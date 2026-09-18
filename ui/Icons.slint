@@ -1,0 +1,364 @@
+// Icon set drawn with Slint `Path` / `Line` primitives so strokes follow
+// the theme. Original geometry on a 24×24 grid, 1.8 stroke, rounded caps.
+// `Icon` dispatches by name; hot paths that render many instances use the
+// concrete Ic* components directly.
+
+import { Colors } from "Colors.slint";
+
+export struct IconCtx {
+    color: brush,
+}
+
+component IcSearch {
+    in property <brush> color: Colors.text-secondary;
+    in property <length> size: 16px;
+    width: size; height: size;
+    Path {
+        width: parent.width; height: parent.height;
+        viewbox-x: 0; viewbox-y: 0; viewbox-width: 24; viewbox-height: 24;
+        stroke: color; stroke-width: 1.8px;
+        stroke-line-cap: round; stroke-line-join: round;
+        fill: transparent;
+        MoveTo { x: 11; y: 4; }
+        ArcTo { radius-x: 7; radius-y: 7; x: 11; y: 18; }
+        ArcTo { radius-x: 7; radius-y: 7; x: 11; y: 4; }
+        MoveTo { x: 16; y: 16; } LineTo { x: 20; y: 20; }
+    }
+}
+
+component IcChevronRight {
+    in property <brush> color: Colors.text-secondary;
+    in property <length> size: 16px;
+    width: size; height: size;
+    Path {
+        width: parent.width; height: parent.height;
+        viewbox-x: 0; viewbox-y: 0; viewbox-width: 24; viewbox-height: 24;
+        stroke: color; stroke-width: 1.8px;
+        stroke-line-cap: round; stroke-line-join: round;
+        fill: transparent;
+        MoveTo { x: 9.5; y: 5; }
+        LineTo { x: 16.5; y: 12; }
+        LineTo { x: 9.5; y: 19; }
+    }
+}
+
+component IcChevronDown {
+    in property <brush> color: Colors.text-secondary;
+    in property <length> size: 16px;
+    width: size; height: size;
+    Path {
+        width: parent.width; height: parent.height;
+        viewbox-x: 0; viewbox-y: 0; viewbox-width: 24; viewbox-height: 24;
+        stroke: color; stroke-width: 1.8px;
+        stroke-line-cap: round; stroke-line-join: round;
+        fill: transparent;
+        MoveTo { x: 5; y: 9.5; }
+        LineTo { x: 12; y: 16.5; }
+        LineTo { x: 19; y: 9.5; }
+    }
+}
+
+component IcPlus {
+    in property <brush> color: Colors.text-secondary;
+    in property <length> size: 16px;
+    width: size; height: size;
+    Path {
+        width: parent.width; height: parent.height;
+        viewbox-x: 0; viewbox-y: 0; viewbox-width: 24; viewbox-height: 24;
+        stroke: color; stroke-width: 1.8px; stroke-line-cap: round;
+        fill: transparent;
+        MoveTo { x: 12; y: 5; } LineTo { x: 12; y: 19; }
+        MoveTo { x: 5; y: 12; } LineTo { x: 19; y: 12; }
+    }
+}
+
+component IcX {
+    in property <brush> color: Colors.text-secondary;
+    in property <length> size: 16px;
+    width: size; height: size;
+    Path {
+        width: parent.width; height: parent.height;
+        viewbox-x: 0; viewbox-y: 0; viewbox-width: 24; viewbox-height: 24;
+        stroke: color; stroke-width: 1.8px; stroke-line-cap: round;
+        fill: transparent;
+        MoveTo { x: 6; y: 6; } LineTo { x: 18; y: 18; }
+        MoveTo { x: 18; y: 6; } LineTo { x: 6; y: 18; }
+    }
+}
+
+component IcGrip {
+    in property <brush> color: Colors.text-secondary;
+    in property <length> size: 16px;
+    width: size; height: size;
+    Path {
+        width: parent.width; height: parent.height;
+        viewbox-x: 0; viewbox-y: 0; viewbox-width: 24; viewbox-height: 24;
+        stroke: color; stroke-width: 2.2px; stroke-line-cap: round;
+        fill: transparent;
+        MoveTo { x: 9; y: 6; } LineTo { x: 9; y: 6.01; }
+        MoveTo { x: 9; y: 12; } LineTo { x: 9; y: 12.01; }
+        MoveTo { x: 9; y: 18; } LineTo { x: 9; y: 18.01; }
+        MoveTo { x: 15; y: 6; } LineTo { x: 15; y: 6.01; }
+        MoveTo { x: 15; y: 12; } LineTo { x: 15; y: 12.01; }
+        MoveTo { x: 15; y: 18; } LineTo { x: 15; y: 18.01; }
+    }
+}
+
+component IcDotsHorizontal {
+    in property <brush> color: Colors.text-secondary;
+    in property <length> size: 16px;
+    width: size; height: size;
+    Path {
+        width: parent.width; height: parent.height;
+        viewbox-x: 0; viewbox-y: 0; viewbox-width: 24; viewbox-height: 24;
+        stroke: color; stroke-width: 2.2px; stroke-line-cap: round;
+        fill: transparent;
+        MoveTo { x: 5; y: 12; } LineTo { x: 5.01; y: 12; }
+        MoveTo { x: 12; y: 12; } LineTo { x: 12.01; y: 12; }
+        MoveTo { x: 19; y: 12; } LineTo { x: 19.01; y: 12; }
+    }
+}
+
+component IcSettings {
+    in property <brush> color: Colors.text-secondary;
+    in property <length> size: 16px;
+    width: size; height: size;
+    Path {
+        width: parent.width; height: parent.height;
+        viewbox-x: 0; viewbox-y: 0; viewbox-width: 24; viewbox-height: 24;
+        stroke: color; stroke-width: 1.8px; stroke-line-cap: round;
+        fill: transparent;
+        MoveTo { x: 4; y: 8; } LineTo { x: 20; y: 8; }
+        MoveTo { x: 9; y: 5; } LineTo { x: 9; y: 11; }
+        MoveTo { x: 4; y: 16; } LineTo { x: 20; y: 16; }
+        MoveTo { x: 17; y: 13; } LineTo { x: 17; y: 19; }
+    }
+}
+
+component IcSun {
+    in property <brush> color: Colors.text-secondary;
+    in property <length> size: 16px;
+    width: size; height: size;
+    Path {
+        width: parent.width; height: parent.height;
+        viewbox-x: 0; viewbox-y: 0; viewbox-width: 24; viewbox-height: 24;
+        stroke: color; stroke-width: 1.8px; stroke-line-cap: round;
+        fill: transparent;
+        MoveTo { x: 12; y: 8.5; }
+        ArcTo { radius-x: 3.5; radius-y: 3.5; x: 12; y: 15.5; }
+        ArcTo { radius-x: 3.5; radius-y: 3.5; x: 12; y: 8.5; }
+        MoveTo { x: 12; y: 2.5; } LineTo { x: 12; y: 4.5; }
+        MoveTo { x: 12; y: 19.5; } LineTo { x: 12; y: 21.5; }
+        MoveTo { x: 2.5; y: 12; } LineTo { x: 4.5; y: 12; }
+        MoveTo { x: 19.5; y: 12; } LineTo { x: 21.5; y: 12; }
+        MoveTo { x: 5.3; y: 5.3; } LineTo { x: 6.7; y: 6.7; }
+        MoveTo { x: 17.3; y: 17.3; } LineTo { x: 18.7; y: 18.7; }
+        MoveTo { x: 18.7; y: 5.3; } LineTo { x: 17.3; y: 6.7; }
+        MoveTo { x: 6.7; y: 17.3; } LineTo { x: 5.3; y: 18.7; }
+    }
+}
+
+component IcMoon {
+    in property <brush> color: Colors.text-secondary;
+    in property <length> size: 16px;
+    width: size; height: size;
+    Path {
+        width: parent.width; height: parent.height;
+        viewbox-x: 0; viewbox-y: 0; viewbox-width: 24; viewbox-height: 24;
+        stroke: color; stroke-width: 1.8px;
+        stroke-line-cap: round; stroke-line-join: round;
+        fill: transparent;
+        MoveTo { x: 20; y: 14.5; }
+        ArcTo { radius-x: 8.5; radius-y: 8.5; x: 9.5; y: 4; large-arc: true; sweep: false; }
+        ArcTo { radius-x: 7; radius-y: 7; x: 20; y: 14.5; large-arc: true; sweep: false; }
+    }
+}
+
+component IcPanelLeft {
+    in property <brush> color: Colors.text-secondary;
+    in property <length> size: 16px;
+    width: size; height: size;
+    Path {
+        width: parent.width; height: parent.height;
+        viewbox-x: 0; viewbox-y: 0; viewbox-width: 24; viewbox-height: 24;
+        stroke: color; stroke-width: 1.8px;
+        stroke-line-join: round;
+        fill: transparent;
+        MoveTo { x: 4; y: 5; } LineTo { x: 20; y: 5; }
+        LineTo { x: 20; y: 19; } LineTo { x: 4; y: 19; } Close {}
+        MoveTo { x: 9.5; y: 5; } LineTo { x: 9.5; y: 19; }
+    }
+}
+
+component IcPage {
+    in property <brush> color: Colors.text-secondary;
+    in property <length> size: 16px;
+    width: size; height: size;
+    Path {
+        width: parent.width; height: parent.height;
+        viewbox-x: 0; viewbox-y: 0; viewbox-width: 24; viewbox-height: 24;
+        stroke: color; stroke-width: 1.8px;
+        stroke-line-cap: round; stroke-line-join: round;
+        fill: transparent;
+        MoveTo { x: 6.5; y: 3; } LineTo { x: 14; y: 3; }
+        LineTo { x: 18; y: 7; } LineTo { x: 18; y: 21; }
+        LineTo { x: 6.5; y: 21; } Close {}
+        MoveTo { x: 14; y: 3; } LineTo { x: 14; y: 7; } LineTo { x: 18; y: 7; }
+    }
+}
+
+component IcStar {
+    in property <brush> color: Colors.text-secondary;
+    in property <length> size: 16px;
+    width: size; height: size;
+    Path {
+        width: parent.width; height: parent.height;
+        viewbox-x: 0; viewbox-y: 0; viewbox-width: 24; viewbox-height: 24;
+        stroke: color; stroke-width: 1.8px;
+        stroke-line-join: round;
+        fill: transparent;
+        MoveTo { x: 12; y: 3.6; }
+        LineTo { x: 14.3; y: 8.7; } LineTo { x: 19.8; y: 9.5; }
+        LineTo { x: 15.9; y: 13.3; } LineTo { x: 16.8; y: 18.8; }
+        LineTo { x: 12; y: 16.3; } LineTo { x: 7.2; y: 18.8; }
+        LineTo { x: 8.1; y: 13.3; } LineTo { x: 4.2; y: 9.5; }
+        LineTo { x: 9.7; y: 8.7; } Close {}
+    }
+}
+
+component IcClock {
+    in property <brush> color: Colors.text-secondary;
+    in property <length> size: 16px;
+    width: size; height: size;
+    Path {
+        width: parent.width; height: parent.height;
+        viewbox-x: 0; viewbox-y: 0; viewbox-width: 24; viewbox-height: 24;
+        stroke: color; stroke-width: 1.8px;
+        stroke-line-cap: round; stroke-line-join: round;
+        fill: transparent;
+        MoveTo { x: 12; y: 4; }
+        ArcTo { radius-x: 8; radius-y: 8; x: 12; y: 20; }
+        ArcTo { radius-x: 8; radius-y: 8; x: 12; y: 4; }
+        MoveTo { x: 12; y: 7.5; } LineTo { x: 12; y: 12; }
+        LineTo { x: 15.2; y: 14.5; }
+    }
+}
+
+component IcMinimize {
+    in property <brush> color: Colors.text-secondary;
+    in property <length> size: 16px;
+    width: size; height: size;
+    Path {
+        width: parent.width; height: parent.height;
+        viewbox-x: 0; viewbox-y: 0; viewbox-width: 24; viewbox-height: 24;
+        stroke: color; stroke-width: 1.5px;
+        fill: transparent;
+        MoveTo { x: 6; y: 12; } LineTo { x: 18; y: 12; }
+    }
+}
+
+component IcMaximize {
+    in property <brush> color: Colors.text-secondary;
+    in property <length> size: 16px;
+    width: size; height: size;
+    Path {
+        width: parent.width; height: parent.height;
+        viewbox-x: 0; viewbox-y: 0; viewbox-width: 24; viewbox-height: 24;
+        stroke: color; stroke-width: 1.5px;
+        fill: transparent;
+        MoveTo { x: 6; y: 6; } LineTo { x: 18; y: 6; }
+        LineTo { x: 18; y: 18; } LineTo { x: 6; y: 18; } Close {}
+    }
+}
+
+component IcTodoCheck {
+    in property <brush> color: Colors.text-secondary;
+    in property <length> size: 16px;
+    width: size; height: size;
+    Path {
+        width: parent.width; height: parent.height;
+        viewbox-x: 0; viewbox-y: 0; viewbox-width: 24; viewbox-height: 24;
+        stroke: color; stroke-width: 2.6px;
+        stroke-line-cap: round; stroke-line-join: round;
+        fill: transparent;
+        MoveTo { x: 4.5; y: 12.5; } LineTo { x: 9.5; y: 17; } LineTo { x: 19.5; y: 6.5; }
+    }
+}
+
+component IcExport {
+    in property <brush> color: Colors.text-secondary;
+    in property <length> size: 16px;
+    width: size; height: size;
+    Path {
+        width: parent.width; height: parent.height;
+        viewbox-x: 0; viewbox-y: 0; viewbox-width: 24; viewbox-height: 24;
+        stroke: color; stroke-width: 1.8px;
+        stroke-line-cap: round; stroke-line-join: round;
+        fill: transparent;
+        MoveTo { x: 12; y: 4; } LineTo { x: 12; y: 14; }
+        MoveTo { x: 8; y: 10.5; } LineTo { x: 12; y: 14.5; } LineTo { x: 16; y: 10.5; }
+        MoveTo { x: 5; y: 19.5; } LineTo { x: 19; y: 19.5; }
+    }
+}
+
+component IcImport {
+    in property <brush> color: Colors.text-secondary;
+    in property <length> size: 16px;
+    width: size; height: size;
+    Path {
+        width: parent.width; height: parent.height;
+        viewbox-x: 0; viewbox-y: 0; viewbox-width: 24; viewbox-height: 24;
+        stroke: color; stroke-width: 1.8px;
+        stroke-line-cap: round; stroke-line-join: round;
+        fill: transparent;
+        MoveTo { x: 12; y: 15; } LineTo { x: 12; y: 5; }
+        MoveTo { x: 8; y: 8.5; } LineTo { x: 12; y: 4.5; } LineTo { x: 16; y: 8.5; }
+        MoveTo { x: 5; y: 19.5; } LineTo { x: 19; y: 19.5; }
+    }
+}
+
+component IcChevronLeft {
+    in property <brush> color: Colors.text-secondary;
+    in property <length> size: 16px;
+    width: size; height: size;
+    Path {
+        width: parent.width; height: parent.height;
+        viewbox-x: 0; viewbox-y: 0; viewbox-width: 24; viewbox-height: 24;
+        stroke: color; stroke-width: 1.8px;
+        stroke-line-cap: round; stroke-line-join: round;
+        fill: transparent;
+        MoveTo { x: 14.5; y: 5; } LineTo { x: 7.5; y: 12; } LineTo { x: 14.5; y: 19; }
+    }
+}
+
+// Name dispatcher used by sidebar rows and palette rows.
+export component Icon {
+    in property <string> name;
+    in property <length> size: 16px;
+    in property <brush> color: Colors.text-secondary;
+    in property <length> stroke-width: 1.8px; // accepted for API symmetry; primitives carry their own
+
+    width: root.size;
+    height: root.size;
+
+    IcSearch { visible: root.name == "search"; size: root.size; color: root.color; }
+    IcChevronRight { visible: root.name == "chevron-right"; size: root.size; color: root.color; }
+    IcChevronDown { visible: root.name == "chevron-down"; size: root.size; color: root.color; }
+    IcChevronLeft { visible: root.name == "chevron-left"; size: root.size; color: root.color; }
+    IcPlus { visible: root.name == "plus"; size: root.size; color: root.color; }
+    IcX { visible: root.name == "x"; size: root.size; color: root.color; }
+    IcGrip { visible: root.name == "grip"; size: root.size; color: root.color; }
+    IcDotsHorizontal { visible: root.name == "dots-horizontal"; size: root.size; color: root.color; }
+    IcSettings { visible: root.name == "settings"; size: root.size; color: root.color; }
+    IcSun { visible: root.name == "sun"; size: root.size; color: root.color; }
+    IcMoon { visible: root.name == "moon"; size: root.size; color: root.color; }
+    IcPanelLeft { visible: root.name == "panel-left"; size: root.size; color: root.color; }
+    IcPage { visible: root.name == "page"; size: root.size; color: root.color; }
+    IcStar { visible: root.name == "star"; size: root.size; color: root.color; }
+    IcClock { visible: root.name == "clock"; size: root.size; color: root.color; }
+    IcMinimize { visible: root.name == "minimize"; size: root.size; color: root.color; }
+    IcMaximize { visible: root.name == "maximize"; size: root.size; color: root.color; }
+    IcTodoCheck { visible: root.name == "todo-check"; size: root.size; color: root.color; }
+    IcExport { visible: root.name == "export"; size: root.size; color: root.color; }
+    IcImport { visible: root.name == "import"; size: root.size; color: root.color; }
+}

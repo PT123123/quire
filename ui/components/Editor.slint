@@ -1,0 +1,69 @@
+// Document surface. A ListView gives us the virtualization skeleton from day
+// one: delegates exist only for visible rows. ListView delegates must be a
+// single `for`, so page-level chrome (hero spacer, page title, tail spacer)
+// rides inside the first/last DocumentRow wrappers instead.
+
+import { ListView } from "std-widgets.slint";
+import { Theme } from "../Theme.slint";
+import { Colors } from "../Colors.slint";
+import { Typography } from "../Typography.slint";
+import { EditorBlock } from "./EditorBlock.slint";
+import { BlockRow, UIState } from "../Types.slint";
+
+component DocumentRow inherits Rectangle {
+    in property <BlockRow> block;
+    in property <bool> first;
+
+    height: head.height + body.height + (block.tail ? Theme.spacing-hero * 2 : 0px);
+
+    head := Rectangle {
+        width: parent.width;
+        height: root.first ? Theme.spacing-hero + title.height + Theme.spacing-lg : 0px;
+        title := Text {
+            x: root.content-x;
+            y: Theme.spacing-hero;
+            width: root.content-width;
+            visible: root.first;
+            text: UIState.page-title;
+            font-family: Typography.ui-font;
+            font-weight: Typography.weight-bold;
+            font-size: Typography.size-page-title;
+            color: Colors.text-primary;
+        }
+    }
+
+    body := EditorBlock {
+        x: 0px;
+        y: head.height;
+        block: root.block;
+        content-x: root.content-x;
+        content-width: root.content-width;
+    }
+
+    in property <length> content-x;
+    in property <length> content-width;
+}
+
+export component Editor inherits Rectangle {
+    // content column centered, min gutter so handles never touch the window edge
+    property <length> gutter: Math.max(
+        Theme.spacing-xl,
+        (root.width - Theme.editor-max-width) / 2);
+
+    background: Colors.background;
+
+    list := ListView {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: parent.height;
+        content-width: parent.width;
+
+        for row[idx] in UIState.blocks : DocumentRow {
+            block: row;
+            first: idx == 0;
+            content-x: root.gutter;
+            content-width: list.content-width - 2 * root.gutter;
+        }
+    }
+}

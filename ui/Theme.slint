@@ -1,0 +1,39 @@
+// Central design tokens: mode toggle, spacing scale, corner radii, motion.
+// Colors and Typography live in their own files and read `Theme.dark`.
+
+import { UIState } from "Types.slint";
+
+export global Theme {
+    // Light is the default; dark mode is a first-class citizen but not forced.
+    // The single writable source is UIState.dark (owned by Rust).
+    out property <bool> dark: UIState.dark;
+
+    // ---- spacing scale (the only allowed step ladder) ----
+    out property <length> spacing-xxs: 2px;
+    out property <length> spacing-xs: 4px;
+    out property <length> spacing-sm: 8px;
+    out property <length> spacing-md: 12px;
+    out property <length> spacing-lg: 16px;
+    out property <length> spacing-xl: 24px;
+    out property <length> spacing-xxl: 32px;
+    out property <length> spacing-hero: 64px;
+
+    // ---- corner radius ----
+    out property <length> radius-xs: 3px;
+    out property <length> radius-sm: 5px;
+    out property <length> radius-md: 8px;
+    out property <length> radius-lg: 12px;
+    out property <length> radius-xl: 16px;
+
+    // ---- structural metrics ----
+    out property <length> titlebar-height: 40px;
+    out property <length> sidebar-width: 260px;
+    out property <length> editor-max-width: 760px;
+    out property <length> editor-side-padding: 96px;
+
+    // ---- motion: feedback, never idle loops ----
+    out property <duration> duration-instant: 80ms;
+    out property <duration> duration-fast: 140ms;
+    out property <duration> duration-normal: 220ms;
+    out property <duration> duration-slow: 320ms;
+}

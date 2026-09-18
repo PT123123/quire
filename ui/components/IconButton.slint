@@ -1,0 +1,36 @@
+// Square icon-only hoverable button (title bar, block handles, palette).
+
+import { Theme } from "../Theme.slint";
+import { Colors } from "../Colors.slint";
+import { Icon } from "../Icons.slint";
+
+export component IconButton inherits Rectangle {
+    in property <string> icon-name;
+    in property <length> size: 28px;
+    in property <brush> icon-color: Colors.text-muted;
+    in property <brush> hover-color: Colors.text-primary;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    width: size;
+    height: size;
+    border-radius: Theme.radius-sm;
+    background: ta.has-hover && root.enabled ? Colors.hover-fill : transparent;
+    animate background { duration: Theme.duration-instant; }
+
+    Icon {
+        x: (parent.width - self.size) / 2;
+        y: (parent.height - self.size) / 2;
+        name: root.icon-name;
+        size: 16px;
+        color: ta.has-hover && root.enabled ? root.hover-color : root.icon-color;
+    }
+
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: MouseCursor.pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}

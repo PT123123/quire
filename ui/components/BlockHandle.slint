@@ -1,0 +1,44 @@
+// Block hover affordances (Notion-style "+  ⋮⋮"), shown left of the focused
+// or hovered block.
+
+import { Theme } from "../Theme.slint";
+import { Colors } from "../Colors.slint";
+import { Icon } from "../Icons.slint";
+
+export component BlockHandle inherits Rectangle {
+    in property <bool> visible-flag: false;
+    width: 44px;
+    height: 26px;
+    opacity: visible-flag ? 1 : 0;
+    animate opacity { duration: Theme.duration-fast; }
+
+    HorizontalLayout {
+        spacing: 0px;
+        Rectangle {
+            width: 22px;
+            height: 26px;
+            border-radius: Theme.radius-xs;
+            background: ta1.has-hover ? Colors.hover-fill : transparent;
+            Icon {
+                x: 3px; y: 5px;
+                name: "plus";
+                size: 15px;
+                color: Colors.text-muted;
+            }
+            ta1 := TouchArea { mouse-cursor: MouseCursor.pointer; }
+        }
+        Rectangle {
+            width: 22px;
+            height: 26px;
+            border-radius: Theme.radius-xs;
+            background: ta2.has-hover ? Colors.hover-fill : transparent;
+            Icon {
+                x: 3px; y: 5px;
+                name: "grip";
+                size: 15px;
+                color: Colors.text-muted;
+            }
+            ta2 := TouchArea { mouse-cursor: MouseCursor.grab; }
+        }
+    }
+}

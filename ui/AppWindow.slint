@@ -1,0 +1,89 @@
+// The single top-level Window. Everything below is composition; state and
+// actions are routed through the UIState global to the Rust controller.
+
+import { Theme } from "Theme.slint";
+import { Colors } from "Colors.slint";
+import { UIState } from "Types.slint";
+import { AppShell } from "components/AppShell.slint";
+import { CommandPalette } from "components/CommandPalette.slint";
+
+// Rust-facing names must be re-exported from the entry file (1.18 codegen rule).
+export { UIState, SidebarNode, BlockRow, CommandRow } from "Types.slint";
+
+export component AppWindow inherits Window {
+    title: "Quire";
+    preferred-width: 1280px;
+    preferred-height: 800px;
+    min-width: 940px;
+    min-height: 600px;
+    background: Colors.background;
+
+    // Frameless: TopBar provides the move area and window controls.
+    no-frame: true;
+    resize-border-width: 6px;
+    forward-focus: shortcuts;
+
+    // (Theme.dark is derived from UIState.dark inside Theme.slint.)
+
+    // `changed` handlers can only observe locally declared properties, so the
+    // two things Rust must react to are mirrored here.
+    in-out property <bool> palette-open <=> UIState.palette-open;
+    in-out property <string> palette-query <=> UIState.palette-query;
+
+    changed palette-open => {
+        if (palette-open) {
+            palette.show();
+        } else {
+            palette.close();
+            UIState.palette-query = "";
+            UIState.palette-focus = 0;
+        }
+    }
+
+    // Filtering happens in Rust (single source of truth for the filtered
+    // model), so keyboard focus and Enter resolve against the same list.
+    changed palette-query => {
+        UIState.palette-query-changed();
+    }
+
+    shortcuts := FocusScope {
+        width: root.width;
+        height: root.height;
+
+        KeyBinding {
+            keys: @keys(Control + K);
+            activated => {
+                UIState.palette-open-requested();
+            }
+        }
+        KeyBinding {
+            keys: @keys(Control + B);
+            activated => {
+                UIState.toggle-sidebar();
+            }
+        }
+        KeyBinding {
+            keys: @keys(Control + Shift + L);
+            activated => {
+                UIState.toggle-theme();
+            }
+        }
+
+        AppShell {
+            minimize-requested => {
+                root.minimized = true;
+            }
+            maximize-requested => {
+                root.maximized = !root.maximized;
+            }
+            close-requested => {
+                root.close();
+            }
+        }
+    }
+
+    palette := CommandPalette {
+        x: (root.width - 560px) / 2;
+        y: 96px;
+    }
+}

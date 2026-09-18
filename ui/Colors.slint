@@ -1,0 +1,44 @@
+// Palette tokens. Every color in the app must come from here.
+// Light: near-white backgrounds, warm-neutral ink, whisper-thin borders.
+// Dark: never pure black; layered surfaces carry the hierarchy.
+
+import { Theme } from "Theme.slint";
+
+export global Colors {
+    // ---- backgrounds & surfaces ----
+    out property <color> background: Theme.dark ? #1a1a1e : #ffffff;
+    out property <color> sidebar: Theme.dark ? #16161a : #f6f6f4;
+    out property <color> surface: Theme.dark ? #1f1f24 : #ffffff;
+    out property <color> surface-hover: Theme.dark ? #26262c : #efefec;
+    out property <color> surface-selected: Theme.dark ? #2d2d34 : #e8e8e4;
+    out property <color> surface-overlay: Theme.dark ? #212127 : #ffffff;
+    out property <color> code-background: Theme.dark ? #101014 : #f6f6f4;
+
+    // ---- text ----
+    out property <color> text-primary: Theme.dark ? #e7e7ea : #1f2328;
+    out property <color> text-secondary: Theme.dark ? #b4b4bb : #5f6569;
+    out property <color> text-muted: Theme.dark ? #7d7d86 : #9b9da2;
+    out property <color> text-on-accent: Theme.dark ? #ffffff : #ffffff;
+
+    // ---- lines & fills ----
+    out property <color> border: Theme.dark ? #2b2b31 : #ebebea;
+    out property <color> border-strong: Theme.dark ? #3b3b43 : #d9d9d6;
+    out property <color> divider: Theme.dark ? #34343b : #e2e2df;
+
+    // ---- semantic ----
+    out property <color> accent: Theme.dark ? #8f87f0 : #5b54d6;
+    out property <color> accent-soft: Theme.dark ? #2a2945 : #eeeeff;
+    out property <color> accent-text: Theme.dark ? #a8a2f5 : #4a44b0;
+    out property <color> danger: Theme.dark ? #f0776c : #d9412e;
+    out property <color> success: Theme.dark ? #4cc38a : #1d9e6f;
+    out property <color> selection: Theme.dark ? #3d4a86 : #b5d3f7;
+
+    // ---- interactive states ----
+    out property <color> hover-fill: Theme.dark ? #ffffff14 : #0000000a;
+    out property <color> pressed-fill: Theme.dark ? #ffffff20 : #00000014;
+    out property <color> focus-ring: Colors.accent;
+
+    // ---- shadows (used sparingly: popups & palette only) ----
+    out property <color> shadow: Theme.dark ? #000000a0 : #00000026;
+    out property <color> scrim: #00000059;
+}

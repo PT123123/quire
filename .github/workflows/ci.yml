@@ -1,0 +1,25 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check-test-build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Check (default renderer: femtovg)
+        run: cargo check --all-targets
+      - name: Check (skia renderer)
+        run: cargo check --no-default-features --features skia-opengl
+      - name: Test
+        run: cargo test
+      - name: Release build
+        run: cargo build --release

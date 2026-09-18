@@ -1,0 +1,145 @@
+// Custom title bar: window move area, breadcrumb, quick actions, and the
+// three window controls. Kept visually quiet — the document is the product.
+
+import { Theme } from "../Theme.slint";
+import { Colors } from "../Colors.slint";
+import { Typography } from "../Typography.slint";
+import { Icon } from "../Icons.slint";
+import { IconButton } from "./IconButton.slint";
+import { UIState } from "../Types.slint";
+
+component WindowControlButton inherits Rectangle {
+    in property <string> icon-name;
+    in property <brush> hover-bg: Colors.hover-fill;
+    in property <brush> hover-fg: Colors.text-primary;
+    callback clicked();
+
+    width: 38px;
+    background: ta.has-hover ? root.hover-bg : transparent;
+    animate background { duration: Theme.duration-instant; }
+
+    Icon {
+        x: (parent.width - self.size) / 2;
+        y: (parent.height - self.size) / 2;
+        name: root.icon-name;
+        size: 14px;
+        stroke-width: 1.5px;
+        color: ta.has-hover ? root.hover-fg : Colors.text-secondary;
+    }
+    ta := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+export component TopBar inherits Rectangle {
+    height: Theme.titlebar-height;
+    background: Colors.background;
+
+    callback minimize-requested();
+    callback maximize-requested();
+    callback close-requested();
+
+    // sidebar-colored strip so the title bar reads as one surface with the rail
+    Rectangle {
+        width: UIState.sidebar-open ? Theme.sidebar-width : 0px;
+        height: parent.height;
+        background: Colors.sidebar;
+    }
+
+    HorizontalLayout {
+        spacing: 2px;
+        padding-left: Theme.spacing-sm;
+        padding-right: Theme.spacing-xs;
+
+        IconButton {
+            vertical-stretch: 0;
+            cross-axis-self-alignment: center;
+            icon-name: "panel-left";
+            size: 30px;
+            clicked => {
+                UIState.toggle-sidebar();
+            }
+        }
+
+        WindowMoveArea {
+            HorizontalLayout {
+                spacing: Theme.spacing-xs;
+                padding-left: Theme.spacing-sm;
+                Text {
+                    text: "Workspace";
+                    font-size: Typography.size-ui;
+                    color: Colors.text-muted;
+                    vertical-alignment: center;
+                }
+                Icon {
+                    vertical-stretch: 0;
+                    cross-axis-self-alignment: center;
+                    width: 12px;
+                    height: 12px;
+                    size: 12px;
+                    stroke-width: 2px;
+                    name: "chevron-right";
+                    color: Colors.text-muted;
+                }
+                Text {
+                    text: UIState.page-title;
+                    font-size: Typography.size-ui;
+                    font-weight: Typography.weight-medium;
+                    color: Colors.text-secondary;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+        }
+
+        Rectangle { width: 0px; }
+
+        IconButton {
+            vertical-stretch: 0;
+            cross-axis-self-alignment: center;
+            icon-name: "search";
+            size: 30px;
+            clicked => {
+                UIState.palette-open-requested();
+            }
+        }
+        IconButton {
+            vertical-stretch: 0;
+            cross-axis-self-alignment: center;
+            icon-name: "dots-horizontal";
+            size: 30px;
+        }
+
+        Rectangle {
+            width: 1px;
+            height: 18px;
+            cross-axis-self-alignment: center;
+            background: Colors.border;
+        }
+
+        // ---- window controls ----
+        WindowControlButton {
+            icon-name: "minimize";
+            clicked => {
+                root.minimize-requested();
+            }
+        }
+        WindowControlButton {
+            icon-name: "maximize";
+            clicked => {
+                root.maximize-requested();
+            }
+        }
+        WindowControlButton {
+            icon-name: "x";
+            hover-bg: Colors.danger;
+            hover-fg: Colors.text-on-accent;
+            clicked => {
+                root.close-requested();
+            }
+        }
+    }
+}

@@ -1,0 +1,203 @@
+// Notion-style command palette (mock, M1). The filtered model and Enter
+// resolution live in Rust; this component is pure view + key routing.
+
+import { Theme } from "../Theme.slint";
+import { Colors } from "../Colors.slint";
+import { Typography } from "../Typography.slint";
+import { Icon } from "../Icons.slint";
+import { ListView } from "std-widgets.slint";
+import { UIState, CommandRow } from "../Types.slint";
+
+export component CommandPalette inherits PopupWindow {
+    width: 560px;
+    height: box.height + Theme.spacing-sm * 2;
+    // Closing is driven entirely by UIState.palette-open (slint-ui/slint#1.18.0
+    // crashes in const-propagation when a popup reads its own `is-open`).
+    // Outside clicks land on the AppShell scrim, which clears the flag.
+    close-policy: PopupClosePolicy.no-auto-close;
+
+    // Focus the input each time the palette opens (AppWindow calls show()).
+    property <bool> opened: UIState.palette-open;
+    changed opened => {
+        if (UIState.palette-open) {
+            input.focus();
+        }
+    }
+
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+
+        // poor-man's elevation: one soft frame + hairline, no blur
+        Rectangle {
+            x: 2px; y: 3px;
+            width: parent.width - 4px;
+            height: parent.height - 5px;
+            border-radius: Theme.radius-lg + 2px;
+            background: Colors.shadow;
+        }
+        Rectangle {
+            x: 0px; y: 0px;
+            width: parent.width;
+            height: parent.height;
+            border-radius: Theme.radius-lg;
+            background: Colors.surface-overlay;
+            border-width: 1px;
+            border-color: Colors.border;
+        }
+
+        box := VerticalLayout {
+            x: 0px; y: Theme.spacing-sm;
+            width: parent.width;
+            height: input-row.height + divider.height + list.height + footer.height;
+            spacing: 0px;
+
+            input-row := Rectangle {
+                height: 40px;
+                HorizontalLayout {
+                    spacing: Theme.spacing-sm;
+                    padding-left: Theme.spacing-md;
+                    padding-right: Theme.spacing-md;
+                    Icon {
+                        vertical-stretch: 0;
+                        cross-axis-self-alignment: center;
+                        width: 16px;
+                        height: 16px;
+                        size: 16px;
+                        name: "search";
+                        color: Colors.text-muted;
+                    }
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        input := TextInput {
+                            width: parent.width;
+                            height: parent.height;
+                            vertical-alignment: center;
+                            font-family: Typography.ui-font;
+                            font-size: Typography.size-ui-lg;
+                            color: Colors.text-primary;
+                            selection-foreground-color: Colors.text-primary;
+                            selection-background-color: Colors.selection;
+                            single-line: true;
+                            text <=> UIState.palette-query;
+                            accepted => {
+                                UIState.command-invoked();
+                            }
+                            key-pressed(event) => {
+                                if (event.text == Key.Escape) {
+                                    UIState.palette-open = false;
+                                    accept
+                                } else if (event.text == Key.UpArrow) {
+                                    UIState.palette-move(-1);
+                                    accept
+                                } else if (event.text == Key.DownArrow) {
+                                    UIState.palette-move(1);
+                                    accept
+                                } else {
+                                    reject
+                                }
+                            }
+                        }
+                        // placeholder (TextInput has none built in)
+                        Text {
+                            visible: UIState.palette-query == "";
+                            vertical-alignment: center;
+                            font-family: Typography.ui-font;
+                            font-size: Typography.size-ui-lg;
+                            color: Colors.text-muted;
+                            text: "Type a command or search pages…";
+                        }
+                    }
+                }
+            }
+
+            divider := Rectangle {
+                height: 1px;
+                Rectangle {
+                    x: Theme.spacing-sm;
+                    width: parent.width - 2 * Theme.spacing-sm;
+                    height: 1px;
+                    background: Colors.border;
+                }
+            }
+
+            list := ListView {
+                content-width: parent.width;
+                height: 320px;
+
+                for cmd[idx] in UIState.commands : Rectangle {
+                    width: list.content-width;
+                    height: 36px;
+                    property <bool> active: idx == UIState.palette-focus;
+                    // 1.18 TouchArea has no entered() — mirror has-hover and react.
+                    property <bool> hovering: row-ta.has-hover;
+                    changed hovering => {
+                        if (hovering) {
+                            UIState.palette-focus = idx;
+                        }
+                    }
+                    border-radius: Theme.radius-sm;
+                    background: active || row-ta.has-hover ? Colors.surface-hover : transparent;
+
+                    HorizontalLayout {
+                        spacing: Theme.spacing-sm;
+                        padding-left: Theme.spacing-sm;
+                        padding-right: Theme.spacing-md;
+                        Icon {
+                            vertical-stretch: 0;
+                            cross-axis-self-alignment: center;
+                            width: 15px;
+                            height: 15px;
+                            size: 15px;
+                            name: cmd.icon;
+                            color: Colors.text-muted;
+                        }
+                        Text {
+                            text: cmd.name;
+                            font-family: Typography.ui-font;
+                            font-size: Typography.size-ui-lg;
+                            color: active ? Colors.text-primary : Colors.text-secondary;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                        Rectangle { width: 0px; }
+                        Text {
+                            vertical-stretch: 0;
+                            cross-axis-self-alignment: center;
+                            text: cmd.section;
+                            font-size: Typography.size-caption;
+                            color: Colors.text-muted;
+                        }
+                        if cmd.hint != "" : Text {
+                            vertical-stretch: 0;
+                            cross-axis-self-alignment: center;
+                            text: cmd.hint;
+                            font-size: Typography.size-caption;
+                            font-family: Typography.mono-font;
+                            color: Colors.text-muted;
+                        }
+                    }
+
+                    row-ta := TouchArea {
+                        mouse-cursor: MouseCursor.pointer;
+                        clicked => {
+                            UIState.command-selected-id = cmd.id;
+                            UIState.command-invoked();
+                        }
+                    }
+                }
+            }
+
+            footer := Rectangle {
+                height: 26px;
+                Text {
+                    x: Theme.spacing-md;
+                    text: "↑ ↓ navigate · Enter open · Esc dismiss";
+                    font-size: Typography.size-caption;
+                    color: Colors.text-muted;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}
