@@ -6,3 +6,4 @@
 /appdata
 *.pdb
 .DS_Store
+/dist
