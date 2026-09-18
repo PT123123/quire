@@ -7,6 +7,8 @@ import { Icon } from "../Icons.slint";
 
 export component BlockHandle inherits Rectangle {
     in property <bool> visible-flag: false;
+    callback plus-clicked();
+    callback grip-clicked();
     width: 44px;
     height: 26px;
     opacity: visible-flag ? 1 : 0;
@@ -25,7 +27,12 @@ export component BlockHandle inherits Rectangle {
                 size: 15px;
                 color: Colors.text-muted;
             }
-            ta1 := TouchArea { mouse-cursor: MouseCursor.pointer; }
+            ta1 := TouchArea {
+                mouse-cursor: MouseCursor.pointer;
+                clicked => {
+                    root.plus-clicked();
+                }
+            }
         }
         Rectangle {
             width: 22px;
@@ -38,7 +45,12 @@ export component BlockHandle inherits Rectangle {
                 size: 15px;
                 color: Colors.text-muted;
             }
-            ta2 := TouchArea { mouse-cursor: MouseCursor.grab; }
+            ta2 := TouchArea {
+                mouse-cursor: MouseCursor.pointer;
+                clicked => {
+                    root.grip-clicked();
+                }
+            }
         }
     }
 }

@@ -85,6 +85,16 @@ export component EditorBlock inherits Rectangle {
         x: root.content-x - 48px;
         y: top-margin;
         visible-flag: ta.has-hover && !editing;
+        plus-clicked => {
+            UIState.block-plus(block.id);
+        }
+        grip-clicked => {
+            if UIState.block-menu-open-id == block.id {
+                UIState.block-menu-open-id = -1;
+            } else {
+                UIState.block-menu-opened(block.id, self.y);
+            }
+        }
     }
 
     plain-text := Text {
@@ -122,13 +132,28 @@ export component EditorBlock inherits Rectangle {
         selection-foreground-color: Colors.text-primary;
         selection-background-color: Colors.selection;
         edited => {
-            UIState.editing-changed();
+            UIState.editing-changed(self.y, self.height, content-x);
         }
         accepted => {
             UIState.enter-at-caret(self.cursor-position-byte-offset);
         }
         key-pressed(event) => {
-            if (event.text == Key.Backspace
+            if (UIState.slash-open && event.text == Key.UpArrow) {
+                UIState.slash-move(-1);
+                accept
+            } else if (UIState.slash-open && event.text == Key.DownArrow) {
+                UIState.slash-move(1);
+                accept
+            } else if (UIState.slash-open && event.text == Key.Return) {
+                UIState.slash-apply-selected();
+                accept
+            } else if (UIState.slash-open && event.text == Key.Escape) {
+                UIState.slash-close();
+                accept
+            } else if (UIState.slash-open && event.text == " ") {
+                UIState.slash-close();
+                reject
+            } else if (event.text == Key.Backspace
                 && self.cursor-position-byte-offset == 0
                 && self.anchor-position-byte-offset == 0) {
                 UIState.backspace-at-start();

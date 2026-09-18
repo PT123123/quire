@@ -25,6 +25,8 @@ pub fn bind(ui: &AppWindow, state: &Rc<AppState>) {
     g.set_commands(state.commands_model());
     g.set_search_rows(state.search_model());
     g.set_menu_rows(state.menu_model());
+    g.set_slash_items(state.slash_model());
+    g.set_block_menu_rows(state.block_menu_model());
     let (title, crumb) = state.open_page_info(state.open_page.get());
     g.set_page_title(title.into());
     g.set_page_breadcrumb(crumb.into());
@@ -459,9 +461,29 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         let gw = gw.clone();
         let s = state.clone();
         let t: &'static slint::Timer = Box::leak(Box::new(slint::Timer::default()));
-        ui.global::<UIState>().on_editing_changed(move || {
+        ui.global::<UIState>().on_editing_changed(move |row_y, row_h, content_x| {
             let gw = gw.clone();
             let s = s.clone();
+            if let Some(g) = gw.upgrade() {
+                // "/" at block start opens the slash menu with the rest of
+                // the line as the filter (SPEC §十五); anchored below the
+                // editing block
+                let text = g.get_editing_text().to_string();
+                if let Some(filter) = text.strip_prefix('/') {
+                    s.open_slash(filter);
+                    g.set_slash_filter(filter.into());
+                    g.set_slash_focus(0);
+                    let scroll = g.get_editor_scroll_y();
+                    let edge = if g.get_sidebar_open() { 260.0 } else { 0.0 };
+                    let y = (40.0 + (row_y as f32) - scroll + (row_h as f32) + 4.0)
+                        .clamp(48.0, g.get_window_h() - 350.0);
+                    g.set_slash_x(edge + (content_x as f32));
+                    g.set_slash_y(y);
+                    g.set_slash_open(true);
+                } else {
+                    g.set_slash_open(false);
+                }
+            }
             t.start(
                 slint::TimerMode::SingleShot,
                 std::time::Duration::from_millis(300),
@@ -568,6 +590,141 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
             let g = gw.upgrade().unwrap();
             flush_pending_edit(&g, &s);
             g.set_editing_id(-1);
+        });
+    }
+
+    // ---- slash menu keyboard + apply ----
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_slash_move(move |delta| {
+            let g = gw.upgrade().unwrap();
+            let count = s.slash_focus_count();
+            if count == 0 {
+                return;
+            }
+            let next = (g.get_slash_focus() + delta).clamp(0, count - 1);
+            g.set_slash_focus(next);
+        });
+    }
+
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_slash_apply_selected(move || {
+            let g = gw.upgrade().unwrap();
+            let focus = g.get_slash_focus();
+            let kind = match s.slash_selected_kind(focus) {
+                Some(k) => k,
+                None => return,
+            };
+            let text = g.get_editing_text().to_string();
+            // strip "/filter" (the menu only triggers on the block's first
+            // token; a space closes the menu before this point)
+            let filter_len = g.get_slash_filter().len();
+            let cleaned = if text.len() >= 1 + filter_len
+                && text.is_char_boundary(1 + filter_len)
+            {
+                text[1 + filter_len..].to_string()
+            } else {
+                String::new()
+            };
+            let id = g.get_editing_id();
+            if id <= 0 {
+                return;
+            }
+            let _ = s.exec_on_open_page(Command::ReplaceText {
+                id: BlockId(id as u64),
+                text: cleaned.clone(),
+            });
+            let _ = s.exec_on_open_page(Command::SetBlockType {
+                id: BlockId(id as u64),
+                kind,
+            });
+            g.set_slash_open(false);
+            g.set_editing_text(cleaned.clone().into());
+            g.set_pending_caret(cleaned.len() as i32);
+            g.set_editing_id(id);
+        });
+    }
+
+    {
+        let gw = gw.clone();
+        ui.global::<UIState>().on_slash_close(move || {
+            let g = gw.upgrade().unwrap();
+            g.set_slash_open(false);
+        });
+    }
+
+    // ---- block handle menu (+/⋮⋮) and clipboard ----
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_block_menu_opened(move |id, row_y| {
+            let g = gw.upgrade().unwrap();
+            eprintln!("debug: block-menu row_y={:.1}", (row_y as f32));
+            s.fill_block_menu();
+            g.set_block_menu_open_id(id);
+        });
+    }
+
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_block_menu_action(move |action| {
+            let g = gw.upgrade().unwrap();
+            let id = g.get_block_menu_open_id();
+            g.set_block_menu_open_id(-1);
+            if id <= 0 {
+                return;
+            }
+            match action {
+                1 => {
+                    let _ = s.exec_on_open_page(Command::MoveBlock {
+                        id: BlockId(id as u64),
+                        delta: -1,
+                    });
+                }
+                2 => {
+                    let _ = s.exec_on_open_page(Command::MoveBlock {
+                        id: BlockId(id as u64),
+                        delta: 1,
+                    });
+                }
+                3 => {
+                    let _ = s.exec_on_open_page(Command::DuplicateBlock { id: BlockId(id as u64) });
+                }
+                4 => s.copy_block(id),
+                5 => {
+                    s.paste_below(id);
+                }
+                6 => {
+                    let _ = s.exec_on_open_page(Command::DeleteBlock { id: BlockId(id as u64) });
+                    if g.get_editing_id() == id {
+                        g.set_editing_id(-1);
+                    }
+                }
+                _ => {}
+            }
+        });
+    }
+
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_block_plus(move |id| {
+            let g = gw.upgrade().unwrap();
+            if id <= 0 {
+                return;
+            }
+            let changes = s.exec_on_open_page(Command::InsertBlockAfter {
+                id: BlockId(id as u64),
+                kind: crate::core::BlockKind::Paragraph,
+                text: String::new(),
+            });
+            if let Some(nid) = changes.as_deref().and_then(find_inserted_id) {
+                focus_block(&g, &s, nid, 0);
+            }
         });
     }
 
@@ -698,6 +855,68 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
     let g = ui.global::<UIState>();
     match scene {
         "dark" => g.set_dark(true),
+        "palette" | "search" | "search-notes" | "menu" | "dialog" | "settings"
+        | "slash" | "block-menu" => apply_scene_overlay(ui, state, scene),
+
+        "rename" => {
+            g.set_renaming_id(108);
+        }
+
+        "empty" => open(&g, state, 113),
+        "slash" => {
+            let target = {
+                let d = state.doc.borrow();
+                d.page_blocks(core_page_id(state.open_page.get()))
+                    .iter()
+                    .find(|b| b.kind == crate::core::BlockKind::Paragraph && !b.text.is_empty())
+                    .map(|b| (b.id.0 as i32, b.text.len() as i32, b.text.clone()))
+            };
+            if let Some((id, len, text)) = target {
+                g.set_editing_text(text.into());
+                g.set_pending_caret(len);
+                g.set_editing_id(id);
+                state.open_slash("");
+                g.set_slash_focus(0);
+                g.set_slash_open(true);
+            }
+        }
+        "block-menu" => {
+            let target = {
+                let d = state.doc.borrow();
+                d.page_blocks(core_page_id(state.open_page.get()))
+                    .get(4)
+                    .map(|b| b.id.0 as i32)
+            };
+            if let Some(id) = target {
+                state.fill_block_menu();
+                g.set_block_menu_open_id(id);
+            }
+        }
+        "edit" => {
+            // focus the first paragraph of the landing page
+            let target = {
+                let d = state.doc.borrow();
+                d.page_blocks(core_page_id(state.open_page.get()))
+                    .iter()
+                    .find(|b| b.kind == crate::core::BlockKind::Paragraph && !b.text.is_empty())
+                    .map(|b| (b.id.0 as i32, b.text.len() as i32, b.text.clone()))
+            };
+            if let Some((id, len, text)) = target {
+                g.set_editing_text(text.into());
+                g.set_pending_caret(len);
+                g.set_editing_id(id);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Popup-opening half of a scene: called AFTER the first render pass so the
+/// delegate-owned popups (slash, block menu) see a false -> true transition
+/// and their `changed` handlers fire.
+pub fn apply_scene_overlay(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
+    let g = ui.global::<UIState>();
+    match scene {
         "palette" => g.set_palette_open(true),
         "search" => {
             g.set_search_open(true);
@@ -715,30 +934,34 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             g.set_menu_x(240.0);
             g.set_menu_open(true);
         }
-        "rename" => {
-            g.set_renaming_id(108);
-        }
-        "settings" => g.set_settings_open(true),
         "dialog" => {
             let (_title, message) = state.delete_dialog_text(105);
             g.set_dialog_title("Delete page?".into());
             g.set_dialog_message(message.into());
             g.set_dialog_open(true);
         }
-        "empty" => open(&g, state, 113),
-        "edit" => {
-            // focus the first paragraph of the landing page
+        "settings" => g.set_settings_open(true),
+        "slash" => {
+            state.open_slash("");
+            g.set_slash_focus(0);
+            // headless estimate: landing-page paragraph position
+            g.set_slash_x(340.0);
+            g.set_slash_y(260.0);
+            g.set_slash_open(true);
+        }
+        "block-menu" => {
             let target = {
                 let d = state.doc.borrow();
                 d.page_blocks(core_page_id(state.open_page.get()))
-                    .iter()
-                    .find(|b| b.kind == crate::core::BlockKind::Paragraph && !b.text.is_empty())
-                    .map(|b| (b.id.0 as i32, b.text.len() as i32, b.text.clone()))
+                    .get(4)
+                    .map(|b| b.id.0 as i32)
             };
-            if let Some((id, len, text)) = target {
-                g.set_editing_text(text.into());
-                g.set_pending_caret(len);
-                g.set_editing_id(id);
+            if let Some(id) = target {
+                state.fill_block_menu();
+                g.set_block_menu_x(320.0);
+                g.set_block_menu_y(300.0);
+                g.set_block_menu_open_id(id);
+                g.set_block_menu_open(true);
             }
         }
         _ => {}

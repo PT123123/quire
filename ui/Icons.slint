@@ -382,6 +382,22 @@ component IcTrash {
     }
 }
 
+component IcChevronUp {
+    in property <brush> color: Colors.text-secondary;
+    in property <length> size: 16px;
+    width: size; height: size;
+    Path {
+        width: parent.width; height: parent.height;
+        viewbox-x: 0; viewbox-y: 0; viewbox-width: 24; viewbox-height: 24;
+        stroke: color; stroke-width: 1.8px;
+        stroke-line-cap: round; stroke-line-join: round;
+        fill: transparent;
+        MoveTo { x: 5; y: 14.5; }
+        LineTo { x: 12; y: 7.5; }
+        LineTo { x: 19; y: 14.5; }
+    }
+}
+
 // Name dispatcher used by sidebar rows and palette rows.
 export component Icon {
     in property <string> name;
@@ -395,6 +411,7 @@ export component Icon {
     IcSearch { visible: root.name == "search"; size: root.size; color: root.color; }
     IcChevronRight { visible: root.name == "chevron-right"; size: root.size; color: root.color; }
     IcChevronDown { visible: root.name == "chevron-down"; size: root.size; color: root.color; }
+    IcChevronUp { visible: root.name == "chevron-up"; size: root.size; color: root.color; }
     IcChevronLeft { visible: root.name == "chevron-left"; size: root.size; color: root.color; }
     IcPencil { visible: root.name == "pencil"; size: root.size; color: root.color; }
     IcCopy { visible: root.name == "copy"; size: root.size; color: root.color; }
