@@ -31,6 +31,7 @@ pub fn bind(ui: &AppWindow, state: &Rc<AppState>) {
     g.set_page_title(title.into());
     g.set_page_breadcrumb(crumb.into());
     g.set_renderer_name(renderer_name().into());
+    g.set_dark(state.dark_setting());
 }
 
 fn renderer_name() -> &'static str {
@@ -63,9 +64,36 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
 
     {
         let gw = gw.clone();
+        let s = state.clone();
         ui.global::<UIState>().on_toggle_theme(move || {
             let g = gw.upgrade().unwrap();
-            g.set_dark(!g.get_dark());
+            let dark = !g.get_dark();
+            g.set_dark(dark);
+            s.set_dark(dark);
+        });
+    }
+
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_set_dark(move |dark| {
+            let g = gw.upgrade().unwrap();
+            g.set_dark(dark);
+            s.set_dark(dark);
+        });
+    }
+
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_move_block(move |delta| {
+            let g = gw.upgrade().unwrap();
+            let cur = g.get_editing_id();
+            if cur <= 0 {
+                return;
+            }
+            s.exec_on_open_page(Command::MoveBlock { id: BlockId(cur as u64), delta });
+            refresh_focused_text(&g, &s);
         });
     }
 
@@ -299,6 +327,24 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                 3 => g.set_sidebar_open(!g.get_sidebar_open()),
                 4 => g.set_dark(!g.get_dark()),
                 5 => g.set_settings_open(true),
+                6 => {
+                    g.set_renaming_id(g.get_sidebar_selected_id());
+                }
+                7 => {
+                    let cur = s.open_page.get();
+                    if let Some(new_id) = s.duplicate_page(cur) {
+                        open(&g, &s, new_id);
+                    }
+                }
+                8 => {
+                    let cur = s.open_page.get();
+                    if s.workspace.borrow().contains(cur) {
+                        let (_t, message) = s.delete_dialog_text(cur);
+                        g.set_dialog_title("Delete page?".into());
+                        g.set_dialog_message(message.into());
+                        g.set_dialog_open(true);
+                    }
+                }
                 other if other >= CMD_PAGE_BASE => {
                     open(&g, &s, other - CMD_PAGE_BASE);
                 }
@@ -731,6 +777,35 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
     {
         let gw = gw.clone();
         let s = state.clone();
+        ui.global::<UIState>().on_toggle_mark(move |kind, start, end| {
+            let g = gw.upgrade().unwrap();
+            flush_pending_edit(&g, &s);
+            let cur = g.get_editing_id();
+            if cur <= 0 {
+                return;
+            }
+            let kind = match kind {
+                0 => Some(crate::core::MarkKind::Bold),
+                1 => Some(crate::core::MarkKind::Italic),
+                2 => Some(crate::core::MarkKind::Strike),
+                3 => Some(crate::core::MarkKind::Code),
+                _ => None,
+            };
+            if let Some(kind) = kind {
+                let _ = s.exec_on_open_page(Command::ToggleMark {
+                    id: BlockId(cur as u64),
+                    start: start.min(end).max(0) as usize,
+                    end: end.max(start).max(0) as usize,
+                    kind,
+                    url: String::new(),
+                });
+            }
+        });
+    }
+
+    {
+        let gw = gw.clone();
+        let s = state.clone();
         ui.global::<UIState>().on_undo_requested(move || {
             let g = gw.upgrade().unwrap();
             flush_pending_edit(&g, &s);
@@ -890,6 +965,31 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             if let Some(id) = target {
                 state.fill_block_menu();
                 g.set_block_menu_open_id(id);
+            }
+        }
+        "marks" => {
+            // seed inline marks on the first paragraph (visual test only,
+            // applied directly like an editor toggle would)
+            let page = core_page_id(state.open_page.get());
+            let target = {
+                let d = state.doc.borrow();
+                d.page_blocks(page)
+                    .iter()
+                    .find(|b| b.kind == crate::core::BlockKind::Paragraph && !b.text.is_empty())
+                    .map(|b| (b.id, b.text.clone()))
+            };
+            if let Some((id, text)) = target {
+                let end = text.len().min(26);
+                let marks = vec![
+                    crate::core::Mark { start: 0, end, kind: crate::core::MarkKind::Bold, url: String::new() },
+                    crate::core::Mark { start: 2, end: 7, kind: crate::core::MarkKind::Italic, url: String::new() },
+                    crate::core::Mark { start: 8, end: 12, kind: crate::core::MarkKind::Code, url: String::new() },
+                ];
+                state
+                    .doc
+                    .borrow_mut()
+                    .apply(&[crate::core::Change::BlockMarksSet { id, marks }]);
+                state.reproject_blocks();
             }
         }
         "edit" => {

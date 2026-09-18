@@ -246,6 +246,16 @@ impl Workspace {
         }
     }
 
+    /// Restore persisted recents (M3 integration); unknown ids are dropped
+    /// lazily by the accessor.
+    pub fn set_recents(&mut self, ids: Vec<i32>) {
+        self.recents = ids;
+    }
+
+    pub fn recents_ids(&self) -> Vec<i32> {
+        self.recents.clone()
+    }
+
     pub fn set_search_text(&mut self, id: i32, blob: String) {
         if let Some(p) = self.pages.get_mut(&id) {
             p.search_text = blob;

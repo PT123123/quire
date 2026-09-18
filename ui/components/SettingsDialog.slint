@@ -108,14 +108,14 @@ export component SettingsDialog inherits PopupWindow {
                     label: "Light";
                     active: !UIState.dark;
                     clicked => {
-                        UIState.dark = false;
+                        UIState.set-dark(false);
                     }
                 }
                 ThemeOption {
                     label: "Dark";
                     active: UIState.dark;
                     clicked => {
-                        UIState.dark = true;
+                        UIState.set-dark(true);
                     }
                 }
             }

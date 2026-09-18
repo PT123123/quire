@@ -97,11 +97,61 @@ export component EditorBlock inherits Rectangle {
         }
     }
 
+    // inline-mark runs (M6). Slint Text has no inline formatting, so a
+    // marked block renders as side-by-side runs (single line, clipped —
+    // documented limitation). Unmarked blocks keep the wrapping Text.
+    if is-plain && !editing && block.runs.length > 0 : Rectangle {
+        x: content-x + (is-list ? 26px : 0px);
+        width: content-width - (is-list ? 26px : 0px);
+        y: top-margin;
+        height: plain-text.height;
+        clip: true;
+        HorizontalLayout {
+            spacing: 0px;
+            for run in block.runs : Rectangle {
+                height: plain-text.height;
+                HorizontalLayout {
+                    spacing: 0px;
+                    Rectangle {
+                        visible: run.code;
+                        border-radius: Theme.radius-xs;
+                        background: Colors.code-background;
+                        border-width: 1px;
+                        border-color: Colors.border;
+                        Text {
+                            x: 4px;
+                            text: run.text;
+                            font-family: Typography.mono-font;
+                            font-size: Typography.size-code;
+                            color: run.bold ? Colors.text-primary : Colors.accent-text;
+                            vertical-alignment: center;
+                        }
+                    }
+                    if !run.code : Text {
+                        text: run.text;
+                        // Slint Text has no font-style: italic comes from the
+                        // family name (Windows ships the italic faces)
+                        font-family: run.italic ? "Segoe UI Italic" : Typography.ui-font;
+                        font-size: body-font-size;
+                        font-weight: run.bold ? Typography.weight-bold : (is-heading ? Typography.weight-semibold : Typography.weight-regular);
+                        color: Colors.text-primary;
+                        line-height-factor: body-line-factor;
+                    }
+                    if run.strike : Rectangle {
+                        y: (parent.height - 1px) / 2;
+                        height: 1.2px;
+                        background: Colors.text-secondary;
+                    }
+                }
+            }
+        }
+    }
+
     plain-text := Text {
         x: content-x + (is-list ? 26px : 0px);
         width: content-width - (is-list ? 26px : 0px);
         y: top-margin;
-        visible: is-plain && !editing;
+        visible: is-plain && !editing && block.runs.length == 0;
         text: block.text;
         font-family: Typography.ui-font;
         font-size: body-font-size;
@@ -153,6 +203,22 @@ export component EditorBlock inherits Rectangle {
             } else if (UIState.slash-open && event.text == " ") {
                 UIState.slash-close();
                 reject
+            } else if (event.modifiers.control && event.text == Key.B
+                && self.anchor-position-byte-offset != self.cursor-position-byte-offset) {
+                UIState.toggle-mark(0, self.anchor-position-byte-offset, self.cursor-position-byte-offset);
+                accept
+            } else if (event.modifiers.control && event.text == Key.I
+                && self.anchor-position-byte-offset != self.cursor-position-byte-offset) {
+                UIState.toggle-mark(1, self.anchor-position-byte-offset, self.cursor-position-byte-offset);
+                accept
+            } else if (event.modifiers.control && event.modifiers.shift && event.text == Key.X
+                && self.anchor-position-byte-offset != self.cursor-position-byte-offset) {
+                UIState.toggle-mark(2, self.anchor-position-byte-offset, self.cursor-position-byte-offset);
+                accept
+            } else if (event.modifiers.control && event.text == Key.E
+                && self.anchor-position-byte-offset != self.cursor-position-byte-offset) {
+                UIState.toggle-mark(3, self.anchor-position-byte-offset, self.cursor-position-byte-offset);
+                accept
             } else if (event.text == Key.Backspace
                 && self.cursor-position-byte-offset == 0
                 && self.anchor-position-byte-offset == 0) {
@@ -172,6 +238,14 @@ export component EditorBlock inherits Rectangle {
                 accept
             } else if (block.kind != 8 && event.text == Key.DownArrow) {
                 UIState.focus-move(1);
+                accept
+            } else if (event.modifiers.control && event.modifiers.shift
+                && event.text == Key.UpArrow) {
+                UIState.move-block(-1);
+                accept
+            } else if (event.modifiers.control && event.modifiers.shift
+                && event.text == Key.DownArrow) {
+                UIState.move-block(1);
                 accept
             } else if (event.text == Key.Escape) {
                 UIState.cancel-editing();

@@ -131,6 +131,23 @@ that wiring decision, not the storage layer.
   lands with the settings UI work (M8); M4 editor polish continues
   (block-type switching menu in M5, IME acceptance = user pass)
 
+## M4/M5/M6 progress — Track A (2026-09-19, `cda0cd8`+)
+- [x] M5 slash menu: Rust-owned descriptors, filter-as-you-type, keyboard
+      first (SPEC §十五); applying type+text cleanup is ONE undo step
+- [x] M5 block handle menu (+ / ⋮⋮): move up/down, duplicate, copy block,
+      paste below, delete; cross-block clipboard (menu-gated)
+- [x] M6 inline marks: Mark/MarkKind in the contract (BlockMarksSet),
+      ToggleMark command (add/remove/replace semantics), marks table in
+      schema v2, Ctrl+B/I/E/Shift+X over the selection; runs render with a
+      documented wrap limitation (Slint Text has no inline formatting)
+- [x] settings persistence: theme + recents survive restart (settings/
+      metadata tables); palette gained Rename/Duplicate/Delete Page
+- [x] platform notes: PopupWindow cannot be conditional/repeated → one
+      instance per row with changed-driven show; delegate-inline menus get
+      painted over by following ListView rows (window-level popups win)
+- [ ] user pass: Chinese IME acceptance; 1000-block typing check lands
+      with Track B's scene E; drag-to-reorder (mouse) deferred to M7 polish
+
 ## Next: M4 · Block editor MVP (remaining)
 - block-type switching menu (BlockHandle affordance), cross-block
   clipboard, 1000-block editing responsiveness check, Chinese IME

@@ -18,7 +18,9 @@ export component AppShell inherits Rectangle {
         || UIState.search-open
         || UIState.menu-open
         || UIState.dialog-open
-        || UIState.settings-open;
+        || UIState.settings-open
+        || UIState.slash-open
+        || UIState.block-menu-open-id >= 0;
 
     VerticalLayout {
         TopBar {
@@ -52,6 +54,8 @@ export component AppShell inherits Rectangle {
                 UIState.menu-open = false;
                 UIState.dialog-open = false;
                 UIState.settings-open = false;
+                UIState.slash-open = false;
+                UIState.block-menu-open-id = -1;
             }
         }
     }

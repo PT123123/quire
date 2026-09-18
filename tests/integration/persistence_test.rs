@@ -40,6 +40,7 @@ fn seeded(path: &Path) -> Arc<SqliteRepository> {
             kind: BlockKind::Paragraph,
             text: String::new(),
             checked: false,
+                marks: Vec::new(),
         }),
     ])
     .unwrap();
@@ -91,6 +92,7 @@ fn shutdown_flush_then_next_session_loads_it() {
             kind: BlockKind::Todo,
             text: "未保存的中文草稿".into(),
             checked: true,
+                marks: Vec::new(),
         })]);
         clock.set(10); // nowhere near due — this is the Ctrl+S/quit path
         svc.force_flush().unwrap();
