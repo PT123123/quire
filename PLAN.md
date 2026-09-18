@@ -84,6 +84,34 @@ Deferred (not blockers, tracked for M3+):
 - scene F remains a programmatic proxy until wheel-input injection is
   available; real input pass stays manual.
 
+## M3 · Local documents (SQLite) — ✅ (2026-09-19, branch `m3-storage`)
+- [x] `storage/`: rusqlite (bundled) + six-table schema per SPEC §十八 in
+      `migrations.rs` (`PRAGMA user_version`, forward-only upgrades),
+      `database.rs` (WAL + synchronous=FULL + startup `integrity_check`,
+      SPEC §二十五), `repository.rs` implementing the `core::Repository`
+      contract — `apply` one transaction per change list (SPEC §十八),
+      cascade + recursive-CTE subtree deletes, `replace_all` with deferred
+      FK checks and an explicit parent-cycle guard
+- [x] `services/persistence.rs`: dirty queue → 300 ms debounce (injectable
+      `Clock`) → one batched `apply`; `force_flush` for Ctrl+S/shutdown;
+      failed writes keep the queue ordered and retry at the next deadline
+      (SPEC §十九). Slint- and thread-free: the app layer's timer calls
+      `flush_if_due`, any thread may call `force_flush`
+- [x] Tests: 22 lib unit + 13 storage integration + 3 persistence
+      integration — round-trip (incl. OrderKey extremes and CJK text),
+      migration of a v0 file, rollback of a failing batch, corrupt-file and
+      unknown-kind reporting, fake-clock debounce behavior, and a
+      subprocess kill -9 crash test (committed rows survive, an
+      in-flight transaction never surfaces)
+- [x] `cargo check --all-targets` + `cargo test` green on this branch;
+      save-latency numbers recorded in docs/PERFORMANCE.md; schema
+      rationale in ADR-0013
+
+Not in this pass (per track split): controller/UI wiring of
+`PersistenceService` and retiring `app/workspace.rs` mocks — Track A
+after the M3/M4 merge. DB file location/first-run bootstrap is part of
+that wiring decision, not the storage layer.
+
 ## Next: M3 · Local documents (SQLite)
 - `core/` document model + `storage/` SQLite repository and migrations;
   debounced transactional persistence replacing `app/workspace.rs`'s

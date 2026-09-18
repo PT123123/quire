@@ -2,6 +2,33 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0013 · Storage schema: cascade-FK tree + split block_children, one
+transaction per contract call
+Decision: the SQLite file uses the six SPEC §十八 tables — `workspaces`
+(kept as the forward-compatible root, single row for now), `pages`
+(self-referencing `parent` FK), `blocks` (identity + payload: page, kind,
+text, checked), `block_children` (tree placement: `parent` FK + `ord`),
+`metadata`, `settings`. Ids are the `core` u64 newtypes stored as `INTEGER`;
+`OrderKey` maps u64→i64 by flipping the sign bit so signed storage keeps
+unsigned ordering. Every mutation funnels through `Repository`: `apply`
+takes one ordered `Change` list inside a single transaction (SPEC §十八),
+deletions are recursive-CTE subtree deletes with `ON DELETE CASCADE` as
+backstop, `replace_all` defers FK checks to commit and adds an explicit
+acyclicity check (FKs alone cannot see an A→B→A cycle). Durability is
+WAL + `synchronous=FULL` with a `PRAGMA integrity_check` at open
+(SPEC §二十五); schema upgrades are forward-only steps in
+`src/storage/migrations.rs` tracked by `PRAGMA user_version`.
+Why: the split matches the SPEC's table list and keeps the hot payload
+(text) on its own table for cheap `BlockTextSet` writes; cascade + CTE
+makes delete semantics single-statement and testable; FULL is paid for
+once per debounced burst (≈2–3 ms measured), not per keystroke (SPEC
+§三十三 forbids the latter); cycle validation protects the sidebar tree.
+Consequences: unknown `kind` strings or unreadable pages surface as
+`StorageError::Corrupt` at startup instead of silent data loss; the
+`workspaces` table is a placeholder until a real multi-workspace model
+lands (feedback to Track A if M4+ needs it in `PersistedState`); a newer
+`user_version` refuses to open rather than downgrade the file.
+
 ## ADR-0012 · Persistence contract lives in `core/`, storage implements it
 Decision: `src/core/types.rs` defines the persisted model (`PageId`,
 `BlockId`, `OrderKey`, `BlockKind`, `Block`, `Page`, `PersistedState`);
