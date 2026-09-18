@@ -2,6 +2,62 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0015 · Crash recovery: rotating `VACUUM INTO` snapshots, restore at
+open; settings and metadata as a diffed key/value layer
+Decision: the durability story from M3 stands and is now on the record as
+measured: `journal_mode=WAL` is stored in the file header (a later open reads
+back `wal`), `synchronous=FULL` (=2), `locking_mode=normal`, `page_size=4096`,
+`wal_autocheckpoint=1000` pages ≈ 4 MB, so SQLite folds the WAL back into the
+main file by itself during a long session and a clean close checkpoints and
+removes `-wal`. On top of that, `src/storage/backup.rs` gives SPEC §二十五 a
+backup policy: every successful open shifts `<path>.bak1 → .bak2 → .bak3`
+(dropping the oldest) and writes a fresh `.bak1`, and `SqliteRepository::open`
+goes through `backup::open_with_recovery` — a main file that fails the startup
+`integrity_check` is repaired before the app ever sees an error. Recovery
+walks `.bak1 … .bak3`, validates each candidate by really opening it
+(migrations + `PRAGMA integrity_check`), moves the unreadable main file aside
+as `<path>.corrupt` and deletes its `-wal`/`-shm`, then *moves* (not copies)
+the good snapshot into the main path and opens that. `Database::open` itself is
+unchanged, so the existing "corruption is reported, not hidden" behavior is
+still reachable (and still asserted by `storage::database::tests`).
+For the UI's remembered state, `src/services/settings_store.rs` wraps the
+frozen contract: `Settings` is a `BTreeMap` with the two keys the panels need
+(`theme`, `sidebar.expanded`), and `SettingsStore` over `Arc<dyn Repository>`
+offers `load_settings`/`load_meta`, `save_settings`/`save_meta` and the
+non-writing `settings_changes`/`meta_changes`, which diff against what the
+repository holds and emit only `SettingSet`/`MetaSet` changes — so a burst of
+window-resize saves can be queued through `PersistenceService` and stay inside
+the debounce window instead of writing per event.
+Why `VACUUM INTO ?1` rather than a file copy or rusqlite's `Backup`: a copy of
+`workspace.db` misses whatever still lives in `-wal` and can catch a torn page,
+while `VACUUM INTO` reads through the live connection (WAL included), writes one
+self-contained compacted file with no sidecar, and is a single statement on the
+connection the snapshot already locks — so it is one consistent point in the
+change stream, not a race. rusqlite's `Backup` offers the same consistency
+page-by-page but needs a second destination connection; the statement is
+simpler. The copy runs with `synchronous=OFF` and restores `FULL` afterwards,
+which is safe because a snapshot is expendable (a torn copy fails its own
+integrity check when recovery tries it, and the next open rewrites it) while
+`VACUUM INTO` only reads the main database — measured at 2.3 MB: ≈23–49 ms
+relaxed vs ≈45–256 ms at `FULL`, same process alternating rounds.
+Consequences: startup pays ≈40 ms per 2.3 MB of workspace (PERFORMANCE.md,
+M8 addendum) and the folder holds up to 3 extra copies of the database — both
+are the price of never opening a blank app after one bad write. The loss
+window is by design: `.bak1` is the database *as of the last successful open*,
+so a corruption that arrives mid-session costs the edits made since startup;
+closing that would mean rewriting the whole file every flush, which §三十三
+rules out in spirit — Track A can call `backup::snapshot` from a "save a copy"
+menu item if a real case appears. Recovery only answers *structural* damage: an
+unknown `blocks.kind` still surfaces as `Corrupt` from `load()` (ADR-0013)
+after a clean open, and that path is the app's to handle (M8_FEEDBACK.md). A
+snapshot failure is logged and ignored — a read-only or full directory must
+never block opening the document — so tests that want the unrecoverable case
+have to delete the `.bak<N>` family first. Because the FTS5 mirror lives in the
+same file (ADR-0014), a recovered database is searchable immediately, with no
+rebuild; and because `Settings` treats an empty value as absent (the contract
+has no `SettingDelete`), a stored-but-empty setting is indistinguishable from a
+removed one.
+
 ## ADR-0014 · Full-text search: FTS5 mirror inside the apply transaction,
 CJK indexed by hand-built segmentation
 Decision: search (SPEC §二十) uses two FTS5 virtual tables added by schema
