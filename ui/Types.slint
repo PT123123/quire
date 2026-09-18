@@ -35,6 +35,12 @@ export struct SearchRow {
     snippet: string, // content excerpt or breadcrumb for title/recents hits
 }
 
+export struct SlashRow {
+    id: int,        // maps to a BlockKind in Rust
+    label: string,
+    hint: string,
+}
+
 export struct MenuRow {
     id: int,
     label: string,
@@ -57,6 +63,24 @@ export global UIState {
     in-out property <string> page-title: "Getting Started";
     in-out property <string> page-breadcrumb: "";
     in-out property <length> editor-scroll-y: 0px; // Editor viewport mirror
+
+    // slash menu (M5): "/" in an editing block filters Rust-provided
+    // block-kind descriptors; the dropdown renders inside the delegate
+    in-out property <bool> slash-open: false;
+    in-out property <string> slash-filter: "";
+    in-out property <int> slash-focus: 0;
+    in-out property <[SlashRow]> slash-items;
+    in-out property <length> slash-x: 300px;
+    in-out property <length> slash-y: 200px;
+
+    // block menu (M5): ⋮⋮ handle menu for one block
+    in-out property <bool> block-menu-open: false;
+    in-out property <int> block-menu-open-id: -1;
+    in-out property <[MenuRow]> block-menu-rows;
+    in-out property <length> block-menu-x: 300px;
+    in-out property <length> block-menu-y: 100px;
+    /// Internal clipboard for cross-block copy/paste (menu-driven).
+    in-out property <bool> has-copied-block: false;
 
     // block editing (M4): exactly one block owns the live TextInput.
     // editing-text mirrors that input; pending-caret is a byte offset the
@@ -109,7 +133,7 @@ export global UIState {
     callback palette-move(int);
     callback todo-toggled(int);
     callback block-activate(int);
-    callback editing-changed();
+    callback editing-changed(length, length, length);
     callback enter-at-caret(int);
     callback backspace-at-start();
     callback focus-move(int);
@@ -117,6 +141,13 @@ export global UIState {
     callback undo-requested();
     callback redo-requested();
     callback save-requested();
+    callback slash-move(int);
+    callback slash-apply-selected();
+    callback slash-close();
+    callback block-menu-opened(int, length);
+    callback block-menu-action(int);
+    callback block-plus(int);
+
     callback node-clicked(int);
     callback node-expand-toggled(int);
     callback node-context(int);

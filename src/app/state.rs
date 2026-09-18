@@ -10,7 +10,7 @@ use crate::app::workspace::{SearchHit, Workspace, BENCH_ID_BASE, MAX_RECENTS};
 use crate::core::persistence::{Change, Repository};
 use crate::core::{Block, BlockId, BlockKind, Command, Document, History, OrderKey, PageId};
 use crate::services::persistence::PersistenceService;
-use crate::{BlockRow, CommandRow, MenuRow, SearchRow, SidebarNode};
+use crate::{BlockRow, CommandRow, MenuRow, SearchRow, SlashRow, SidebarNode};
 use slint::{Model, ModelRc, VecModel};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -24,6 +24,8 @@ pub struct AppState {
     pub commands: Rc<VecModel<CommandRow>>,
     pub search: Rc<VecModel<SearchRow>>,
     pub menu: Rc<VecModel<MenuRow>>,
+    pub slash: Rc<VecModel<SlashRow>>,
+    pub block_menu: Rc<VecModel<MenuRow>>,
     /// Full command list before query filtering.
     pub all_commands: Vec<CommandRow>,
     /// The editing truth for every page's blocks (M4).
@@ -36,6 +38,8 @@ pub struct AppState {
     page_order: RefCell<HashMap<i32, OrderKey>>,
     /// Installed by the controller: restarts the flush timer on record().
     flush_hook: RefCell<Option<Rc<dyn Fn()>>>,
+    /// Cross-block clipboard (menu-driven copy/paste of one block).
+    clipboard: RefCell<Option<Block>>,
     /// Currently open page (0 = none / empty workspace).
     pub open_page: Cell<i32>,
     /// Page awaiting delete confirmation.
@@ -197,6 +201,9 @@ impl AppState {
             commands,
             search: Rc::new(VecModel::from(Vec::new())),
             menu: Rc::new(VecModel::from(Vec::new())),
+            slash: Rc::new(VecModel::from(slash_items(""))),
+            block_menu: Rc::new(VecModel::from(Vec::new())),
+            clipboard: RefCell::new(None),
             all_commands,
             doc: RefCell::new(doc),
             history: RefCell::new(History::default()),
@@ -229,6 +236,12 @@ impl AppState {
     }
     pub fn menu_model(&self) -> ModelRc<MenuRow> {
         ModelRc::from(self.menu.clone())
+    }
+    pub fn slash_model(&self) -> ModelRc<SlashRow> {
+        ModelRc::from(self.slash.clone())
+    }
+    pub fn block_menu_model(&self) -> ModelRc<MenuRow> {
+        ModelRc::from(self.block_menu.clone())
     }
 
     // ---- projections ----
@@ -381,6 +394,72 @@ impl AppState {
         let changes = self.exec_editor(cmd)?;
         self.reproject_blocks();
         Some(changes)
+    }
+
+    // ---- slash menu (descriptors owned by Rust, per SPEC §十五) ----
+
+    /// Filter the block-kind descriptors by the text after "/".
+    pub fn open_slash(&self, filter: &str) {
+        let needle = filter.to_lowercase();
+        let rows: Vec<SlashRow> = SLASH_ITEMS
+            .iter()
+            .filter(|(_, label, _)| {
+                needle.is_empty() || label.to_lowercase().contains(&needle)
+            })
+            .map(|(kind, label, hint)| SlashRow {
+                id: kind_to_int(*kind),
+                label: (*label).into(),
+                hint: (*hint).into(),
+            })
+            .collect();
+        self.slash.set_vec(rows);
+    }
+
+    pub fn slash_focus_count(&self) -> i32 {
+        self.slash.row_count() as i32
+    }
+
+    pub fn slash_selected_kind(&self, focus: i32) -> Option<BlockKind> {
+        let row = self.slash.row_data(focus.max(0) as usize)?;
+        Some(kind_from_int(row.id))
+    }
+
+    // ---- block menu ----
+
+    /// Fill the handle menu for one block. Paste appears only when the
+    /// internal clipboard holds a block.
+    pub fn fill_block_menu(&self) {
+        let mut rows = vec![
+            MenuRow { id: 1, label: "Move up".into(), icon: "chevron-up".into(), danger: false },
+            MenuRow { id: 2, label: "Move down".into(), icon: "chevron-down".into(), danger: false },
+            MenuRow { id: 3, label: "Duplicate".into(), icon: "copy".into(), danger: false },
+            MenuRow { id: 4, label: "Copy block".into(), icon: "copy".into(), danger: false },
+        ];
+        if self.clipboard.borrow().is_some() {
+            rows.push(MenuRow { id: 5, label: "Paste below".into(), icon: "import".into(), danger: false });
+        }
+        rows.push(MenuRow { id: 6, label: "Delete".into(), icon: "trash".into(), danger: true });
+        self.block_menu.set_vec(rows);
+    }
+
+    pub fn copy_block(&self, id: i32) {
+        if let Some(b) = self.doc.borrow().block(BlockId(id as u64)) {
+            *self.clipboard.borrow_mut() = Some(b.clone());
+        }
+    }
+
+    pub fn paste_below(&self, id: i32) -> bool {
+        let clip = self.clipboard.borrow().clone();
+        match clip {
+            Some(c) => self
+                .exec_on_open_page(Command::InsertBlockAfter {
+                    id: BlockId(id as u64),
+                    kind: c.kind,
+                    text: c.text,
+                })
+                .is_some(),
+            None => false,
+        }
     }
 
     pub fn undo_open_page(&self) -> Option<Vec<Change>> {
@@ -696,6 +775,34 @@ fn leaf_row(id: i32, label: &str, kind: &str, selected: bool) -> SidebarNode {
 /// M2 mock page ids (i32) map into the u64 core id space unchanged.
 pub fn core_page_id(id: i32) -> PageId {
     PageId(id as u32 as u64)
+}
+
+/// Slash-menu descriptors: Rust owns the list (SPEC §十五), the UI only
+/// renders labels. ids are BlockKind ints (see kind_from_int).
+const SLASH_ITEMS: &[(BlockKind, &str, &str)] = &[
+    (BlockKind::Paragraph, "Text", "Plain paragraph"),
+    (BlockKind::Heading1, "Heading 1", "Large section heading"),
+    (BlockKind::Heading2, "Heading 2", "Medium section heading"),
+    (BlockKind::Heading3, "Heading 3", "Small section heading"),
+    (BlockKind::Bullet, "Bullet list", "Simple bulleted list"),
+    (BlockKind::Numbered, "Numbered list", "List with numbering"),
+    (BlockKind::Todo, "To-do list", "Track tasks with checkboxes"),
+    (BlockKind::Quote, "Quote", "Capture a quotation"),
+    (BlockKind::Code, "Code", "Monospaced code block"),
+    (BlockKind::Divider, "Divider", "Visual separator"),
+];
+
+fn slash_items(filter: &str) -> Vec<SlashRow> {
+    let needle = filter.to_lowercase();
+    SLASH_ITEMS
+        .iter()
+        .filter(|(_, label, _)| needle.is_empty() || label.to_lowercase().contains(&needle))
+        .map(|(kind, label, hint)| SlashRow {
+            id: kind_to_int(*kind),
+            label: (*label).into(),
+            hint: (*hint).into(),
+        })
+        .collect()
 }
 
 fn kind_from_int(kind: i32) -> BlockKind {

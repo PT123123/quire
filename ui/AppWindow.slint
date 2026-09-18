@@ -3,6 +3,8 @@
 
 import { Theme } from "Theme.slint";
 import { Colors } from "Colors.slint";
+import { Typography } from "Typography.slint";
+import { Icon } from "Icons.slint";
 import { UIState } from "Types.slint";
 import { AppShell } from "components/AppShell.slint";
 import { CommandPalette } from "components/CommandPalette.slint";
@@ -11,8 +13,120 @@ import { ContextMenu } from "components/ContextMenu.slint";
 import { ConfirmDialog } from "components/Dialog.slint";
 import { SettingsDialog } from "components/SettingsDialog.slint";
 
+// Row menus (slash + block handle): one window-level popup each, positioned
+// by the controller from the delegate's reported geometry. Declared before
+// use (slint rule).
+
+component BlockMenuPopup inherits PopupWindow {
+    width: 176px;
+    height: UIState.block-menu-rows.length * 28px + 8px;
+    close-policy: PopupClosePolicy.no-auto-close;
+
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        border-radius: Theme.radius-md;
+        background: Colors.surface-overlay;
+        border-width: 1px;
+        border-color: Colors.border;
+
+        for item[index] in UIState.block-menu-rows : Rectangle {
+            x: 4px;
+            y: 4px + (index * 28px);
+            width: parent.width - 8px;
+            height: 28px;
+            border-radius: Theme.radius-sm;
+            background: bm-ta.has-hover ? Colors.surface-hover : transparent;
+            animate background { duration: Theme.duration-instant; }
+
+            HorizontalLayout {
+                x: 6px;
+                spacing: Theme.spacing-sm;
+                Icon {
+                    y: (parent.height - 14px) / 2;
+                    width: 14px;
+                    height: 14px;
+                    size: 14px;
+                    name: item.icon;
+                    color: item.danger ? Colors.danger
+                        : (bm-ta.has-hover ? Colors.text-primary : Colors.text-secondary);
+                }
+                Text {
+                    text: item.label;
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-ui;
+                    color: item.danger ? Colors.danger
+                        : (bm-ta.has-hover ? Colors.text-primary : Colors.text-secondary);
+                    vertical-alignment: center;
+                }
+            }
+            bm-ta := TouchArea {
+                mouse-cursor: MouseCursor.pointer;
+                clicked => {
+                    UIState.block-menu-action(item.id);
+                }
+            }
+        }
+    }
+}
+
+component SlashMenuPopup inherits PopupWindow {
+    width: Math.min(280px, 760px);
+    height: UIState.slash-items.length * 32px + 8px;
+    close-policy: PopupClosePolicy.no-auto-close;
+
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        border-radius: Theme.radius-md;
+        background: Colors.surface-overlay;
+        border-width: 1px;
+        border-color: Colors.border;
+
+        for item[idx] in UIState.slash-items : Rectangle {
+            x: 4px;
+            y: 4px + (idx * 32px);
+            width: parent.width - 8px;
+            height: 32px;
+            border-radius: Theme.radius-sm;
+            background: idx == UIState.slash-focus || sl-ta.has-hover
+                ? Colors.surface-hover : transparent;
+            animate background { duration: Theme.duration-instant; }
+
+            HorizontalLayout {
+                x: 8px;
+                spacing: Theme.spacing-sm;
+                Text {
+                    text: item.label;
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-ui;
+                    color: idx == UIState.slash-focus ? Colors.text-primary : Colors.text-secondary;
+                    vertical-alignment: center;
+                    horizontal-stretch: 0;
+                }
+                Rectangle { width: 0px; }
+                Text {
+                    text: item.hint;
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-caption;
+                    color: Colors.text-muted;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+            sl-ta := TouchArea {
+                mouse-cursor: MouseCursor.pointer;
+                clicked => {
+                    UIState.slash-focus = idx;
+                    UIState.slash-apply-selected();
+                }
+            }
+        }
+    }
+}
+
 // Rust-facing names must be re-exported from the entry file (1.18 codegen rule).
-export { UIState, SidebarNode, BlockRow, CommandRow, SearchRow, MenuRow } from "Types.slint";
+export { UIState, SidebarNode, BlockRow, CommandRow, SearchRow, MenuRow, SlashRow } from "Types.slint";
 
 export component AppWindow inherits Window {
     title: "Quire";
@@ -34,6 +148,8 @@ export component AppWindow inherits Window {
     in-out property <bool> search-open <=> UIState.search-open;
     in-out property <string> search-query <=> UIState.search-query;
     in-out property <bool> menu-open <=> UIState.menu-open;
+    in-out property <bool> slash-open <=> UIState.slash-open;
+    in-out property <bool> block-menu-open <=> UIState.block-menu-open;
     in-out property <bool> dialog-open <=> UIState.dialog-open;
     in-out property <bool> settings-open <=> UIState.settings-open;
 
@@ -74,6 +190,22 @@ export component AppWindow inherits Window {
         } else {
             menu.close();
             UIState.menu-node-id = -1;
+        }
+    }
+
+    changed slash-open => {
+        if (slash-open) {
+            slashMenu.show();
+        } else {
+            slashMenu.close();
+        }
+    }
+
+    changed block-menu-open => {
+        if (block-menu-open) {
+            blockMenu.show();
+        } else {
+            blockMenu.close();
         }
     }
 
@@ -186,6 +318,16 @@ export component AppWindow inherits Window {
     menu := ContextMenu {
         x: UIState.menu-x;
         y: UIState.menu-y;
+    }
+
+    slashMenu := SlashMenuPopup {
+        x: UIState.slash-x;
+        y: UIState.slash-y;
+    }
+
+    blockMenu := BlockMenuPopup {
+        x: UIState.block-menu-x;
+        y: UIState.block-menu-y;
     }
 
     dialog := ConfirmDialog {
