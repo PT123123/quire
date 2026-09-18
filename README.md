@@ -4,6 +4,14 @@ A local, GPU-accelerated, Notion-like document workspace.
 Rust + Slint. Single process. No Electron, no WebView, no web stack.
 
 ```
+just build                    # cargo build --release (default FemtoVG renderer)
+just run                      # cargo run (debug)
+just clean                    # cargo clean + remove skia/wgpu benchmark target dirs
+```
+
+Plain cargo still works as before:
+
+```
 cargo run                     # debug, FemtoVG renderer
 cargo run --release           # release
 cargo run --no-default-features --features skia --release   # Skia build
