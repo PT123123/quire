@@ -59,6 +59,12 @@ name = "quire-shot"
 path = "src/bin/quire_shot.rs"
 required-features = ["software"]
 
+# Scene E typing benchmark (docs/PERFORMANCE.md): drives the real window, so
+# it builds against whichever renderer is enabled.
+[[bin]]
+name = "quire-typing"
+path = "src/bin/quire_typing.rs"
+
 [profile.release]
 codegen-units = 1
 lto = "thin"
