@@ -1,15 +1,16 @@
-// Application state + mock content for M2.
+// Application state + mock content for M2/M4.
 //
-// The tree/bookkeeping logic lives in `workspace.rs` (pure, unit-tested);
-// this module is the view-projection layer: it turns workspace state into
-// Slint models (SidebarNode / BlockRow / CommandRow / SearchRow / MenuRow).
-// M3 replaces the mock block content with the real document model.
+// The page tree lives in `workspace.rs` (pure, unit-tested); the block
+// content of every page lives in `core::Document` since M4 (the editing
+// truth, mutated only through commands). This module is the view-
+// projection layer between the two and the Slint models (SidebarNode /
+// BlockRow / CommandRow / SearchRow / MenuRow).
 
 use crate::app::workspace::{SearchHit, Workspace, BENCH_ID_BASE, MAX_RECENTS};
+use crate::core::{Block, BlockId, BlockKind, Command, Document, History, OrderKey, PageId};
 use crate::{BlockRow, CommandRow, MenuRow, SearchRow, SidebarNode};
 use slint::{Model, ModelRc, VecModel};
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
 use std::rc::Rc;
 
 pub struct AppState {
@@ -21,8 +22,10 @@ pub struct AppState {
     pub menu: Rc<VecModel<MenuRow>>,
     /// Full command list before query filtering.
     pub all_commands: Vec<CommandRow>,
-    /// Mock block content per page id (M3: read from storage instead).
-    pub contents: RefCell<HashMap<i32, Vec<BlockRow>>>,
+    /// The editing truth for every page's blocks (M4).
+    pub doc: RefCell<Document>,
+    /// Per-page undo/redo stacks.
+    pub history: RefCell<History>,
     /// Currently open page (0 = none / empty workspace).
     pub open_page: Cell<i32>,
     /// Page awaiting delete confirmation.
@@ -30,6 +33,10 @@ pub struct AppState {
     /// Benchmark scroll bookkeeping (scene F): last viewport-y seen.
     pub last_scroll_y: Cell<f32>,
 }
+
+/// Block ids start above this so they never collide with anything derived
+/// from mock page ids.
+const BLOCK_ID_BASE: u64 = 1_000_000_000;
 
 pub struct HandleArgs {
     /// Number of mock blocks for benchmarks (0 = default sample document).
@@ -48,25 +55,24 @@ impl AppState {
             Workspace::sample()
         };
 
-        let mut contents: HashMap<i32, Vec<BlockRow>> = HashMap::new();
+        let mut doc = Document::new(BLOCK_ID_BASE);
         for id in workspace.dfs_order() {
             let title = workspace.title_of(id).unwrap().to_string();
-            let blocks = if args.blocks > 0 && id == PAGE_ATLAS {
+            let rows = if args.blocks > 0 && id == PAGE_ATLAS {
                 mock_blocks_bench(args.blocks)
             } else if id >= BENCH_ID_BASE {
                 mock_blocks_bench_page(&title)
             } else {
                 mock_blocks_for_page(id, &title)
             };
-            let blob = block_search_blob(&title, &blocks);
+            let blob = block_search_blob(&title, &rows);
             workspace.set_search_text(id, blob);
-            contents.insert(id, blocks);
+            let core_blocks = rows_to_blocks(id, rows, &mut doc);
+            doc.set_page_blocks(core_page_id(id), core_blocks);
         }
 
         let open = if args.blocks > 0 { PAGE_ATLAS } else { PAGE_GETTING_STARTED };
-        let blocks = Rc::new(VecModel::from(
-            contents.get(&open).cloned().unwrap_or_default(),
-        ));
+        let blocks = Rc::new(VecModel::from(Vec::new()));
 
         let all_commands = mock_commands(&workspace);
         let commands = Rc::new(VecModel::from(all_commands.clone()));
@@ -78,7 +84,8 @@ impl AppState {
             search: Rc::new(VecModel::from(Vec::new())),
             menu: Rc::new(VecModel::from(Vec::new())),
             all_commands,
-            contents: RefCell::new(contents),
+            doc: RefCell::new(doc),
+            history: RefCell::new(History::default()),
             open_page: Cell::new(0),
             pending_delete: Cell::new(None),
             last_scroll_y: Cell::new(0.0),
@@ -196,14 +203,34 @@ impl AppState {
             ws.expand_ancestors(id);
         }
         self.open_page.set(id);
-        let blocks = self
-            .contents
-            .borrow()
-            .get(&id)
-            .cloned()
-            .unwrap_or_default();
-        self.blocks.set_vec(blocks);
+        self.reproject_blocks();
         self.rebuild_sidebar();
+    }
+
+    /// Rebuild the editor rows from the Document (page switch, undo/redo,
+    /// structural edits). Typing never goes through here.
+    pub fn reproject_blocks(&self) {
+        let page = self.open_page.get();
+        let rows = {
+            let doc = self.doc.borrow();
+            project_blocks(doc.page_blocks(core_page_id(page)))
+        };
+        self.blocks.set_vec(rows);
+    }
+
+    /// Run a command against the open page's blocks and refresh the rows
+    /// when the structure changed (the caller decides — structural commands
+    /// return BlockInserted/BlockDeleted/BlockMoved changes).
+    pub fn exec_on_open_page(&self, cmd: Command) -> Option<Vec<crate::core::Change>> {
+        let page = core_page_id(self.open_page.get());
+        let changes = crate::core::command::exec(
+            &mut self.doc.borrow_mut(),
+            &mut self.history.borrow_mut(),
+            page,
+            cmd,
+        )?;
+        self.reproject_blocks();
+        Some(changes)
     }
 
     /// Open a page and return its title + breadcrumb for the top bar.
@@ -219,9 +246,9 @@ impl AppState {
             .workspace
             .borrow_mut()
             .create(parent, "Untitled");
-        self.contents
-            .borrow_mut()
-            .insert(id, Vec::new()); // new pages start empty (empty state)
+        // new pages start empty (the editor shows the empty state); the
+        // Document gets the page registered lazily by set_page_blocks' OR
+        // path on first block — an empty page is simply no rows
         self.open_page(id);
         id
     }
@@ -233,20 +260,18 @@ impl AppState {
             return;
         }
         self.workspace.borrow_mut().rename(id, title);
-        // refresh the page header block (when the template carries one) and
-        // the searchable blob's title prefix
+        // searchable blob: refresh the title prefix in place
+        let pid = core_page_id(id);
         let blob = {
-            let mut contents = self.contents.borrow_mut();
-            if let Some(blocks) = contents.get_mut(&id) {
-                if let Some(first) = blocks.first_mut() {
-                    if first.kind == BLOCK_H1 {
-                        first.text = title.into();
-                    }
+            let doc = self.doc.borrow();
+            let mut b = String::from(title);
+            for block in doc.page_blocks(pid) {
+                if !block.text.is_empty() {
+                    b.push('\n');
+                    b.push_str(&block.text);
                 }
-                block_search_blob(title, blocks)
-            } else {
-                title.to_string()
             }
+            b
         };
         self.workspace.borrow_mut().set_search_text(id, blob);
         self.rebuild_sidebar();
@@ -255,10 +280,26 @@ impl AppState {
     pub fn duplicate_page(&self, id: i32) -> Option<i32> {
         let new_id = self.workspace.borrow_mut().duplicate(id);
         if let Some(nid) = new_id {
-            let blocks = self.contents.borrow().get(&id).cloned().unwrap_or_default();
+            // copy the source page's blocks with fresh ids
+            let src = core_page_id(id);
+            let dst = core_page_id(nid);
+            let copies: Vec<Block> = {
+                let doc = self.doc.borrow();
+                let start = doc.next_id_value();
+                doc.page_blocks(src)
+                    .iter()
+                    .enumerate()
+                    .map(|(i, b)| {
+                        let mut c = b.clone();
+                        c.id = BlockId(start + i as u64);
+                        c.page = dst;
+                        c
+                    })
+                    .collect()
+            };
             let title = self.workspace.borrow().title_of(nid).unwrap().to_string();
-            let blob = block_search_blob(&title, &blocks);
-            self.contents.borrow_mut().insert(nid, blocks);
+            let blob = block_search_blob(&title, &project_blocks(&copies));
+            self.doc.borrow_mut().set_page_blocks(dst, copies);
             self.workspace.borrow_mut().set_search_text(nid, blob);
             self.rebuild_sidebar();
         }
@@ -268,8 +309,11 @@ impl AppState {
     pub fn delete_page(&self, id: i32) -> bool {
         let removed = self.workspace.borrow_mut().delete(id);
         let had_open = removed.contains(&self.open_page.get());
-        for r in &removed {
-            self.contents.borrow_mut().remove(r);
+        {
+            let mut doc = self.doc.borrow_mut();
+            for r in &removed {
+                doc.drop_page(core_page_id(*r));
+            }
         }
         if had_open {
             // stale until the controller opens a fallback page
@@ -412,6 +456,92 @@ fn leaf_row(id: i32, label: &str, kind: &str, selected: bool) -> SidebarNode {
 }
 
 // ---- block content ----
+
+// ---- core <-> projection bridge ----
+
+/// M2 mock page ids (i32) map into the u64 core id space unchanged.
+pub fn core_page_id(id: i32) -> PageId {
+    PageId(id as u32 as u64)
+}
+
+fn kind_from_int(kind: i32) -> BlockKind {
+    match kind {
+        1 => BlockKind::Heading1,
+        2 => BlockKind::Heading2,
+        3 => BlockKind::Heading3,
+        4 => BlockKind::Bullet,
+        5 => BlockKind::Numbered,
+        6 => BlockKind::Todo,
+        7 => BlockKind::Quote,
+        8 => BlockKind::Code,
+        9 => BlockKind::Divider,
+        _ => BlockKind::Paragraph,
+    }
+}
+
+fn kind_to_int(kind: BlockKind) -> i32 {
+    match kind {
+        BlockKind::Heading1 => 1,
+        BlockKind::Heading2 => 2,
+        BlockKind::Heading3 => 3,
+        BlockKind::Bullet => 4,
+        BlockKind::Numbered => 5,
+        BlockKind::Todo => 6,
+        BlockKind::Quote => 7,
+        BlockKind::Code => 8,
+        BlockKind::Divider => 9,
+        BlockKind::Paragraph => 0,
+    }
+}
+
+/// Convert mock template rows into core Blocks with fresh ids and order
+/// keys (order = the row order).
+fn rows_to_blocks(page: i32, rows: Vec<BlockRow>, doc: &mut Document) -> Vec<Block> {
+    let pid = core_page_id(page);
+    let mut prev: Option<OrderKey> = None;
+    rows.into_iter()
+        .map(|row| {
+            let order = OrderKey::between(prev, None).expect("order space exhausted");
+            prev = Some(order);
+            Block {
+                id: doc.alloc_block_id(),
+                page: pid,
+                parent: None,
+                order,
+                kind: kind_from_int(row.kind),
+                text: row.text.to_string(),
+                checked: row.checked,
+            }
+        })
+        .collect()
+}
+
+/// Project a page's blocks into editor rows: numbered items renumbered by
+/// position, the last row flagged as the tail spacer carrier.
+pub fn project_blocks(blocks: &[Block]) -> Vec<BlockRow> {
+    let mut out: Vec<BlockRow> = blocks
+        .iter()
+        .map(|b| BlockRow {
+            id: b.id.0 as i32,
+            kind: kind_to_int(b.kind),
+            text: b.text.clone().into(),
+            checked: b.checked,
+            number: 0,
+            tail: false,
+        })
+        .collect();
+    let mut n = 0;
+    for r in &mut out {
+        if r.kind == BLOCK_NUMBERED {
+            n += 1;
+            r.number = n;
+        }
+    }
+    if let Some(last) = out.last_mut() {
+        last.tail = true;
+    }
+    out
+}
 
 pub const BLOCK_PARAGRAPH: i32 = 0;
 pub const BLOCK_H1: i32 = 1;

@@ -6,9 +6,10 @@
 // 'static callbacks capture a Weak and upgrade() it at fire time.
 
 use crate::app::state::{
-    AppState, CMD_PAGE_BASE, MENU_DELETE, MENU_DUPLICATE, MENU_FAVORITE, MENU_NEW_SUBPAGE,
-    MENU_RENAME, PAGE_GETTING_STARTED, ROW_NEW_PAGE,
+    core_page_id, AppState, CMD_PAGE_BASE, MENU_DELETE, MENU_DUPLICATE, MENU_FAVORITE,
+    MENU_NEW_SUBPAGE, MENU_RENAME, PAGE_GETTING_STARTED, ROW_NEW_PAGE,
 };
+use crate::core::{BlockId, Change, Command};
 use crate::{AppWindow, UIState};
 use slint::{ComponentHandle, Global, Model};
 use std::rc::Rc;
@@ -374,15 +375,270 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
     {
         let s = state.clone();
         ui.global::<UIState>().on_todo_toggled(move |id| {
-            let mut rows: Vec<_> = s.blocks.iter().collect();
-            for r in rows.iter_mut() {
-                if r.id == id {
-                    r.checked = !r.checked;
+            if id <= 0 {
+                return;
+            }
+            // route through the command layer; targeted row update only
+            let changes = crate::core::command::exec(
+                &mut s.doc.borrow_mut(),
+                &mut s.history.borrow_mut(),
+                core_page_id(s.open_page.get()),
+                Command::ToggleTodoChecked { id: BlockId(id as u64) },
+            );
+            if changes.is_some() {
+                let checked = s
+                    .doc
+                    .borrow()
+                    .block(BlockId(id as u64))
+                    .map(|b| b.checked)
+                    .unwrap_or(false);
+                let mut i = 0;
+                while let Some(mut row) = s.blocks.row_data(i) {
+                    if row.id == id {
+                        row.checked = checked;
+                        s.blocks.set_row_data(i, row);
+                        return;
+                    }
+                    i += 1;
                 }
             }
-            s.blocks.set_vec(rows);
         });
     }
+
+    // ---- block editing (M4) ----
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_block_activate(move |id| {
+            let g = gw.upgrade().unwrap();
+            if id <= 0 {
+                return;
+            }
+            flush_pending_edit(&g, &s);
+            let (text, len) = {
+                let d = s.doc.borrow();
+                d.block(BlockId(id as u64))
+                    .map(|b| (b.text.clone(), b.text.len()))
+                    .unwrap_or_default()
+            };
+            g.set_editing_text(text.into());
+            g.set_pending_caret(len as i32);
+            g.set_editing_id(id);
+        });
+    }
+
+    // debounce the typing commit: each keystroke restarts the timer; the
+    // Timer must outlive this scope (leaked, like the bench timers)
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        let t: &'static slint::Timer = Box::leak(Box::new(slint::Timer::default()));
+        ui.global::<UIState>().on_editing_changed(move || {
+            let gw = gw.clone();
+            let s = s.clone();
+            t.start(
+                slint::TimerMode::SingleShot,
+                std::time::Duration::from_millis(300),
+                move || {
+                    if let Some(g) = gw.upgrade() {
+                        flush_pending_edit(&g, &s);
+                    }
+                },
+            );
+        });
+    }
+
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_enter_at_caret(move |caret| {
+            let g = gw.upgrade().unwrap();
+            flush_pending_edit(&g, &s);
+            let cur = g.get_editing_id();
+            if cur <= 0 {
+                return;
+            }
+            let changes = s.exec_on_open_page(Command::SplitBlock {
+                id: BlockId(cur as u64),
+                caret: caret.max(0) as usize,
+            });
+            let new_id = changes.as_deref().and_then(find_inserted_id);
+            if let Some(nid) = new_id {
+                focus_block(&g, &s, nid, 0);
+            }
+        });
+    }
+
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_backspace_at_start(move || {
+            let g = gw.upgrade().unwrap();
+            flush_pending_edit(&g, &s);
+            let cur = g.get_editing_id();
+            if cur <= 0 {
+                return;
+            }
+            let page = core_page_id(s.open_page.get());
+            // capture the previous block so the caret can land at the seam
+            let prev = {
+                let d = s.doc.borrow();
+                let blocks = d.page_blocks(page);
+                blocks
+                    .iter()
+                    .position(|b| b.id.0 as i32 == cur)
+                    .and_then(|i| i.checked_sub(1))
+                    .and_then(|i| blocks.get(i))
+                    .map(|b| (b.id.0 as i32, b.text.len() as i32))
+            };
+            let changes = s.exec_on_open_page(Command::MergeBackward { id: BlockId(cur as u64) });
+            if changes.is_some() {
+                match prev {
+                    Some((pid, plen)) => focus_block(&g, &s, pid, plen),
+                    None => g.set_editing_id(-1), // first block deleted
+                }
+            }
+        });
+    }
+
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_focus_move(move |delta| {
+            let g = gw.upgrade().unwrap();
+            flush_pending_edit(&g, &s);
+            let cur = g.get_editing_id();
+            if cur <= 0 {
+                return;
+            }
+            let page = core_page_id(s.open_page.get());
+            let target = {
+                let d = s.doc.borrow();
+                let blocks = d.page_blocks(page);
+                blocks
+                    .iter()
+                    .position(|b| b.id.0 as i32 == cur)
+                    .map(|i| i as i32 + delta)
+                    .and_then(|t| {
+                        if t < 0 {
+                            None
+                        } else {
+                            blocks.get(t as usize).map(|b| {
+                                (b.id.0 as i32, b.text.len() as i32, delta < 0)
+                            })
+                        }
+                    })
+            };
+            if let Some((tid, tlen, up)) = target {
+                focus_block(&g, &s, tid, if up { tlen } else { 0 });
+            }
+        });
+    }
+
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_cancel_editing(move || {
+            let g = gw.upgrade().unwrap();
+            flush_pending_edit(&g, &s);
+            g.set_editing_id(-1);
+        });
+    }
+
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_undo_requested(move || {
+            let g = gw.upgrade().unwrap();
+            flush_pending_edit(&g, &s);
+            let page = core_page_id(s.open_page.get());
+            crate::core::undo(&mut s.doc.borrow_mut(), &mut s.history.borrow_mut(), page);
+            s.reproject_blocks();
+            refresh_focused_text(&g, &s);
+        });
+    }
+
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_redo_requested(move || {
+            let g = gw.upgrade().unwrap();
+            flush_pending_edit(&g, &s);
+            let page = core_page_id(s.open_page.get());
+            crate::core::redo(&mut s.doc.borrow_mut(), &mut s.history.borrow_mut(), page);
+            s.reproject_blocks();
+            refresh_focused_text(&g, &s);
+        });
+    }
+}
+
+/// Commit the live editing text as a `ReplaceText` command (no-op when the
+/// text is unchanged). Called by the debounce timer and before every
+/// structural operation so undo history stays consistent.
+fn flush_pending_edit(g: &UIState<'_>, state: &Rc<AppState>) {
+    let editing = g.get_editing_id();
+    if editing <= 0 {
+        return;
+    }
+    let id = BlockId(editing as u64);
+    let text = g.get_editing_text().to_string();
+    let applied = crate::core::command::exec(
+        &mut state.doc.borrow_mut(),
+        &mut state.history.borrow_mut(),
+        core_page_id(state.open_page.get()),
+        Command::ReplaceText { id, text: text.clone() },
+    );
+    if applied.is_some() {
+        // targeted row sync; no delegate rebuild
+        let mut i = 0;
+        while let Some(mut row) = state.blocks.row_data(i) {
+            if row.id == editing {
+                row.text = text.into();
+                state.blocks.set_row_data(i, row);
+                return;
+            }
+            i += 1;
+        }
+    }
+}
+
+/// Move the live editor onto another block with the caret at `caret` bytes.
+fn focus_block(g: &UIState<'_>, state: &Rc<AppState>, id: i32, caret: i32) {
+    let (text, len) = {
+        let d = state.doc.borrow();
+        d.block(BlockId(id as u64))
+            .map(|b| (b.text.clone(), b.text.len()))
+            .unwrap_or_default()
+    };
+    g.set_editing_text(text.into());
+    g.set_pending_caret(caret.clamp(0, len as i32));
+    g.set_editing_id(id);
+}
+
+/// After undo/redo: keep the editor on its block if it still exists.
+fn refresh_focused_text(g: &UIState<'_>, state: &Rc<AppState>) {
+    let cur = g.get_editing_id();
+    if cur <= 0 {
+        return;
+    }
+    let text = {
+        let d = state.doc.borrow();
+        d.block(BlockId(cur as u64)).map(|b| b.text.clone())
+    };
+    match text {
+        Some(t) => {
+            g.set_editing_text(t.into());
+            g.set_pending_caret(-1);
+        }
+        None => g.set_editing_id(-1),
+    }
+}
+
+fn find_inserted_id(changes: &[Change]) -> Option<i32> {
+    changes.iter().find_map(|c| match c {
+        Change::BlockInserted(b) => Some(b.id.0 as i32),
+        _ => None,
+    })
 }
 
 /// Open a page, sync the top bar, and highlight it in the tree.
@@ -453,6 +709,21 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             g.set_dialog_open(true);
         }
         "empty" => open(&g, state, 113),
+        "edit" => {
+            // focus the first paragraph of the landing page
+            let target = {
+                let d = state.doc.borrow();
+                d.page_blocks(core_page_id(state.open_page.get()))
+                    .iter()
+                    .find(|b| b.kind == crate::core::BlockKind::Paragraph && !b.text.is_empty())
+                    .map(|b| (b.id.0 as i32, b.text.len() as i32, b.text.clone()))
+            };
+            if let Some((id, len, text)) = target {
+                g.set_editing_text(text.into());
+                g.set_pending_caret(len);
+                g.set_editing_id(id);
+            }
+        }
         _ => {}
     }
 }

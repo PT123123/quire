@@ -130,6 +130,24 @@ export component AppWindow inherits Window {
             }
         }
         KeyBinding {
+            keys: @keys(Control + Z);
+            activated => {
+                UIState.undo-requested();
+            }
+        }
+        KeyBinding {
+            keys: @keys(Control + Shift + Z);
+            activated => {
+                UIState.redo-requested();
+            }
+        }
+        KeyBinding {
+            keys: @keys(Control + Y);
+            activated => {
+                UIState.redo-requested();
+            }
+        }
+        KeyBinding {
             keys: @keys(Control + Shift + L);
             activated => {
                 UIState.toggle-theme();

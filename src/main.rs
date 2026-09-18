@@ -73,8 +73,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // nothing but address-space reservation. See DECISIONS.md ADR-0009.
     let child = std::thread::Builder::new().stack_size(8 * 1024 * 1024)
         .spawn(|| real_main()).expect("spawn UI thread");
-    let r = child.join();
-    r.unwrap_or(Ok(()));
+    child.join().map_err(|_| "UI thread panicked".to_string())??;
     Ok(())
 }
 
