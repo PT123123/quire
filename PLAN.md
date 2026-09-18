@@ -148,6 +148,21 @@ that wiring decision, not the storage layer.
 - [ ] user pass: Chinese IME acceptance; 1000-block typing check lands
       with Track B's scene E; drag-to-reorder (mouse) deferred to M7 polish
 
+## M5/M6/M7/M8 wiring — Track A round 2 (2026-09-19)
+- [x] merged Track B m8-markdown into m3-storage: schema v2 (FTS search
+      index) + v3 (inline marks) coexist; CURRENT_VERSION = 3
+- [x] search panel switched to the FTS SearchService (ranked, Chinese-
+      capable via segmentation); blob scan remains the no-DB fallback
+- [x] import/export wired: palette "Export Page as Markdown…" /
+      "Import Markdown…" with native file dialogs (rfd); import creates a
+      page from the file and opens it
+- [x] M6 link UI: Ctrl+L over a selection opens an Add-link dialog
+      (URL input, Apply/Remove); Link marks render accent-colored
+- [x] settings persistence: theme + recents survive restart; palette
+      gained Rename/Duplicate/Delete Page; Ctrl+Shift+Up/Down moves the
+      focused block
+- [x] judge review of slash / block-menu / marks / link scenes: 4/4 pass
+
 ## Next: M4 · Block editor MVP (remaining)
 - block-type switching menu (BlockHandle affordance), cross-block
   clipboard, 1000-block editing responsiveness check, Chinese IME

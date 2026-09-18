@@ -219,6 +219,20 @@ export component EditorBlock inherits Rectangle {
                 && self.anchor-position-byte-offset != self.cursor-position-byte-offset) {
                 UIState.toggle-mark(3, self.anchor-position-byte-offset, self.cursor-position-byte-offset);
                 accept
+            } else if (event.modifiers.control && event.text == Key.L
+                && self.anchor-position-byte-offset != self.cursor-position-byte-offset) {
+                UIState.link-start = Math.min(self.anchor-position-byte-offset, self.cursor-position-byte-offset);
+                UIState.link-end = Math.max(self.anchor-position-byte-offset, self.cursor-position-byte-offset);
+                UIState.link-url = "";
+                UIState.link-open = true;
+                accept
+            } else if (event.modifiers.control && event.text == Key.L
+                && self.anchor-position-byte-offset != self.cursor-position-byte-offset) {
+                UIState.link-start = Math.min(self.anchor-position-byte-offset, self.cursor-position-byte-offset);
+                UIState.link-end = Math.max(self.anchor-position-byte-offset, self.cursor-position-byte-offset);
+                UIState.link-url = "";
+                UIState.link-open = true;
+                accept
             } else if (event.text == Key.Backspace
                 && self.cursor-position-byte-offset == 0
                 && self.anchor-position-byte-offset == 0) {

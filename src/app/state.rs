@@ -8,8 +8,10 @@
 
 use crate::app::workspace::{SearchHit, Workspace, BENCH_ID_BASE, MAX_RECENTS};
 use crate::core::persistence::{Change, Repository};
+use crate::storage::SqliteRepository;
 use crate::core::{Block, BlockId, BlockKind, Command, Document, History, OrderKey, PageId};
 use crate::services::persistence::PersistenceService;
+use crate::services::search_service::SearchService;
 use crate::{BlockRow, CommandRow, MenuRow, SearchRow, SlashRow, SidebarNode, TextRun};
 use slint::{Model, ModelRc, VecModel};
 use std::cell::{Cell, RefCell};
@@ -34,6 +36,8 @@ pub struct AppState {
     pub history: RefCell<History>,
     /// Debounced persistence pipeline (M3). `None` = headless/test mode.
     pub persistence: Option<Arc<PersistenceService>>,
+    /// FTS-backed search (M7). `None` falls back to the in-memory scan.
+    pub search_service: Option<Arc<SearchService>>,
     /// Persisted sibling order of every page (drives PageCreated/Moved).
     page_order: RefCell<HashMap<i32, OrderKey>>,
     /// Installed by the controller: restarts the flush timer on record().
@@ -119,7 +123,7 @@ fn workspace_from_persisted(
 }
 
 impl AppState {
-    pub fn new(args: &HandleArgs, repo_in: Option<Arc<dyn Repository>>) -> Rc<Self> {
+    pub fn new(args: &HandleArgs, repo_in: Option<Arc<SqliteRepository>>) -> Rc<Self> {
         // Try to load persisted state. A failed load disables persistence
         // for the session rather than risking a seed-flush over live data.
         let mut repo = repo_in;
@@ -181,7 +185,10 @@ impl AppState {
             let _ = title;
         }
 
-        let persistence = repo.map(|r| Arc::new(PersistenceService::with_default_clock(r)));
+        let persistence = repo
+            .clone()
+            .map(|r| Arc::new(PersistenceService::with_default_clock(r)));
+        let search_service = repo.map(crate::services::search_service::SearchService::new_arc);
 
         // fresh database: record the whole session once so a restart
         // reproduces exactly this state
@@ -228,6 +235,7 @@ impl AppState {
             doc: RefCell::new(doc),
             history: RefCell::new(History::default()),
             persistence,
+            search_service,
             page_order: RefCell::new(page_order),
             flush_hook: RefCell::new(None),
             open_page: Cell::new(0),
@@ -382,6 +390,10 @@ impl AppState {
             project_blocks(doc.page_blocks(core_page_id(page)))
         };
         self.blocks.set_vec(rows);
+    }
+
+    pub fn page_order_of(&self, id: i32) -> OrderKey {
+        *self.page_order.borrow().get(&id).unwrap_or(&OrderKey::FIRST)
     }
 
     /// Queue a change batch for the debounced flush and arm the timer.
@@ -734,6 +746,30 @@ impl AppState {
     // ---- search panel ----
 
     pub fn set_search_query(&self, query: &str) {
+        if let Some(svc) = &self.search_service {
+            if !query.trim().is_empty() {
+                let rows: Vec<SearchRow> = match svc.query(query) {
+                    Ok(hits) => hits
+                        .iter()
+                        .map(|h| SearchRow {
+                            page_id: h.page.0 as i32,
+                            title: h.title.clone().into(),
+                            snippet: if h.snippet.is_empty() {
+                                self.workspace
+                                    .borrow()
+                                    .breadcrumb(h.page.0 as i32)
+                                    .into()
+                            } else {
+                                h.snippet.clone().into()
+                            },
+                        })
+                        .collect(),
+                    Err(_) => Vec::new(),
+                };
+                self.search.set_vec(rows);
+                return;
+            }
+        }
         let hits: Vec<SearchHit> = self.workspace.borrow().search(query);
         let rows: Vec<SearchRow> = hits
             .into_iter()
@@ -950,6 +986,7 @@ fn build_runs(text: &str, marks: &[crate::core::Mark]) -> Vec<TextRun> {
                 italic: marks.iter().any(|m| m.kind == crate::core::MarkKind::Italic && m.start <= s && m.end >= e),
                 strike: marks.iter().any(|m| m.kind == crate::core::MarkKind::Strike && m.start <= s && m.end >= e),
                 code: marks.iter().any(|m| m.kind == crate::core::MarkKind::Code && m.start <= s && m.end >= e),
+                link: marks.iter().any(|m| m.kind == crate::core::MarkKind::Link && m.start <= s && m.end >= e),
             })
         })
         .collect()
@@ -1181,9 +1218,11 @@ const CMD_SEARCH: i32 = 2;
 const CMD_TOGGLE_SIDEBAR: i32 = 3;
 const CMD_TOGGLE_THEME: i32 = 4;
 const CMD_SETTINGS: i32 = 5;
-const CMD_RENAME_PAGE: i32 = 6;
-const CMD_DUPLICATE_PAGE: i32 = 7;
-const CMD_DELETE_PAGE: i32 = 8;
+pub const CMD_RENAME_PAGE: i32 = 6;
+pub const CMD_DUPLICATE_PAGE: i32 = 7;
+pub const CMD_DELETE_PAGE: i32 = 8;
+pub const CMD_EXPORT_PAGE: i32 = 9;
+pub const CMD_IMPORT_MD: i32 = 10;
 /// Jump-to-page commands are 10 000 + page id.
 pub const CMD_PAGE_BASE: i32 = 10_000;
 
@@ -1206,6 +1245,8 @@ fn mock_commands(ws: &Workspace) -> Vec<CommandRow> {
     cmd(CMD_RENAME_PAGE, "Rename Page", "F2", "Page", "pencil");
     cmd(CMD_DUPLICATE_PAGE, "Duplicate Page", "", "Page", "copy");
     cmd(CMD_DELETE_PAGE, "Delete Page", "", "Page", "trash");
+    cmd(CMD_EXPORT_PAGE, "Export Page as Markdown…", "", "Page", "export");
+    cmd(CMD_IMPORT_MD, "Import Markdown…", "", "Page", "import");
     for id in ws.dfs_order() {
         if id >= BENCH_ID_BASE {
             continue;

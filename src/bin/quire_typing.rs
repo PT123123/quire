@@ -177,8 +177,7 @@ fn run() -> Result<(), String> {
         auto_exit_secs: 0.0,
         bench_pages: 0,
     };
-    let repo_dyn: Arc<dyn Repository> = repo.clone();
-    let state = AppState::new(&handle, Some(repo_dyn));
+    let state = AppState::new(&handle, Some(repo.clone()));
     controller::bind(&ui, &state);
     controller::wire(&ui, &state);
 

@@ -6,8 +6,9 @@
 // 'static callbacks capture a Weak and upgrade() it at fire time.
 
 use crate::app::state::{
-    core_page_id, AppState, CMD_PAGE_BASE, MENU_DELETE, MENU_DUPLICATE, MENU_FAVORITE,
-    MENU_NEW_SUBPAGE, MENU_RENAME, PAGE_GETTING_STARTED, ROW_NEW_PAGE,
+    core_page_id, AppState, CMD_DELETE_PAGE, CMD_DUPLICATE_PAGE, CMD_EXPORT_PAGE, CMD_IMPORT_MD,
+    CMD_PAGE_BASE, CMD_RENAME_PAGE, MENU_DELETE, MENU_DUPLICATE, MENU_FAVORITE, MENU_NEW_SUBPAGE,
+    MENU_RENAME, PAGE_GETTING_STARTED, ROW_NEW_PAGE,
 };
 use crate::core::{BlockId, Change, Command};
 use crate::{AppWindow, UIState};
@@ -345,6 +346,8 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                         g.set_dialog_open(true);
                     }
                 }
+                CMD_EXPORT_PAGE => export_current_page(&g, &s),
+                CMD_IMPORT_MD => import_markdown_dialog(&g, &s),
                 other if other >= CMD_PAGE_BASE => {
                     open(&g, &s, other - CMD_PAGE_BASE);
                 }
@@ -803,6 +806,59 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         });
     }
 
+    // ---- link dialog (M6) ----
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_link_apply(move || {
+            let g = gw.upgrade().unwrap();
+            let url = g.get_link_url().to_string();
+            g.set_link_open(false);
+            let cur = g.get_editing_id();
+            if cur <= 0 {
+                return;
+            }
+            let _ = s.exec_on_open_page(Command::ToggleMark {
+                id: BlockId(cur as u64),
+                start: g.get_link_start().max(0) as usize,
+                end: g.get_link_end().max(0) as usize,
+                kind: crate::core::MarkKind::Link,
+                url,
+            });
+            refresh_focused_text(&g, &s);
+        });
+    }
+
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_link_remove(move || {
+            let g = gw.upgrade().unwrap();
+            g.set_link_open(false);
+            let cur = g.get_editing_id();
+            if cur <= 0 {
+                return;
+            }
+            // a covering Link mark is toggled off by the same range
+            let _ = s.exec_on_open_page(Command::ToggleMark {
+                id: BlockId(cur as u64),
+                start: g.get_link_start().max(0) as usize,
+                end: g.get_link_end().max(0) as usize,
+                kind: crate::core::MarkKind::Link,
+                url: String::new(),
+            });
+            refresh_focused_text(&g, &s);
+        });
+    }
+
+    {
+        let gw = gw.clone();
+        ui.global::<UIState>().on_link_cancel(move || {
+            let g = gw.upgrade().unwrap();
+            g.set_link_open(false);
+        });
+    }
+
     {
         let gw = gw.clone();
         let s = state.clone();
@@ -883,6 +939,69 @@ fn refresh_focused_text(g: &UIState<'_>, state: &Rc<AppState>) {
     }
 }
 
+/// Export the open page's blocks to a .md file via the native save dialog.
+fn export_current_page(g: &UIState<'_>, state: &Rc<AppState>) {
+    let page = state.open_page.get();
+    let title = state.workspace.borrow().title_of(page).unwrap_or("page").to_string();
+    let md = {
+        let d = state.doc.borrow();
+        crate::services::export_service::export_page(d.page_blocks(core_page_id(page)))
+    };
+    if let Some(path) = rfd::FileDialog::new()
+        .add_filter("Markdown", &["md"])
+        .set_file_name(&format!("{}.md", title))
+        .save_file()
+    {
+        match std::fs::write(&path, md) {
+            Ok(()) => eprintln!("quire: exported {}", path.display()),
+            Err(e) => eprintln!("quire: export failed: {e}"),
+        }
+    }
+    let _ = g;
+}
+
+/// Import a .md file as a new page via the native open dialog.
+fn import_markdown_dialog(g: &UIState<'_>, state: &Rc<AppState>) {
+    let Some(path) = rfd::FileDialog::new()
+        .add_filter("Markdown", &["md"])
+        .pick_file()
+    else {
+        return;
+    };
+    let Ok(src) = std::fs::read_to_string(&path) else {
+        eprintln!("quire: import failed: cannot read {}", path.display());
+        return;
+    };
+    let title = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "Imported".into());
+
+    let new_id = state.create_page(None);
+    let core_page = crate::core::Page {
+        id: crate::core::PageId(new_id as u32 as u64),
+        title: title.clone(),
+        parent: None,
+        order: state.page_order_of(new_id),
+        favorite: false,
+        expanded: false,
+    };
+    let changes = {
+        let mut doc = state.doc.borrow_mut();
+        let mut alloc = || doc.alloc_block_id();
+        crate::services::import_service::import_markdown(&src, &core_page, &mut alloc)
+    };
+    // the service's PageCreated replaces create_page's "Untitled" record
+    let rest = changes.into_iter().skip(1).collect::<Vec<_>>();
+    {
+        let mut d = state.doc.borrow_mut();
+        d.apply(&rest);
+    }
+    state.record(rest);
+    state.rename_page(new_id, &title);
+    open(g, state, new_id);
+}
+
 fn find_inserted_id(changes: &[Change]) -> Option<i32> {
     changes.iter().find_map(|c| match c {
         Change::BlockInserted(b) => Some(b.id.0 as i32),
@@ -949,6 +1068,7 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             }
         }
         "block-menu" => {}
+        "link" => apply_scene_overlay(ui, state, "link-dlg"),
 
         "rename" => {
             g.set_renaming_id(108);
@@ -1036,6 +1156,27 @@ pub fn apply_scene_overlay(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             g.set_slash_x(340.0);
             g.set_slash_y(260.0);
             g.set_slash_open(true);
+        }
+        "block-menu" => {
+            let target = {
+                let d = state.doc.borrow();
+                d.page_blocks(core_page_id(state.open_page.get()))
+                    .get(4)
+                    .map(|b| b.id.0 as i32)
+            };
+            if let Some(id) = target {
+                state.fill_block_menu();
+                g.set_block_menu_x(320.0);
+                g.set_block_menu_y(300.0);
+                g.set_block_menu_open_id(id);
+                g.set_block_menu_open(true);
+            }
+        }
+        "link-dlg" => {
+            g.set_link_start(0);
+            g.set_link_end(20);
+            g.set_link_url("https://github.com/slint-ui/slint".into());
+            g.set_link_open(true);
         }
 
         _ => {}
