@@ -12,6 +12,14 @@ export struct SidebarNode {
     y: int,         // cumulative px offset in the tree area (menu anchoring)
 }
 
+export struct TextRun {
+    text: string,
+    bold: bool,
+    italic: bool,
+    strike: bool,
+    code: bool,
+}
+
 export struct BlockRow {
     id: int,
     kind: int, // 0 para, 1 h1, 2 h2, 3 h3, 4 bullet, 5 numbered, 6 todo, 7 quote, 8 code, 9 divider
@@ -19,6 +27,7 @@ export struct BlockRow {
     checked: bool,
     number: int,
     tail: bool, // last block of the page: the delegate carries the bottom spacer
+    runs: [TextRun], // inline marks (M6); empty = render `text` as one run
 }
 
 export struct CommandRow {
@@ -127,6 +136,9 @@ export global UIState {
     // routed to Rust controller
     callback toggle-sidebar();
     callback toggle-theme();
+    callback set-dark(bool);
+    callback move-block(int);
+    callback toggle-mark(int, int, int); // kind(0 bold,1 italic,2 strike,3 code), start, end
     callback palette-query-changed();
     callback palette-open-requested();
     callback command-invoked();

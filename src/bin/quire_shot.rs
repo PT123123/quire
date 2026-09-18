@@ -66,6 +66,18 @@ fn write_bmp(path: &str, buffer: &SharedPixelBuffer<Rgb8Pixel>) -> Result<(), St
     std::fs::write(path, out).map_err(|e| e.to_string())
 }
 
+fn render(ui: &AppWindow, w: u32, h: u32) -> bool {
+    WINDOW.with(|slot| -> bool {
+        let window = slot.borrow().clone().expect("window adapter");
+        window.draw_if_needed(|renderer| {
+            let mut buffer = SharedPixelBuffer::<Rgb8Pixel>::new(w, h);
+            let stride = buffer.width() as usize;
+            renderer.render(buffer.make_mut_slice(), stride);
+            BUFFER.with(|b| *b.borrow_mut() = Some(buffer));
+        })
+    })
+}
+
 fn parse(args: &[String], key: &str) -> Option<String> {
     args.iter()
         .position(|a| a == key)
@@ -103,18 +115,29 @@ fn run() -> Result<(), String> {
     }
     ui.show().map_err(|e| e.to_string())?;
 
-    let drawn = WINDOW.with(|slot| -> bool {
-        let window = slot.borrow().clone().expect("window adapter");
-        window.draw_if_needed(|renderer| {
-            let mut buffer = SharedPixelBuffer::<Rgb8Pixel>::new(w, h);
-            let stride = buffer.width() as usize;
-            renderer.render(buffer.make_mut_slice(), stride);
-            BUFFER.with(|b| *b.borrow_mut() = Some(buffer));
-        })
-    });
+    let drawn = render(&ui, w, h);
     if !drawn {
         return Err("window never requested a redraw".into());
     }
+
+
+    if let Some(scene) = &scene {
+        controller::apply_scene_overlay(&ui, &state, scene);
+    }
+    BUFFER.with(|b| *b.borrow_mut() = None);
+    WINDOW.with(|slot| {
+        if let Some(window) = slot.borrow().clone() {
+            // the overlay flags mark popup state, not the window's redraw
+            // flag — request the second pass explicitly
+            window.request_redraw();
+            window.draw_if_needed(|renderer| {
+                let mut buffer = SharedPixelBuffer::<Rgb8Pixel>::new(w, h);
+                let stride = buffer.width() as usize;
+                renderer.render(buffer.make_mut_slice(), stride);
+                BUFFER.with(|b| *b.borrow_mut() = Some(buffer));
+            });
+        }
+    });
 
     let buffer = BUFFER.with(|b| b.borrow_mut().take());
     match buffer {

@@ -10,7 +10,7 @@ use crate::app::workspace::{SearchHit, Workspace, BENCH_ID_BASE, MAX_RECENTS};
 use crate::core::persistence::{Change, Repository};
 use crate::core::{Block, BlockId, BlockKind, Command, Document, History, OrderKey, PageId};
 use crate::services::persistence::PersistenceService;
-use crate::{BlockRow, CommandRow, MenuRow, SearchRow, SlashRow, SidebarNode};
+use crate::{BlockRow, CommandRow, MenuRow, SearchRow, SlashRow, SidebarNode, TextRun};
 use slint::{Model, ModelRc, VecModel};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -40,6 +40,10 @@ pub struct AppState {
     flush_hook: RefCell<Option<Rc<dyn Fn()>>>,
     /// Cross-block clipboard (menu-driven copy/paste of one block).
     clipboard: RefCell<Option<Block>>,
+    /// Persisted settings (theme etc.), loaded from storage at startup.
+    settings: RefCell<HashMap<String, String>>,
+    /// Persisted recent-page ids, restored before first open.
+    recents_restored: Cell<Vec<i32>>,
     /// Currently open page (0 = none / empty workspace).
     pub open_page: Cell<i32>,
     /// Page awaiting delete confirmation.
@@ -133,6 +137,20 @@ impl AppState {
             None => None,
         };
         let persisted = loaded.filter(|s| !s.pages.is_empty());
+        let mut restored_settings: HashMap<String, String> = HashMap::new();
+        let mut restored_recents: Vec<i32> = Vec::new();
+        if let Some(state0) = &persisted {
+            restored_settings = state0
+                .settings
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            restored_recents = state0
+                .meta
+                .get("recents")
+                .map(|v| v.split(',').filter_map(|x| x.parse::<i32>().ok()).collect())
+                .unwrap_or_default();
+        }
 
         let (workspace, mut doc, page_order, seed) = match &persisted {
             Some(state) => {
@@ -204,6 +222,8 @@ impl AppState {
             slash: Rc::new(VecModel::from(slash_items(""))),
             block_menu: Rc::new(VecModel::from(Vec::new())),
             clipboard: RefCell::new(None),
+            settings: RefCell::new(restored_settings),
+            recents_restored: Cell::new(restored_recents),
             all_commands,
             doc: RefCell::new(doc),
             history: RefCell::new(History::default()),
@@ -214,8 +234,14 @@ impl AppState {
             pending_delete: Cell::new(None),
             last_scroll_y: Cell::new(0.0),
         };
-        // bench pages never appear as recents/initial content churn
+        // restore persisted recents before the first open marks its page
         let state = Rc::new(state);
+        {
+            let recents = state.recents_restored.take();
+            if !recents.is_empty() {
+                state.workspace.borrow_mut().set_recents(recents);
+            }
+        }
         state.open_page(open);
         state
     }
@@ -332,6 +358,16 @@ impl AppState {
             ws.mark_opened(id);
             ws.expand_ancestors(id);
         }
+        // persist the recent list
+        let recents = self.workspace.borrow().recents_ids();
+        self.record(vec![Change::MetaSet {
+            key: "recents".into(),
+            value: recents
+                .iter()
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+                .join(","),
+        }]);
         self.open_page.set(id);
         self.reproject_blocks();
         self.rebuild_sidebar();
@@ -394,6 +430,25 @@ impl AppState {
         let changes = self.exec_editor(cmd)?;
         self.reproject_blocks();
         Some(changes)
+    }
+
+    /// Set the theme and persist it (settings table).
+    pub fn set_dark(&self, dark: bool) {
+        self.settings
+            .borrow_mut()
+            .insert("dark".into(), (dark as u8).to_string());
+        self.record(vec![Change::SettingSet {
+            key: "dark".into(),
+            value: (dark as u8).to_string(),
+        }]);
+    }
+
+    pub fn dark_setting(&self) -> bool {
+        self.settings
+            .borrow()
+            .get("dark")
+            .map(|v| v == "1")
+            .unwrap_or(false)
     }
 
     // ---- slash menu (descriptors owned by Rust, per SPEC §十五) ----
@@ -835,6 +890,12 @@ fn kind_to_int(kind: BlockKind) -> i32 {
     }
 }
 
+fn runs_to_model(b: &Block) -> slint::ModelRc<TextRun> {
+    slint::ModelRc::from(Rc::new(slint::VecModel::from(build_runs(
+        &b.text, &b.marks,
+    ))))
+}
+
 /// Convert mock template rows into core Blocks with fresh ids and order
 /// keys (order = the row order).
 fn rows_to_blocks(page: i32, rows: Vec<BlockRow>, doc: &mut Document) -> Vec<Block> {
@@ -852,7 +913,44 @@ fn rows_to_blocks(page: i32, rows: Vec<BlockRow>, doc: &mut Document) -> Vec<Blo
                 kind: kind_from_int(row.kind),
                 text: row.text.to_string(),
                 checked: row.checked,
+                marks: Vec::new(),
             }
+        })
+        .collect()
+}
+
+/// Split text into per-mark runs. Runs are single-line rendered (Slint Text
+/// has no inline rich formatting — documented limitation, see
+/// docs/EDITOR_ARCHITECTURE.md).
+fn build_runs(text: &str, marks: &[crate::core::Mark]) -> Vec<TextRun> {
+    if marks.is_empty() || text.is_empty() {
+        return Vec::new();
+    }
+    let len = text.len();
+    let mut bounds: Vec<usize> = vec![0, len];
+    for m in marks {
+        for v in [m.start.min(len), m.end.min(len)] {
+            if text.is_char_boundary(v) {
+                bounds.push(v);
+            }
+        }
+    }
+    bounds.sort_unstable();
+    bounds.dedup();
+    bounds
+        .windows(2)
+        .filter_map(|w| {
+            let (s, e) = (w[0], w[1]);
+            if s == e {
+                return None;
+            }
+            Some(TextRun {
+                text: text[s..e].into(),
+                bold: marks.iter().any(|m| m.kind == crate::core::MarkKind::Bold && m.start <= s && m.end >= e),
+                italic: marks.iter().any(|m| m.kind == crate::core::MarkKind::Italic && m.start <= s && m.end >= e),
+                strike: marks.iter().any(|m| m.kind == crate::core::MarkKind::Strike && m.start <= s && m.end >= e),
+                code: marks.iter().any(|m| m.kind == crate::core::MarkKind::Code && m.start <= s && m.end >= e),
+            })
         })
         .collect()
 }
@@ -869,6 +967,7 @@ pub fn project_blocks(blocks: &[Block]) -> Vec<BlockRow> {
             checked: b.checked,
             number: 0,
             tail: false,
+            runs: runs_to_model(b),
         })
         .collect();
     let mut n = 0;
@@ -903,6 +1002,7 @@ fn block(kind: i32, text: &str) -> BlockRow {
         checked: false,
         number: 0,
         tail: false,
+        runs: ModelRc::from(Rc::new(VecModel::from(Vec::new()))),
     }
 }
 
@@ -1081,6 +1181,9 @@ const CMD_SEARCH: i32 = 2;
 const CMD_TOGGLE_SIDEBAR: i32 = 3;
 const CMD_TOGGLE_THEME: i32 = 4;
 const CMD_SETTINGS: i32 = 5;
+const CMD_RENAME_PAGE: i32 = 6;
+const CMD_DUPLICATE_PAGE: i32 = 7;
+const CMD_DELETE_PAGE: i32 = 8;
 /// Jump-to-page commands are 10 000 + page id.
 pub const CMD_PAGE_BASE: i32 = 10_000;
 
@@ -1100,6 +1203,9 @@ fn mock_commands(ws: &Workspace) -> Vec<CommandRow> {
     cmd(CMD_TOGGLE_SIDEBAR, "Toggle Sidebar", "Ctrl+B", "Interface", "panel-left");
     cmd(CMD_TOGGLE_THEME, "Toggle Dark Mode", "Ctrl+Shift+L", "Interface", "moon");
     cmd(CMD_SETTINGS, "Settings", "", "Navigate", "settings");
+    cmd(CMD_RENAME_PAGE, "Rename Page", "F2", "Page", "pencil");
+    cmd(CMD_DUPLICATE_PAGE, "Duplicate Page", "", "Page", "copy");
+    cmd(CMD_DELETE_PAGE, "Delete Page", "", "Page", "trash");
     for id in ws.dfs_order() {
         if id >= BENCH_ID_BASE {
             continue;

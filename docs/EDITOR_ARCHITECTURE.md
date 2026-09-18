@@ -1,7 +1,24 @@
 # Editor Architecture
 
-Design for the block editor (M4) — written ahead of implementation so the
-M2/M3 work leaves the right seams. Status: design, not yet built.
+Design for the block editor — M4 core landed (commands, undo/redo, single
+TextInput editing), M5 slash/block menus landed, M6 marks model +
+persistence landed. This doc records the design AND the platform walls hit
+during implementation.
+
+## Platform wall: inline rich text rendering
+
+Slint `Text` has no inline formatting (no per-run style, no decoration).
+Marks are therefore rendered as a HorizontalLayout of per-mark runs with
+`clip: true`. Consequences, accepted for now:
+
+- runs do not reflow across each other — a marked paragraph wraps per run,
+  so long marked text shows reflow artifacts;
+- italic uses the "Segoe UI Italic" family name (no font-style property);
+- strike is a 1px Rectangle overlay; code runs get the code background;
+- the live TextInput always shows plain text (marks visible when blurred).
+
+When Slint ships rich text support, `build_runs` in state.rs and the runs
+layout in EditorBlock.slint are the only two seams to replace.
 
 ## Model
 
