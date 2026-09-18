@@ -4,11 +4,12 @@
 export struct SidebarNode {
     id: int,
     label: string,
-    kind: string,   // "search" | "settings" | "header" | "favorite" | "recent" | "page"
+    kind: string,   // "header" | "favorite" | "recent" | "page" | "new-page"
     depth: int,
     expanded: bool,
     has-children: bool,
     selected: bool,
+    y: int,         // cumulative px offset in the tree area (menu anchoring)
 }
 
 export struct BlockRow {
@@ -28,25 +29,68 @@ export struct CommandRow {
     icon: string,
 }
 
+export struct SearchRow {
+    page-id: int,
+    title: string,
+    snippet: string, // content excerpt or breadcrumb for title/recents hits
+}
+
+export struct MenuRow {
+    id: int,
+    label: string,
+    icon: string,
+    danger: bool,
+}
+
 // The one place transient UI state lives. Components read/write it directly;
 // Rust reaches it through the generated global accessor.
 export global UIState {
     in-out property <bool> dark: false;
     in-out property <bool> sidebar-open: true;
-    in-out property <bool> palette-open: false;
-    in-out property <string> palette-query: "";
-    in-out property <int> palette-focus: 0;
 
     in-out property <[SidebarNode]> sidebar-rows;
     in-out property <int> sidebar-selected-id: 0;
+    in-out property <int> renaming-id: -1;      // page being renamed inline
+    in-out property <length> tree-viewport-y: 0px; // PageTree scroll mirror
 
     in-out property <[BlockRow]> blocks;
-    in-out property <string> page-title: "Project Atlas";
+    in-out property <string> page-title: "Getting Started";
+    in-out property <string> page-breadcrumb: "";
+    in-out property <length> editor-scroll-y: 0px; // Editor viewport mirror
 
+    // command palette
+    in-out property <bool> palette-open: false;
+    in-out property <string> palette-query: "";
+    in-out property <int> palette-focus: 0;
     in-out property <[CommandRow]> commands;
     in-out property <int> command-selected-id: -1;
 
-    in property <string> app-version: "0.1.0 · M1";
+    // search panel
+    in-out property <bool> search-open: false;
+    in-out property <string> search-query: "";
+    in-out property <int> search-focus: 0;
+    in-out property <int> search-selected-id: -1;
+    in-out property <[SearchRow]> search-rows;
+
+    // context menu (shared by sidebar rows and the TopBar ⋯ button)
+    in-out property <bool> menu-open: false;
+    in-out property <int> menu-node-id: -1;
+    in-out property <length> menu-x: 240px;
+    in-out property <length> menu-y: 100px;
+    in-out property <[MenuRow]> menu-rows;
+
+    // dialogs
+    in-out property <bool> dialog-open: false;
+    in-out property <string> dialog-title: "";
+    in-out property <string> dialog-message: "";
+    in-out property <string> dialog-confirm-label: "Delete";
+    in-out property <bool> settings-open: false;
+
+    // window geometry mirror (for centering/anchoring popups from Rust)
+    in-out property <length> window-w: 1280px;
+    in-out property <length> window-h: 800px;
+
+    in property <string> app-version: "0.1.0 · M2";
     in property <string> renderer-name: "unknown";
 
     // routed to Rust controller
@@ -56,6 +100,21 @@ export global UIState {
     callback palette-open-requested();
     callback command-invoked();
     callback palette-move(int);
-    callback node-activated();
     callback todo-toggled(int);
+    callback node-clicked(int);
+    callback node-expand-toggled(int);
+    callback node-context(int);
+    callback page-menu-requested();
+    callback page-create-requested();
+    callback rename-committed(int, string);
+    callback rename-cancelled();
+    callback menu-action(int);
+    callback search-open-requested();
+    callback search-query-changed();
+    callback search-move(int);
+    callback search-invoked();
+    callback dialog-confirmed();
+    callback dialog-cancelled();
+    callback settings-open-requested();
+    callback settings-close-requested();
 }

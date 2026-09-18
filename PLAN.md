@@ -45,15 +45,55 @@ Known gaps carried into M2 (not blockers):
 - Scene F (continuous scroll) still a manual pass;
 - window "startup_ms" measures window-up, not first paint.
 
-## Next: M2 · App shell navigation on mock pages
-- Search panel, favorites/recent wiring, page tree collapse/expand round-trip,
-  right-click menu on pages, window resize/snap polish decisions.
+## M2 · App shell navigation on mock pages — ✅ (2026-09-19)
+- [x] `app/workspace.rs`: pure page-tree model (create/rename/duplicate/
+      delete, favorites, recents with cap, expand-ancestors, search over
+      title + content blob) — unit-tested without Slint
+- [x] Live sidebar: Favorites / Recent / Workspace tree projection,
+      collapse/expand round-trip, selection + fallback landing page,
+      "+ New page" row
+- [x] Page switching: per-page mock content, TopBar breadcrumb
+      (Workspace › parent › page), Todo toggle kept
+- [x] Context menu (right-click on tree rows, ⋯ on TopBar): new subpage,
+      rename (inline), duplicate (deep copy), favorite toggle, delete
+      with confirmation dialog (subtree-size aware)
+- [x] Search panel Ctrl+P: titles + content, keyboard navigation,
+      recents as the empty-query view; palette (Ctrl+K) = commands only
+- [x] Settings dialog (appearance + about), delete confirm dialog,
+      empty-page state, Ctrl+N new page flow
+- [x] lib/bin split: `src/lib.rs` exposes the crate for `tests/`
+      integration tests (6) + unit tests (7) — all green
+- [x] `quire-shot` headless visual-regression tool (ADR-0011) +
+      `just shot <scene>`; 9 M2 scenes rendered and reviewed (9/9 pass)
+- [x] Benchmarks: scenes F + G measured for the first time
+      (PERFORMANCE.md), scenes A/D re-measured on the M2 build
+
+Delivered in the same pass (former known-gaps from M0/M1):
+- Scene F now has a programmatic proxy measurement; scene G delivered
+  with M2 as planned. Palette interaction verified by real renders of
+  each interactive state (headless), not just static construction.
+- Stack-overflow on startup found & fixed (ADR-0009): Slint 1.18's
+  recursive binding evaluation exceeded the 1 MB Windows default with
+  the full M2 shell; the event loop now runs on an 8 MB-stack thread.
+  Also fixed by the visual review pass: page-title descender collision,
+  TopBar child-geometry (Slint centers width-only children), zero-length
+  icon path segments invisible in the software renderer.
+
+Deferred (not blockers, tracked for M3+):
+- window `startup_ms` still measures window-up, not first paint;
+- scene F remains a programmatic proxy until wheel-input injection is
+  available; real input pass stays manual.
+
+## Next: M3 · Local documents (SQLite)
+- `core/` document model + `storage/` SQLite repository and migrations;
+  debounced transactional persistence replacing `app/workspace.rs`'s
+  in-memory tree; load-on-restart; settings persistence.
 
 ## Later (unchanged from brief)
-M3 SQLite persistence → M4 block editor MVP (IME = test item, ADR-0002) →
-M5 slash menu + command palette real wiring → M6 rich text →
-M7 virtualization/performance → M8 Windows RC (packaging, crash recovery,
-import/export) → M9 Android (separate IME/editor test plan).
+M4 block editor MVP (IME = test item, ADR-0002) → M5 slash menu + command
+palette real wiring → M6 rich text → M7 virtualization/performance →
+M8 Windows RC (packaging, crash recovery, import/export) → M9 Android
+(separate IME/editor test plan).
 
 ## Explicitly out of scope for v1
 Sync, collaboration, cloud, plugin market, AI, multi-process IPC,

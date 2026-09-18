@@ -1,0 +1,81 @@
+# Editor Architecture
+
+Design for the block editor (M4) — written ahead of implementation so the
+M2/M3 work leaves the right seams. Status: design, not yet built.
+
+## Model
+
+```
+Document (M3: one row per page in SQLite)
+  └─ Page
+       └─ Block tree (flat rows ordered by parent + order key)
+            id          stable i64 (ULID/UUID — never an array index)
+            parent_id   NULL = top-level
+            order       fractional ranking key (insert between neighbors)
+            kind        paragraph | heading_1..3 | bullet | numbered | todo
+                        | quote | code | divider      (M4 set)
+            text        plain UTF-8 (M4) / inline span refs (M6)
+            checked     todo only
+```
+
+- The **in-memory truth** is `core::Document` owning a page's blocks in a
+  slotmap/id-indexed structure. The UI receives a **projection**:
+  `Vec<BlockRow>` exactly like today's mock (`tail` flag included).
+- Nesting (bullet/numbered children) is modeled with `parent_id`, but M4
+  renders one indent level at most; deep trees wait for M7 virtualization
+  work.
+
+## Command system
+
+Every edit is a `Command` in `core::command`:
+
+```
+InsertText { id, pos, text }      DeleteText { id, range }
+SplitBlock { id, pos }            MergeBlock { id, with_prev }
+SetBlockType { id, kind }         MoveBlock { id, before_of }
+InsertBlock { after, kind }       DeleteBlock { id }
+ToggleTodo { id }                 ApplyMark { id, range, mark }   (M6)
+```
+
+- Commands apply to the in-memory document and push an inverse onto the
+  undo stack. Undo/Redo never reads the database (SPEC §十四).
+- The controller translates UI callbacks into commands; the editor
+  produces *no* direct model mutation from `.slint` code.
+
+## Editing surface: one TextEdit, rest are Text
+
+Per ADR-0003, a page is `Text` delegates. On focus/click:
+
+1. The clicked block's delegate swaps to a `TextInput` (the only live
+   editor instance in the window).
+2. The `TextInput` is initialized from the block's text; caret/selection
+   stay inside it. IME comes from Slint's winit integration (ADR-0002).
+3. Keys that mean structure (Enter, Backspace at pos 0, Tab, arrows
+   crossing block borders) are intercepted in `key-pressed`, routed as
+   commands, and re-targeted: the editor moves to the neighboring block
+   and re-focuses the single `TextInput` there.
+
+`EditorState` (Rust-owned, mirrored read-only into `UIState`):
+`focused_block_id`, `selection_anchor`, `selection_cursor`,
+`composition_active`, `editing_mode`. No `.slint` file keeps a private
+selection.
+
+## Rendering contract (kept from M1/M2)
+
+- `EditorBlock` stays the static renderer (all kinds, `visible` toggles).
+- A block being edited swaps to `BlockEditor` (TextInput + block chrome).
+- The ListView keeps virtualizing; `tail` flag logic stays in Rust.
+- Typed text flows: `TextInput` edit → controller debounces (≈300 ms) →
+  `InsertText` command → document update → **targeted** model row update
+  (never `set_vec` on the whole page while typing).
+
+## Testing
+
+- `core/` command application and undo stacks: plain unit tests.
+- Round-trip persistence: M3 integration tests over a temp SQLite.
+- IME + caret behavior (Chinese composition, Enter/Backspace inside
+  composition): manual test checklist at M4, per SPEC §十一; not
+  scriptable on this desktop (foreground policy), so it is a named
+  acceptance item, not an afterthought.
+- Visual: `just shot` scenes gain editor states (focused block, selection
+  across blocks) in M4.

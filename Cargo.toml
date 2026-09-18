@@ -31,6 +31,17 @@ software = ["slint/renderer-software"]
 [build-dependencies]
 slint-build = "1.18"
 
+[[test]]
+name = "workspace"
+path = "tests/integration/workspace_test.rs"
+
+# Headless screenshot tool (visual regression); built only with the
+# software renderer feature so the shipped binary stays lean.
+[[bin]]
+name = "quire-shot"
+path = "src/bin/quire_shot.rs"
+required-features = ["software"]
+
 [profile.release]
 codegen-units = 1
 lto = "thin"

@@ -2,6 +2,48 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0011 · Headless visual regression via `quire-shot`
+Decision: UI screenshots are produced by a second binary
+(`src/bin/quire_shot.rs`) that installs a custom `Platform` whose window
+adapter is Slint's `MinimalSoftwareWindow` (software renderer), renders the
+real `AppWindow` into an RGB buffer, and writes a BMP; `just shot <scene>`
+converts to PNG. Scenes (`--scene menu|rename|…`) set `UIState`/controller
+state directly — no input injection.
+Why: OS foreground policy blocks headless SendKeys, screen capture loses
+to overlapping windows, and `PrintWindow` returns black pixels for
+GPU-composited (GL) windows. The offscreen path is deterministic,
+occlusion-proof, and doubles as the visual-regression harness for M3+.
+Consequences: `quire-shot` builds only with `--features software`
+(`required-features`), so the shipped binary stays lean; PopupWindow
+show/close is exercised through the same code path as production.
+
+## ADR-0010 · Page search = substring over a text blob; palette = commands only
+Decision: search (Ctrl+P) scans `Page.search_text` (title + block text,
+ASCII case-folding, char-boundary snippets, capped at 20 hits); the
+command palette (Ctrl+K) lists commands only, generated from the
+workspace. Both share `fuzzy_subsequence`-style matching only where it
+helps (palette).
+Why: content search must find unopened pages, which requires an inverted
+index (SQLite FTS, M3+) or a flat blob; the blob is honest, fast at this
+scale, and swappable. Separating palette and search mirrors the Notion
+model and keeps command resolution unambiguous.
+Consequences: `Workspace::search` is the single seam — M3 replaces its
+body with FTS queries without touching UI or controller.
+
+## ADR-0009 · UI event loop runs on an 8 MB-stack thread
+Decision: both binaries spawn the Slint event loop / render on a thread
+with an 8 MB stack (`std::thread::Builder::stack_size`).
+Why: Slint 1.18 evaluates the component tree's initial property and
+layout bindings recursively on the C stack; Quire's shell (sidebar tree
+delegates + editor + five popup trees) needs slightly over the 1 MB
+Windows default in debug builds, and popup open/close adds depth at
+runtime. Verified by bisection: any single component removed masks it,
+512 MB survives it — finite but deep. 8 MB is the standard Linux default
+and costs only address-space reservation.
+Consequences: crashes-in-the-field from stack exhaustion are off the
+table for the planned M3–M6 growth; if a future Slint flattens binding
+evaluation, the wrapper can be dropped in one place.
+
 ## ADR-0008 · Popup lifecycle is state-driven, never `is-open`-read
 Decision: `CommandPalette` uses `close-policy: no-auto-close`; show/hide is
 driven exclusively by `UIState.palette-open` (mirrored in AppWindow with

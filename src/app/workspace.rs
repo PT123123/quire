@@ -1,0 +1,578 @@
+// Pure page-tree workspace model behind the M2 shell navigation. No Slint
+// types here on purpose: this module is the seed of `core/`'s real model
+// (M3 swaps the mock content for SQLite rows behind the same operations),
+// so it must stay compilable and testable without a window.
+
+use std::collections::HashMap;
+
+/// How many pages the Recent section keeps.
+pub const MAX_RECENTS: usize = 6;
+
+/// Pages with an id >= this are benchmark fixtures, never listed in the
+/// command palette.
+pub const BENCH_ID_BASE: i32 = 1000;
+
+pub struct Page {
+    pub id: i32,
+    pub title: String,
+    pub parent: Option<i32>,
+    pub children: Vec<i32>,
+    pub favorite: bool,
+    pub expanded: bool,
+    /// Title + block text blob, filled by the app layer; the search source.
+    pub search_text: String,
+}
+
+/// One visible row of the workspace tree (expanded nodes only, pre-flattened).
+pub struct TreeRow {
+    pub id: i32,
+    pub label: String,
+    pub depth: i32,
+    pub expanded: bool,
+    pub has_children: bool,
+}
+
+pub struct SearchHit {
+    pub id: i32,
+    pub title: String,
+    pub breadcrumb: String,
+    /// Text around the first content match; empty for title/recents hits.
+    pub snippet: String,
+}
+
+pub struct Workspace {
+    pages: HashMap<i32, Page>,
+    roots: Vec<i32>,
+    next_id: i32,
+    recents: Vec<i32>, // most recent first
+}
+
+impl Workspace {
+    /// The sample tree M1's mock sidebar imitated. Ids are stable so tests
+    /// and scenes can refer to them.
+    pub fn sample() -> Self {
+        let mut ws = Workspace {
+            pages: HashMap::new(),
+            roots: Vec::new(),
+            next_id: 100,
+            recents: Vec::new(),
+        };
+        ws.create(None, "Weekly Review"); // 100
+        ws.create(None, "Design Ideas"); // 101
+        let getting_started = ws.create(None, "Getting Started"); // 102
+        ws.create(Some(getting_started), "Keyboard Shortcuts"); // 103
+        ws.create(Some(getting_started), "Import from Markdown"); // 104
+        let atlas = ws.create(None, "Project Atlas"); // 105
+        let research = ws.create(Some(atlas), "Research Notes"); // 106
+        ws.create(Some(research), "Sources"); // 107
+        ws.create(Some(atlas), "Meeting Notes"); // 108
+        ws.create(Some(atlas), "Architecture"); // 109
+        let reading = ws.create(None, "Reading List"); // 110
+        ws.create(Some(reading), "Papers to Read"); // 111
+        ws.create(None, "写作与中文测试"); // 112
+        ws.create(None, "Scratchpad"); // 113
+        ws.toggle_favorite(100);
+        ws.toggle_favorite(101);
+        ws.pages.get_mut(&110).unwrap().expanded = false;
+        ws.pages.get_mut(&102).unwrap().expanded = true;
+        ws.pages.get_mut(&105).unwrap().expanded = true;
+        ws.mark_opened(108);
+        ws.mark_opened(105);
+        ws
+    }
+
+    /// Sample tree plus `n` flat benchmark pages (scene G).
+    pub fn with_bench_pages(n: usize) -> Self {
+        let mut ws = Workspace::sample();
+        for i in 0..n {
+            let title = format!("Bench {:03}", i);
+            let id = ws.create(None, &title);
+            let _ = id;
+        }
+        ws
+    }
+
+    fn new_page(&mut self, title: &str) -> i32 {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.pages.insert(
+            id,
+            Page {
+                id,
+                title: title.to_string(),
+                parent: None,
+                children: Vec::new(),
+                favorite: false,
+                expanded: false,
+                search_text: String::new(),
+            },
+        );
+        id
+    }
+
+    fn attach(&mut self, id: i32, parent: Option<i32>, after: Option<i32>) {
+        self.pages.get_mut(&id).expect("page exists").parent = parent;
+        let list: &mut Vec<i32> = match parent {
+            Some(p) => &mut self.pages.get_mut(&p).expect("parent exists").children,
+            None => &mut self.roots,
+        };
+        match after {
+            Some(prev) => {
+                let pos = list
+                    .iter()
+                    .position(|&x| x == prev)
+                    .map_or(list.len(), |i| i + 1);
+                list.insert(pos, id);
+            }
+            None => list.push(id),
+        }
+    }
+
+    /// Create a page under `parent` (root when None) and return its id.
+    pub fn create(&mut self, parent: Option<i32>, title: &str) -> i32 {
+        let id = self.new_page(title);
+        if let Some(p) = parent {
+            self.pages.get_mut(&p).expect("parent exists").expanded = true;
+        }
+        self.attach(id, parent, None);
+        id
+    }
+
+    pub fn rename(&mut self, id: i32, title: &str) {
+        if let Some(p) = self.pages.get_mut(&id) {
+            p.title = title.to_string();
+        }
+    }
+
+    /// Deep-copy the subtree; the copy lands directly after the original and
+    /// is titled "Copy of …". Returns the new root id.
+    pub fn duplicate(&mut self, id: i32) -> Option<i32> {
+        let (parent, title) = {
+            let src = self.pages.get(&id)?;
+            (src.parent, format!("Copy of {}", src.title))
+        };
+        let new_root = self.new_page(&title);
+        self.attach(new_root, parent, Some(id));
+        self.copy_children(id, new_root);
+        Some(new_root)
+    }
+
+    fn copy_children(&mut self, src: i32, dst: i32) {
+        let kids = self.pages.get(&src).expect("src exists").children.clone();
+        for k in kids {
+            let (title, blob) = {
+                let p = self.pages.get(&k).expect("child exists");
+                (p.title.clone(), p.search_text.clone())
+            };
+            let new_id = self.new_page(&title);
+            self.pages.get_mut(&new_id).unwrap().search_text = blob;
+            self.attach(new_id, Some(dst), None);
+            self.copy_children(k, new_id);
+        }
+    }
+
+    /// Remove the subtree; returns the removed ids (root first).
+    pub fn delete(&mut self, id: i32) -> Vec<i32> {
+        if !self.pages.contains_key(&id) {
+            return Vec::new();
+        }
+        let parent = self.pages.get(&id).unwrap().parent;
+        match parent {
+            Some(p) => self.pages.get_mut(&p).unwrap().children.retain(|&c| c != id),
+            None => self.roots.retain(|&r| r != id),
+        }
+        let mut removed = Vec::new();
+        self.remove_recursive(id, &mut removed);
+        self.recents.retain(|r| !removed.contains(r));
+        removed
+    }
+
+    fn remove_recursive(&mut self, id: i32, out: &mut Vec<i32>) {
+        let kids = self.pages.get(&id).expect("page exists").children.clone();
+        for k in kids {
+            self.remove_recursive(k, out);
+        }
+        self.pages.remove(&id);
+        out.push(id);
+    }
+
+    /// Number of pages in the subtree rooted at `id` (inclusive).
+    pub fn subtree_size(&self, id: i32) -> usize {
+        let mut n = 0;
+        self.count_recursive(id, &mut n);
+        n
+    }
+
+    fn count_recursive(&self, id: i32, n: &mut usize) {
+        if let Some(p) = self.pages.get(&id) {
+            *n += 1;
+            for &c in &p.children {
+                self.count_recursive(c, n);
+            }
+        }
+    }
+
+    pub fn toggle_expanded(&mut self, id: i32) {
+        if let Some(p) = self.pages.get_mut(&id) {
+            p.expanded = !p.expanded;
+        }
+    }
+
+    pub fn toggle_favorite(&mut self, id: i32) {
+        if let Some(p) = self.pages.get_mut(&id) {
+            p.favorite = !p.favorite;
+        }
+    }
+
+    pub fn mark_opened(&mut self, id: i32) {
+        if !self.pages.contains_key(&id) {
+            return;
+        }
+        self.recents.retain(|&r| r != id);
+        self.recents.insert(0, id);
+        self.recents.truncate(MAX_RECENTS);
+    }
+
+    /// Expand every ancestor of `id` so it is visible in the tree.
+    pub fn expand_ancestors(&mut self, id: i32) {
+        let mut cur = self.pages.get(&id).and_then(|p| p.parent);
+        while let Some(pid) = cur {
+            if let Some(p) = self.pages.get_mut(&pid) {
+                p.expanded = true;
+                cur = p.parent;
+            } else {
+                break;
+            }
+        }
+    }
+
+    pub fn set_search_text(&mut self, id: i32, blob: String) {
+        if let Some(p) = self.pages.get_mut(&id) {
+            p.search_text = blob;
+        }
+    }
+
+    pub fn get(&self, id: i32) -> Option<&Page> {
+        self.pages.get(&id)
+    }
+
+    pub fn contains(&self, id: i32) -> bool {
+        self.pages.contains_key(&id)
+    }
+
+    pub fn page_count(&self) -> usize {
+        self.pages.len()
+    }
+
+    pub fn title_of(&self, id: i32) -> Option<&str> {
+        self.pages.get(&id).map(|p| p.title.as_str())
+    }
+
+    /// Ancestors of `id`, root first, inclusive of `id` itself.
+    pub fn ancestors(&self, id: i32) -> Vec<(i32, String)> {
+        let mut chain = Vec::new();
+        let mut cur = Some(id);
+        while let Some(cid) = cur {
+            match self.pages.get(&cid) {
+                Some(p) => {
+                    chain.push((p.id, p.title.clone()));
+                    cur = p.parent;
+                }
+                None => break,
+            }
+        }
+        chain.reverse();
+        chain
+    }
+
+    /// Breadcrumb of ancestors above `id` (empty for roots), "A / B" style.
+    pub fn breadcrumb(&self, id: i32) -> String {
+        let chain = self.ancestors(id);
+        chain
+            .iter()
+            .take(chain.len().saturating_sub(1))
+            .map(|(_, t)| t.as_str())
+            .collect::<Vec<_>>()
+            .join(" / ")
+    }
+
+    /// First root page, used as the fallback landing page.
+    pub fn first_root(&self) -> Option<i32> {
+        self.roots.first().copied()
+    }
+
+    /// Favorites in tree order.
+    pub fn favorites(&self) -> Vec<(i32, String)> {
+        let mut out = Vec::new();
+        self.collect_if(self.roots.clone(), &mut |p| {
+            p.favorite.then(|| (p.id, p.title.clone()))
+        }, &mut out);
+        out
+    }
+
+    pub fn recents(&self) -> Vec<(i32, String)> {
+        self.recents
+            .iter()
+            .filter_map(|id| self.pages.get(id).map(|p| (p.id, p.title.clone())))
+            .collect()
+    }
+
+    fn collect_if(
+        &self,
+        ids: Vec<i32>,
+        f: &mut dyn FnMut(&Page) -> Option<(i32, String)>,
+        out: &mut Vec<(i32, String)>,
+    ) {
+        for id in ids {
+            if let Some(p) = self.pages.get(&id) {
+                if let Some(hit) = f(p) {
+                    out.push(hit);
+                }
+                let kids = p.children.clone();
+                self.collect_if(kids, f, out);
+            }
+        }
+    }
+
+    /// Visible tree rows, depth-first, honoring `expanded` flags.
+    pub fn tree_rows(&self) -> Vec<TreeRow> {
+        let mut rows = Vec::new();
+        self.tree_recursive(self.roots.clone(), 0, &mut rows);
+        rows
+    }
+
+    fn tree_recursive(&self, ids: Vec<i32>, depth: i32, rows: &mut Vec<TreeRow>) {
+        for id in ids {
+            if let Some(p) = self.pages.get(&id) {
+                let has_children = !p.children.is_empty();
+                rows.push(TreeRow {
+                    id: p.id,
+                    label: p.title.clone(),
+                    depth,
+                    expanded: p.expanded,
+                    has_children,
+                });
+                if p.expanded {
+                    self.tree_recursive(p.children.clone(), depth + 1, rows);
+                }
+            }
+        }
+    }
+
+    /// All page ids in depth-first display order.
+    pub fn dfs_order(&self) -> Vec<i32> {
+        let mut ids = Vec::new();
+        self.dfs_recursive(self.roots.clone(), &mut ids);
+        ids
+    }
+
+    fn dfs_recursive(&self, list: Vec<i32>, out: &mut Vec<i32>) {
+        for id in list {
+            if let Some(p) = self.pages.get(&id) {
+                out.push(id);
+                let kids = p.children.clone();
+                self.dfs_recursive(kids, out);
+            }
+        }
+    }
+
+    /// Search pages by title substring first, then by content substring.
+    /// An empty query returns the recent pages ("jump back in" list).
+    /// Result count is capped at 20.
+    pub fn search(&self, query: &str) -> Vec<SearchHit> {
+        let q = query.trim();
+        if q.is_empty() {
+            return self
+                .recents()
+                .into_iter()
+                .take(20)
+                .map(|(id, title)| SearchHit {
+                    id,
+                    title,
+                    breadcrumb: self.breadcrumb(id),
+                    snippet: String::new(),
+                })
+                .collect();
+        }
+        let needle: Vec<char> = q.chars().collect();
+        let mut title_hits = Vec::new();
+        let mut content_hits = Vec::new();
+        for id in self.dfs_order() {
+            let p = &self.pages[&id];
+            if find_ci(&p.title.chars().collect::<Vec<_>>(), &needle).is_some() {
+                title_hits.push(SearchHit {
+                    id,
+                    title: p.title.clone(),
+                    breadcrumb: self.breadcrumb(id),
+                    snippet: String::new(),
+                });
+            } else if let Some(pos) = find_ci(&p.search_text.chars().collect::<Vec<_>>(), &needle) {
+                content_hits.push(SearchHit {
+                    id,
+                    title: p.title.clone(),
+                    breadcrumb: self.breadcrumb(id),
+                    snippet: extract_snippet(&p.search_text, pos, needle.len(), 48),
+                });
+            }
+            if title_hits.len() + content_hits.len() >= 20 {
+                break;
+            }
+        }
+        title_hits.extend(content_hits);
+        title_hits
+    }
+}
+
+fn lower_ascii(c: char) -> char {
+    c.to_ascii_lowercase()
+}
+
+/// Case-insensitive substring search over char slices (ASCII folding only;
+/// CJK has no case). Returns the char position of the first match.
+fn find_ci(hay: &[char], needle: &[char]) -> Option<usize> {
+    if needle.is_empty() {
+        return None;
+    }
+    if needle.len() > hay.len() {
+        return None;
+    }
+    hay.windows(needle.len()).position(|w| {
+        w.iter()
+            .zip(needle)
+            .all(|(a, b)| lower_ascii(*a) == lower_ascii(*b))
+    })
+}
+
+/// ±`pad` chars around a match, on char boundaries, with ellipses.
+fn extract_snippet(text: &str, pos: usize, needle_len: usize, pad: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let start = pos.saturating_sub(pad);
+    let end = (pos + needle_len + pad).min(chars.len());
+    let mut s = String::new();
+    if start > 0 {
+        s.push('…');
+    }
+    s.extend(&chars[start..end]);
+    if end < chars.len() {
+        s.push('…');
+    }
+    s.replace('\n', " ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ws() -> Workspace {
+        Workspace::sample()
+    }
+
+    #[test]
+    fn sample_tree_shape() {
+        let w = ws();
+        assert_eq!(w.page_count(), 14);
+        assert_eq!(w.title_of(102), Some("Getting Started"));
+        let rows = w.tree_rows();
+        // expanded roots and their children are visible
+        assert!(rows.iter().any(|r| r.id == 102 && r.depth == 0 && r.expanded));
+        assert!(rows.iter().any(|r| r.id == 103 && r.depth == 1));
+        // Reading List starts collapsed
+        let rl = rows.iter().find(|r| r.id == 110).unwrap();
+        assert!(!rl.expanded && rl.has_children);
+        // collapsed child not present
+        assert!(!rows.iter().any(|r| r.id == 111));
+    }
+
+    #[test]
+    fn create_rename_delete_roundtrip() {
+        let mut w = ws();
+        let id = w.create(Some(105), "New Kid");
+        assert_eq!(w.title_of(id), Some("New Kid"));
+        // parent was auto-expanded, child visible
+        assert!(w.tree_rows().iter().any(|r| r.id == id && r.depth == 1));
+        w.rename(id, "Renamed");
+        assert_eq!(w.title_of(id), Some("Renamed"));
+        let removed = w.delete(105); // Atlas + 4 descendants + the new kid
+        assert_eq!(removed.len(), 6);
+        assert!(removed.contains(&id));
+        assert!(!w.contains(105));
+        assert!(w.tree_rows().iter().all(|r| r.id != id));
+        // delete also cleans recents
+        assert!(w.recents().iter().all(|(id, _)| *id != 105));
+    }
+
+    #[test]
+    fn duplicate_copies_subtree_with_fresh_ids() {
+        let mut w = ws();
+        let n_before = w.page_count();
+        let copy = w.duplicate(105).unwrap();
+        assert_eq!(w.title_of(copy), Some("Copy of Project Atlas"));
+        assert_eq!(w.page_count(), n_before + 5);
+        assert_eq!(w.subtree_size(copy), 5);
+        // original untouched, copy lands after the whole original subtree
+        // (both are expanded, so the DFS list interleaves children)
+        let roots = w.tree_rows();
+        let pos_orig = roots.iter().position(|r| r.id == 105).unwrap();
+        assert_eq!(roots[pos_orig + w.subtree_size(105)].id, copy);
+    }
+
+    #[test]
+    fn favorites_and_recents() {
+        let mut w = ws();
+        let favs = w.favorites();
+        assert_eq!(favs.len(), 2);
+        assert!(favs.iter().all(|(id, _)| *id == 100 || *id == 101));
+        w.toggle_favorite(112);
+        assert_eq!(w.favorites().len(), 3);
+        // recents: most recent first, capped
+        w.mark_opened(113);
+        assert_eq!(w.recents()[0].0, 113);
+        for i in 200..200 + MAX_RECENTS as i32 + 3 {
+            w.mark_opened(i); // unknown ids ignored
+        }
+        w.mark_opened(103);
+        w.mark_opened(104);
+        w.mark_opened(106);
+        w.mark_opened(107);
+        w.mark_opened(108);
+        w.mark_opened(109);
+        assert_eq!(w.recents().len(), MAX_RECENTS);
+        assert_eq!(w.recents()[0].0, 109);
+        // 113 was pushed out by the cap
+        assert!(w.recents()[1..].iter().all(|(id, _)| *id != 113));
+    }
+
+    #[test]
+    fn expand_ancestors_makes_leaf_visible() {
+        let mut w = ws();
+        w.expand_ancestors(107); // Sources
+        let rows = w.tree_rows();
+        assert!(rows.iter().any(|r| r.id == 107 && r.depth == 2));
+    }
+
+    #[test]
+    fn search_title_then_content() {
+        let mut w = ws();
+        w.set_search_text(112, "写作与中文测试\n中文段落用于验证字体回退与行高".into());
+        w.set_search_text(113, "Scratchpad\nnothing useful here".into());
+        // title hit
+        let hits = w.search("atlas");
+        assert!(hits.iter().any(|h| h.id == 105 && h.snippet.is_empty()));
+        // content hit produces a snippet
+        let hits = w.search("字体回退");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, 112);
+        assert!(hits[0].snippet.contains("字体回退"));
+        // empty query = recents
+        assert!(!w.search("").is_empty());
+        // no hits
+        assert!(w.search("zzzz-not-there").is_empty());
+    }
+
+    #[test]
+    fn breadcrumb_walks_parents() {
+        let w = ws();
+        assert_eq!(w.breadcrumb(107), "Project Atlas / Research Notes");
+        assert_eq!(w.breadcrumb(105), "");
+    }
+}

@@ -21,39 +21,41 @@ Task Manager's "GPU Memory" column / pdh counters and say so.
 
 ## Scenes
 | id | scene | command |
-|----|--------------------------------|-----------------------------------|
-| A | empty shell (mock sidebar only) | `quire.exe` |
+|----|--------------------------------|--------------------------------------------------|
+| A | empty shell | `quire.exe` |
 | B | 100 blocks | `quire.exe --blocks 100` |
 | C | 5 000 blocks | `quire.exe --blocks 5000` |
 | D | 10 000 blocks | `quire.exe --blocks 10000` |
 | E | typing | deferred to M4 (no editor yet) |
-| F | continuous scroll | manual pass, recorded per milestone |
-| G | switch 100 pages | deferred to M2 |
+| F | continuous scroll | `bench.ps1 -Scroll` (programmatic proxy, below) |
+| G | switch 100 pages | `bench.ps1 -PageSwitch 100` |
 
-## Baseline — M0/M1 (Release, idle ≈ 5 s after window appears)
+## Baseline — M2 (Release, idle ≈ 5 s after window appears)
 
-`startup_ms` = process start → main window handle exists (window-up time,
-slightly before first paint). `idle_cpu_pct` is % of one logical core.
-Measured 2026-09-18 with `benchmarks/scripts/bench.ps1`.
+Re-measured 2026-09-19 after the M2 navigation work (live sidebar model,
+per-page content, headless ADR-0009 stack change). Same machine.
 
 | renderer | build | startup ms | idle CPU % | WS MB | Private MB |
 |----------|-------|-----------:|-----------:|------:|-----------:|
-| FemtoVG·GL | A | 838 | 0.39 | 108.8 | 84.7 |
-| FemtoVG·wgpu | A | 773 | 0.20 | 199.1 | 147.5 |
-| Skia | A | 833 | 0.00 | 245.2 | 211.5 |
-| FemtoVG·GL | D (10 000 blocks) | 160 | 0.19 | 108.4 | 87.5 |
-| FemtoVG·wgpu | D | 125 | 0.00 | 190.2 | 149.0 |
-| Skia | D | 120 | 0.00 | 234.9 | 211.9 |
+| FemtoVG·GL | A | 414 | 0.58 | 111.5 | 86.6 |
+| FemtoVG·GL | D (10 000 blocks) | 402 | 0.58 | 112.4 | 90.6 |
+| FemtoVG·GL | F (continuous scroll) | 1006 | 19.49 | 134.8 | 108.3 |
+| FemtoVG·GL | G (100-page switching) | 393 | 0.39 | 111.5 | 86.7 |
 
 Reading:
-- All three GPU paths run natively on this machine (Intel Arc, GL + wgpu +
-  Skia/Metal-like GL all fine). Binary sizes: GL 15 MB, wgpu 22 MB, Skia 25 MB.
-- 10 000 blocks add ≈ 3 MB Private and no idle CPU → the single-`for`
-  ListView virtualizes as intended (ADR-0007).
-- FemtoVG·GL has roughly half the memory of wgpu and a third of Skia →
-  default renderer stays `femtovg` until M7 text-clarity comparisons say
-  otherwise. Second-launch `startup_ms` is lower (OS cache warm).
-- Idle CPU ≈ 0 % on all three: no animation loops, no polling. Keep it that way.
+- Idle CPU stays ≈ 0 %: the M2 sidebar/search/menu additions did not
+  introduce idle work. 10 000 blocks still cost only ≈ 4 MB Private over
+  the empty shell — ListView virtualization intact.
+- Scene F is a *programmatic proxy*: a 16 ms timer advances the editor
+  viewport-y through its two-way binding, i.e. ~60 full-window repaints/s
+  driving the same path as wheel input (real input injection stays a
+  manual pass). 19.5 % of one core for 60 fps is acceptable; revisit if
+  M7 comparisons regress.
+- Scene G opens one of 100 mock pages every 120 ms (model swap + sidebar
+  rebuild + editor delegate churn): 0.39 % of one core, no memory drift
+  over the sampling window.
+- Second-launch startup ≈ 400 ms (warm OS cache); numbers above are
+  first-launch-after-build runs.
 
 ## Notes / open questions
 - Slint's winit backend redraws on events; any persistent animation on an

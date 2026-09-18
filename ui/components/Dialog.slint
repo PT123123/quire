@@ -1,0 +1,73 @@
+// Confirmation dialog (delete page, later: destructive block ops). One
+// instance at window level; the controller fills title/message and shows it.
+
+import { Theme } from "../Theme.slint";
+import { Colors } from "../Colors.slint";
+import { Typography } from "../Typography.slint";
+import { Button } from "./Button.slint";
+import { UIState } from "../Types.slint";
+
+export component ConfirmDialog inherits PopupWindow {
+    width: 380px;
+    height: content-col.preferred-height + Theme.spacing-lg * 2;
+    close-policy: PopupClosePolicy.no-auto-close;
+
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+
+        Rectangle {
+            x: 2px; y: 3px;
+            width: parent.width - 4px;
+            height: parent.height - 5px;
+            border-radius: Theme.radius-lg + 2px;
+            background: Colors.shadow;
+        }
+        Rectangle {
+            width: parent.width;
+            height: parent.height;
+            border-radius: Theme.radius-lg;
+            background: Colors.surface-overlay;
+            border-width: 1px;
+            border-color: Colors.border;
+        }
+
+        content-col := VerticalLayout {
+            padding: Theme.spacing-lg;
+            spacing: Theme.spacing-md;
+
+            Text {
+                text: UIState.dialog-title;
+                font-family: Typography.ui-font;
+                font-size: Typography.size-h3;
+                font-weight: Typography.weight-semibold;
+                color: Colors.text-primary;
+            }
+            Text {
+                text: UIState.dialog-message;
+                font-family: Typography.ui-font;
+                font-size: Typography.size-ui;
+                color: Colors.text-secondary;
+                wrap: word-wrap;
+            }
+            Rectangle { height: Theme.spacing-xs; }
+            HorizontalLayout {
+                spacing: Theme.spacing-sm;
+                Rectangle { horizontal-stretch: 1; }
+                Button {
+                    text: "Cancel";
+                    clicked => {
+                        UIState.dialog-cancelled();
+                    }
+                }
+                confirm-btn := Button {
+                    text: UIState.dialog-confirm-label;
+                    primary: true;
+                    clicked => {
+                        UIState.dialog-confirmed();
+                    }
+                }
+            }
+        }
+    }
+}

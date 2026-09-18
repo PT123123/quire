@@ -43,24 +43,34 @@ See `docs/DECISIONS.md` for the rationale of every non-obvious pick
 
 ```
 src/
-  main.rs            args, window bootstrap, no logic
-  app/               controller.rs (callback dispatch), state.rs (view data)
+  lib.rs             module root; slint include_modules (one compiled unit)
+  main.rs            args parse, 8 MB-stack UI thread (ADR-0009), bench timers
+  bin/quire_shot.rs  headless visual-regression renderer (ADR-0011)
+  app/               controller.rs (callback dispatch), state.rs (view
+                     projection + mock content), workspace.rs (pure page-tree
+                     model; the seed of core/'s real model)
   core/              document model, commands, history  (M3+)
   storage/           SQLite, migrations, repository     (M3)
   services/          document/search/import/export      (M3+)
   platform/          Windows adapters only if forced    (M8)
 ui/
-  AppWindow.slint    root window, composition
+  AppWindow.slint    root window, composition, keybindings, popup roots
   Theme.slint        spacing / radius / motion tokens, dark flag
   Colors.slint       palette tokens (light + dark)
   Typography.slint   type scale
   Icons.slint        vector path icons, theme-aware
   Types.slint        shared structs + UIState global
-  components/        AppShell, TopBar, Sidebar, PageTree, SidebarItem,
+  components/        AppShell, TopBar, Sidebar, SidebarItem, PageTree,
                      Editor, EditorBlock, BlockHandle, CommandPalette,
+                     SearchPanel, ContextMenu, Dialog, SettingsDialog,
                      Button, IconButton
-benchmarks/scripts/  release benchmark harness (see docs/PERFORMANCE.md)
-docs/                ARCHITECTURE, PERFORMANCE, DECISIONS, ROADMAP
+tests/
+  integration/       workspace + state projection tests (cargo test)
+  fixtures/          editor/storage fixtures land here in M3+
+benchmarks/
+  scripts/           bench.ps1 (scenes A–G), shot2png.ps1
+docs/                ARCHITECTURE, UI_ARCHITECTURE, EDITOR_ARCHITECTURE,
+                     PERFORMANCE, DECISIONS, ROADMAP
 ```
 
 ## Milestones

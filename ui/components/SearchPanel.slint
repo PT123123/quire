@@ -1,0 +1,212 @@
+// Ctrl+P page search: titles + content, keyboard-first. The filtered model
+// and Enter resolution live in Rust; this component is view + key routing.
+
+import { Theme } from "../Theme.slint";
+import { Colors } from "../Colors.slint";
+import { Typography } from "../Typography.slint";
+import { Icon } from "../Icons.slint";
+import { ListView } from "std-widgets.slint";
+import { UIState } from "../Types.slint";
+
+export component SearchPanel inherits PopupWindow {
+    width: 620px;
+    height: box.height + Theme.spacing-sm * 2;
+    close-policy: PopupClosePolicy.no-auto-close;
+
+    property <bool> opened: UIState.search-open;
+    changed opened => {
+        if (UIState.search-open) {
+            input.focus();
+        }
+    }
+
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+
+        Rectangle {
+            x: 2px; y: 3px;
+            width: parent.width - 4px;
+            height: parent.height - 5px;
+            border-radius: Theme.radius-lg + 2px;
+            background: Colors.shadow;
+        }
+        Rectangle {
+            width: parent.width;
+            height: parent.height;
+            border-radius: Theme.radius-lg;
+            background: Colors.surface-overlay;
+            border-width: 1px;
+            border-color: Colors.border;
+        }
+
+        box := VerticalLayout {
+            x: 0px; y: Theme.spacing-sm;
+            width: parent.width;
+            height: input-row.height + divider.height + list.height + footer.height;
+
+            input-row := Rectangle {
+                height: 40px;
+                HorizontalLayout {
+                    spacing: Theme.spacing-sm;
+                    padding-left: Theme.spacing-md;
+                    padding-right: Theme.spacing-md;
+                    Icon {
+                        vertical-stretch: 0;
+                        cross-axis-self-alignment: center;
+                        width: 16px;
+                        height: 16px;
+                        size: 16px;
+                        name: "search";
+                        color: Colors.text-muted;
+                    }
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        input := TextInput {
+                            width: parent.width;
+                            height: parent.height;
+                            vertical-alignment: center;
+                            font-family: Typography.ui-font;
+                            font-size: Typography.size-ui-lg;
+                            color: Colors.text-primary;
+                            selection-foreground-color: Colors.text-primary;
+                            selection-background-color: Colors.selection;
+                            single-line: true;
+                            text <=> UIState.search-query;
+                            accepted => {
+                                UIState.search-invoked();
+                            }
+                            key-pressed(event) => {
+                                if (event.text == Key.Escape) {
+                                    UIState.search-open = false;
+                                    accept
+                                } else if (event.text == Key.UpArrow) {
+                                    UIState.search-move(-1);
+                                    accept
+                                } else if (event.text == Key.DownArrow) {
+                                    UIState.search-move(1);
+                                    accept
+                                } else {
+                                    reject
+                                }
+                            }
+                        }
+                        Text {
+                            visible: UIState.search-query == "";
+                            vertical-alignment: center;
+                            font-family: Typography.ui-font;
+                            font-size: Typography.size-ui-lg;
+                            color: Colors.text-muted;
+                            text: "Search pages…";
+                        }
+                    }
+                }
+            }
+
+            divider := Rectangle {
+                height: 1px;
+                Rectangle {
+                    x: Theme.spacing-sm;
+                    width: parent.width - 2 * Theme.spacing-sm;
+                    height: 1px;
+                    background: Colors.border;
+                }
+            }
+
+            list-host := Rectangle {
+                height: UIState.search-rows.length == 0 ? 64px : 312px;
+
+                list := ListView {
+                    width: parent.width;
+                    height: parent.height;
+                    content-width: parent.width;
+
+                    for row[idx] in UIState.search-rows : Rectangle {
+                        width: list.content-width;
+                        height: 52px;
+                        property <bool> active: idx == UIState.search-focus;
+                        property <bool> hovering: row-ta.has-hover;
+                        changed hovering => {
+                            if (hovering) {
+                                UIState.search-focus = idx;
+                            }
+                        }
+                        border-radius: Theme.radius-sm;
+                        background: active || row-ta.has-hover ? Colors.surface-hover : transparent;
+
+                        VerticalLayout {
+                            spacing: 1px;
+                            padding-left: Theme.spacing-md;
+                            padding-right: Theme.spacing-md;
+                            padding-top: Theme.spacing-xs;
+                            padding-bottom: Theme.spacing-xs;
+                            // title line
+                            HorizontalLayout {
+                                spacing: Theme.spacing-sm;
+                                Icon {
+                                    vertical-stretch: 0;
+                                    cross-axis-self-alignment: center;
+                                    width: 13px;
+                                    height: 13px;
+                                    size: 13px;
+                                    name: "page";
+                                    color: Colors.text-muted;
+                                }
+                                Text {
+                                    text: row.title;
+                                    font-family: Typography.ui-font;
+                                    font-size: Typography.size-ui-lg;
+                                    color: active ? Colors.text-primary : Colors.text-secondary;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+                            }
+                            // snippet / breadcrumb line
+                            Text {
+                                x: 13px + Theme.spacing-sm;
+                                text: row.snippet;
+                                font-family: Typography.ui-font;
+                                font-size: Typography.size-caption;
+                                color: Colors.text-muted;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                        }
+
+                        row-ta := TouchArea {
+                            mouse-cursor: MouseCursor.pointer;
+                            clicked => {
+                                UIState.search-selected-id = row.page-id;
+                                UIState.search-invoked();
+                            }
+                        }
+                    }
+                }
+
+                if UIState.search-rows.length == 0 : Text {
+                    x: Theme.spacing-md;
+                    y: 0px;
+                    height: parent.height;
+                    vertical-alignment: center;
+                    text: UIState.search-query == ""
+                        ? "Type to search titles and content."
+                        : "No pages match.";
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-ui;
+                    color: Colors.text-muted;
+                }
+            }
+
+            footer := Rectangle {
+                height: 26px;
+                Text {
+                    x: Theme.spacing-md;
+                    text: "↑ ↓ navigate · Enter open · Esc dismiss";
+                    font-size: Typography.size-caption;
+                    color: Colors.text-muted;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}

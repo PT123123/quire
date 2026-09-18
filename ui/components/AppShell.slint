@@ -1,5 +1,5 @@
 // Composition of the whole window body: title bar on top, sidebar + editor
-// below, plus the palette scrim. No business logic here — state flows
+// below, plus the scrim behind overlays. No business logic here — state flows
 // through the UIState global, actions flow to the Rust controller.
 
 import { Theme } from "../Theme.slint";
@@ -13,6 +13,12 @@ export component AppShell inherits Rectangle {
     callback minimize-requested();
     callback maximize-requested();
     callback close-requested();
+
+    property <bool> overlay-open: UIState.palette-open
+        || UIState.search-open
+        || UIState.menu-open
+        || UIState.dialog-open
+        || UIState.settings-open;
 
     VerticalLayout {
         TopBar {
@@ -32,16 +38,20 @@ export component AppShell inherits Rectangle {
         }
     }
 
-    // scrim behind the command palette
+    // scrim behind overlays: a click dismisses whichever is open
     Rectangle {
         width: parent.width;
         height: parent.height;
-        visible: UIState.palette-open;
+        visible: root.overlay-open;
         background: transparent;
         scrim-ta := TouchArea {
-            enabled: UIState.palette-open;
+            enabled: root.overlay-open;
             clicked => {
                 UIState.palette-open = false;
+                UIState.search-open = false;
+                UIState.menu-open = false;
+                UIState.dialog-open = false;
+                UIState.settings-open = false;
             }
         }
     }

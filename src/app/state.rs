@@ -1,20 +1,34 @@
-// Application state + mock content for M1/M2.
+// Application state + mock content for M2.
 //
-// The real Document Model (M3+) replaces the `mock_*` constructors; the
-// shapes below (SidebarNode / BlockRow / CommandRow) are UI-facing
-// projections generated from `ui/Types.slint`, not the storage format.
+// The tree/bookkeeping logic lives in `workspace.rs` (pure, unit-tested);
+// this module is the view-projection layer: it turns workspace state into
+// Slint models (SidebarNode / BlockRow / CommandRow / SearchRow / MenuRow).
+// M3 replaces the mock block content with the real document model.
 
-use crate::{BlockRow, CommandRow, SidebarNode};
-use slint::{ModelRc, VecModel};
+use crate::app::workspace::{SearchHit, Workspace, BENCH_ID_BASE, MAX_RECENTS};
+use crate::{BlockRow, CommandRow, MenuRow, SearchRow, SidebarNode};
+use slint::{Model, ModelRc, VecModel};
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 pub struct AppState {
+    pub workspace: RefCell<Workspace>,
     pub sidebar: Rc<VecModel<SidebarNode>>,
     pub blocks: Rc<VecModel<BlockRow>>,
     pub commands: Rc<VecModel<CommandRow>>,
+    pub search: Rc<VecModel<SearchRow>>,
+    pub menu: Rc<VecModel<MenuRow>>,
     /// Full command list before query filtering.
     pub all_commands: Vec<CommandRow>,
-    pub page_titles: Vec<&'static str>,
+    /// Mock block content per page id (M3: read from storage instead).
+    pub contents: RefCell<HashMap<i32, Vec<BlockRow>>>,
+    /// Currently open page (0 = none / empty workspace).
+    pub open_page: Cell<i32>,
+    /// Page awaiting delete confirmation.
+    pub pending_delete: Cell<Option<i32>>,
+    /// Benchmark scroll bookkeeping (scene F): last viewport-y seen.
+    pub last_scroll_y: Cell<f32>,
 }
 
 pub struct HandleArgs {
@@ -22,26 +36,60 @@ pub struct HandleArgs {
     pub blocks: usize,
     /// Quit the event loop after N seconds (0 = never).
     pub auto_exit_secs: f64,
+    /// Scene G: number of extra flat pages to switch between.
+    pub bench_pages: usize,
 }
 
 impl AppState {
     pub fn new(args: &HandleArgs) -> Rc<Self> {
-        let sidebar = Rc::new(VecModel::from(mock_sidebar()));
-        let blocks = if args.blocks > 0 {
-            Rc::new(VecModel::from(mock_blocks_bench(args.blocks)))
+        let mut workspace = if args.bench_pages > 0 {
+            Workspace::with_bench_pages(args.bench_pages)
         } else {
-            Rc::new(VecModel::from(mock_blocks_sample()))
+            Workspace::sample()
         };
-        let all_commands = mock_commands();
+
+        let mut contents: HashMap<i32, Vec<BlockRow>> = HashMap::new();
+        for id in workspace.dfs_order() {
+            let title = workspace.title_of(id).unwrap().to_string();
+            let blocks = if args.blocks > 0 && id == PAGE_ATLAS {
+                mock_blocks_bench(args.blocks)
+            } else if id >= BENCH_ID_BASE {
+                mock_blocks_bench_page(&title)
+            } else {
+                mock_blocks_for_page(id, &title)
+            };
+            let blob = block_search_blob(&title, &blocks);
+            workspace.set_search_text(id, blob);
+            contents.insert(id, blocks);
+        }
+
+        let open = if args.blocks > 0 { PAGE_ATLAS } else { PAGE_GETTING_STARTED };
+        let blocks = Rc::new(VecModel::from(
+            contents.get(&open).cloned().unwrap_or_default(),
+        ));
+
+        let all_commands = mock_commands(&workspace);
         let commands = Rc::new(VecModel::from(all_commands.clone()));
-        Rc::new(AppState {
-            sidebar,
+        let state = AppState {
+            workspace: RefCell::new(workspace),
+            sidebar: Rc::new(VecModel::from(Vec::new())),
             blocks,
             commands,
+            search: Rc::new(VecModel::from(Vec::new())),
+            menu: Rc::new(VecModel::from(Vec::new())),
             all_commands,
-            page_titles: mock_page_titles(),
-        })
+            contents: RefCell::new(contents),
+            open_page: Cell::new(0),
+            pending_delete: Cell::new(None),
+            last_scroll_y: Cell::new(0.0),
+        };
+        // bench pages never appear as recents/initial content churn
+        let state = Rc::new(state);
+        state.open_page(open);
+        state
     }
+
+    // ---- models ----
 
     pub fn sidebar_model(&self) -> ModelRc<SidebarNode> {
         ModelRc::from(self.sidebar.clone())
@@ -52,6 +100,211 @@ impl AppState {
     pub fn commands_model(&self) -> ModelRc<CommandRow> {
         ModelRc::from(self.commands.clone())
     }
+    pub fn search_model(&self) -> ModelRc<SearchRow> {
+        ModelRc::from(self.search.clone())
+    }
+    pub fn menu_model(&self) -> ModelRc<MenuRow> {
+        ModelRc::from(self.menu.clone())
+    }
+
+    // ---- projections ----
+
+    /// Rebuild the flat sidebar model: Favorites, Recent, Workspace tree,
+    /// and the trailing "New page" action row. `row.y` is the cumulative
+    /// pixel offset inside the tree area (used to anchor the context menu).
+    pub fn rebuild_sidebar(&self) {
+        self.sidebar.set_vec(self.build_sidebar_rows());
+    }
+
+    pub fn build_sidebar_rows(&self) -> Vec<SidebarNode> {
+        let ws = self.workspace.borrow();
+        let open = self.open_page.get();
+        let mut rows: Vec<SidebarNode> = Vec::new();
+        let mut y = 0;
+
+        let push = |rows: &mut Vec<SidebarNode>, y: &mut i32, node: SidebarNode| {
+            let mut n = node;
+            n.y = *y;
+            *y += if n.kind == "header" { 26 } else { 28 };
+            rows.push(n);
+        };
+
+        let favorites = ws.favorites();
+        if !favorites.is_empty() {
+            push(&mut rows, &mut y, header("Favorites"));
+            for (id, title) in favorites {
+                push(
+                    &mut rows,
+                    &mut y,
+                    leaf_row(id, &title, "favorite", false),
+                );
+            }
+        }
+        let recents = ws.recents();
+        if !recents.is_empty() {
+            push(&mut rows, &mut y, header("Recent"));
+            for (id, title) in recents.iter().take(MAX_RECENTS) {
+                push(&mut rows, &mut y, leaf_row(*id, title, "recent", false));
+            }
+        }
+
+        push(&mut rows, &mut y, header("Workspace"));
+        for r in ws.tree_rows() {
+            rows.push(SidebarNode {
+                id: r.id,
+                label: r.label.into(),
+                kind: "page".into(),
+                depth: r.depth,
+                expanded: r.expanded,
+                has_children: r.has_children,
+                selected: r.id == open,
+                y: y,
+            });
+            y += 28;
+        }
+        // trailing "new page" action row
+        rows.push(SidebarNode {
+            id: ROW_NEW_PAGE,
+            label: "New page".into(),
+            kind: "new-page".into(),
+            depth: 0,
+            expanded: false,
+            has_children: false,
+            selected: false,
+            y: y,
+        });
+        rows
+    }
+
+    pub fn sidebar_row_y(&self, id: i32) -> i32 {
+        self.sidebar
+            .iter()
+            .find(|r| r.id == id)
+            .map(|r| r.y)
+            .unwrap_or(0)
+    }
+
+    // ---- operations (called by the controller) ----
+
+    pub fn open_page(&self, id: i32) {
+        {
+            let mut ws = self.workspace.borrow_mut();
+            if !ws.contains(id) {
+                return;
+            }
+            ws.mark_opened(id);
+            ws.expand_ancestors(id);
+        }
+        self.open_page.set(id);
+        let blocks = self
+            .contents
+            .borrow()
+            .get(&id)
+            .cloned()
+            .unwrap_or_default();
+        self.blocks.set_vec(blocks);
+        self.rebuild_sidebar();
+    }
+
+    /// Open a page and return its title + breadcrumb for the top bar.
+    pub fn open_page_info(&self, id: i32) -> (String, String) {
+        let ws = self.workspace.borrow();
+        let title = ws.title_of(id).unwrap_or("").to_string();
+        let crumb = ws.breadcrumb(id);
+        (title, crumb)
+    }
+
+    pub fn create_page(&self, parent: Option<i32>) -> i32 {
+        let id = self
+            .workspace
+            .borrow_mut()
+            .create(parent, "Untitled");
+        self.contents
+            .borrow_mut()
+            .insert(id, Vec::new()); // new pages start empty (empty state)
+        self.open_page(id);
+        id
+    }
+
+    pub fn rename_page(&self, id: i32, title: &str) {
+        let title = title.trim();
+        if title.is_empty() {
+            self.rebuild_sidebar();
+            return;
+        }
+        self.workspace.borrow_mut().rename(id, title);
+        // refresh the page header block (when the template carries one) and
+        // the searchable blob's title prefix
+        let blob = {
+            let mut contents = self.contents.borrow_mut();
+            if let Some(blocks) = contents.get_mut(&id) {
+                if let Some(first) = blocks.first_mut() {
+                    if first.kind == BLOCK_H1 {
+                        first.text = title.into();
+                    }
+                }
+                block_search_blob(title, blocks)
+            } else {
+                title.to_string()
+            }
+        };
+        self.workspace.borrow_mut().set_search_text(id, blob);
+        self.rebuild_sidebar();
+    }
+
+    pub fn duplicate_page(&self, id: i32) -> Option<i32> {
+        let new_id = self.workspace.borrow_mut().duplicate(id);
+        if let Some(nid) = new_id {
+            let blocks = self.contents.borrow().get(&id).cloned().unwrap_or_default();
+            let title = self.workspace.borrow().title_of(nid).unwrap().to_string();
+            let blob = block_search_blob(&title, &blocks);
+            self.contents.borrow_mut().insert(nid, blocks);
+            self.workspace.borrow_mut().set_search_text(nid, blob);
+            self.rebuild_sidebar();
+        }
+        new_id
+    }
+
+    pub fn delete_page(&self, id: i32) -> bool {
+        let removed = self.workspace.borrow_mut().delete(id);
+        let had_open = removed.contains(&self.open_page.get());
+        for r in &removed {
+            self.contents.borrow_mut().remove(r);
+        }
+        if had_open {
+            // stale until the controller opens a fallback page
+            self.open_page.set(0);
+        }
+        self.rebuild_sidebar();
+        had_open
+    }
+
+    pub fn toggle_favorite(&self, id: i32) {
+        self.workspace.borrow_mut().toggle_favorite(id);
+        self.rebuild_sidebar();
+    }
+
+    pub fn toggle_expanded(&self, id: i32) {
+        self.workspace.borrow_mut().toggle_expanded(id);
+        self.rebuild_sidebar();
+    }
+
+    /// Prepare the delete-confirmation dialog for `id`; the controller reads
+    /// the text and shows the popup.
+    pub fn delete_dialog_text(&self, id: i32) -> (String, String) {
+        let ws = self.workspace.borrow();
+        let title = ws.title_of(id).unwrap_or("").to_string();
+        let n = ws.subtree_size(id);
+        let message = if n > 1 {
+            format!("“{title}” and its {} sub-pages will be deleted. This cannot be undone.", n - 1)
+        } else {
+            format!("“{title}” will be deleted. This cannot be undone.")
+        };
+        self.pending_delete.set(Some(id));
+        (title, message)
+    }
+
+    // ---- command palette ----
 
     pub fn set_query(&self, query: &str) {
         let filtered = if query.is_empty() {
@@ -66,63 +319,99 @@ impl AppState {
         self.commands.set_vec(filtered);
     }
 
-    /// Replace sidebar rows (used when a page node toggles expansion or is selected).
-    pub fn set_sidebar_rows(&self, rows: Vec<SidebarNode>) {
-        self.sidebar.set_vec(rows);
+    // ---- search panel ----
+
+    pub fn set_search_query(&self, query: &str) {
+        let hits: Vec<SearchHit> = self.workspace.borrow().search(query);
+        let rows: Vec<SearchRow> = hits
+            .into_iter()
+            .map(|h| SearchRow {
+                page_id: h.id,
+                title: h.title.into(),
+                snippet: if h.snippet.is_empty() {
+                    h.breadcrumb.into()
+                } else {
+                    h.snippet.into()
+                },
+            })
+            .collect();
+        self.search.set_vec(rows);
     }
 
-    pub fn load_page(&self, title: &str) {
-        self.blocks.set_vec(mock_blocks_for_page(title));
+    // ---- context menu ----
+
+    /// Context-menu items for a page row (also used by the TopBar ⋯ menu).
+    pub fn fill_menu(&self, id: i32) {
+        let ws = self.workspace.borrow();
+        let fav_label = if ws.get(id).map(|p| p.favorite).unwrap_or(false) {
+            "Remove from favorites"
+        } else {
+            "Add to favorites"
+        };
+        let rows = vec![
+            MenuRow { id: MENU_NEW_SUBPAGE, label: "New subpage".into(), icon: "plus".into(), danger: false },
+            MenuRow { id: MENU_RENAME, label: "Rename".into(), icon: "pencil".into(), danger: false },
+            MenuRow { id: MENU_DUPLICATE, label: "Duplicate".into(), icon: "copy".into(), danger: false },
+            MenuRow { id: MENU_FAVORITE, label: fav_label.into(), icon: "star".into(), danger: false },
+            MenuRow { id: MENU_DELETE, label: "Delete".into(), icon: "trash".into(), danger: true },
+        ];
+        self.menu.set_vec(rows);
+    }
+
+    /// Benchmark scene F: the controller reads/writes the editor viewport-y
+    /// property and uses this cell to detect "hit the bottom" (position
+    /// stopped changing) so the scroll can wrap.
+    pub fn last_scroll_y(&self) -> f32 {
+        self.last_scroll_y.get()
+    }
+    pub fn set_last_scroll_y(&self, v: f32) {
+        self.last_scroll_y.set(v);
     }
 }
 
-fn node(id: i32, label: &str, kind: &str, depth: i32, expanded: bool, has_children: bool) -> SidebarNode {
+// Sample page ids (stable, used by scenes/tests).
+pub const PAGE_WEEKLY_REVIEW: i32 = 100;
+pub const PAGE_GETTING_STARTED: i32 = 102;
+pub const PAGE_ATLAS: i32 = 105;
+pub const PAGE_CHINESE: i32 = 112;
+pub const PAGE_SCRATCHPAD: i32 = 113;
+
+pub const ROW_NEW_PAGE: i32 = -2;
+
+// Context-menu action ids.
+pub const MENU_NEW_SUBPAGE: i32 = 1;
+pub const MENU_RENAME: i32 = 2;
+pub const MENU_DUPLICATE: i32 = 3;
+pub const MENU_FAVORITE: i32 = 4;
+pub const MENU_DELETE: i32 = 5;
+
+fn header(label: &str) -> SidebarNode {
+    SidebarNode {
+        id: -1,
+        label: label.into(),
+        kind: "header".into(),
+        depth: 0,
+        expanded: false,
+        has_children: false,
+        selected: false,
+        y: 0,
+    }
+}
+
+fn leaf_row(id: i32, label: &str, kind: &str, selected: bool) -> SidebarNode {
     SidebarNode {
         id,
         label: label.into(),
         kind: kind.into(),
-        depth,
-        expanded,
-        has_children,
-        selected: false,
+        depth: 0,
+        expanded: false,
+        has_children: false,
+        selected,
+        y: 0,
     }
 }
 
-/// Flat, pre-expanded row list; `depth` drives indentation. Children of a
-/// collapsed node are simply not present in the model (M2 keeps it this way;
-/// real virtualization arrives with M7's tree work).
-pub fn mock_sidebar() -> Vec<SidebarNode> {
-    use sidebar_kind::*;
-    let mut rows = vec![node(10, "FAVORITES", SECTION_HEADER, 0, false, false)];
-    rows.push(node(11, "Weekly Review", FAVORITE, 0, false, false));
-    rows.push(node(12, "Design Ideas", FAVORITE, 0, false, false));
-    rows.push(node(20, "RECENT", SECTION_HEADER, 0, false, false));
-    rows.push(node(21, "Project Atlas", RECENT, 0, false, false));
-    rows.push(node(22, "Meeting Notes", RECENT, 0, false, false));
-    rows.push(node(30, "WORKSPACE", SECTION_HEADER, 0, false, false));
-    rows.push(node(31, "Getting Started", PAGE, 0, true, true));
-    rows.push(node(32, "Keyboard Shortcuts", PAGE, 1, false, false));
-    rows.push(node(33, "Import from Markdown", PAGE, 1, false, false));
-    rows.push(node(34, "Project Atlas", PAGE, 0, true, true));
-    rows.push(node(35, "Research Notes", PAGE, 1, true, true));
-    rows.push(node(36, "Sources", PAGE, 2, false, false));
-    rows.push(node(37, "Meeting Notes", PAGE, 1, false, false));
-    rows.push(node(38, "Architecture", PAGE, 1, false, false));
-    rows.push(node(39, "Reading List", PAGE, 0, false, true));
-    rows.push(node(40, "写作与中文测试", PAGE, 0, false, false));
-    rows.push(node(41, "Scratchpad", PAGE, 0, false, false));
-    if let Some(atlas) = rows.iter_mut().find(|r| r.id == 34) {
-        atlas.selected = true;
-    }
-    rows
-}
-
-mod sidebar_kind {
-    pub const SECTION_HEADER: &str = "header";
-    pub const FAVORITE: &str = "favorite";
-    pub const RECENT: &str = "recent";
-    pub const PAGE: &str = "page";
-}
+// ---- block content ----
 
 pub const BLOCK_PARAGRAPH: i32 = 0;
 pub const BLOCK_H1: i32 = 1;
@@ -155,44 +444,124 @@ fn with_tail(mut b: Vec<BlockRow>) -> Vec<BlockRow> {
     b
 }
 
+fn number_renumber(b: &mut [BlockRow]) {
+    let mut n = 0;
+    for r in b.iter_mut() {
+        if r.kind == BLOCK_NUMBERED {
+            n += 1;
+            r.number = n;
+        }
+    }
+}
+
+fn mock_blocks_for_page(id: i32, title: &str) -> Vec<BlockRow> {
+    match id {
+        PAGE_GETTING_STARTED => mock_blocks_sample(),
+        PAGE_CHINESE => mock_blocks_chinese(),
+        PAGE_SCRATCHPAD => Vec::new(),
+        _ => mock_blocks_generic(title),
+    }
+}
+
 fn mock_blocks_sample() -> Vec<BlockRow> {
-    let mut b = vec![block(
-        BLOCK_PARAGRAPH,
-        "A quiet home for thinking. This workspace collects notes, plans, and references for the Atlas project — and doubles as the visual test document for Quire itself.",
-    )];
-    b.push(block(BLOCK_DIVIDER, ""));
-    b.push(block(BLOCK_H2, "Why a local-first editor"));
-    b.push(block(
-        BLOCK_PARAGRAPH,
-        "Cloud apps are great until the laptop fan sounds like a jet engine. Quire keeps documents in a local SQLite database, renders with the GPU, and stays out of the way.",
-    ));
-    b.push(block(BLOCK_QUOTE, "Simplicity is the ultimate sophistication — but performance is the ultimate courtesy."));
-    b.push(block(BLOCK_H3, "Principles"));
-    b.push(block(BLOCK_BULLET, "One process, one document model, no hidden servers"));
-    b.push(block(BLOCK_BULLET, "Only the focused block owns a real text cursor"));
-    b.push(block(BLOCK_BULLET, "Nothing animates unless the user asks for it"));
-    b.push(block(BLOCK_NUMBERED, "Write instantly, even on a five-year-old laptop"));
-    b.push(block(BLOCK_NUMBERED, "Scroll a 10 000-block page without hitching"));
-    b.push(block(BLOCK_NUMBERED, "Close the lid, reopen, and everything is there"));
-    b.push(block(BLOCK_TODO, "Block editor MVP"));
-    b.push(block(BLOCK_TODO, "Slash menu (type \"/\" anywhere)"));
-    b.push(block(BLOCK_H2, "运行与中文"));
-    b.push(block(
-        BLOCK_PARAGRAPH,
-        "中文段落用于验证字体回退与行高：排版本应稳定，不出现字符裁剪；标点悬挂与换行位置符合预期。",
-    ));
-    b.push(block(BLOCK_CODE, "cargo run --release  # 140 ms to first paint, hopefully"));
-    b.push(block(
-        BLOCK_PARAGRAPH,
-        "Start typing, or press Ctrl+K to open the command palette.",
-    ));
-    let mut numbered = 0;
+    let mut b = vec![
+        block(
+            BLOCK_PARAGRAPH,
+            "A quiet home for thinking. This workspace collects notes, plans, and references for the Atlas project — and doubles as the visual test document for Quire itself.",
+        ),
+        block(BLOCK_DIVIDER, ""),
+        block(BLOCK_H2, "Why a local-first editor"),
+        block(
+            BLOCK_PARAGRAPH,
+            "Cloud apps are great until the laptop fan sounds like a jet engine. Quire keeps documents in a local SQLite database, renders with the GPU, and stays out of the way.",
+        ),
+        block(BLOCK_QUOTE, "Simplicity is the ultimate sophistication — but performance is the ultimate courtesy."),
+        block(BLOCK_H3, "Principles"),
+        block(BLOCK_BULLET, "One process, one document model, no hidden servers"),
+        block(BLOCK_BULLET, "Only the focused block owns a real text cursor"),
+        block(BLOCK_BULLET, "Nothing animates unless the user asks for it"),
+        block(BLOCK_NUMBERED, "Write instantly, even on a five-year-old laptop"),
+        block(BLOCK_NUMBERED, "Scroll a 10 000-block page without hitching"),
+        block(BLOCK_NUMBERED, "Close the lid, reopen, and everything is there"),
+        block(BLOCK_TODO, "Block editor MVP"),
+        block(BLOCK_TODO, "Slash menu (type \"/\" anywhere)"),
+        block(BLOCK_H2, "运行与中文"),
+        block(
+            BLOCK_PARAGRAPH,
+            "中文段落用于验证字体回退与行高：排版本应稳定，不出现字符裁剪；标点悬挂与换行位置符合预期。",
+        ),
+        block(BLOCK_CODE, "cargo run --release  # 140 ms to first paint, hopefully"),
+        block(
+            BLOCK_PARAGRAPH,
+            "Start typing, or press Ctrl+K to open the command palette.",
+        ),
+    ];
     for (i, row) in b.iter_mut().enumerate() {
         row.id = i as i32;
-        if row.kind == BLOCK_NUMBERED {
-            numbered += 1;
-            row.number = numbered;
-        }
+    }
+    number_renumber(&mut b);
+    with_tail(b)
+}
+
+fn mock_blocks_chinese() -> Vec<BlockRow> {
+    let mut b = vec![
+        block(BLOCK_H2, "写作与中文测试"),
+        block(
+            BLOCK_PARAGRAPH,
+            "中文段落用于验证字体回退与行高：排版本应稳定，不出现字符裁剪；标点悬挂与换行位置符合预期。",
+        ),
+        block(
+            BLOCK_PARAGRAPH,
+            "在长段落中混排 English words 与数字（如 2026 年 9 月）时，基线应保持一致，中西文之间留有恰当的间隙。",
+        ),
+        block(BLOCK_TODO, "检查行高在 125% 缩放下是否稳定"),
+        block(BLOCK_TODO, "检查标点挤压与引号方向"),
+        block(BLOCK_QUOTE, "好的排版是看不见的 —— 读者只注意到内容本身。"),
+        block(BLOCK_CODE, "cargo run --release --features skia"),
+    ];
+    for (i, row) in b.iter_mut().enumerate() {
+        row.id = i as i32;
+    }
+    with_tail(b)
+}
+
+/// Placeholder content for regular pages. No H1: the editor header already
+/// renders the page title.
+fn mock_blocks_generic(_title: &str) -> Vec<BlockRow> {
+    let mut b = vec![
+        block(
+            BLOCK_PARAGRAPH,
+            "This is a mock page for the navigation milestone: the tree, search, and menus are live; the text is placeholder until the block editor arrives.",
+        ),
+        block(BLOCK_DIVIDER, ""),
+        block(
+            BLOCK_PARAGRAPH,
+            "Use the sidebar to create, rename, duplicate, and delete pages — changes live in memory for now; SQLite persistence lands with the next milestone.",
+        ),
+        block(BLOCK_BULLET, "Ctrl+P searches every page, titles and content"),
+        block(BLOCK_BULLET, "Ctrl+K opens the command palette"),
+        block(BLOCK_BULLET, "Right-click a page for its context menu"),
+    ];
+    for (i, row) in b.iter_mut().enumerate() {
+        row.id = i as i32;
+    }
+    with_tail(b)
+}
+
+/// Small page body for scene G's bench pages.
+fn mock_blocks_bench_page(title: &str) -> Vec<BlockRow> {
+    let mut b = vec![
+        block(
+            BLOCK_PARAGRAPH,
+            "Benchmark fixture page. Switching between these pages exercises model swap + delegate rebuild.",
+        ),
+        block(BLOCK_H2, title),
+        block(BLOCK_PARAGRAPH, "The quick brown fox jumps over the lazy dog."),
+        block(BLOCK_BULLET, "Pack my box with five dozen liquor jugs."),
+        block(BLOCK_TODO, "Sphinx of black quartz, judge my vow."),
+    ];
+    for (i, row) in b.iter_mut().enumerate() {
+        row.id = i as i32;
     }
     with_tail(b)
 }
@@ -222,22 +591,29 @@ fn mock_blocks_bench(count: usize) -> Vec<BlockRow> {
     )
 }
 
-pub fn mock_blocks_for_page(title: &str) -> Vec<BlockRow> {
-    let mut b = Vec::new();
-    b.push(block(BLOCK_H1, title));
-    b.push(block(
-        BLOCK_PARAGRAPH,
-        &format!("This is the “{title}” page. Real editing arrives with the block editor milestone; the shell, the fonts, and the colors are already load-bearing."),
-    ));
-    b.push(block(BLOCK_DIVIDER, ""));
-    b.push(block(
-        BLOCK_PARAGRAPH,
-        "Start typing, or press Ctrl+K to open the command palette.",
-    ));
-    with_tail(b)
+/// Title + block texts, the blob the search scans.
+fn block_search_blob(title: &str, blocks: &[BlockRow]) -> String {
+    let mut blob = String::from(title);
+    for b in blocks {
+        if !b.text.is_empty() {
+            blob.push('\n');
+            blob.push_str(&b.text);
+        }
+    }
+    blob
 }
 
-fn mock_commands() -> Vec<CommandRow> {
+// ---- command palette ----
+
+const CMD_NEW_PAGE: i32 = 1;
+const CMD_SEARCH: i32 = 2;
+const CMD_TOGGLE_SIDEBAR: i32 = 3;
+const CMD_TOGGLE_THEME: i32 = 4;
+const CMD_SETTINGS: i32 = 5;
+/// Jump-to-page commands are 10 000 + page id.
+pub const CMD_PAGE_BASE: i32 = 10_000;
+
+fn mock_commands(ws: &Workspace) -> Vec<CommandRow> {
     let mut v = Vec::new();
     let mut cmd = |id: i32, name: &str, hint: &str, section: &str, icon: &str| {
         v.push(CommandRow {
@@ -248,31 +624,20 @@ fn mock_commands() -> Vec<CommandRow> {
             icon: icon.into(),
         })
     };
-    cmd(1, "New Page", "Ctrl+N", "Editor", "plus");
-    cmd(2, "Toggle Sidebar", "Ctrl+B", "Interface", "panel-left");
-    cmd(3, "Toggle Dark Mode", "Ctrl+Shift+L", "Interface", "moon");
-    cmd(4, "Go to Settings", "", "Navigate", "settings");
-    cmd(5, "Export as Markdown…", "Ctrl+E", "File", "export");
-    cmd(6, "Import from Markdown…", "", "File", "import");
-    for (i, t) in mock_page_titles().iter().enumerate() {
-        cmd(50 + i as i32, t, "", "Jump to page", "page");
+    cmd(CMD_NEW_PAGE, "New Page", "Ctrl+N", "Editor", "plus");
+    cmd(CMD_SEARCH, "Search Pages…", "Ctrl+P", "Navigate", "search");
+    cmd(CMD_TOGGLE_SIDEBAR, "Toggle Sidebar", "Ctrl+B", "Interface", "panel-left");
+    cmd(CMD_TOGGLE_THEME, "Toggle Dark Mode", "Ctrl+Shift+L", "Interface", "moon");
+    cmd(CMD_SETTINGS, "Settings", "", "Navigate", "settings");
+    for id in ws.dfs_order() {
+        if id >= BENCH_ID_BASE {
+            continue;
+        }
+        if let Some(title) = ws.title_of(id) {
+            cmd(CMD_PAGE_BASE + id, title, "", "Jump to page", "page");
+        }
     }
     v
-}
-
-fn mock_page_titles() -> Vec<&'static str> {
-    vec![
-        "Getting Started",
-        "Keyboard Shortcuts",
-        "Import from Markdown",
-        "Project Atlas",
-        "Research Notes",
-        "Meeting Notes",
-        "Architecture",
-        "Reading List",
-        "写作与中文测试",
-        "Scratchpad",
-    ]
 }
 
 /// Cheap subsequence fuzzy match, case-insensitive, ASCII-only scoring.
