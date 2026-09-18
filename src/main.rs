@@ -96,7 +96,7 @@ fn real_main() -> Result<(), String> {
     // Persistence (M3): open (or create) the database. A failure to open
     // means the session runs in memory only — never fall back to writing
     // over a database we could not read.
-    let repo: Option<std::sync::Arc<dyn quire::core::Repository>> = {
+    let repo: Option<std::sync::Arc<quire::storage::SqliteRepository>> = {
         let path = launch
             .db
             .clone()

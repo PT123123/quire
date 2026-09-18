@@ -18,6 +18,7 @@ export struct TextRun {
     italic: bool,
     strike: bool,
     code: bool,
+    link: bool,
 }
 
 export struct BlockRow {
@@ -88,6 +89,12 @@ export global UIState {
     in-out property <[MenuRow]> block-menu-rows;
     in-out property <length> block-menu-x: 300px;
     in-out property <length> block-menu-y: 100px;
+
+    // link dialog (M6): Ctrl+L over a selection
+    in-out property <bool> link-open: false;
+    in-out property <string> link-url: "";
+    in-out property <int> link-start: 0;
+    in-out property <int> link-end: 0;
     /// Internal clipboard for cross-block copy/paste (menu-driven).
     in-out property <bool> has-copied-block: false;
 
@@ -139,6 +146,9 @@ export global UIState {
     callback set-dark(bool);
     callback move-block(int);
     callback toggle-mark(int, int, int); // kind(0 bold,1 italic,2 strike,3 code), start, end
+    callback link-apply();
+    callback link-remove();
+    callback link-cancel();
     callback palette-query-changed();
     callback palette-open-requested();
     callback command-invoked();

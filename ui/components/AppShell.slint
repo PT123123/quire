@@ -19,6 +19,7 @@ export component AppShell inherits Rectangle {
         || UIState.menu-open
         || UIState.dialog-open
         || UIState.settings-open
+        || UIState.link-open
         || UIState.slash-open
         || UIState.block-menu-open-id >= 0;
 
@@ -54,6 +55,7 @@ export component AppShell inherits Rectangle {
                 UIState.menu-open = false;
                 UIState.dialog-open = false;
                 UIState.settings-open = false;
+                UIState.link-open = false;
                 UIState.slash-open = false;
                 UIState.block-menu-open-id = -1;
             }

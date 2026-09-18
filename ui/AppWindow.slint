@@ -5,6 +5,7 @@ import { Theme } from "Theme.slint";
 import { Colors } from "Colors.slint";
 import { Typography } from "Typography.slint";
 import { Icon } from "Icons.slint";
+import { Button } from "components/Button.slint";
 import { UIState } from "Types.slint";
 import { AppShell } from "components/AppShell.slint";
 import { CommandPalette } from "components/CommandPalette.slint";
@@ -125,6 +126,99 @@ component SlashMenuPopup inherits PopupWindow {
     }
 }
 
+component LinkDialog inherits PopupWindow {
+    width: 380px;
+    height: content-col.preferred-height + Theme.spacing-lg * 2;
+    close-policy: PopupClosePolicy.no-auto-close;
+
+    property <bool> opened: UIState.link-open;
+    changed opened => {
+        if (UIState.link-open) {
+            url-input.focus();
+        }
+    }
+
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+
+        Rectangle {
+            x: 2px; y: 3px;
+            width: parent.width - 4px;
+            height: parent.height - 5px;
+            border-radius: Theme.radius-lg + 2px;
+            background: Colors.shadow;
+        }
+        Rectangle {
+            width: parent.width;
+            height: parent.height;
+            border-radius: Theme.radius-lg;
+            background: Colors.surface-overlay;
+            border-width: 1px;
+            border-color: Colors.border;
+        }
+
+        content-col := VerticalLayout {
+            padding: Theme.spacing-lg;
+            spacing: Theme.spacing-md;
+
+            Text {
+                text: "Add link";
+                font-family: Typography.ui-font;
+                font-size: Typography.size-h3;
+                font-weight: Typography.weight-semibold;
+                color: Colors.text-primary;
+            }
+            url-field := Rectangle {
+                height: 32px;
+                border-radius: Theme.radius-sm;
+                background: Colors.background;
+                border-width: 1px;
+                border-color: Colors.border;
+                clip: true;
+                url-input := TextInput {
+                    x: Theme.spacing-sm;
+                    width: parent.width - 2 * Theme.spacing-sm;
+                    y: (parent.height - self.preferred-height) / 2;
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-ui;
+                    color: Colors.text-primary;
+                    single-line: true;
+                    text <=> UIState.link-url;
+                    accepted => {
+                        UIState.link-apply();
+                    }
+                    key-pressed(event) => {
+                        if (event.text == Key.Escape) {
+                            UIState.link-cancel();
+                            accept
+                        } else {
+                            reject
+                        }
+                    }
+                }
+            }
+            HorizontalLayout {
+                spacing: Theme.spacing-sm;
+                Button {
+                    text: "Remove";
+                    clicked => {
+                        UIState.link-remove();
+                    }
+                }
+                Rectangle { horizontal-stretch: 1; }
+                Button {
+                    text: "Apply";
+                    primary: true;
+                    clicked => {
+                        UIState.link-apply();
+                    }
+                }
+            }
+        }
+    }
+}
+
 // Rust-facing names must be re-exported from the entry file (1.18 codegen rule).
 export { UIState, SidebarNode, BlockRow, TextRun, CommandRow, SearchRow, MenuRow, SlashRow } from "Types.slint";
 
@@ -150,6 +244,7 @@ export component AppWindow inherits Window {
     in-out property <bool> menu-open <=> UIState.menu-open;
     in-out property <bool> slash-open <=> UIState.slash-open;
     in-out property <bool> block-menu-open <=> UIState.block-menu-open;
+    in-out property <bool> link-open <=> UIState.link-open;
     in-out property <bool> dialog-open <=> UIState.dialog-open;
     in-out property <bool> settings-open <=> UIState.settings-open;
 
@@ -206,6 +301,14 @@ export component AppWindow inherits Window {
             blockMenu.show();
         } else {
             blockMenu.close();
+        }
+    }
+
+    changed link-open => {
+        if (link-open) {
+            linkDialog.show();
+        } else {
+            linkDialog.close();
         }
     }
 
@@ -328,6 +431,11 @@ export component AppWindow inherits Window {
     blockMenu := BlockMenuPopup {
         x: UIState.block-menu-x;
         y: UIState.block-menu-y;
+    }
+
+    linkDialog := LinkDialog {
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
     }
 
     dialog := ConfirmDialog {
