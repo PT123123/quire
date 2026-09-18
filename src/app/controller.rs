@@ -930,15 +930,11 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
     let g = ui.global::<UIState>();
     match scene {
         "dark" => g.set_dark(true),
-        "palette" | "search" | "search-notes" | "menu" | "dialog" | "settings"
-        | "slash" | "block-menu" => apply_scene_overlay(ui, state, scene),
-
-        "rename" => {
-            g.set_renaming_id(108);
+        "palette" | "search" | "search-notes" | "menu" | "dialog" | "settings" => {
+            apply_scene_overlay(ui, state, scene)
         }
-
-        "empty" => open(&g, state, 113),
         "slash" => {
+            // base: focus the first paragraph (overlay opens the menu)
             let target = {
                 let d = state.doc.borrow();
                 d.page_blocks(core_page_id(state.open_page.get()))
@@ -950,23 +946,15 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
                 g.set_editing_text(text.into());
                 g.set_pending_caret(len);
                 g.set_editing_id(id);
-                state.open_slash("");
-                g.set_slash_focus(0);
-                g.set_slash_open(true);
             }
         }
-        "block-menu" => {
-            let target = {
-                let d = state.doc.borrow();
-                d.page_blocks(core_page_id(state.open_page.get()))
-                    .get(4)
-                    .map(|b| b.id.0 as i32)
-            };
-            if let Some(id) = target {
-                state.fill_block_menu();
-                g.set_block_menu_open_id(id);
-            }
+        "block-menu" => {}
+
+        "rename" => {
+            g.set_renaming_id(108);
         }
+
+        "empty" => open(&g, state, 113),
         "marks" => {
             // seed inline marks on the first paragraph (visual test only,
             // applied directly like an editor toggle would)
@@ -1049,21 +1037,7 @@ pub fn apply_scene_overlay(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             g.set_slash_y(260.0);
             g.set_slash_open(true);
         }
-        "block-menu" => {
-            let target = {
-                let d = state.doc.borrow();
-                d.page_blocks(core_page_id(state.open_page.get()))
-                    .get(4)
-                    .map(|b| b.id.0 as i32)
-            };
-            if let Some(id) = target {
-                state.fill_block_menu();
-                g.set_block_menu_x(320.0);
-                g.set_block_menu_y(300.0);
-                g.set_block_menu_open_id(id);
-                g.set_block_menu_open(true);
-            }
-        }
+
         _ => {}
     }
 }
