@@ -30,7 +30,7 @@ shot scene="default":
 # package the release exe into a zip (M8-lite; installer comes later)
 dist:
     cargo build --release
-    powershell -NoProfile -Command       "New-Item -ItemType Directory -Force dist | Out-Null;        Copy-Item .	argetelease\quire.exe .\dist\quire.exe -Force;        Compress-Archive -Path .\dist\quire.exe -DestinationPath .\dist\quire-windows-x64.zip -Force;        Remove-Item .\dist\quire.exe; Write-Output 'dist/quire-windows-x64.zip ready'"
+    powershell -NoProfile -ExecutionPolicy Bypass -File benchmarks\scripts\dist.ps1
 
 # remove build artifacts: ./target + skia/wgpu benchmark target dirs
 clean:
