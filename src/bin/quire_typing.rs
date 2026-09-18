@@ -18,7 +18,6 @@ use std::time::{Duration, Instant};
 
 use quire::app::controller;
 use quire::app::state::{AppState, HandleArgs};
-use quire::core::persistence::Repository;
 use quire::services::search_service::SearchService;
 use quire::storage::search_index::SearchRequest;
 use quire::storage::SqliteRepository;
