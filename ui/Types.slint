@@ -58,6 +58,13 @@ export global UIState {
     in-out property <string> page-breadcrumb: "";
     in-out property <length> editor-scroll-y: 0px; // Editor viewport mirror
 
+    // block editing (M4): exactly one block owns the live TextInput.
+    // editing-text mirrors that input; pending-caret is a byte offset the
+    // input consumes on init (then resets to -1).
+    in-out property <int> editing-id: -1;
+    in-out property <string> editing-text: "";
+    in-out property <int> pending-caret: -1;
+
     // command palette
     in-out property <bool> palette-open: false;
     in-out property <string> palette-query: "";
@@ -101,6 +108,14 @@ export global UIState {
     callback command-invoked();
     callback palette-move(int);
     callback todo-toggled(int);
+    callback block-activate(int);
+    callback editing-changed();
+    callback enter-at-caret(int);
+    callback backspace-at-start();
+    callback focus-move(int);
+    callback cancel-editing();
+    callback undo-requested();
+    callback redo-requested();
     callback node-clicked(int);
     callback node-expand-toggled(int);
     callback node-context(int);
