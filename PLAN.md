@@ -6,7 +6,7 @@
 - [x] Renderer feature matrix in Cargo.toml (femtovg / femtovg-wgpu / skia / skia-opengl / software)
 - [x] Renderer benchmark harness: `benchmarks/scripts/bench.ps1`
 - [x] Baseline numbers recorded in docs/PERFORMANCE.md
-- [x] Slint LSP config (.vscode) + CI workflow (cargo check / test / release build)
+- [x] Slint LSP config (.vscode)（CI workflow 已按要求移除，本地手动构建）
 - [x] Directory structure + ARCHITECTURE.md / DECISIONS.md / PLAN.md / PERFORMANCE.md
 
 ## M1 · Design system & product-grade shell — ✅ (2026-09-18)
