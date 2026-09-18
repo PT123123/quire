@@ -140,6 +140,41 @@ Reading:
 - Memory: 10 000 blocks cost ≈6 MB Private over 100, matching scene D — search
   and typing add no leak-shaped drift over the window.
 
+## M8 · what the rotating backup costs (ADR-0015)
+Measured 2026-09-19 on `m8-markdown` with
+`cargo test --release --test backup -- --ignored --nocapture` (the
+`snapshot_cost` probe: a 1 000-page / 10 000-block workspace, 2 281 472-byte
+main file, temp-dir file DB, three alternating rounds in one process):
+
+| measurement | value |
+|-------------|------:|
+| `Database::open` (migrations + `integrity_check`, no snapshot) | 27.6 – 86.9 ms |
+| `backup::snapshot` (`VACUUM INTO`, `synchronous=OFF` for the copy) | 22.7 – 48.9 ms |
+| the same copy at `synchronous=FULL` | 44.9 – 255.7 ms |
+| `SqliteRepository::open` end to end (rotate + snapshot) | 46.3 – 116.1 ms |
+| snapshot file size | 2 269 184 bytes (≈ main, compacted) |
+
+Reading: the policy adds one statement per open, running at roughly 50 MB/s
+(2.3 MB in ≈40 ms) — a few milliseconds for a typical 150–450 KB workspace (the
+scene E DBs). Disk timings on this machine swing by a factor of three between
+rounds, so the ranges are the honest unit; re-measuring with the same command
+is the regression check. Keeping the copy
+at `synchronous=OFF` is worth roughly half of it on a warm cache and nothing on
+a cold one — recorded because it is a deliberate durability exception, not
+because the number is large.
+
+Scene E, re-run after the snapshot landed (`bench.ps1 -Typing`, 30 strokes/s,
+search every 100): startup 475 / 404 / 432 ms for 100 / 1 000 / 10 000 blocks,
+against 351 / 365 / 331 ms in the table above. The two readings agree within
+this bench's ±100 ms startup noise; the probe row is the number to trust for
+the snapshot itself. Stroke-handler medians (52 / 53 / 59 µs) and idle CPU%
+(26.7 – 32 %) did not move, so recovery did not make typing more expensive —
+the snapshot runs once, before the window exists.
+
+Storage pragmas confirmed on the way (all from the same probe):
+`journal_mode=wal` (persisted in the file), `synchronous=2` (FULL),
+`locking_mode=normal`, `page_size=4096`, `wal_autocheckpoint=1000` pages ≈ 4 MB.
+
 ## Notes / open questions
 - Slint's winit backend redraws on events; any persistent animation on an
   idle screen is a bug — chase it (animation tokens are finite-duration only).
