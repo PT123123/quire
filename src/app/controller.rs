@@ -6,9 +6,9 @@
 // 'static callbacks capture a Weak and upgrade() it at fire time.
 
 use crate::app::state::{
-    core_page_id, AppState, CMD_DELETE_PAGE, CMD_DUPLICATE_PAGE, CMD_EXPORT_PAGE, CMD_IMPORT_MD,
-    CMD_PAGE_BASE, CMD_RENAME_PAGE, MENU_DELETE, MENU_DUPLICATE, MENU_FAVORITE, MENU_NEW_SUBPAGE,
-    MENU_RENAME, PAGE_GETTING_STARTED, ROW_NEW_PAGE,
+    core_page_id, AppState, CMD_EXPORT_PAGE, CMD_IMPORT_MD, CMD_PAGE_BASE, MENU_DELETE,
+    MENU_DUPLICATE, MENU_FAVORITE, MENU_NEW_SUBPAGE, MENU_RENAME, PAGE_GETTING_STARTED,
+    ROW_NEW_PAGE,
 };
 use crate::core::{BlockId, Change, Command};
 use crate::{AppWindow, UIState};
