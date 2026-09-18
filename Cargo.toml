@@ -48,6 +48,10 @@ path = "tests/integration/persistence_test.rs"
 name = "markdown"
 path = "tests/integration/markdown_test.rs"
 
+[[test]]
+name = "search"
+path = "tests/integration/search_test.rs"
+
 # Headless screenshot tool (visual regression); built only with the
 # software renderer feature so the shipped binary stays lean.
 [[bin]]

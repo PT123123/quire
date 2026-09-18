@@ -67,6 +67,24 @@ sets + block insert + setting): **median 2.44 ms, max 2.73 ms** per batch
 10 006 blocks + 1 004 pages **3.6 ms**; bulk checkpoint
 (`replace_all`, ≈21 000 rows) 119 ms.
 
+### M7 addendum · the same probe with the FTS5 index maintained (ADR-0014)
+Re-measured 2026-09-19 on `m8-markdown`, same command, idle machine (the
+index rows are written inside the very same transactions the probe times,
+so these numbers *are* the after-cost of search):
+
+| measurement | before | with index |
+|-------------|-------:|-----------:|
+| debounced 32-change `apply`, median | 2.44 ms | **3.42 ms** (min 2.93, max 19.5 — the tail is WAL fsync jitter, not search) |
+| `replace_all` of 10 006 blocks + 1 004 pages | 119 ms | **216 ms** |
+| startup `load` | 3.6 ms | 7.4 ms (`load` never reads the index; the swing is OS cache state) |
+
+Reading: indexing a debounced burst costs ≈1 ms for 32 rows (≈30 µs/row:
+one segmented copy + one `INSERT OR REPLACE` by rowid), and the bulk path
+pays ≈9 µs per row for 11 000 rows. Neither is a per-keystroke cost (SPEC
+§三十三): writes are batched by the 300/600 ms debounce, so search adds
+well under one frame to a save. Query latency is recorded with scene E
+below, where a search runs against every typing burst.
+
 ## Notes / open questions
 - Slint's winit backend redraws on events; any persistent animation on an
   idle screen is a bug — chase it (animation tokens are finite-duration only).
