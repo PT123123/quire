@@ -2,6 +2,24 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0012 · Persistence contract lives in `core/`, storage implements it
+Decision: `src/core/types.rs` defines the persisted model (`PageId`,
+`BlockId`, `OrderKey`, `BlockKind`, `Block`, `Page`, `PersistedState`);
+`src/core/persistence.rs` defines `Repository` (`load` / `apply(&[Change])
+/ `replace_all`) plus the `Change` mutation enum. The M3 storage layer
+(`src/storage/`, SQLite) implements the trait; the M4 editor emits
+`Change`s from commands. The contract was frozen in one commit before the
+two work streams started in parallel.
+Why: two agents can then build storage and editor simultaneously without
+interface drift; `core` stays free of Slint and of SQL details, and undo
+(M4) replays inverse `Change`s rather than re-reading the DB (SPEC §十四).
+Consequences: sibling order is a `u64` `OrderKey` with midpoint insertion
+(`OrderKey::between`, renumber on exhaustion) — no per-insert row shifts;
+deletes cascade in storage (undo replays captured `BlockInserted`s); `text`
+is plain UTF-8 until M6 inline spans extend it. Any contract change goes
+through one owner only (Track A) with the other side filing a feedback
+note, never editing both sides at once.
+
 ## ADR-0011 · Headless visual regression via `quire-shot`
 Decision: UI screenshots are produced by a second binary
 (`src/bin/quire_shot.rs`) that installs a custom `Platform` whose window
