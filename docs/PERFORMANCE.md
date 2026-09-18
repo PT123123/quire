@@ -14,8 +14,13 @@ a number whose scene and command line aren't recorded here.
 waits for the main window (that interval ≈ startup time), then samples the
 process for N seconds:
 - Working Set / Private Bytes (task-manager semantics via Get-Process)
-- CPU% = ΔTotalProcessorTime / (Δwalltime × logical cores)
+- CPU% = ΔTotalProcessorTime / Δwalltime, i.e. **percent of one core** (this
+  machine has 16 cores / 22 threads, so divide by 16 for a Task-Manager-style
+  whole-machine share). The script applies no core divisor.
 Idle scenes use `--auto-exit N`; no mouse/keyboard input during sampling.
+Scene E (`-Typing`) is not idle: `quire-typing` drives the editor through
+the same property/callback path a real keystroke uses, and samples the
+single-threaded latencies itself.
 GPU-side memory is *not* Working Set; when it matters we record it from
 Task Manager's "GPU Memory" column / pdh counters and say so.
 
@@ -26,7 +31,7 @@ Task Manager's "GPU Memory" column / pdh counters and say so.
 | B | 100 blocks | `quire.exe --blocks 100` |
 | C | 5 000 blocks | `quire.exe --blocks 5000` |
 | D | 10 000 blocks | `quire.exe --blocks 10000` |
-| E | typing | deferred to M4 (no editor yet) |
+| E | typing | `bench.ps1 -Typing -Blocks N` (`quire-typing`, see below) |
 | F | continuous scroll | `bench.ps1 -Scroll` (programmatic proxy, below) |
 | G | switch 100 pages | `bench.ps1 -PageSwitch 100` |
 
@@ -66,6 +71,74 @@ sets + block insert + setting): **median 2.44 ms, max 2.73 ms** per batch
 (debug build ≈ same, the commit fsync dominates); startup `load` of
 10 006 blocks + 1 004 pages **3.6 ms**; bulk checkpoint
 (`replace_all`, ≈21 000 rows) 119 ms.
+
+### M7 addendum · the same probe with the FTS5 index maintained (ADR-0014)
+Re-measured 2026-09-19 on `m8-markdown`, same command, idle machine (the
+index rows are written inside the very same transactions the probe times,
+so these numbers *are* the after-cost of search):
+
+| measurement | before | with index |
+|-------------|-------:|-----------:|
+| debounced 32-change `apply`, median | 2.44 ms | **3.42 ms** (min 2.93, max 19.5 — the tail is WAL fsync jitter, not search) |
+| `replace_all` of 10 006 blocks + 1 004 pages | 119 ms | **216 ms** |
+| startup `load` | 3.6 ms | 7.4 ms (`load` never reads the index; the swing is OS cache state) |
+
+Reading: indexing a debounced burst costs ≈1 ms for 32 rows (≈30 µs/row:
+one segmented copy + one `INSERT OR REPLACE` by rowid), and the bulk path
+pays ≈9 µs per row for 11 000 rows. Neither is a per-keystroke cost (SPEC
+§三十三): writes are batched by the 300/600 ms debounce, so search adds
+well under one frame to a save. Query latency is recorded with scene E
+below, where a search runs against every typing burst.
+
+## Scene E · typing (M4 editor + M7 search acceptance)
+Measured 2026-09-19 on `m8-markdown`, release build, with
+`benchmarks/scripts/bench.ps1 -Typing`. `quire-typing` builds the page, then
+a timer appends one character to a random block every `1/rate` s through
+`editing-id` / `editing-text` / `editing-changed` — the exact path a key press
+takes — so a keystroke covers binding → 300 ms edit debounce → command + undo
+entry → model row update → repaint → 600 ms flush → SQLite + FTS5 write. Each
+run types against a fresh file DB in `%TEMP%`; CPU% and memory are sampled
+over 8 s of that, which is ~350 strokes at 30/s.
+
+30 strokes/s, one search every 100 strokes (`--search-every 100`):
+
+| blocks | startup ms | CPU % (typing + search) | CPU % (typing only) | WS MB | Priv MB | stroke handler med / p95 / max µs | search med / p95 µs |
+|-------:|-----------:|------------------------:|------------------:|------:|--------:|----------------------------------:|-------------------:|
+| 100 | 351 | 27.48 | 31.03 | 120.3 | 88.7 | 52 / 97 / 392 | 383 / 446 |
+| 1 000 | 365 | 32.76 | 29.08 | 120.5 | 88.4 | 56 / 116 / 291 | 670 / 760 |
+| 10 000 | 331 | 31.40 | 26.70 | 125.3 | 94.5 | 51 / 109 / 396 | 1934 / 2305 |
+
+4× rate, 1 000 and 10 000 blocks (search every 100 strokes):
+
+| blocks | CPU % | achieved rate | stroke handler med / p95 / max µs | search med / p95 µs |
+|-------:|------:|--------------:|----------------------------------:|-------------------:|
+| 1 000 | 32.36 | 119.3 / 120 | 26 / 57 / 130 | 549 / 925 |
+| 10 000 | 32.74 | 119.1 / 120 | 29 / 59 / 239 | 1656 / 2277 |
+
+Reading:
+- **Per keystroke: ≈50 µs of UI-thread work, flat in page size.** 100 rows and
+  10 000 rows measure the same, because the debounced write touches one model
+  row and one index row. The long-document acceptance from the SPEC
+  ("连续编辑 1000 blocks 不明显卡顿") holds — the worst single stroke sampled
+  is 396 µs, ≈2.5 % of a 16 ms frame (one 10 000-row run without search
+  logged 548 µs). §三十三's ban on per-character SQLite transactions is
+  intact: the 348 strokes of a run reach the DB in flush batches, not one
+  transaction each, and stroke cost stays flat from 100 to 10 000 rows.
+- **CPU% is repaint-bound, not stroke-bound.** ≈27–33 % of one core for
+  typing (against ≈0.58 % idle), and it does not move when the rate goes 30 →
+  120/s, when the search runs, or when the page grows 100×. The achieved rate
+  tracks the request at 120/s, i.e. the event loop never falls behind.
+- The med per-stroke handler *halves* at 120/s (56 → 26 µs): back-to-back
+  strokes coalesce into fewer repaints per keystroke, so per-stroke time
+  understates the load and CPU% is the honest number. Compare scenes at equal
+  rate for that reason.
+- **Search cost scales with the corpus, not the typing:** 0.38 ms at 100
+  blocks → 1.9 ms at 10 000, and it fits inside one frame either way. This
+  probe calls `SearchService::search` on the UI thread to time it; the panel
+  should use `search_async` (ADR-0014), which keeps even the 2 ms case out of
+  the frame.
+- Memory: 10 000 blocks cost ≈6 MB Private over 100, matching scene D — search
+  and typing add no leak-shaped drift over the window.
 
 ## Notes / open questions
 - Slint's winit backend redraws on events; any persistent animation on an

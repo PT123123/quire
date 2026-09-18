@@ -2,6 +2,58 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0014 · Full-text search: FTS5 mirror inside the apply transaction,
+CJK indexed by hand-built segmentation
+Decision: search (SPEC §二十) uses two FTS5 virtual tables added by schema
+version 2 — `search_pages(rowid = page id, title)` and
+`search_blocks(rowid = block id, page_id UNINDEXED, text)` — written by
+`src/storage/search_index.rs` from *inside* `SqliteRepository::apply`'s and
+`replace_all`'s transaction: `insert_page`/`insert_block` index as they
+insert, `PageTitleSet`/`BlockTextSet` re-index by rowid, and one orphan
+sweep (`prune`) runs per batch that contained a delete, so the FK cascades
+that remove blocks and pages need no per-row bookkeeping. The index can
+therefore never drift from the document: an aborted batch rolls the index
+back with the rows (ADR-0012). `Repository` and `Change` are untouched —
+the query API is `SqliteRepository::search(&SearchRequest)` plus
+`src/services/search_service.rs`, which aggregates raw matches into one
+ranked `Hit` per page (bm25, block matches beat title matches for the
+snippet slot) and offers `search_async` → `PendingSearch::poll` so the UI
+thread never waits on SQLite (ARCHITECTURE hard rule 1).
+Tokenizer: `unicode61`, which never splits inside a run of Han characters
+("写作与中文测试" is one token, so "中文" would never match). Indexing
+therefore stores a *segmented* copy — `segment()` gives every CJK character
+(Han incl. ext. A/B–E, kana, Hangul) its own token — and queries are
+segmented the same way, then issued as a *phrase* (`"中 文"*`) so only
+adjacent characters match, reproducing the substring semantics of the M2
+in-memory scan. Single words keep a trailing `*` for type-ahead.
+Why not FTS5's `trigram` tokenizer (the usual CJK answer), measured with
+the `#[ignore]`d `search_index::tests::fts5_capabilities` probe on the
+bundled SQLite 3.53.2: trigrams need ≥ 3 characters, so a two-character
+Chinese term — "中文", "字体", "行高", by far the common case — matches
+nothing (`trigram "中文" -> []`, `"中文测" -> [1]`). It also indexes every
+offset, inflating the DB for Latin text. Segmentation costs one extra pass
+per write and keeps exact adjacency. The probe further confirms
+`bro*` → "brown" (prefix works), `"quick br*"` → ∅ (`*` is only legal
+*after* a whole phrase), and that an *unsegmented* Chinese phrase matches
+nothing — i.e. query segmentation is mandatory, not cosmetic. FTS5 needed
+no new Cargo feature: rusqlite 0.40 `bundled` (libsqlite3-sys 0.38) already
+compiles SQLite with `-DSQLITE_ENABLE_FTS5`.
+Consequences: a keystroke rewrites exactly one index row by rowid, so the
+debounced write cost stays O(edited blocks) rather than O(page size) — the
+10 000-block page of SPEC §二十二 keeps typing cheap (numbers in
+PERFORMANCE.md "M3 · save latency"); the M2 linear-scan search in
+`app/workspace.rs` stays in place until Track A wires the panel (both are
+consistent with each other, no behavior change in this branch); migrating a
+v1 database runs a one-time `search_index::rebuild` backfill after the
+step commits (it needs its own transaction), and `check_schema` now also
+requires the two FTS tables; `Arc<SqliteRepository>` must be kept around
+by the app layer to build a `SearchService` (unsized coercion gives the
+`Arc<dyn Repository>` the persistence pipeline wants — a plain
+`Arc<dyn Repository>` cannot be downcast back); index rows for pages that
+hold no text are simply absent, so an empty page is unsearchable by body
+and by title alike; and the index is derived data — a rebuild is always
+safe, which D4's recovery path relies on.
+
 ## ADR-0013 · Storage schema: cascade-FK tree + split block_children, one
 transaction per contract call
 Decision: the SQLite file uses the six SPEC §十八 tables — `workspaces`
