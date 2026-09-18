@@ -7,11 +7,15 @@
 // BlockRow / CommandRow / SearchRow / MenuRow).
 
 use crate::app::workspace::{SearchHit, Workspace, BENCH_ID_BASE, MAX_RECENTS};
+use crate::core::persistence::{Change, Repository};
 use crate::core::{Block, BlockId, BlockKind, Command, Document, History, OrderKey, PageId};
+use crate::services::persistence::PersistenceService;
 use crate::{BlockRow, CommandRow, MenuRow, SearchRow, SidebarNode};
 use slint::{Model, ModelRc, VecModel};
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Arc;
 
 pub struct AppState {
     pub workspace: RefCell<Workspace>,
@@ -26,6 +30,12 @@ pub struct AppState {
     pub doc: RefCell<Document>,
     /// Per-page undo/redo stacks.
     pub history: RefCell<History>,
+    /// Debounced persistence pipeline (M3). `None` = headless/test mode.
+    pub persistence: Option<Arc<PersistenceService>>,
+    /// Persisted sibling order of every page (drives PageCreated/Moved).
+    page_order: RefCell<HashMap<i32, OrderKey>>,
+    /// Installed by the controller: restarts the flush timer on record().
+    flush_hook: RefCell<Option<Rc<dyn Fn()>>>,
     /// Currently open page (0 = none / empty workspace).
     pub open_page: Cell<i32>,
     /// Page awaiting delete confirmation.
@@ -47,34 +57,138 @@ pub struct HandleArgs {
     pub bench_pages: usize,
 }
 
-impl AppState {
-    pub fn new(args: &HandleArgs) -> Rc<Self> {
-        let mut workspace = if args.bench_pages > 0 {
-            Workspace::with_bench_pages(args.bench_pages)
+/// Build the mock/bench session (fresh database or no persistence).
+fn build_mock_session(args: &HandleArgs) -> (Workspace, Document, HashMap<i32, OrderKey>) {
+    let mut workspace = if args.bench_pages > 0 {
+        Workspace::with_bench_pages(args.bench_pages)
+    } else {
+        Workspace::sample()
+    };
+    let mut doc = Document::new(BLOCK_ID_BASE);
+    for id in workspace.dfs_order() {
+        let title = workspace.title_of(id).unwrap().to_string();
+        let rows = if args.blocks > 0 && id == PAGE_ATLAS {
+            mock_blocks_bench(args.blocks)
+        } else if id >= BENCH_ID_BASE {
+            mock_blocks_bench_page(&title)
         } else {
-            Workspace::sample()
+            mock_blocks_for_page(id, &title)
+        };
+        let blob = block_search_blob(&title, &rows);
+        workspace.set_search_text(id, blob);
+        let core_blocks = rows_to_blocks(id, rows, &mut doc);
+        doc.set_page_blocks(core_page_id(id), core_blocks);
+    }
+    let page_order = assign_page_orders(&workspace);
+    (workspace, doc, page_order)
+}
+
+/// Chain sibling order keys per parent group (deterministic seed order).
+fn assign_page_orders(workspace: &Workspace) -> HashMap<i32, OrderKey> {
+    fn walk(ws: &Workspace, parent: Option<i32>, map: &mut HashMap<i32, OrderKey>) {
+        let mut prev: Option<OrderKey> = None;
+        for id in ws.children_of(parent) {
+            let key = OrderKey::between(prev, None).expect("append order exhausted");
+            map.insert(id, key);
+            prev = Some(key);
+            walk(ws, Some(id), map);
+        }
+    }
+    let mut map = HashMap::new();
+    walk(workspace, None, &mut map);
+    map
+}
+
+fn workspace_from_persisted(
+    state: &crate::core::PersistedState,
+) -> (Workspace, HashMap<i32, OrderKey>) {
+    let ws = Workspace::from_persisted(&state.pages);
+    let mut map = HashMap::new();
+    for p in &state.pages {
+        map.insert(p.id.0 as i32, p.order);
+    }
+    (ws, map)
+}
+
+impl AppState {
+    pub fn new(args: &HandleArgs, repo_in: Option<Arc<dyn Repository>>) -> Rc<Self> {
+        // Try to load persisted state. A failed load disables persistence
+        // for the session rather than risking a seed-flush over live data.
+        let mut repo = repo_in;
+        let loaded = match repo.take() {
+            Some(r) => match r.load() {
+                Ok(state) => {
+                    repo = Some(r);
+                    Some(state)
+                }
+                Err(e) => {
+                    eprintln!("quire: load failed ({e}); running without persistence");
+                    None
+                }
+            },
+            None => None,
+        };
+        let persisted = loaded.filter(|s| !s.pages.is_empty());
+
+        let (workspace, mut doc, page_order, seed) = match &persisted {
+            Some(state) => {
+                let (ws, orders) = workspace_from_persisted(state);
+                let mut d = Document::new(BLOCK_ID_BASE);
+                let mut by_page: HashMap<PageId, Vec<Block>> = HashMap::new();
+                for b in &state.blocks {
+                    by_page.entry(b.page).or_default().push(b.clone());
+                }
+                for (pid, blocks) in by_page {
+                    d.set_page_blocks(pid, blocks);
+                }
+                (ws, d, orders, Vec::<Vec<Change>>::new())
+            }
+            None => {
+                let (ws, d, orders) = build_mock_session(args);
+                (ws, d, orders, Vec::<Vec<Change>>::new())
+            }
         };
 
-        let mut doc = Document::new(BLOCK_ID_BASE);
-        for id in workspace.dfs_order() {
-            let title = workspace.title_of(id).unwrap().to_string();
-            let rows = if args.blocks > 0 && id == PAGE_ATLAS {
-                mock_blocks_bench(args.blocks)
-            } else if id >= BENCH_ID_BASE {
-                mock_blocks_bench_page(&title)
-            } else {
-                mock_blocks_for_page(id, &title)
-            };
-            let blob = block_search_blob(&title, &rows);
-            workspace.set_search_text(id, blob);
-            let core_blocks = rows_to_blocks(id, rows, &mut doc);
-            doc.set_page_blocks(core_page_id(id), core_blocks);
+        // bench content overrides the loaded page (in memory only; never
+        // recorded, so scene D stays deterministic across runs)
+        if args.blocks > 0 {
+            let title = workspace.title_of(PAGE_ATLAS).unwrap_or("").to_string();
+            let rows = mock_blocks_bench(args.blocks);
+            let core_blocks = rows_to_blocks(PAGE_ATLAS, rows, &mut doc);
+            doc.set_page_blocks(core_page_id(PAGE_ATLAS), core_blocks);
+            let _ = title;
         }
 
-        let open = if args.blocks > 0 { PAGE_ATLAS } else { PAGE_GETTING_STARTED };
-        let blocks = Rc::new(VecModel::from(Vec::new()));
+        let persistence = repo.map(|r| Arc::new(PersistenceService::with_default_clock(r)));
 
+        // fresh database: record the whole session once so a restart
+        // reproduces exactly this state
+        if let (Some(p), true) = (&persistence, persisted.is_none()) {
+            let mut batch = Vec::new();
+            for (id, title, parent, favorite, expanded) in workspace.page_seed_rows() {
+                batch.push(Change::PageCreated(crate::core::Page {
+                    id: PageId(id as u32 as u64),
+                    title,
+                    parent: parent.map(|v| PageId(v as u32 as u64)),
+                    order: *page_order.get(&id).unwrap_or(&OrderKey::FIRST),
+                    favorite,
+                    expanded,
+                }));
+            }
+            for id in workspace.dfs_order() {
+                for b in doc.page_blocks(core_page_id(id)) {
+                    batch.push(Change::BlockInserted(b.clone()));
+                }
+            }
+            p.record_all(vec![batch]);
+            // best effort: a failed first write surfaces on the next flush
+            let _ = p.force_flush();
+        }
+        let _ = seed;
+
+        let open = if args.blocks > 0 { PAGE_ATLAS } else { PAGE_GETTING_STARTED };
         let all_commands = mock_commands(&workspace);
+        let blocks = Rc::new(VecModel::from(Vec::new()));
         let commands = Rc::new(VecModel::from(all_commands.clone()));
         let state = AppState {
             workspace: RefCell::new(workspace),
@@ -86,6 +200,9 @@ impl AppState {
             all_commands,
             doc: RefCell::new(doc),
             history: RefCell::new(History::default()),
+            persistence,
+            page_order: RefCell::new(page_order),
+            flush_hook: RefCell::new(None),
             open_page: Cell::new(0),
             pending_delete: Cell::new(None),
             last_scroll_y: Cell::new(0.0),
@@ -218,10 +335,36 @@ impl AppState {
         self.blocks.set_vec(rows);
     }
 
-    /// Run a command against the open page's blocks and refresh the rows
-    /// when the structure changed (the caller decides — structural commands
-    /// return BlockInserted/BlockDeleted/BlockMoved changes).
-    pub fn exec_on_open_page(&self, cmd: Command) -> Option<Vec<crate::core::Change>> {
+    /// Queue a change batch for the debounced flush and arm the timer.
+    pub fn record(&self, changes: Vec<Change>) {
+        if changes.is_empty() {
+            return;
+        }
+        if let Some(p) = &self.persistence {
+            p.record(changes);
+        }
+        if let Some(hook) = &*self.flush_hook.borrow() {
+            hook();
+        }
+    }
+
+    /// Controller installs the flush-timer trigger at wiring time.
+    pub fn install_flush_hook(&self, hook: Box<dyn Fn()>) {
+        *self.flush_hook.borrow_mut() = Some(Rc::new(hook));
+    }
+
+    /// Write everything queued so far (Ctrl+S, app exit).
+    pub fn persistence_force_flush(&self) {
+        if let Some(p) = &self.persistence {
+            // errors surface through take_last_error on the next call;
+            // nothing actionable at the exit path
+            let _ = p.force_flush();
+        }
+    }
+
+    /// Run a command without reprojecting (typing): the caller keeps the
+    /// delegate alive and syncs the single row itself.
+    pub fn exec_editor(&self, cmd: Command) -> Option<Vec<Change>> {
         let page = core_page_id(self.open_page.get());
         let changes = crate::core::command::exec(
             &mut self.doc.borrow_mut(),
@@ -229,8 +372,33 @@ impl AppState {
             page,
             cmd,
         )?;
+        self.record(changes.clone());
+        Some(changes)
+    }
+
+    /// Run a command and refresh the editor rows (structural edits).
+    pub fn exec_on_open_page(&self, cmd: Command) -> Option<Vec<Change>> {
+        let changes = self.exec_editor(cmd)?;
         self.reproject_blocks();
         Some(changes)
+    }
+
+    pub fn undo_open_page(&self) -> Option<Vec<Change>> {
+        let page = core_page_id(self.open_page.get());
+        let applied =
+            crate::core::undo(&mut self.doc.borrow_mut(), &mut self.history.borrow_mut(), page)?;
+        self.record(applied.clone());
+        self.reproject_blocks();
+        Some(applied)
+    }
+
+    pub fn redo_open_page(&self) -> Option<Vec<Change>> {
+        let page = core_page_id(self.open_page.get());
+        let applied =
+            crate::core::redo(&mut self.doc.borrow_mut(), &mut self.history.borrow_mut(), page)?;
+        self.record(applied.clone());
+        self.reproject_blocks();
+        Some(applied)
     }
 
     /// Open a page and return its title + breadcrumb for the top bar.
@@ -246,9 +414,26 @@ impl AppState {
             .workspace
             .borrow_mut()
             .create(parent, "Untitled");
-        // new pages start empty (the editor shows the empty state); the
-        // Document gets the page registered lazily by set_page_blocks' OR
-        // path on first block — an empty page is simply no rows
+        // the new page is the last sibling: order = previous last + 1
+        let order = {
+            let kids = self.workspace.borrow().children_of(parent);
+            let map = self.page_order.borrow();
+            let prev = kids
+                .len()
+                .checked_sub(2)
+                .and_then(|i| kids.get(i))
+                .and_then(|pid| map.get(pid).copied());
+            OrderKey::between(prev, None).expect("append order exhausted")
+        };
+        self.page_order.borrow_mut().insert(id, order);
+        self.record(vec![Change::PageCreated(crate::core::Page {
+            id: PageId(id as u32 as u64),
+            title: "Untitled".into(),
+            parent: parent.map(|v| PageId(v as u32 as u64)),
+            order,
+            favorite: false,
+            expanded: false,
+        })]);
         self.open_page(id);
         id
     }
@@ -274,6 +459,10 @@ impl AppState {
             b
         };
         self.workspace.borrow_mut().set_search_text(id, blob);
+        self.record(vec![Change::PageTitleSet {
+            id: PageId(id as u32 as u64),
+            title: title.to_string(),
+        }]);
         self.rebuild_sidebar();
     }
 
@@ -299,8 +488,42 @@ impl AppState {
             };
             let title = self.workspace.borrow().title_of(nid).unwrap().to_string();
             let blob = block_search_blob(&title, &project_blocks(&copies));
+
+            // order: right after the original when a gap exists, else the
+            // end of the sibling run (known drift: the copy may sort last
+            // after a restart; the tree session view keeps it adjacent)
+            let (parent, order) = {
+                let ws = self.workspace.borrow();
+                let parent = ws.get(nid).and_then(|p| p.parent);
+                let kids = ws.children_of(parent);
+                let next = kids
+                    .iter()
+                    .skip_while(|&&k| k != id)
+                    .nth(1)
+                    .and_then(|k| self.page_order.borrow().get(k).copied());
+                let orig = self.page_order.borrow().get(&id).copied();
+                let key = OrderKey::between(orig, next).or_else(|| {
+                    let last = kids.last().and_then(|k| self.page_order.borrow().get(k).copied());
+                    OrderKey::between(last, None)
+                });
+                (parent, key.expect("order space exhausted"))
+            };
+            self.page_order.borrow_mut().insert(nid, order);
+
+            let mut batch = vec![Change::PageCreated(crate::core::Page {
+                id: PageId(nid as u32 as u64),
+                title,
+                parent: parent.map(|v| PageId(v as u32 as u64)),
+                order,
+                favorite: false,
+                expanded: false,
+            })];
+            for b in &copies {
+                batch.push(Change::BlockInserted(b.clone()));
+            }
             self.doc.borrow_mut().set_page_blocks(dst, copies);
             self.workspace.borrow_mut().set_search_text(nid, blob);
+            self.record(batch);
             self.rebuild_sidebar();
         }
         new_id
@@ -315,6 +538,7 @@ impl AppState {
                 doc.drop_page(core_page_id(*r));
             }
         }
+        self.record(vec![Change::PageDeleted { id: PageId(id as u32 as u64) }]);
         if had_open {
             // stale until the controller opens a fallback page
             self.open_page.set(0);
@@ -325,11 +549,21 @@ impl AppState {
 
     pub fn toggle_favorite(&self, id: i32) {
         self.workspace.borrow_mut().toggle_favorite(id);
+        let favorite = self.workspace.borrow().get(id).map(|p| p.favorite).unwrap_or(false);
+        self.record(vec![Change::PageFavoriteSet {
+            id: PageId(id as u32 as u64),
+            favorite,
+        }]);
         self.rebuild_sidebar();
     }
 
     pub fn toggle_expanded(&self, id: i32) {
         self.workspace.borrow_mut().toggle_expanded(id);
+        let expanded = self.workspace.borrow().get(id).map(|p| p.expanded).unwrap_or(false);
+        self.record(vec![Change::PageExpandedSet {
+            id: PageId(id as u32 as u64),
+            expanded,
+        }]);
         self.rebuild_sidebar();
     }
 
