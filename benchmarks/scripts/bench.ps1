@@ -2,12 +2,16 @@ param(
     [Parameter(Mandatory = $true)][string]$Exe,
     [int]$Blocks = 0,
     [int]$IdleSeconds = 8,
-    [string]$Label = "run"
+    [string]$Label = "run",
+    [switch]$Scroll,          # scene F: programmatic continuous scroll
+    [int]$PageSwitch = 0      # scene G: switch between N bench pages
 )
 $ErrorActionPreference = "SilentlyContinue"
 
 $args = @("--auto-exit", "$($IdleSeconds + 6)")
 if ($Blocks -gt 0) { $args += @("--blocks", "$Blocks") }
+if ($Scroll) { $args += @("--scroll") }
+if ($PageSwitch -gt 0) { $args += @("--page-switch", "$PageSwitch") }
 
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
 $p = Start-Process -FilePath $Exe -ArgumentList $args -PassThru

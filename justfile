@@ -13,6 +13,20 @@ build:
 run *args:
     cargo run {{ args }}
 
+# local CI replacement (the GitHub workflow was removed on purpose):
+# everything a push would run, before you commit
+check:
+    cargo check --all-targets
+    cargo test
+    cargo build --release
+
+# headless visual shot: software-rendered PNG of the real UI, no window.
+# Scene names: default dark palette search-notes menu rename settings dialog empty
+shot scene="default":
+    cargo build --features software --bin quire-shot
+    .\target\debug\quire-shot.exe --out .scratch\shots\latest.bmp --scene {{ scene }}
+    powershell -NoProfile -ExecutionPolicy Bypass -File benchmarks\scripts\shot2png.ps1
+
 # remove build artifacts: ./target + skia/wgpu benchmark target dirs
 clean:
     cargo clean

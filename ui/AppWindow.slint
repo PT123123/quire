@@ -6,9 +6,13 @@ import { Colors } from "Colors.slint";
 import { UIState } from "Types.slint";
 import { AppShell } from "components/AppShell.slint";
 import { CommandPalette } from "components/CommandPalette.slint";
+import { SearchPanel } from "components/SearchPanel.slint";
+import { ContextMenu } from "components/ContextMenu.slint";
+import { ConfirmDialog } from "components/Dialog.slint";
+import { SettingsDialog } from "components/SettingsDialog.slint";
 
 // Rust-facing names must be re-exported from the entry file (1.18 codegen rule).
-export { UIState, SidebarNode, BlockRow, CommandRow } from "Types.slint";
+export { UIState, SidebarNode, BlockRow, CommandRow, SearchRow, MenuRow } from "Types.slint";
 
 export component AppWindow inherits Window {
     title: "Quire";
@@ -23,12 +27,15 @@ export component AppWindow inherits Window {
     resize-border-width: 6px;
     forward-focus: shortcuts;
 
-    // (Theme.dark is derived from UIState.dark inside Theme.slint.)
-
     // `changed` handlers can only observe locally declared properties, so the
-    // two things Rust must react to are mirrored here.
+    // things Rust must react to are mirrored here first.
     in-out property <bool> palette-open <=> UIState.palette-open;
     in-out property <string> palette-query <=> UIState.palette-query;
+    in-out property <bool> search-open <=> UIState.search-open;
+    in-out property <string> search-query <=> UIState.search-query;
+    in-out property <bool> menu-open <=> UIState.menu-open;
+    in-out property <bool> dialog-open <=> UIState.dialog-open;
+    in-out property <bool> settings-open <=> UIState.settings-open;
 
     changed palette-open => {
         if (palette-open) {
@@ -46,6 +53,54 @@ export component AppWindow inherits Window {
         UIState.palette-query-changed();
     }
 
+    changed search-open => {
+        if (search-open) {
+            search.show();
+        } else {
+            search.close();
+            UIState.search-query = "";
+            UIState.search-focus = 0;
+            UIState.search-selected-id = -1;
+        }
+    }
+
+    changed search-query => {
+        UIState.search-query-changed();
+    }
+
+    changed menu-open => {
+        if (menu-open) {
+            menu.show();
+        } else {
+            menu.close();
+            UIState.menu-node-id = -1;
+        }
+    }
+
+    changed dialog-open => {
+        if (dialog-open) {
+            dialog.show();
+        } else {
+            dialog.close();
+        }
+    }
+
+    changed settings-open => {
+        if (settings-open) {
+            settings.show();
+        } else {
+            settings.close();
+        }
+    }
+
+    // geometry mirror for Rust-side popup anchoring
+    changed width => {
+        UIState.window-w = self.width;
+    }
+    changed height => {
+        UIState.window-h = self.height;
+    }
+
     shortcuts := FocusScope {
         width: root.width;
         height: root.height;
@@ -54,6 +109,18 @@ export component AppWindow inherits Window {
             keys: @keys(Control + K);
             activated => {
                 UIState.palette-open-requested();
+            }
+        }
+        KeyBinding {
+            keys: @keys(Control + P);
+            activated => {
+                UIState.search-open-requested();
+            }
+        }
+        KeyBinding {
+            keys: @keys(Control + N);
+            activated => {
+                UIState.page-create-requested();
             }
         }
         KeyBinding {
@@ -85,5 +152,25 @@ export component AppWindow inherits Window {
     palette := CommandPalette {
         x: (root.width - 560px) / 2;
         y: 96px;
+    }
+
+    search := SearchPanel {
+        x: (root.width - self.width) / 2;
+        y: 96px;
+    }
+
+    menu := ContextMenu {
+        x: UIState.menu-x;
+        y: UIState.menu-y;
+    }
+
+    dialog := ConfirmDialog {
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+    }
+
+    settings := SettingsDialog {
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
     }
 }

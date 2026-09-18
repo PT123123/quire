@@ -1,0 +1,87 @@
+// Right-click / ⋯ context menu. One instance lives at window level; the
+// controller positions it (UIState.menu-x/y) and fills the rows. Closing is
+// driven entirely by UIState.menu-open (a popup must not read its own
+// `is-open` — slint 1.18 const-prop crash); outside clicks land on the
+// AppShell scrim.
+
+import { Theme } from "../Theme.slint";
+import { Colors } from "../Colors.slint";
+import { Typography } from "../Typography.slint";
+import { Icon } from "../Icons.slint";
+import { ListView } from "std-widgets.slint";
+import { UIState } from "../Types.slint";
+
+export component ContextMenu inherits PopupWindow {
+    width: 184px;
+    height: min(UIState.menu-rows.length * 30px + 8px, 320px);
+    close-policy: PopupClosePolicy.no-auto-close;
+
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+
+        Rectangle {
+            x: 2px; y: 3px;
+            width: parent.width - 4px;
+            height: parent.height - 5px;
+            border-radius: Theme.radius-md + 2px;
+            background: Colors.shadow;
+        }
+        Rectangle {
+            width: parent.width;
+            height: parent.height;
+            border-radius: Theme.radius-md;
+            background: Colors.surface-overlay;
+            border-width: 1px;
+            border-color: Colors.border;
+        }
+
+        ListView {
+            x: 4px; y: 4px;
+            width: parent.width - 8px;
+            height: parent.height - 8px;
+            content-width: self.width;
+
+            for item in UIState.menu-rows : Rectangle {
+                width: parent.content-width;
+                height: 30px;
+                border-radius: Theme.radius-sm;
+                background: row-ta.has-hover ? Colors.surface-hover : transparent;
+                animate background { duration: Theme.duration-instant; }
+
+                HorizontalLayout {
+                    spacing: Theme.spacing-sm;
+                    padding-left: Theme.spacing-sm;
+                    padding-right: Theme.spacing-sm;
+                    Icon {
+                        vertical-stretch: 0;
+                        cross-axis-self-alignment: center;
+                        width: 14px;
+                        height: 14px;
+                        size: 14px;
+                        name: item.icon;
+                        color: item.danger ? Colors.danger
+                            : (row-ta.has-hover ? Colors.text-primary : Colors.text-secondary);
+                    }
+                    Text {
+                        text: item.label;
+                        font-family: Typography.ui-font;
+                        font-size: Typography.size-ui;
+                        color: item.danger ? Colors.danger
+                            : (row-ta.has-hover ? Colors.text-primary : Colors.text-secondary);
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                }
+
+                row-ta := TouchArea {
+                    mouse-cursor: MouseCursor.pointer;
+                    clicked => {
+                        UIState.menu-open = false;
+                        UIState.menu-action(item.id);
+                    }
+                }
+            }
+        }
+    }
+}

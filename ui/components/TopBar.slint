@@ -44,12 +44,18 @@ export component TopBar inherits Rectangle {
 
     // sidebar-colored strip so the title bar reads as one surface with the rail
     Rectangle {
+        x: 0;
+        y: 0;
         width: UIState.sidebar-open ? Theme.sidebar-width : 0px;
         height: parent.height;
         background: Colors.sidebar;
     }
 
     HorizontalLayout {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        height: parent.height;
         spacing: 2px;
         padding-left: Theme.spacing-sm;
         padding-right: Theme.spacing-xs;
@@ -65,7 +71,12 @@ export component TopBar inherits Rectangle {
         }
 
         WindowMoveArea {
+            height: parent.height;
+            horizontal-stretch: 1;
             HorizontalLayout {
+                height: parent.height;
+                width: parent.width;
+                alignment: start;
                 spacing: Theme.spacing-xs;
                 padding-left: Theme.spacing-sm;
                 Text {
@@ -75,6 +86,23 @@ export component TopBar inherits Rectangle {
                     vertical-alignment: center;
                 }
                 Icon {
+                    vertical-stretch: 0;
+                    cross-axis-self-alignment: center;
+                    width: 12px;
+                    height: 12px;
+                    size: 12px;
+                    stroke-width: 2px;
+                    name: "chevron-right";
+                    color: Colors.text-muted;
+                }
+                if UIState.page-breadcrumb != "" : Text {
+                    text: UIState.page-breadcrumb;
+                    font-size: Typography.size-ui;
+                    color: Colors.text-muted;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                if UIState.page-breadcrumb != "" : Icon {
                     vertical-stretch: 0;
                     cross-axis-self-alignment: center;
                     width: 12px;
@@ -103,7 +131,7 @@ export component TopBar inherits Rectangle {
             icon-name: "search";
             size: 30px;
             clicked => {
-                UIState.palette-open-requested();
+                UIState.search-open-requested();
             }
         }
         IconButton {
@@ -111,6 +139,9 @@ export component TopBar inherits Rectangle {
             cross-axis-self-alignment: center;
             icon-name: "dots-horizontal";
             size: 30px;
+            clicked => {
+                UIState.page-menu-requested();
+            }
         }
 
         Rectangle {

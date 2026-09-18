@@ -7,6 +7,7 @@ import { ListView } from "std-widgets.slint";
 import { Theme } from "../Theme.slint";
 import { Colors } from "../Colors.slint";
 import { Typography } from "../Typography.slint";
+import { Icon } from "../Icons.slint";
 import { EditorBlock } from "./EditorBlock.slint";
 import { BlockRow, UIState } from "../Types.slint";
 
@@ -28,6 +29,9 @@ component DocumentRow inherits Rectangle {
             font-family: Typography.ui-font;
             font-weight: Typography.weight-bold;
             font-size: Typography.size-page-title;
+            // without an explicit factor the text height is the font size
+            // only, and descenders (g, y) collide with the first block
+            line-height-factor: 1.28;
             color: Colors.text-primary;
         }
     }
@@ -52,18 +56,56 @@ export component Editor inherits Rectangle {
 
     background: Colors.background;
 
+    // The scroll position mirror lets the bench harness drive the same
+    // viewport a mouse wheel would (scene F); normal wheel use still works
+    // because Flickable writes its internal changes back through the
+    // two-way binding.
     list := ListView {
         x: 0px;
         y: 0px;
         width: parent.width;
         height: parent.height;
         content-width: parent.width;
+        content-y <=> UIState.editor-scroll-y;
 
         for row[idx] in UIState.blocks : DocumentRow {
             block: row;
             first: idx == 0;
             content-x: root.gutter;
             content-width: list.content-width - 2 * root.gutter;
+        }
+    }
+
+    // empty state — a page with no blocks yet
+    if UIState.blocks.length == 0 : Rectangle {
+        width: parent.width;
+        height: parent.height;
+        VerticalLayout {
+            spacing: Theme.spacing-sm;
+            alignment: center;
+            Icon {
+                width: 40px;
+                height: 40px;
+                size: 40px;
+                name: "page";
+                color: Colors.text-muted;
+                cross-axis-self-alignment: center;
+            }
+            Text {
+                text: "This page is empty";
+                font-family: Typography.ui-font;
+                font-size: Typography.size-h3;
+                font-weight: Typography.weight-semibold;
+                color: Colors.text-secondary;
+                horizontal-alignment: center;
+            }
+            Text {
+                text: "The block editor arrives in a later milestone — pages, search, and navigation are already live.";
+                font-family: Typography.ui-font;
+                font-size: Typography.size-ui;
+                color: Colors.text-muted;
+                horizontal-alignment: center;
+            }
         }
     }
 }

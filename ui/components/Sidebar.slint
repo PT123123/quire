@@ -113,14 +113,17 @@ export component Sidebar inherits Rectangle {
         SidebarPinnedRow {
             icon-name: "search";
             label: "Search";
-            shortcut-hint: "Ctrl K";
+            shortcut-hint: "Ctrl P";
             clicked => {
-                UIState.palette-open-requested();
+                UIState.search-open-requested();
             }
         }
         SidebarPinnedRow {
             icon-name: "settings";
             label: "Settings";
+            clicked => {
+                UIState.settings-open-requested();
+            }
         }
 
         Rectangle { height: Theme.spacing-sm; }

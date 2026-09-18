@@ -6,6 +6,8 @@ Rust + Slint. Single process. No Electron, no WebView, no web stack.
 ```
 just build                    # cargo build --release (default FemtoVG renderer)
 just run                      # cargo run (debug)
+just check                    # local CI replacement: check + test + release
+just shot menu                # headless visual shot (scene name optional)
 just clean                    # cargo clean + remove skia/wgpu benchmark target dirs
 ```
 
@@ -47,7 +49,7 @@ UI 不直接碰数据库或磁盘 IO。Renderer 需实测对比 FemtoVG·wgpu �
 |--|------|------|
 | M0 | 工具链、GPU renderer 验证、benchmark 基线 | ✅ |
 | M1 | 设计系统（Theme/Colors/Typography/Icons）+ 产品级 App Shell | ✅ |
-| M2 | App Shell：Sidebar / Page Tree / 编辑区 / 搜索 / 设置 | 待办 |
+| M2 | App Shell：Sidebar / Page Tree / 编辑区 / 搜索 / 设置 | ✅ |
 | M3 | 本地文档：SQLite、自动保存、重启恢复 | 待办 |
 | M4 | Block Editor MVP（Enter/Backspace/合并/拆分/Undo…） | 待办 |
 | M5 | Notion 交互：Slash 菜单、Command Palette、块拖拽 | 待办 |

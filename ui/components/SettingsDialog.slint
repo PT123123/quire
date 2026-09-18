@@ -1,0 +1,178 @@
+// Settings popup (M2 scope: appearance + about). Real settings persistence
+// arrives with SQLite in M3.
+
+import { Theme } from "../Theme.slint";
+import { Colors } from "../Colors.slint";
+import { Typography } from "../Typography.slint";
+import { Button } from "./Button.slint";
+import { UIState } from "../Types.slint";
+
+component ThemeOption inherits Rectangle {
+    in property <string> label;
+    in property <bool> active;
+    callback clicked();
+
+    height: 30px;
+    width: 96px;
+    border-radius: Theme.radius-sm;
+    background: active ? Colors.accent-soft
+        : (ta.has-hover ? Colors.surface-hover : Colors.surface);
+    border-width: 1px;
+    border-color: active ? Colors.accent : Colors.border;
+    animate background { duration: Theme.duration-instant; }
+
+    Text {
+        text: root.label;
+        font-family: Typography.ui-font;
+        font-size: Typography.size-ui;
+        font-weight: active ? Typography.weight-semibold : Typography.weight-regular;
+        color: active ? Colors.accent-text : Colors.text-secondary;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    ta := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+export component SettingsDialog inherits PopupWindow {
+    width: 400px;
+    height: content-col.preferred-height + Theme.spacing-lg * 2;
+    close-policy: PopupClosePolicy.no-auto-close;
+
+    property <bool> opened: UIState.settings-open;
+    changed opened => {
+        if (UIState.settings-open) {
+            // steal focus so Esc reaches the input below
+            focus-proxy.focus();
+        }
+    }
+
+    focus-proxy := TextInput {
+        x: 0; y: 0;
+        width: 0px; height: 0px;
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                UIState.settings-close-requested();
+                accept
+            } else {
+                reject
+            }
+        }
+    }
+
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+
+        Rectangle {
+            x: 2px; y: 3px;
+            width: parent.width - 4px;
+            height: parent.height - 5px;
+            border-radius: Theme.radius-lg + 2px;
+            background: Colors.shadow;
+        }
+        Rectangle {
+            width: parent.width;
+            height: parent.height;
+            border-radius: Theme.radius-lg;
+            background: Colors.surface-overlay;
+            border-width: 1px;
+            border-color: Colors.border;
+        }
+
+        content-col := VerticalLayout {
+            padding: Theme.spacing-lg;
+            spacing: Theme.spacing-md;
+
+            Text {
+                text: "Settings";
+                font-family: Typography.ui-font;
+                font-size: Typography.size-h3;
+                font-weight: Typography.weight-semibold;
+                color: Colors.text-primary;
+            }
+
+            Text {
+                text: "APPEARANCE";
+                font-size: Typography.size-caption;
+                font-weight: Typography.weight-semibold;
+                color: Colors.text-muted;
+            }
+            HorizontalLayout {
+                spacing: Theme.spacing-sm;
+                ThemeOption {
+                    label: "Light";
+                    active: !UIState.dark;
+                    clicked => {
+                        UIState.dark = false;
+                    }
+                }
+                ThemeOption {
+                    label: "Dark";
+                    active: UIState.dark;
+                    clicked => {
+                        UIState.dark = true;
+                    }
+                }
+            }
+
+            Rectangle { height: 1px; background: Colors.border; }
+
+            Text {
+                text: "ABOUT";
+                font-size: Typography.size-caption;
+                font-weight: Typography.weight-semibold;
+                color: Colors.text-muted;
+            }
+            HorizontalLayout {
+                Text {
+                    text: "Version";
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-ui;
+                    color: Colors.text-secondary;
+                    vertical-alignment: center;
+                }
+                Rectangle { width: 0px; }
+                Text {
+                    text: "Quire " + UIState.app-version;
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-ui;
+                    color: Colors.text-primary;
+                    vertical-alignment: center;
+                }
+            }
+            HorizontalLayout {
+                Text {
+                    text: "Renderer";
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-ui;
+                    color: Colors.text-secondary;
+                    vertical-alignment: center;
+                }
+                Rectangle { width: 0px; }
+                Text {
+                    text: UIState.renderer-name;
+                    font-family: Typography.mono-font;
+                    font-size: Typography.size-caption;
+                    color: Colors.text-primary;
+                    vertical-alignment: center;
+                }
+            }
+
+            Rectangle { height: Theme.spacing-xs; }
+            HorizontalLayout {
+                Rectangle { horizontal-stretch: 1; }
+                Button {
+                    text: "Done";
+                    clicked => {
+                        UIState.settings-close-requested();
+                    }
+                }
+            }
+        }
+    }
+}

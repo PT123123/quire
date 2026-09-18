@@ -14,7 +14,8 @@ export component Button inherits Rectangle {
     callback clicked();
 
     height: 30px;
-    width: content.min-layout-width() + 2 * Theme.spacing-md;
+    // width follows the content: the parent layout sizes this to its
+    // preferred width (no explicit min-layout-width here)
     border-radius: Theme.radius-sm;
     opacity: root.enabled ? 1 : 0.45;
     background: root.primary

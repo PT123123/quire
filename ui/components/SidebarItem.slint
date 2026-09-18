@@ -1,5 +1,5 @@
 // One row of the sidebar. `node.kind` decides whether it renders as a
-// section header, a nav entry, or a page-tree node.
+// section header, a nav entry, a page-tree node, or the "New page" action.
 
 import { Theme } from "../Theme.slint";
 import { Colors } from "../Colors.slint";
@@ -10,11 +10,16 @@ import { UIState, SidebarNode } from "../Types.slint";
 export component SidebarItem inherits Rectangle {
     in property <SidebarNode> node;
 
-    height: node.kind == "header" ? 26px : 28px;
+    property <bool> is-header: node.kind == "header";
+    property <bool> is-page: node.kind == "page";
+    property <bool> is-new-page: node.kind == "new-page";
+    property <bool> renaming: is-page && UIState.renaming-id == node.id;
+
+    height: is-header ? 26px : 28px;
     border-radius: Theme.radius-sm;
     background: node.selected
         ? Colors.surface-selected
-        : (ta.has-hover ? Colors.hover-fill : transparent);
+        : (ta.has-hover && !renaming ? Colors.hover-fill : transparent);
     animate background { duration: Theme.duration-instant; }
 
     HorizontalLayout {
@@ -22,36 +27,106 @@ export component SidebarItem inherits Rectangle {
         padding-left: Theme.spacing-xs + node.depth * 14px;
         padding-right: Theme.spacing-sm;
         cross-axis-alignment: center;
-        if node.kind != "header" : Icon {
+
+        if !is-header : Rectangle {
             width: 16px;
             height: 16px;
-            size: 15px;
-            name: node.kind == "search" ? "search"
-                : node.kind == "settings" ? "settings"
-                : node.kind == "favorite" ? "star"
-                : node.kind == "recent" ? "clock"
-                : node.has-children ? (node.expanded ? "chevron-down" : "chevron-right")
-                : "page";
-            color: node.selected ? Colors.accent-text
-                : (ta.has-hover ? Colors.text-secondary : Colors.text-muted);
+            // chevron area doubles as the expand/collapse click target;
+            // leaves and the action row show their plain icon.
+            if is-page && node.has-children : Rectangle {
+                width: 16px;
+                height: 16px;
+                Icon {
+                    width: 14px;
+                    height: 14px;
+                    size: 14px;
+                    name: node.expanded ? "chevron-down" : "chevron-right";
+                    color: chev-ta.has-hover ? Colors.text-primary : Colors.text-muted;
+                }
+                chev-ta := TouchArea {
+                    mouse-cursor: MouseCursor.pointer;
+                    clicked => {
+                        UIState.node-expand-toggled(node.id);
+                    }
+                }
+            }
+            if !(is-page && node.has-children) : Icon {
+                width: 15px;
+                height: 15px;
+                size: 15px;
+                name: is-new-page ? "plus"
+                    : node.kind == "favorite" ? "star"
+                    : node.kind == "recent" ? "clock"
+                    : "page";
+                color: is-new-page ? Colors.text-muted
+                    : node.selected ? Colors.accent-text
+                    : (ta.has-hover ? Colors.text-secondary : Colors.text-muted);
+            }
         }
-        Text {
+
+        // label or inline rename input
+        if renaming : Rectangle {
+            height: 22px;
+            border-radius: Theme.radius-xs;
+            background: Colors.background;
+            border-width: 1px;
+            border-color: Colors.accent;
+            rename-input := TextInput {
+                x: 4px;
+                width: parent.width - 8px;
+                height: parent.height;
+                vertical-alignment: center;
+                font-family: Typography.ui-font;
+                font-size: Typography.size-ui;
+                color: Colors.text-primary;
+                selection-foreground-color: Colors.text-primary;
+                selection-background-color: Colors.selection;
+                single-line: true;
+                text: node.label;
+                accepted => {
+                    UIState.rename-committed(node.id, self.text);
+                }
+                key-pressed(event) => {
+                    if (event.text == Key.Escape) {
+                        UIState.rename-cancelled();
+                        accept
+                    } else {
+                        reject
+                    }
+                }
+                init => {
+                    rename-input.focus();
+                    rename-input.select-all();
+                }
+            }
+        }
+        if !renaming : Text {
             text: node.label;
             font-family: Typography.ui-font;
-            font-size: node.kind == "header" ? Typography.size-caption : Typography.size-ui;
-            font-weight: node.kind == "header" ? Typography.weight-semibold : Typography.weight-regular;
-            color: node.kind == "header" ? Colors.text-muted
+            font-size: is-header ? Typography.size-caption : Typography.size-ui;
+            font-weight: is-header ? Typography.weight-semibold : Typography.weight-regular;
+            color: is-header ? Colors.text-muted
+                : is-new-page ? Colors.text-muted
                 : node.selected ? Colors.text-primary
                 : Colors.text-secondary;
             overflow: elide;
+            vertical-alignment: center;
         }
     }
 
     ta := TouchArea {
+        enabled: !renaming;
         mouse-cursor: MouseCursor.pointer;
         clicked => {
             UIState.sidebar-selected-id = node.id;
-            UIState.node-activated();
+            UIState.node-clicked(node.id);
+        }
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.up
+                && event.button == PointerEventButton.right
+                && is-page) {
+                UIState.node-context(node.id);
+            }
         }
     }
 }

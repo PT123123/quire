@@ -1,0 +1,7 @@
+{
+    "files.associations": { "*.slint": "slint" },
+    "slint.languageServer.config.all": {
+        "completion": true,
+        "hover": true
+    }
+}

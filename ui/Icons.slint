@@ -95,12 +95,14 @@ component IcGrip {
         viewbox-x: 0; viewbox-y: 0; viewbox-width: 24; viewbox-height: 24;
         stroke: color; stroke-width: 2.2px; stroke-line-cap: round;
         fill: transparent;
-        MoveTo { x: 9; y: 6; } LineTo { x: 9; y: 6.01; }
-        MoveTo { x: 9; y: 12; } LineTo { x: 9; y: 12.01; }
-        MoveTo { x: 9; y: 18; } LineTo { x: 9; y: 18.01; }
-        MoveTo { x: 15; y: 6; } LineTo { x: 15; y: 6.01; }
-        MoveTo { x: 15; y: 12; } LineTo { x: 15; y: 12.01; }
-        MoveTo { x: 15; y: 18; } LineTo { x: 15; y: 18.01; }
+        // short segments (not zero-length): zero-area paths drop out of the
+        // software renderer's rasterizer even with round caps
+        MoveTo { x: 9; y: 5.4; } LineTo { x: 9; y: 6.6; }
+        MoveTo { x: 9; y: 11.4; } LineTo { x: 9; y: 12.6; }
+        MoveTo { x: 9; y: 17.4; } LineTo { x: 9; y: 18.6; }
+        MoveTo { x: 15; y: 5.4; } LineTo { x: 15; y: 6.6; }
+        MoveTo { x: 15; y: 11.4; } LineTo { x: 15; y: 12.6; }
+        MoveTo { x: 15; y: 17.4; } LineTo { x: 15; y: 18.6; }
     }
 }
 
@@ -113,9 +115,9 @@ component IcDotsHorizontal {
         viewbox-x: 0; viewbox-y: 0; viewbox-width: 24; viewbox-height: 24;
         stroke: color; stroke-width: 2.2px; stroke-line-cap: round;
         fill: transparent;
-        MoveTo { x: 5; y: 12; } LineTo { x: 5.01; y: 12; }
-        MoveTo { x: 12; y: 12; } LineTo { x: 12.01; y: 12; }
-        MoveTo { x: 19; y: 12; } LineTo { x: 19.01; y: 12; }
+        MoveTo { x: 4.4; y: 12; } LineTo { x: 5.6; y: 12; }
+        MoveTo { x: 11.4; y: 12; } LineTo { x: 12.6; y: 12; }
+        MoveTo { x: 18.4; y: 12; } LineTo { x: 19.6; y: 12; }
     }
 }
 
@@ -331,6 +333,55 @@ component IcChevronLeft {
     }
 }
 
+component IcPencil {
+    in property <brush> color: Colors.text-secondary;
+    in property <length> size: 16px;
+    width: size; height: size;
+    Path {
+        width: parent.width; height: parent.height;
+        viewbox-x: 0; viewbox-y: 0; viewbox-width: 24; viewbox-height: 24;
+        stroke: color; stroke-width: 1.8px;
+        stroke-line-cap: round; stroke-line-join: round;
+        fill: transparent;
+        MoveTo { x: 15.2; y: 5.2; } LineTo { x: 18.8; y: 8.8; }
+        LineTo { x: 8.5; y: 19; } LineTo { x: 5; y: 19; } LineTo { x: 5; y: 15.5; } Close {}
+        MoveTo { x: 13.5; y: 7; } LineTo { x: 17; y: 10.5; }
+    }
+}
+
+component IcCopy {
+    in property <brush> color: Colors.text-secondary;
+    in property <length> size: 16px;
+    width: size; height: size;
+    Path {
+        width: parent.width; height: parent.height;
+        viewbox-x: 0; viewbox-y: 0; viewbox-width: 24; viewbox-height: 24;
+        stroke: color; stroke-width: 1.8px;
+        stroke-line-cap: round; stroke-line-join: round;
+        fill: transparent;
+        MoveTo { x: 9; y: 9; } LineTo { x: 19; y: 9; } LineTo { x: 19; y: 19; } LineTo { x: 9; y: 19; } Close {}
+        MoveTo { x: 5; y: 15; } LineTo { x: 5; y: 5; } LineTo { x: 15; y: 5; }
+    }
+}
+
+component IcTrash {
+    in property <brush> color: Colors.text-secondary;
+    in property <length> size: 16px;
+    width: size; height: size;
+    Path {
+        width: parent.width; height: parent.height;
+        viewbox-x: 0; viewbox-y: 0; viewbox-width: 24; viewbox-height: 24;
+        stroke: color; stroke-width: 1.8px;
+        stroke-line-cap: round; stroke-line-join: round;
+        fill: transparent;
+        MoveTo { x: 4.5; y: 7; } LineTo { x: 19.5; y: 7; }
+        MoveTo { x: 9.5; y: 4.5; } LineTo { x: 14.5; y: 4.5; }
+        MoveTo { x: 7; y: 7; } LineTo { x: 7.8; y: 19.5; } LineTo { x: 16.2; y: 19.5; } LineTo { x: 17; y: 7; }
+        MoveTo { x: 10; y: 10.5; } LineTo { x: 10; y: 16; }
+        MoveTo { x: 14; y: 10.5; } LineTo { x: 14; y: 16; }
+    }
+}
+
 // Name dispatcher used by sidebar rows and palette rows.
 export component Icon {
     in property <string> name;
@@ -345,6 +396,9 @@ export component Icon {
     IcChevronRight { visible: root.name == "chevron-right"; size: root.size; color: root.color; }
     IcChevronDown { visible: root.name == "chevron-down"; size: root.size; color: root.color; }
     IcChevronLeft { visible: root.name == "chevron-left"; size: root.size; color: root.color; }
+    IcPencil { visible: root.name == "pencil"; size: root.size; color: root.color; }
+    IcCopy { visible: root.name == "copy"; size: root.size; color: root.color; }
+    IcTrash { visible: root.name == "trash"; size: root.size; color: root.color; }
     IcPlus { visible: root.name == "plus"; size: root.size; color: root.color; }
     IcX { visible: root.name == "x"; size: root.size; color: root.color; }
     IcGrip { visible: root.name == "grip"; size: root.size; color: root.color; }
