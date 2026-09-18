@@ -57,6 +57,16 @@ Reading:
 - Second-launch startup ≈ 400 ms (warm OS cache); numbers above are
   first-launch-after-build runs.
 
+## M3 · save latency (Release, SQLite WAL + synchronous=FULL)
+Measured 2026-09-19 on branch `m3-storage` via
+`cargo test --test storage -- --ignored --nocapture save_latency`
+(temp-dir file DB, not the UI pipeline — wiring adds only the 300 ms
+debounce window). A debounced burst = one `apply` of 32 changes (30 text
+sets + block insert + setting): **median 2.44 ms, max 2.73 ms** per batch
+(debug build ≈ same, the commit fsync dominates); startup `load` of
+10 006 blocks + 1 004 pages **3.6 ms**; bulk checkpoint
+(`replace_all`, ≈21 000 rows) 119 ms.
+
 ## Notes / open questions
 - Slint's winit backend redraws on events; any persistent animation on an
   idle screen is a bug — chase it (animation tokens are finite-duration only).
