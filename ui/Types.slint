@@ -1,0 +1,61 @@
+// Data shapes exchanged between Rust and the UI, plus the single shared
+// UI-state global. Rust owns construction (VecModel), UI owns presentation.
+
+export struct SidebarNode {
+    id: int,
+    label: string,
+    kind: string,   // "search" | "settings" | "header" | "favorite" | "recent" | "page"
+    depth: int,
+    expanded: bool,
+    has-children: bool,
+    selected: bool,
+}
+
+export struct BlockRow {
+    id: int,
+    kind: int, // 0 para, 1 h1, 2 h2, 3 h3, 4 bullet, 5 numbered, 6 todo, 7 quote, 8 code, 9 divider
+    text: string,
+    checked: bool,
+    number: int,
+    tail: bool, // last block of the page: the delegate carries the bottom spacer
+}
+
+export struct CommandRow {
+    id: int,
+    name: string,
+    hint: string,
+    section: string,
+    icon: string,
+}
+
+// The one place transient UI state lives. Components read/write it directly;
+// Rust reaches it through the generated global accessor.
+export global UIState {
+    in-out property <bool> dark: false;
+    in-out property <bool> sidebar-open: true;
+    in-out property <bool> palette-open: false;
+    in-out property <string> palette-query: "";
+    in-out property <int> palette-focus: 0;
+
+    in-out property <[SidebarNode]> sidebar-rows;
+    in-out property <int> sidebar-selected-id: 0;
+
+    in-out property <[BlockRow]> blocks;
+    in-out property <string> page-title: "Project Atlas";
+
+    in-out property <[CommandRow]> commands;
+    in-out property <int> command-selected-id: -1;
+
+    in property <string> app-version: "0.1.0 · M1";
+    in property <string> renderer-name: "unknown";
+
+    // routed to Rust controller
+    callback toggle-sidebar();
+    callback toggle-theme();
+    callback palette-query-changed();
+    callback palette-open-requested();
+    callback command-invoked();
+    callback palette-move(int);
+    callback node-activated();
+    callback todo-toggled(int);
+}

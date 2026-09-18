@@ -1,0 +1,32 @@
+// Type scale. Windows-first font stack; mono for code blocks.
+
+import { Theme } from "Theme.slint";
+
+export global Typography {
+    out property <string> ui-font: "Segoe UI";
+    out property <string> display-font: "Segoe UI Semibold";
+    out property <string> mono-font: "Cascadia Mono, Consolas";
+
+    // page chrome
+    out property <length> size-caption: 11px;   // section labels, hints
+    out property <length> size-ui: 13px;        // sidebar rows, menus, buttons
+    out property <length> size-ui-lg: 14px;     // palette items
+
+    // document
+    out property <length> size-body: 15.5px;
+    out property <float> line-body: 1.55;  // factor of natural line height
+    out property <length> size-h3: 18px;
+    out property <float> line-h3: 1.5;
+    out property <length> size-h2: 22px;
+    out property <float> line-h2: 1.36;
+    out property <length> size-h1: 28px;
+    out property <float> line-h1: 1.36;
+    out property <length> size-page-title: 38px;
+    out property <length> size-code: 13.5px;
+    out property <float> line-code: 1.48;
+
+    out property <int> weight-regular: 400;
+    out property <int> weight-medium: 500;
+    out property <int> weight-semibold: 600;
+    out property <int> weight-bold: 700;
+}

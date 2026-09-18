@@ -1,0 +1,57 @@
+// One row of the sidebar. `node.kind` decides whether it renders as a
+// section header, a nav entry, or a page-tree node.
+
+import { Theme } from "../Theme.slint";
+import { Colors } from "../Colors.slint";
+import { Typography } from "../Typography.slint";
+import { Icon } from "../Icons.slint";
+import { UIState, SidebarNode } from "../Types.slint";
+
+export component SidebarItem inherits Rectangle {
+    in property <SidebarNode> node;
+
+    height: node.kind == "header" ? 26px : 28px;
+    border-radius: Theme.radius-sm;
+    background: node.selected
+        ? Colors.surface-selected
+        : (ta.has-hover ? Colors.hover-fill : transparent);
+    animate background { duration: Theme.duration-instant; }
+
+    HorizontalLayout {
+        spacing: Theme.spacing-sm;
+        padding-left: Theme.spacing-xs + node.depth * 14px;
+        padding-right: Theme.spacing-sm;
+        cross-axis-alignment: center;
+        if node.kind != "header" : Icon {
+            width: 16px;
+            height: 16px;
+            size: 15px;
+            name: node.kind == "search" ? "search"
+                : node.kind == "settings" ? "settings"
+                : node.kind == "favorite" ? "star"
+                : node.kind == "recent" ? "clock"
+                : node.has-children ? (node.expanded ? "chevron-down" : "chevron-right")
+                : "page";
+            color: node.selected ? Colors.accent-text
+                : (ta.has-hover ? Colors.text-secondary : Colors.text-muted);
+        }
+        Text {
+            text: node.label;
+            font-family: Typography.ui-font;
+            font-size: node.kind == "header" ? Typography.size-caption : Typography.size-ui;
+            font-weight: node.kind == "header" ? Typography.weight-semibold : Typography.weight-regular;
+            color: node.kind == "header" ? Colors.text-muted
+                : node.selected ? Colors.text-primary
+                : Colors.text-secondary;
+            overflow: elide;
+        }
+    }
+
+    ta := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => {
+            UIState.sidebar-selected-id = node.id;
+            UIState.node-activated();
+        }
+    }
+}

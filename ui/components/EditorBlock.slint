@@ -1,0 +1,181 @@
+// A rendered block block. Deliberately NOT a TextEdit: static blocks are pure
+// Text + shapes, so a 10 000-block document costs one delegate each, not an
+// interactive widget each. The focused-block editor overlay arrives in M4.
+// Elements for all kinds exist and toggle `visible` — one cheap hidden Text
+// beats four conditional-element paths through the compiler.
+
+import { Theme } from "../Theme.slint";
+import { Colors } from "../Colors.slint";
+import { Typography } from "../Typography.slint";
+import { Icon } from "../Icons.slint";
+import { BlockHandle } from "./BlockHandle.slint";
+import { BlockRow, UIState } from "../Types.slint";
+
+export component EditorBlock inherits Rectangle {
+    in property <BlockRow> block;
+    in property <length> content-width;
+    in property <length> content-x;
+
+    property <bool> is-list: block.kind == 4 || block.kind == 5 || block.kind == 6;
+    property <bool> is-heading: block.kind == 1 || block.kind == 2 || block.kind == 3;
+    property <bool> is-plain: block.kind <= 6;
+    property <length> top-margin:
+        block.kind == 1 ? Theme.spacing-xl
+        : block.kind == 2 ? Theme.spacing-lg + Theme.spacing-xs
+        : block.kind == 3 || block.kind == 9 ? Theme.spacing-md
+        : 0px;
+    // Text with an explicit width + wrap sizes itself (height-for-width);
+    // we just read its computed height to size the row.
+    property <length> body-height:
+        block.kind == 7 ? quote-text.height + Theme.spacing-xs
+        : block.kind == 8 ? code-text.height + 2 * Theme.spacing-md
+        : block.kind == 9 ? 20px
+        : plain-text.height;
+
+    height: top-margin + body-height + (block.kind == 0 ? Theme.spacing-xs : Theme.spacing-sm);
+
+    ta := TouchArea {
+        width: parent.width;
+        height: parent.height;
+    }
+
+    Rectangle {
+        x: content-x - 8px;
+        width: content-width + 16px;
+        y: top-margin;
+        height: body-height;
+        border-radius: Theme.radius-sm;
+        background: ta.has-hover ? Colors.hover-fill : transparent;
+        animate background { duration: Theme.duration-instant; }
+    }
+
+    BlockHandle {
+        x: root.content-x - 48px;
+        y: top-margin;
+        visible-flag: ta.has-hover;
+    }
+
+    plain-text := Text {
+        x: content-x + (is-list ? 26px : 0px);
+        width: content-width - (is-list ? 26px : 0px);
+        y: top-margin;
+        visible: is-plain;
+        text: block.text;
+        font-family: Typography.ui-font;
+        font-size: block.kind == 1 ? Typography.size-h1
+            : block.kind == 2 ? Typography.size-h2
+            : block.kind == 3 ? Typography.size-h3
+            : Typography.size-body;
+        font-weight: root.is-heading ? Typography.weight-semibold : Typography.weight-regular;
+        color: block.checked && block.kind == 6 ? Colors.text-muted : Colors.text-primary;
+        line-height-factor: block.kind == 1 ? Typography.line-h1
+            : block.kind == 2 ? Typography.line-h2
+            : block.kind == 3 ? Typography.line-h3
+            : Typography.line-body;
+        wrap: word-wrap;
+    }
+
+    Rectangle {
+        x: content-x + 8px;
+        y: top-margin + Typography.size-body * Typography.line-body / 2 - 5px;
+        width: 6px;
+        height: 6px;
+        border-radius: 3px;
+        visible: block.kind == 4;
+        background: Colors.text-primary;
+    }
+
+    Text {
+        x: content-x + 2px;
+        y: top-margin;
+        width: 22px;
+        visible: block.kind == 5;
+        text: "\{block.number}.";
+        font-family: Typography.ui-font;
+        font-size: Typography.size-body;
+        color: Colors.text-primary;
+        line-height-factor: Typography.line-body;
+    }
+
+    Rectangle {
+        x: content-x + 2px;
+        y: top-margin + Typography.size-body * Typography.line-body / 2 - 8px;
+        width: 17px;
+        height: 17px;
+        visible: block.kind == 6;
+        border-radius: Theme.radius-xs;
+        border-width: block.checked ? 0px : 1.5px;
+        border-color: Colors.border-strong;
+        background: block.checked ? Colors.accent : transparent;
+        animate background { duration: Theme.duration-fast; }
+        Icon {
+            x: 1.5px; y: 1.5px;
+            name: "todo-check";
+            size: 14px;
+            stroke-width: 2.4px;
+            color: Colors.text-on-accent;
+            visible: block.checked;
+        }
+        TouchArea {
+            mouse-cursor: MouseCursor.pointer;
+            clicked => {
+                UIState.todo-toggled(block.id);
+            }
+        }
+    }
+
+    Rectangle {
+        x: content-x;
+        y: top-margin + 2px;
+        width: 3px;
+        height: quote-text.height - 2px;
+        visible: block.kind == 7;
+        border-radius: 2px;
+        background: Colors.text-primary;
+    }
+    quote-text := Text {
+        x: content-x + Theme.spacing-md;
+        y: top-margin;
+        width: content-width - Theme.spacing-md;
+        visible: block.kind == 7;
+        text: block.text;
+        font-family: Typography.ui-font;
+        font-size: Typography.size-body;
+        color: Colors.text-primary;
+        line-height-factor: Typography.line-body;
+        wrap: word-wrap;
+    }
+
+    Rectangle {
+        x: content-x;
+        y: top-margin;
+        width: content-width;
+        height: root.body-height;
+        visible: block.kind == 8;
+        border-radius: Theme.radius-md;
+        background: Colors.code-background;
+        border-width: 1px;
+        border-color: Colors.border;
+    }
+    code-text := Text {
+        x: content-x + Theme.spacing-md;
+        y: top-margin + Theme.spacing-md;
+        width: content-width - 2 * Theme.spacing-md;
+        visible: block.kind == 8;
+        text: block.text;
+        font-family: Typography.mono-font;
+        font-size: Typography.size-code;
+        color: Colors.text-primary;
+        line-height-factor: Typography.line-code;
+        wrap: word-wrap;
+    }
+
+    Rectangle {
+        x: content-x;
+        y: top-margin + 10px;
+        width: content-width;
+        height: 1px;
+        visible: block.kind == 9;
+        background: Colors.divider;
+    }
+}

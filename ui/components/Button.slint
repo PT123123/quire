@@ -1,0 +1,54 @@
+// Ghost/primary button used by dialogs and menus. The sidebar rows and icon
+// buttons have their own, denser affordances — this is the standard control.
+
+import { Theme } from "../Theme.slint";
+import { Colors } from "../Colors.slint";
+import { Typography } from "../Typography.slint";
+import { Icon } from "../Icons.slint";
+
+export component Button inherits Rectangle {
+    in property <string> text;
+    in property <string> icon-name: "";
+    in property <bool> primary: false;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    height: 30px;
+    width: content.min-layout-width() + 2 * Theme.spacing-md;
+    border-radius: Theme.radius-sm;
+    opacity: root.enabled ? 1 : 0.45;
+    background: root.primary
+        ? (ta.has-hover && root.enabled ? Colors.accent-text : Colors.accent)
+        : (ta.has-hover && root.enabled ? Colors.surface-hover : transparent);
+    border-width: root.primary ? 0px : 1px;
+    border-color: Colors.border-strong;
+    animate background { duration: Theme.duration-fast; }
+
+    content := HorizontalLayout {
+        alignment: center;
+        spacing: Theme.spacing-sm;
+        padding-left: Theme.spacing-md;
+        padding-right: Theme.spacing-md;
+        if root.icon-name != "" : Icon {
+            name: root.icon-name;
+            size: 15px;
+            color: root.primary ? Colors.text-on-accent : Colors.text-secondary;
+        }
+        Text {
+            horizontal-alignment: center;
+            text: root.text;
+            font-family: Typography.ui-font;
+            font-size: Typography.size-ui;
+            font-weight: Typography.weight-medium;
+            color: root.primary ? Colors.text-on-accent : Colors.text-primary;
+        }
+    }
+
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.default;
+        clicked => {
+            root.clicked();
+        }
+    }
+}

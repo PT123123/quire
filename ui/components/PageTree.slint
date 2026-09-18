@@ -1,0 +1,14 @@
+// The scrollable page tree inside the sidebar. Rows come pre-flattened from
+// Rust (M2); a collapsed node simply has no child rows in the model.
+
+import { ListView } from "std-widgets.slint";
+import { UIState } from "../Types.slint";
+import { SidebarItem } from "./SidebarItem.slint";
+
+export component PageTree inherits ListView {
+    content-width: self.width;
+    for node in UIState.sidebar-rows : SidebarItem {
+        node: node;
+        width: parent.content-width;
+    }
+}

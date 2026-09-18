@@ -1,0 +1,48 @@
+// Composition of the whole window body: title bar on top, sidebar + editor
+// below, plus the palette scrim. No business logic here — state flows
+// through the UIState global, actions flow to the Rust controller.
+
+import { Theme } from "../Theme.slint";
+import { Colors } from "../Colors.slint";
+import { TopBar } from "./TopBar.slint";
+import { Sidebar } from "./Sidebar.slint";
+import { Editor } from "./Editor.slint";
+import { UIState } from "../Types.slint";
+
+export component AppShell inherits Rectangle {
+    callback minimize-requested();
+    callback maximize-requested();
+    callback close-requested();
+
+    VerticalLayout {
+        TopBar {
+            minimize-requested => {
+                root.minimize-requested();
+            }
+            maximize-requested => {
+                root.maximize-requested();
+            }
+            close-requested => {
+                root.close-requested();
+            }
+        }
+        HorizontalLayout {
+            Sidebar {}
+            Editor {}
+        }
+    }
+
+    // scrim behind the command palette
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        visible: UIState.palette-open;
+        background: transparent;
+        scrim-ta := TouchArea {
+            enabled: UIState.palette-open;
+            clicked => {
+                UIState.palette-open = false;
+            }
+        }
+    }
+}

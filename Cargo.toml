@@ -1,0 +1,37 @@
+[package]
+name = "quire"
+version = "0.1.0"
+edition = "2021"
+description = "A local, GPU-accelerated, Notion-like document app built with Rust + Slint"
+
+[dependencies]
+# Renderer is selected per cargo feature (see [features]); default-features are off so
+# exactly one GPU renderer is compiled per binary, keeping the binary lean.
+slint = { version = "1.18", default-features = false, features = [
+    "std",
+    "backend-winit",
+    "accessibility",
+    "system-tray",
+    "image-default-formats",
+    "compat-1-18",
+] }
+
+[features]
+default = ["femtovg"]
+# A. FemtoVG via OpenGL (Slint's default desktop renderer path)
+femtovg = ["slint/renderer-femtovg"]
+# A'. FemtoVG via wgpu
+femtovg-wgpu = ["slint/renderer-femtovg-wgpu"]
+# B. Skia (Vulkan/GL drivers behind it, per variant)
+skia = ["slint/renderer-skia"]
+skia-opengl = ["slint/renderer-skia-opengl"]
+# Software renderer kept available as a no-GPU fallback for testing
+software = ["slint/renderer-software"]
+
+[build-dependencies]
+slint-build = "1.18"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = "debuginfo"

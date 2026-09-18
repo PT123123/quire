@@ -1,0 +1,172 @@
+// Left navigation column: workspace header, pinned entries, page tree,
+// and a footer with theme toggle and build info.
+
+import { Theme } from "../Theme.slint";
+import { Colors } from "../Colors.slint";
+import { Typography } from "../Typography.slint";
+import { Icon } from "../Icons.slint";
+import { IconButton } from "./IconButton.slint";
+import { PageTree } from "./PageTree.slint";
+import { UIState } from "../Types.slint";
+
+component SidebarPinnedRow inherits Rectangle {
+    in property <string> icon-name;
+    in property <string> label;
+    in property <string> shortcut-hint: "";
+    callback clicked();
+
+    height: 28px;
+    border-radius: Theme.radius-sm;
+    background: ta.has-hover ? Colors.hover-fill : transparent;
+    animate background { duration: Theme.duration-instant; }
+
+    HorizontalLayout {
+        spacing: Theme.spacing-sm;
+        padding-left: Theme.spacing-xs;
+        padding-right: Theme.spacing-sm;
+        cross-axis-alignment: center;
+        Icon {
+            width: 16px;
+            height: 16px;
+            size: 15px;
+            name: root.icon-name;
+            color: ta.has-hover ? Colors.text-secondary : Colors.text-muted;
+        }
+        Text {
+            text: root.label;
+            font-family: Typography.ui-font;
+            font-size: Typography.size-ui;
+            color: Colors.text-secondary;
+        }
+        Rectangle { width: 0px; }
+        if root.shortcut-hint != "" : Text {
+            text: root.shortcut-hint;
+            font-family: Typography.ui-font;
+            font-size: Typography.size-caption;
+            color: Colors.text-muted;
+        }
+    }
+
+    ta := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+export component Sidebar inherits Rectangle {
+    width: UIState.sidebar-open ? Theme.sidebar-width : 0px;
+    clip: true;
+    animate width { duration: Theme.duration-normal; }
+    background: Colors.sidebar;
+
+    VerticalLayout {
+        width: Theme.sidebar-width;
+        padding-left: Theme.spacing-sm;
+        padding-right: Theme.spacing-sm;
+
+        // ---- workspace header ----
+        Rectangle {
+            height: 36px;
+            HorizontalLayout {
+                spacing: Theme.spacing-sm;
+                padding-left: Theme.spacing-xs;
+                Rectangle {
+                    vertical-stretch: 0;
+                    cross-axis-self-alignment: center;
+                    width: 20px;
+                    height: 20px;
+                    border-radius: 6px;
+                    background: Colors.accent;
+                    Text {
+                        text: "Q";
+                        font-family: Typography.ui-font;
+                        font-size: 12px;
+                        font-weight: Typography.weight-bold;
+                        color: Colors.text-on-accent;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        width: 20px;
+                        height: 20px;
+                    }
+                }
+                Text {
+                    text: "Workspace";
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-ui;
+                    font-weight: Typography.weight-semibold;
+                    color: Colors.text-primary;
+                    vertical-alignment: center;
+                }
+                Rectangle { width: 0px; }
+                IconButton {
+                    vertical-stretch: 0;
+                    cross-axis-self-alignment: center;
+                    icon-name: "chevron-down";
+                    size: 22px;
+                }
+            }
+        }
+
+        // ---- pinned rows: search / settings ----
+        SidebarPinnedRow {
+            icon-name: "search";
+            label: "Search";
+            shortcut-hint: "Ctrl K";
+            clicked => {
+                UIState.palette-open-requested();
+            }
+        }
+        SidebarPinnedRow {
+            icon-name: "settings";
+            label: "Settings";
+        }
+
+        Rectangle { height: Theme.spacing-sm; }
+
+        PageTree {
+            content-width: self.width;
+        }
+
+        // ---- footer ----
+        Rectangle {
+            height: 1px;
+            Rectangle {
+                x: Theme.spacing-xs;
+                width: parent.width - 2 * Theme.spacing-xs;
+                height: 1px;
+                background: Colors.border;
+            }
+        }
+        SidebarPinnedRow {
+            icon-name: UIState.dark ? "sun" : "moon";
+            label: UIState.dark ? "Light mode" : "Dark mode";
+            shortcut-hint: "Ctrl+Shift+L";
+            clicked => {
+                UIState.toggle-theme();
+            }
+        }
+        Rectangle {
+            height: 22px;
+            HorizontalLayout {
+                padding-left: Theme.spacing-xs + 24px;
+                Text {
+                    text: UIState.app-version;
+                    font-size: Typography.size-caption;
+                    color: Colors.text-muted;
+                    vertical-alignment: center;
+                    width: 60px;
+                }
+                Text {
+                    text: UIState.renderer-name;
+                    font-size: Typography.size-caption;
+                    color: Colors.text-muted;
+                    vertical-alignment: center;
+                }
+                Rectangle { width: 0px; }
+            }
+        }
+        Rectangle { height: Theme.spacing-sm; }
+    }
+}
