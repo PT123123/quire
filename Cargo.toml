@@ -5,6 +5,7 @@ edition = "2021"
 description = "A local, GPU-accelerated, Notion-like document app built with Rust + Slint"
 
 [dependencies]
+rusqlite = { version = "0.40.2", features = ["bundled"] }
 # Renderer is selected per cargo feature (see [features]); default-features are off so
 # exactly one GPU renderer is compiled per binary, keeping the binary lean.
 slint = { version = "1.18", default-features = false, features = [
@@ -34,6 +35,14 @@ slint-build = "1.18"
 [[test]]
 name = "workspace"
 path = "tests/integration/workspace_test.rs"
+
+[[test]]
+name = "storage"
+path = "tests/integration/storage_test.rs"
+
+[[test]]
+name = "persistence"
+path = "tests/integration/persistence_test.rs"
 
 # Headless screenshot tool (visual regression); built only with the
 # software renderer feature so the shipped binary stays lean.
