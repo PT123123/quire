@@ -41,7 +41,7 @@ fn search_finds_unopened_page_content() {
     // content blobs are filled at construction, so search works before a
     // page is ever opened
     let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0 };
-    let state = AppState::new(&args);
+    let state = AppState::new(&args, None);
     let hits = state.workspace.borrow().search("字体回退");
     assert!(
         hits.iter().any(|h| h.id == 112 && h.snippet.contains("字体回退")),
@@ -52,7 +52,7 @@ fn search_finds_unopened_page_content() {
 #[test]
 fn sidebar_projection_shape() {
     let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0 };
-    let state = AppState::new(&args);
+    let state = AppState::new(&args, None);
     let rows = state.build_sidebar_rows();
     // sections in order, y offsets strictly increasing, no duplicate ids
     let kinds: Vec<&str> = rows.iter().map(|r| r.kind.as_str()).collect();
@@ -73,7 +73,7 @@ fn sidebar_projection_shape() {
 #[test]
 fn create_then_open_page_lands_empty() {
     let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0 };
-    let state = AppState::new(&args);
+    let state = AppState::new(&args, None);
     let id = state.create_page(None);
     assert_eq!(state.open_page.get(), id);
     assert_eq!(state.blocks.row_count(), 0, "new page shows the empty state");
@@ -83,7 +83,7 @@ fn create_then_open_page_lands_empty() {
 #[test]
 fn delete_open_page_resets_selection() {
     let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0 };
-    let state = AppState::new(&args);
+    let state = AppState::new(&args, None);
     let id = state.create_page(None);
     assert!(state.delete_page(id), "deleting the open page is reported");
     assert_eq!(state.open_page.get(), 0, "selection resets to no-page");

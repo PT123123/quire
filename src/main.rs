@@ -19,6 +19,10 @@ pub struct LaunchArgs {
     pub scroll: bool,
     /// Headless state setup for screenshots (--scene <name>).
     pub scene: Option<String>,
+    /// Database file (--db <path>; default appdata/quire.db).
+    pub db: Option<std::path::PathBuf>,
+    /// Debug: print loaded page/block counts to stderr (--dump-state).
+    pub dump_state: bool,
 }
 
 fn parse_launch_args() -> LaunchArgs {
@@ -29,6 +33,8 @@ fn parse_launch_args() -> LaunchArgs {
         bench_pages: 0,
         scroll: false,
         scene: None,
+        db: None,
+        dump_state: false,
     };
     let mut i = 1;
     while i < argv.len() {
@@ -51,6 +57,13 @@ fn parse_launch_args() -> LaunchArgs {
             ("--scene", Some(v)) => {
                 a.scene = Some(v.clone());
                 i += 1;
+            }
+            ("--db", Some(v)) => {
+                a.db = Some(std::path::PathBuf::from(v));
+                i += 1;
+            }
+            ("--dump-state", _) => {
+                a.dump_state = true;
             }
             _ => {}
         }
@@ -79,15 +92,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn real_main() -> Result<(), String> {
     let launch = parse_launch_args();
+
+    // Persistence (M3): open (or create) the database. A failure to open
+    // means the session runs in memory only — never fall back to writing
+    // over a database we could not read.
+    let repo: Option<std::sync::Arc<dyn quire::core::Repository>> = {
+        let path = launch
+            .db
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from("appdata/quire.db"));
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match quire::storage::SqliteRepository::open(&path) {
+            Ok(r) => Some(std::sync::Arc::new(r)),
+            Err(e) => {
+                eprintln!("quire: database unavailable ({}); running in memory", e);
+                None
+            }
+        }
+    };
     let args = HandleArgs {
         blocks: launch.blocks,
         auto_exit_secs: launch.auto_exit_secs,
         bench_pages: launch.bench_pages,
     };
     let ui = AppWindow::new().map_err(|e| e.to_string())?;
-    let state = AppState::new(&args);
+    let state = AppState::new(&args, repo);
     controller::bind(&ui, &state);
     controller::wire(&ui, &state);
+
+    if launch.dump_state {
+        let pages = state.workspace.borrow().page_count();
+        let blocks = {
+            let d = state.doc.borrow();
+            let mut n = 0;
+            for pid in [102, 105] {
+                n += d.page_blocks(quire::core::PageId(pid)).len();
+            }
+            n
+        };
+        eprintln!("dump-state: pages={pages} gs+atlas-blocks={blocks}");
+    }
 
     if args.auto_exit_secs > 0.0 {
         let t = Timer::default();
@@ -180,6 +226,8 @@ fn real_main() -> Result<(), String> {
     }
 
     ui.run().map_err(|e| e.to_string())?;
+    // final flush on window close (SPEC §十九: shutdown flushes dirty state)
+    state.persistence_force_flush();
     Ok(())
 }
 

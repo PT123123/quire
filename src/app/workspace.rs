@@ -366,6 +366,82 @@ impl Workspace {
         ids
     }
 
+    /// Ordered children of `parent` (roots when `None`).
+    pub fn children_of(&self, parent: Option<i32>) -> Vec<i32> {
+        match parent {
+            Some(p) => self.pages.get(&p).map(|n| n.children.clone()).unwrap_or_default(),
+            None => self.roots.clone(),
+        }
+    }
+
+    /// Rebuild the workspace from persisted page rows (M3 integration).
+    /// Sibling order comes from the persisted order keys; ids are the
+    /// persisted u64s truncated to the workspace's i32 space (single-app
+    /// scope: ids stay well below 2^31). Recents restart empty.
+    pub fn from_persisted(pages: &[crate::core::Page]) -> Self {
+        let mut ws = Workspace {
+            pages: HashMap::new(),
+            roots: Vec::new(),
+            next_id: 1,
+            recents: Vec::new(),
+        };
+        let mut max_id = 0i32;
+        for p in pages {
+            let id = p.id.0 as i32;
+            max_id = max_id.max(id);
+            ws.pages.insert(
+                id,
+                Page {
+                    id,
+                    title: p.title.clone(),
+                    parent: p.parent.map(|v| v.0 as i32),
+                    children: Vec::new(),
+                    favorite: p.favorite,
+                    expanded: p.expanded,
+                    search_text: String::new(),
+                },
+            );
+        }
+        // assemble roots/children ordered by key
+        let mut by_parent: std::collections::BTreeMap<Option<i32>, Vec<(crate::core::OrderKey, i32)>> =
+            std::collections::BTreeMap::new();
+        for p in pages {
+            let key = (p.parent.map(|v| v.0 as i32), p.order);
+            by_parent
+                .entry(key.0)
+                .or_default()
+                .push((p.order, p.id.0 as i32));
+        }
+        for (parent, mut kids) in by_parent {
+            kids.sort();
+            let ids: Vec<i32> = kids.into_iter().map(|(_, id)| id).collect();
+            match parent {
+                Some(p) => {
+                    if let Some(node) = ws.pages.get_mut(&p) {
+                        node.children = ids;
+                    }
+                }
+                None => ws.roots = ids,
+            }
+        }
+        ws.next_id = max_id + 1;
+        ws
+    }
+
+    /// Expose the persisted-tree shape for seeding (id, title, parent,
+    /// favorite, expanded) — used by the app layer when recording the
+    /// initial workspace into storage.
+    pub fn page_seed_rows(&self) -> Vec<(i32, String, Option<i32>, bool, bool)> {
+        self.dfs_order()
+            .iter()
+            .filter_map(|id| {
+                self.pages.get(id).map(|p| {
+                    (p.id, p.title.clone(), p.parent, p.favorite, p.expanded)
+                })
+            })
+            .collect()
+    }
+
     fn dfs_recursive(&self, list: Vec<i32>, out: &mut Vec<i32>) {
         for id in list {
             if let Some(p) = self.pages.get(&id) {

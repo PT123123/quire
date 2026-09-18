@@ -95,7 +95,7 @@ fn run() -> Result<(), String> {
     ui.window().set_size(PhysicalSize::new(w, h));
 
     let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0 };
-    let state = AppState::new(&args);
+    let state = AppState::new(&args, None);
     controller::bind(&ui, &state);
     controller::wire(&ui, &state);
     if let Some(scene) = &scene {

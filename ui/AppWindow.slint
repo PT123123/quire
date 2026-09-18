@@ -153,6 +153,12 @@ export component AppWindow inherits Window {
                 UIState.toggle-theme();
             }
         }
+        KeyBinding {
+            keys: @keys(Control + S);
+            activated => {
+                UIState.save-requested();
+            }
+        }
 
         AppShell {
             minimize-requested => {

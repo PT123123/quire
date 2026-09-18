@@ -427,6 +427,32 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         });
     }
 
+    // persistence: arm the flush timer hook; every recorded batch restarts
+    // it, so the write lands once the user has been quiet for 600 ms
+    {
+        let t: &'static slint::Timer = Box::leak(Box::new(slint::Timer::default()));
+        let sw = std::rc::Rc::downgrade(&state);
+        state.install_flush_hook(Box::new(move || {
+            let sw = sw.clone();
+            t.start(
+                slint::TimerMode::SingleShot,
+                std::time::Duration::from_millis(600),
+                move || {
+                    if let Some(s) = sw.upgrade() {
+                        s.persistence_force_flush();
+                    }
+                },
+            );
+        }));
+    }
+
+    {
+        let s = state.clone();
+        ui.global::<UIState>().on_save_requested(move || {
+            s.persistence_force_flush();
+        });
+    }
+
     // debounce the typing commit: each keystroke restarts the timer; the
     // Timer must outlive this scope (leaked, like the bench timers)
     {
@@ -551,9 +577,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         ui.global::<UIState>().on_undo_requested(move || {
             let g = gw.upgrade().unwrap();
             flush_pending_edit(&g, &s);
-            let page = core_page_id(s.open_page.get());
-            crate::core::undo(&mut s.doc.borrow_mut(), &mut s.history.borrow_mut(), page);
-            s.reproject_blocks();
+            s.undo_open_page();
             refresh_focused_text(&g, &s);
         });
     }
@@ -564,9 +588,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         ui.global::<UIState>().on_redo_requested(move || {
             let g = gw.upgrade().unwrap();
             flush_pending_edit(&g, &s);
-            let page = core_page_id(s.open_page.get());
-            crate::core::redo(&mut s.doc.borrow_mut(), &mut s.history.borrow_mut(), page);
-            s.reproject_blocks();
+            s.redo_open_page();
             refresh_focused_text(&g, &s);
         });
     }
@@ -582,12 +604,7 @@ fn flush_pending_edit(g: &UIState<'_>, state: &Rc<AppState>) {
     }
     let id = BlockId(editing as u64);
     let text = g.get_editing_text().to_string();
-    let applied = crate::core::command::exec(
-        &mut state.doc.borrow_mut(),
-        &mut state.history.borrow_mut(),
-        core_page_id(state.open_page.get()),
-        Command::ReplaceText { id, text: text.clone() },
-    );
+    let applied = state.exec_editor(Command::ReplaceText { id, text: text.clone() });
     if applied.is_some() {
         // targeted row sync; no delegate rebuild
         let mut i = 0;
