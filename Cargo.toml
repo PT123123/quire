@@ -44,12 +44,26 @@ path = "tests/integration/storage_test.rs"
 name = "persistence"
 path = "tests/integration/persistence_test.rs"
 
+[[test]]
+name = "markdown"
+path = "tests/integration/markdown_test.rs"
+
+[[test]]
+name = "search"
+path = "tests/integration/search_test.rs"
+
 # Headless screenshot tool (visual regression); built only with the
 # software renderer feature so the shipped binary stays lean.
 [[bin]]
 name = "quire-shot"
 path = "src/bin/quire_shot.rs"
 required-features = ["software"]
+
+# Scene E typing benchmark (docs/PERFORMANCE.md): drives the real window, so
+# it builds against whichever renderer is enabled.
+[[bin]]
+name = "quire-typing"
+path = "src/bin/quire_typing.rs"
 
 [profile.release]
 codegen-units = 1
