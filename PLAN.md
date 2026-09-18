@@ -112,10 +112,29 @@ Not in this pass (per track split): controller/UI wiring of
 after the M3/M4 merge. DB file location/first-run bootstrap is part of
 that wiring decision, not the storage layer.
 
-## Next: M3 · Local documents (SQLite)
-- `core/` document model + `storage/` SQLite repository and migrations;
-  debounced transactional persistence replacing `app/workspace.rs`'s
-  in-memory tree; load-on-restart; settings persistence.
+## M3 integration wiring — ✅ (2026-09-19, Track A, `de43e95`)
+- [x] main.rs opens `appdata/quire.db` (migrate + integrity check);
+      `--db` override; failed open = memory-only session (never writes
+      over an unreadable database); final flush on window close
+- [x] fresh DB seeds the session once (PageCreated + BlockInserted batch
+      flushed immediately); non-empty DB rebuilds workspace tree + Document
+      from PersistedState
+- [x] every mutation records contract Changes: page create/rename/
+      duplicate/delete/favorite/expand, editor commands, undo/redo;
+      600 ms quiet-period flush timer + Ctrl+S
+- [x] verified end to end: seed run (14 pages / 24 blocks) -> restart
+      loads identical state (`--dump-state`)
+- known drift: a duplicated page may sort last among siblings after a
+  restart (gap-exhaustion fallback appends); session view keeps it
+  adjacent. Bench `--blocks` overrides the loaded page in memory only.
+- still mock: recent list is session-local; settings (theme) persistence
+  lands with the settings UI work (M8); M4 editor polish continues
+  (block-type switching menu in M5, IME acceptance = user pass)
+
+## Next: M4 · Block editor MVP (remaining)
+- block-type switching menu (BlockHandle affordance), cross-block
+  clipboard, 1000-block editing responsiveness check, Chinese IME
+  acceptance pass (user), editor visual scenes re-shot.
 
 ## Later (unchanged from brief)
 M4 block editor MVP (IME = test item, ADR-0002) → M5 slash menu + command
