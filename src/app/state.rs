@@ -63,9 +63,10 @@ pub struct AppState {
     ui: RefCell<Option<slint::Weak<crate::UIState<'static>>>>,
     /// Persisted recent-page ids, restored before first open.
     recents_restored: Cell<Vec<i32>>,
-    /// Startup notice (e.g. database restored from backup); consumed by the
-    /// controller and shown once in the shell.
-    db_notice: RefCell<Option<String>>,
+    /// Startup notices (abort banner, backup restore, library move) — more
+    /// than one can queue; the controller drains them as one line and shows
+    /// it once in the shell.
+    db_notice: RefCell<Vec<String>>,
     /// Currently open page (0 = none / empty workspace).
     pub open_page: Cell<i32>,
     /// Page awaiting delete confirmation.
@@ -216,6 +217,40 @@ impl AppState {
                     .with_database_snapshots(&r),
             )
         });
+
+        // M8_FEEDBACK #9: the panic logger runs before any repository
+        // exists, so its facts land in <data dir>/session.meta. This is the
+        // first place that holds both sides: copy the entries into the
+        // metadata table (one transaction), then consume them from the
+        // session file — session.meta is a handoff note to exactly this
+        // next session, so anything left would be re-reported forever. An
+        // abort summary also becomes the startup notice bar's first line.
+        let mut abort_notice: Option<String> = None;
+        if let (Some(r), Some(logger)) = (&repo, crate::services::logging::current()) {
+            let entries = logger.meta_entries();
+            if !entries.is_empty() {
+                let mut changes: Vec<Change> = entries
+                    .iter()
+                    .map(|(k, v)| Change::MetaSet {
+                        key: k.clone(),
+                        value: v.clone(),
+                    })
+                    .collect();
+                changes.extend(entries.iter().map(|(k, _)| Change::MetaDelete {
+                    key: k.clone(),
+                }));
+                let _ = r.apply(&changes);
+                if let Some((_, summary)) = entries.iter().find(|(k, _)| {
+                    k == crate::services::logging::KEY_SESSION_ABORTED
+                }) {
+                    let first_line = summary.lines().next().unwrap_or(summary);
+                    abort_notice = Some(format!(
+                        "the previous session ended unexpectedly: {first_line}"
+                    ));
+                }
+            }
+        }
+
         let search_service = repo.map(crate::services::search_service::SearchService::new_arc);
 
         // fresh database: record the whole session once so a restart
@@ -246,7 +281,11 @@ impl AppState {
         let open = if args.blocks > 0 {
             PAGE_ATLAS
         } else {
-            PAGE_GETTING_STARTED
+            // reopen the page the last session had open (the "current-page"
+            // meta every open_page writes), unless it no longer exists
+            restored_current
+                .filter(|id| workspace.contains(*id))
+                .unwrap_or(PAGE_GETTING_STARTED)
         };
         let all_commands = mock_commands(&workspace);
         let blocks = Rc::new(VecModel::from(Vec::new()));
@@ -264,7 +303,7 @@ impl AppState {
             settings: RefCell::new(restored_settings),
             recents_restored: Cell::new(restored_recents),
             ui: RefCell::new(None),
-            db_notice: RefCell::new(None),
+            db_notice: RefCell::new(abort_notice.into_iter().collect()),
             all_commands,
             doc: RefCell::new(doc),
             history: RefCell::new(History::default()),
@@ -542,11 +581,22 @@ impl AppState {
     }
 
     pub fn set_db_notice(&self, notice: String) {
-        *self.db_notice.borrow_mut() = Some(notice);
+        self.db_notice.borrow_mut().push(notice);
     }
 
+    /// Drain everything queued as one line. Startup can stack several facts
+    /// (the previous session aborted, a backup was restored, the library
+    /// moved); they read better joined than overwriting each other.
     pub fn take_db_notice(&self) -> Option<String> {
-        self.db_notice.borrow_mut().take()
+        let mut queue = self.db_notice.borrow_mut();
+        if queue.is_empty() {
+            return None;
+        }
+        let mut line = queue.join("; ");
+        if !line.ends_with('.') {
+            line.push('.');
+        }
+        Some(line)
     }
 
     pub fn page_order_of(&self, id: i32) -> OrderKey {
