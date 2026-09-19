@@ -8,6 +8,7 @@
 
 use crate::app::workspace::{SearchHit, Workspace, BENCH_ID_BASE, MAX_RECENTS};
 use crate::core::persistence::{Change, Repository};
+use crate::storage::search_index::SearchRequest;
 use crate::storage::SqliteRepository;
 use crate::core::{Block, BlockId, BlockKind, Command, Document, History, OrderKey, PageId};
 use crate::services::persistence::PersistenceService;
@@ -38,6 +39,10 @@ pub struct AppState {
     pub persistence: Option<Arc<PersistenceService>>,
     /// FTS-backed search (M7). `None` falls back to the in-memory scan.
     pub search_service: Option<Arc<SearchService>>,
+    /// In-flight async search with its generation; superseded queries drop
+    /// their result instead of overwriting newer ones.
+    pending_search: RefCell<Option<(u64, crate::services::search_service::PendingSearch)>>,
+    search_generation: Cell<u64>,
     /// Persisted sibling order of every page (drives PageCreated/Moved).
     page_order: RefCell<HashMap<i32, OrderKey>>,
     /// Installed by the controller: restarts the flush timer on record().
@@ -236,6 +241,8 @@ impl AppState {
             history: RefCell::new(History::default()),
             persistence,
             search_service,
+            pending_search: RefCell::new(None),
+            search_generation: Cell::new(0),
             page_order: RefCell::new(page_order),
             flush_hook: RefCell::new(None),
             open_page: Cell::new(0),
@@ -390,6 +397,80 @@ impl AppState {
             project_blocks(doc.page_blocks(core_page_id(page)))
         };
         self.blocks.set_vec(rows);
+    }
+
+    /// Poll the in-flight search; called by the controller on a short
+    /// timer while a query is pending. Returns rows when a result landed.
+    fn next_search_generation(&self) -> u64 {
+        let g = self.search_generation.get() + 1;
+        self.search_generation.set(g);
+        g
+    }
+
+    pub fn poll_search(&self) -> Option<Vec<SearchRow>> {
+        let (gen, pending) = self.pending_search.borrow_mut().take()?;
+        if gen != self.search_generation.get() {
+            return Some(Vec::new()); // superseded: show nothing
+        }
+        match pending.poll() {
+            Some(Ok(hits)) => {
+                let rows: Vec<SearchRow> = hits
+                    .iter()
+                    .map(|h| SearchRow {
+                        page_id: h.page.0 as i32,
+                        title: h.title.clone().into(),
+                        snippet: if h.snippet.is_empty() {
+                            self.workspace
+                                .borrow()
+                                .breadcrumb(h.page.0 as i32)
+                                .into()
+                        } else {
+                            h.snippet.clone().into()
+                        },
+                    })
+                    .collect();
+                Some(rows)
+            }
+            Some(Err(_)) => Some(Vec::new()),
+            None => {
+                // still running: put it back
+                *self.pending_search.borrow_mut() = Some((gen, pending));
+                None
+            }
+        }
+    }
+
+    pub fn search_in_flight(&self) -> bool {
+        self.pending_search.borrow().is_some()
+    }
+
+    /// Blocking search for tools/headless scenes (the GUI path is async).
+    pub fn set_search_rows_sync(&self, query: &str) {
+        if let Some(svc) = &self.search_service {
+            if !query.trim().is_empty() {
+                let rows: Vec<SearchRow> = match svc.query(query) {
+                    Ok(hits) => hits
+                        .iter()
+                        .map(|h| SearchRow {
+                            page_id: h.page.0 as i32,
+                            title: h.title.clone().into(),
+                            snippet: if h.snippet.is_empty() {
+                                self.workspace
+                                    .borrow()
+                                    .breadcrumb(h.page.0 as i32)
+                                    .into()
+                            } else {
+                                h.snippet.clone().into()
+                            },
+                        })
+                        .collect(),
+                    Err(_) => Vec::new(),
+                };
+                self.search.set_vec(rows);
+                return;
+            }
+        }
+        self.set_search_query(query);
     }
 
     pub fn page_order_of(&self, id: i32) -> OrderKey {
@@ -750,27 +831,16 @@ impl AppState {
     pub fn set_search_query(&self, query: &str) {
         if let Some(svc) = &self.search_service {
             if !query.trim().is_empty() {
-                let rows: Vec<SearchRow> = match svc.query(query) {
-                    Ok(hits) => hits
-                        .iter()
-                        .map(|h| SearchRow {
-                            page_id: h.page.0 as i32,
-                            title: h.title.clone().into(),
-                            snippet: if h.snippet.is_empty() {
-                                self.workspace
-                                    .borrow()
-                                    .breadcrumb(h.page.0 as i32)
-                                    .into()
-                            } else {
-                                h.snippet.clone().into()
-                            },
-                        })
-                        .collect(),
-                    Err(_) => Vec::new(),
-                };
-                self.search.set_vec(rows);
+                // hand the query to the worker thread; the controller polls
+                // on a timer and the generation counter drops stale results
+                let gen = self.next_search_generation();
+                self.pending_search
+                    .borrow_mut()
+                    .replace((gen, svc.search_async(SearchRequest::new(query))));
+                self.search.set_vec(Vec::new());
                 return;
             }
+            self.pending_search.borrow_mut().take();
         }
         let hits: Vec<SearchHit> = self.workspace.borrow().search(query);
         let rows: Vec<SearchRow> = hits

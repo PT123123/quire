@@ -392,6 +392,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
             let q = g.get_search_query().to_string();
             s.set_search_query(&q);
             g.set_search_focus(0);
+            poll_arm(&gw, &s);
         });
     }
 
@@ -902,6 +903,30 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
     }
 }
 
+/// Arm the one-shot poll timer for an in-flight async search. Each poll
+/// that comes back empty re-arms; a landed result stops the cycle.
+fn poll_arm(gw: &slint::Weak<UIState<'static>>, s: &Rc<AppState>) {
+    if !s.search_in_flight() {
+        return;
+    }
+    let t: &'static slint::Timer = Box::leak(Box::new(slint::Timer::default()));
+    let gw = gw.clone();
+    let s = s.clone();
+    t.start(
+        slint::TimerMode::SingleShot,
+        std::time::Duration::from_millis(30),
+        move || {
+            let g = gw.upgrade().unwrap();
+            if let Some(rows) = s.poll_search() {
+                s.search.set_vec(rows);
+                g.set_search_focus(0);
+            } else if s.search_in_flight() {
+                poll_arm(&gw, &s);
+            }
+        },
+    );
+}
+
 /// Commit the live editing text as a `ReplaceText` command (no-op when the
 /// text is unchanged). Called by the debounce timer and before every
 /// structural operation so undo history stays consistent.
@@ -1151,7 +1176,8 @@ pub fn apply_scene_overlay(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
         }
         "search-notes" => {
             g.set_search_query("notes".into());
-            state.set_search_query("notes");
+            // headless: blocking query (the GUI path polls async instead)
+            state.set_search_rows_sync("notes");
             g.set_search_open(true);
         }
         "menu" => {
