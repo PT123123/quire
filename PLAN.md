@@ -429,8 +429,49 @@ column + lifecycle") lands, on `master` after the D13 merge.
       export shape (link + dangling fallback); suite green (199 pass /
       4 ignored); scene `page-block` rendered and reviewed (icon + live
       title + sidebar child, light theme)
-- deferred (follow-ups): Link-to-page block needs a page picker; turning
-  a Page block into another kind keeps the child in the tree; a
-  duplicated page's embedded page blocks still share the original's
-  child references (recursive copy is v2)
+- deferred (follow-ups): turning a Page block into another kind keeps the
+  child in the tree; a duplicated page's embedded page blocks still share
+  the original's child references (recursive copy is v2)
+
+## Track A round 9 — B-package (2026-09-20, on `master`, parallel with Track B's A1–A5)
+
+First round under the split-brief protocol (`docs/AGENT_BRIEF_M8_TAIL.md`):
+Track B owns storage/packaging/bench files, Track A owns contract/app/UI;
+both commit per task on `master` with surgical staging. No collisions.
+
+- [x] B1 · Link-to-page block (`9f0f496`): BlockKind::Link ("link_to_page",
+      UI kind 12) reuses `blocks.page_ref` — no schema change, no new
+      Change variant — and points at an EXISTING page it does not own.
+      The "+" menu's "Link to page" row flips the slash popup into a page
+      picker (`slash-pick-page` mode: every page in tree order, title
+      filter, breadcrumb hints, applying converts the line, Escape keeps
+      it). Delete leaves the target page alone; duplicate/paste share the
+      ref freely (unowned); rendering shares the page-row path with a link
+      icon; export matches Page. Scene `link-block` seeded + reviewed.
+- [x] B2 · drag-and-drop file import — deferred with a finding: Slint
+      1.18.0 handles zero external file-drop events (no
+      `DroppedFile`/`HoveredFile` anywhere in the vendored winit backend or
+      core), so Explorer drops never reach `DropArea`. Revisit on a Slint
+      upgrade or via a Win32 `IDropTarget` hook in `platform/` (needs a COM
+      dependency — cost/benefit against §二十七's post-MVP status).
+- [x] B3 · rich paste (`b235829` + `cb4334e`): Ctrl+V reads the clipboard;
+      text with block structure lands as blocks (empty row converts in
+      place, further rows insert after, marks replay as sequential
+      ToggleMark commands), plain paragraphs fall through to the native
+      caret paste. The first cut read the clipboard through a
+      `Get-Clipboard` subprocess — measured 7–10 s on this desktop — so
+      the read is direct Win32 FFI (`OpenClipboard`/`CF_UNICODETEXT`/
+      `GlobalLock`, microseconds, no new crate), verified end to end with
+      a clip.exe round trip.
+- [x] gate tests: `parse_if_block_structure` admits multi-block and
+      non-paragraph lines, rejects plain paragraphs (marks included);
+      suite green throughout (201 pass / 4 ignored) alongside Track B's
+      in-flight A1/A3 edits in the shared tree.
+- known costs: an N-block paste is several undo steps (inserts chain on
+  ids the command planner cannot know upfront); Ctrl+V in a non-empty
+  block inserts after it rather than splitting at the caret (Notion does
+  the split; v1 keeps the simpler shape). CJK round-trips through the
+  FFI read (any source app's CF_UNICODETEXT); the app's own
+  `copy_to_clipboard` write path remains ASCII-by-design (clip.exe).
+
 

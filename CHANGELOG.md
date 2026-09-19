@@ -41,6 +41,12 @@ First functional release: a local, single-file-database notes workspace.
   opens the child, deleting the block deletes the child page, and
   duplicating copies the child so the two blocks never share a target.
   Exports as a `quire://page` link that re-imports clickable
+- Link-to-page block (insert menu "Link to page"): points at any existing
+  page through a filterable picker; the target is not owned — deleting
+  the block, duplicating, or pasting it never touches the page
+- Rich paste: pasting markdown with block structure (headings, lists,
+  to-dos, quotes, code) splits it into real blocks with inline marks;
+  plain text still pastes natively at the caret
 - Every popup (page menus, ⋮⋮ menu, slash menu, command palette, search)
   dismisses on a click outside it and on Escape; UI state follows so
   nothing stays blocked behind an already-closed menu
