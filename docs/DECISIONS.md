@@ -2,6 +2,36 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0026 · Page and Link-to-page blocks share blocks.page_ref; ownership is a kind-level contract
+Decision: both page-bearing block kinds — `Page` (kind 11) and `Link`
+(kind 12) — point at a page through the SAME nullable `blocks.page_ref`
+column (schema v5) and the same `BlockRefSet` change; no per-kind column or
+variant. What differs is **ownership**, decided by the kind:
+- `Page` **owns** its child page (created in the same batch as the block).
+  Deleting the block deletes the child; duplicating the block deep-copies
+  the child and retargets the copy; pasting one lands the title as plain
+  text (two blocks must never share an owned page). One `BlockRefSet`
+  without a live `PageCreated` is still legal — storage stores the pointer,
+  the lifecycle is the caller's composition.
+- `Link` **references** an existing page picked in the page picker. Delete,
+  duplicate and paste never touch the target; sharing a reference is the
+  point. Turning either kind into another kind via the ⋮⋮ menu drops the
+  reference (`BlockRefSet` → `None`); a Page's child survives in the tree,
+  unowned.
+Why: Notion's Page block and Link-to-page differ exactly in lifecycle, not
+in data shape — one column keeps schema and export uniform (`[title]
+(quire://page/<id>)` for both, the ownership difference deliberately does
+not survive Markdown), and the contract stays at one change variant
+instead of two. The page picker reuses the slash popup in a
+`slash-pick-page` mode rather than a fourth popup, so anchor/keyboard/
+close behavior has one implementation.
+Consequences: a dangling `page_ref` (child deleted from the sidebar) renders
+"(deleted page)" muted, and the block still opens nothing — no cascade from
+block to tree outside the explicit delete path. A duplicated page's own
+embedded Page blocks still reference the ORIGINAL children (recursive copy
+is v2). Keyboard focus-move can land on a page row; the row is
+never-editable by kind, so the input simply does not appear.
+
 ## ADR-0025 · Clipboard reads are direct Win32 FFI — no clipboard crate, no subprocess
 Decision: `platform::read_clipboard` opens the clipboard through
 `OpenClipboard` / `GetClipboardData(CF_UNICODETEXT)` / `GlobalLock` declared

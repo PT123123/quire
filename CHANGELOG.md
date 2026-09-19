@@ -87,6 +87,8 @@ First functional release: a local, single-file-database notes workspace.
 ### Desktop integration
 - Frameless window with custom title bar, light + dark themes (persisted)
 - Window size remembered; last-opened page restored
+- Settings: appearance, LAN sharing, the database folder (open it in
+  Explorer, take a backup on demand)
 - Markdown export/import (page level, inline marks round-trip)
 - Installer (Inno Setup): per-user, Start menu + desktop shortcuts,
   optional `.md` "Open with" association; `--open <path>` dispatch
@@ -97,6 +99,9 @@ First functional release: a local, single-file-database notes workspace.
 - Switching directly from one open menu to another (e.g. ⋮⋮ on a different
   block while a menu is open) takes two clicks — the first click only
   dismisses the open popup (standard Slint popup semantics)
+- A menu taller than the window (e.g. Move-to in a large workspace)
+  overflows the bottom — the anchor clamps but the list does not scroll
+  yet
 - Block colors are cosmetic: they do not survive a Markdown export/import
   round trip, and Callout blocks export as quotes
 - Inline-mark paragraphs render runs on one line (no cross-run reflow —
