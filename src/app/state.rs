@@ -444,22 +444,24 @@ impl AppState {
         Some(changes)
     }
 
-    /// Set the theme and persist it (settings table).
+    /// Set the theme and persist it (settings table; key spelling matches
+    /// services/settings_store.rs `Settings::KEY_THEME`).
     pub fn set_dark(&self, dark: bool) {
+        let value = if dark { "dark" } else { "light" };
         self.settings
             .borrow_mut()
-            .insert("dark".into(), (dark as u8).to_string());
+            .insert("theme".into(), value.into());
         self.record(vec![Change::SettingSet {
-            key: "dark".into(),
-            value: (dark as u8).to_string(),
+            key: "theme".into(),
+            value: value.into(),
         }]);
     }
 
     pub fn dark_setting(&self) -> bool {
         self.settings
             .borrow()
-            .get("dark")
-            .map(|v| v == "1")
+            .get("theme")
+            .map(|v| v == "dark")
             .unwrap_or(false)
     }
 
