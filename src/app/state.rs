@@ -741,6 +741,20 @@ impl AppState {
         }
     }
 
+    /// Plan+apply several commands as ONE undo step, refresh the rows.
+    pub fn exec_all_on_open_page(&self, cmds: Vec<Command>) -> Option<Vec<Change>> {
+        let page = core_page_id(self.open_page.get());
+        let changes = crate::core::command::exec_all(
+            &mut self.doc.borrow_mut(),
+            &mut self.history.borrow_mut(),
+            page,
+            cmds,
+        )?;
+        self.record(changes.clone());
+        self.reproject_blocks();
+        Some(changes)
+    }
+
     pub fn undo_open_page(&self) -> Option<Vec<Change>> {
         let page = core_page_id(self.open_page.get());
         let applied = crate::core::undo(
@@ -1172,6 +1186,24 @@ fn kind_to_int(kind: BlockKind) -> i32 {
     }
 }
 
+/// Nesting depth of one block (ancestors within the same page), bounded —
+/// M4 renders a single indent level.
+fn block_depth(blocks: &[Block], b: &Block) -> i32 {
+    let mut depth = 0i32;
+    let mut parent = b.parent;
+    while let Some(pid) = parent {
+        depth += 1;
+        if depth >= 4 {
+            break;
+        }
+        match blocks.iter().find(|x| x.id == pid) {
+            Some(x) => parent = x.parent,
+            None => break,
+        }
+    }
+    depth
+}
+
 fn runs_to_model(b: &Block) -> slint::ModelRc<TextRun> {
     slint::ModelRc::from(Rc::new(slint::VecModel::from(build_runs(
         &b.text, &b.marks,
@@ -1263,6 +1295,7 @@ pub fn project_blocks(blocks: &[Block]) -> Vec<BlockRow> {
             number: 0,
             tail: false,
             runs: runs_to_model(b),
+            depth: block_depth(blocks, b),
         })
         .collect();
     let mut n = 0;
@@ -1298,6 +1331,7 @@ fn block(kind: i32, text: &str) -> BlockRow {
         number: 0,
         tail: false,
         runs: ModelRc::from(Rc::new(VecModel::from(Vec::new()))),
+        depth: 0,
     }
 }
 

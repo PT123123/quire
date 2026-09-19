@@ -403,6 +403,12 @@ export component AppWindow inherits Window {
             }
         }
         KeyBinding {
+            keys: @keys(Control + F);
+            activated => {
+                UIState.find-open = true;
+            }
+        }
+        KeyBinding {
             keys: @keys(Control + S);
             activated => {
                 UIState.save-requested();

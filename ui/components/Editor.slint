@@ -14,6 +14,7 @@ import { BlockRow, UIState } from "../Types.slint";
 
 component DocumentRow inherits Rectangle {
     in property <BlockRow> block;
+    in property <int> depth;
     in property <bool> first;
 
     height: head.height + body.height + (block.tail ? Theme.spacing-hero * 2 : 0px);
@@ -87,6 +88,7 @@ component DocumentRow inherits Rectangle {
         x: 0px;
         y: head.height;
         block: root.block;
+        depth: root.block.depth;
         content-x: root.content-x;
         content-width: root.content-width;
     }
@@ -223,6 +225,7 @@ export component Editor inherits Rectangle {
 
         for row[idx] in UIState.blocks : DocumentRow {
             block: row;
+            depth: row.depth;
             first: idx == 0;
             content-x: root.gutter;
             content-width: list.content-width - 2 * root.gutter;

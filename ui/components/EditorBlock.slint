@@ -12,10 +12,12 @@ import { BlockRow, UIState } from "../Types.slint";
 
 export component EditorBlock inherits Rectangle {
     in property <BlockRow> block;
+    in property <int> depth;
     in property <length> content-width;
     in property <length> content-x;
 
     property <bool> is-list: block.kind == 4 || block.kind == 5 || block.kind == 6;
+    property <length> list-indent: (is-list ? root.depth * 24px : 0px);
     property <bool> is-heading: block.kind == 1 || block.kind == 2 || block.kind == 3;
     property <bool> is-plain: block.kind <= 6;
     property <bool> editing: UIState.editing-id == block.id && block.kind != 9;
@@ -101,8 +103,8 @@ export component EditorBlock inherits Rectangle {
     // marked block renders as side-by-side runs (single line, clipped —
     // documented limitation). Unmarked blocks keep the wrapping Text.
     if is-plain && !editing && block.runs.length > 0 : Rectangle {
-        x: content-x + (is-list ? 26px : 0px);
-        width: content-width - (is-list ? 26px : 0px);
+        x: content-x + list-indent + (is-list ? 26px : 0px);
+        width: content-width - list-indent - (is-list ? 26px : 0px);
         y: top-margin;
         height: plain-text.height;
         clip: true;
@@ -156,8 +158,8 @@ export component EditorBlock inherits Rectangle {
     }
 
     plain-text := Text {
-        x: content-x + (is-list ? 26px : 0px);
-        width: content-width - (is-list ? 26px : 0px);
+        x: content-x + list-indent + (is-list ? 26px : 0px);
+        width: content-width - list-indent - (is-list ? 26px : 0px);
         y: top-margin;
         visible: is-plain && !editing && block.runs.length == 0;
         text: block.text;
@@ -173,8 +175,8 @@ export component EditorBlock inherits Rectangle {
     edit-input := TextInput {
         visible: editing;
         enabled: editing;
-        x: input-x;
-        width: input-width;
+        x: input-x + list-indent;
+        width: input-width - list-indent;
         // explicit preferred height: an implicit height would derive from
         // the row, which derives its height from this input (loop)
         height: self.preferred-height;
@@ -227,12 +229,32 @@ export component EditorBlock inherits Rectangle {
                 && self.anchor-position-byte-offset != self.cursor-position-byte-offset) {
                 UIState.toggle-mark(3, self.anchor-position-byte-offset, self.cursor-position-byte-offset);
                 accept
+            } else if (event.text == Key.Tab
+                && !event.modifiers.shift
+                && (block.kind == 4 || block.kind == 5 || block.kind == 6)) {
+                UIState.indent-list(block.id);
+                accept
+            } else if (event.text == Key.Tab
+                && event.modifiers.shift
+                && (block.kind == 4 || block.kind == 5 || block.kind == 6)) {
+                UIState.outdent-list(block.id);
+                accept
             } else if (event.modifiers.control && event.text == Key.L
                 && self.anchor-position-byte-offset != self.cursor-position-byte-offset) {
                 UIState.link-start = Math.min(self.anchor-position-byte-offset, self.cursor-position-byte-offset);
                 UIState.link-end = Math.max(self.anchor-position-byte-offset, self.cursor-position-byte-offset);
                 UIState.link-url = "";
                 UIState.link-open = true;
+                accept
+            } else if (event.text == Key.Tab
+                && !event.modifiers.shift
+                && (block.kind == 4 || block.kind == 5 || block.kind == 6)) {
+                UIState.indent-list(block.id);
+                accept
+            } else if (event.text == Key.Tab
+                && event.modifiers.shift
+                && (block.kind == 4 || block.kind == 5 || block.kind == 6)) {
+                UIState.outdent-list(block.id);
                 accept
             } else if (event.modifiers.control && event.text == Key.L
                 && self.anchor-position-byte-offset != self.cursor-position-byte-offset) {
@@ -286,7 +308,7 @@ export component EditorBlock inherits Rectangle {
     }
 
     Rectangle {
-        x: content-x + 8px;
+        x: content-x + list-indent + 8px;
         y: top-margin + Typography.size-body * Typography.line-body / 2 - 5px;
         width: 6px;
         height: 6px;
@@ -296,7 +318,7 @@ export component EditorBlock inherits Rectangle {
     }
 
     Text {
-        x: content-x + 2px;
+        x: content-x + list-indent + 2px;
         y: top-margin;
         width: 22px;
         visible: block.kind == 5;
@@ -308,7 +330,7 @@ export component EditorBlock inherits Rectangle {
     }
 
     Rectangle {
-        x: content-x + 2px;
+        x: content-x + list-indent + 2px;
         y: top-margin + Typography.size-body * Typography.line-body / 2 - 8px;
         width: 17px;
         height: 17px;

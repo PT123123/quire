@@ -907,6 +907,39 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         });
     }
 
+    // ---- list nesting (Tab / Shift+Tab) ----
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        let nest = move |g: &UIState<'_>, s: &Rc<AppState>, id: i32, indent: bool| {
+            flush_pending_edit(g, s);
+            let cmd = if indent {
+                Command::IndentList { id: BlockId(id as u64) }
+            } else {
+                Command::OutdentList { id: BlockId(id as u64) }
+            };
+            if s.exec_on_open_page(cmd).is_some() {
+                refresh_focused_text(g, s);
+            }
+        };
+        ui.global::<UIState>().on_indent_list(move |id| {
+            let g = gw.upgrade().unwrap();
+            nest(&g, &s, id, true);
+        });
+    }
+
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_outdent_list(move |id| {
+            let g = gw.upgrade().unwrap();
+            flush_pending_edit(&g, &s);
+            if s.exec_on_open_page(Command::OutdentList { id: BlockId(id as u64) }).is_some() {
+                refresh_focused_text(&g, &s);
+            }
+        });
+    }
+
     // ---- page title in-place editing ----
     {
         let gw = gw.clone();
@@ -1262,6 +1295,21 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
         }
 
         "empty" => open(&g, state, 113),
+        "nest" => {
+            // indent the second bullet under the first (visual test)
+            let page = core_page_id(state.open_page.get());
+            let target = {
+                let d = state.doc.borrow();
+                d.page_blocks(page)
+                    .iter()
+                    .filter(|b| b.kind == crate::core::BlockKind::Bullet)
+                    .nth(1)
+                    .map(|b| b.id)
+            };
+            if let Some(id) = target {
+                let _ = state.exec_on_open_page(Command::IndentList { id });
+            }
+        }
         "find" => {
             g.set_find_open(true);
             g.set_find_term("the".into());
