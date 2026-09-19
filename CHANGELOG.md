@@ -68,7 +68,10 @@ First functional release: a local, single-file-database notes workspace.
   jumping
 - Full-text search (Ctrl+P) — titles and content, Chinese included
   (FTS5 + segmentation)
-- Context menus on pages and blocks
+- Context menus on pages and blocks; pages move: Move up / Move down
+  reorders siblings, Move to reparents anywhere outside the moved
+  subtree (the whole hierarchy travels, recorded and restored across
+  restarts)
 
 ### Persistence & reliability
 - SQLite (bundled, no server): pages, blocks, marks, colors, settings,

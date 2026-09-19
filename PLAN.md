@@ -474,4 +474,35 @@ both commit per task on `master` with surgical staging. No collisions.
   FFI read (any source app's CF_UNICODETEXT); the app's own
   `copy_to_clipboard` write path remains ASCII-by-design (clip.exe).
 
+## Track A round 10 — Move page (2026-09-20, on `master`)
+
+While Track B runs its A-package, the B-side found a real SPEC gap:
+`PageMoved` existed in the contract and storage since M3, but nothing in
+the app ever constructed it — SPEC §十七's "Move page" never shipped.
+
+- [x] workspace: `move_page` (detach + attach, refuses moving a page into
+      its own subtree via the ancestor chain, expands the target parent on
+      arrival) and `swap_with_neighbor` (sibling ±1 with edge refusal)
+- [x] state: `move_page` / `move_page_by` mirror the tree edits into the
+      `page_order` map and record `PageMoved` changes (one for a reparent,
+      two for a swap); sidebar rebuilds
+- [x] sidebar page menu: Move up / Move down / Move to — the second-level
+      submenu lists Top level plus every page outside the moved subtree
+      (indented tree walk; cycles impossible by construction), keeps the
+      popup open like the block menu's mover, and re-anchors the taller
+      list so it stays on the window
+- [x] small closes riding along: Turn-into away from Page/Link drops the
+      block's reference (a Page's child survives, unowned); ⋮⋮ Copy-link
+      on a Page/Link row copies `quire://page/<ref>` so the link opens the
+      target everywhere (the in-app resolver jumps straight to it)
+- [x] test `move_page_reparents_refuses_cycles_and_swaps_siblings` through
+      the public API (reparent/refuse-cycle/swap/edge/back-to-root); scene
+      `page-move-to` rendered and reviewed (Back / Top level / indented
+      targets, the moved subtree correctly absent); suite green (202 pass /
+      4 ignored)
+- known limit: a Move-to list taller than the window still overflows
+  (the clamp moves the anchor, cannot shrink a menu) — same class as the
+  block menu's mover; a scrollable menu is a later polish item
+
+
 
