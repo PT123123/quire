@@ -104,6 +104,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn real_main() -> Result<(), String> {
+    quire::services::logging::init(); // the rotating log + panic hook (SPEC §二十五, M8 D9)
     let launch = parse_launch_args();
 
     // Persistence (M3): open (or create) the database. A failure to open

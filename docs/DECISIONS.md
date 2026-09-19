@@ -2,6 +2,42 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0018 · Logging is one rotating file plus a panic report the next start
+reads back
+Decision: `services::logging` owns the app's only log file, `quire.log` beside
+the database, with a family of three (`quire.log`, `.1`, `.2`) and a 1 MB ceiling
+per file — size is checked before each append, so a line may overshoot by its own
+length and nothing else does. Records are one physical line: `2026-09-19T08:21:55
+.169Z [info] …`, UTC, with newlines in a message escaped to the two-character
+`\n`. `init()` is the single line `main` calls; it creates the directory, writes
+the startup record, and installs a panic hook that chains whatever hook was
+already there. On panic the hook appends a `[panic]` line and writes
+`panic-report.txt`; the *next* `start()` reads that file, records it as the
+`last_session_aborted` entry of `session.meta`, logs the same fact, and deletes
+the report so a restart cannot blame the old crash twice. `session.meta` is a
+line-oriented key/value file — the file-backed twin of the `metadata` table — and
+`meta_entries()` hands it to whoever holds a repository.
+Why: the alternatives all cost more than a crash trace is worth. A `log`/`tracing`
+facade would add dependencies to a four-crate tree to gain levels nobody tunes,
+and an async writer would need the thread this milestone is explicitly avoiding.
+Writing the abort *metadata* on the next launch rather than inside the panic is
+the same argument in miniature: a panicking process may die at any moment, so it
+gets two plain writes while the read-modify-write of a metadata file runs on a
+thread that is known to be healthy. UTC rather than local time because a log
+timestamp and a file's modified time must be comparable when the two disagree
+about nothing else. The one line in `main.rs` is the ceiling the milestone allows,
+which is also why the logger cannot reach the database: it starts before the
+repository exists, and `src/app/**` is off-limits (M8_FEEDBACK #9 records the
+wiring Track A still owes).
+Consequences: a hard crash (access violation, kill, power loss) leaves no report,
+so `last_session_aborted` means "a Rust panic", not "the session did not end
+cleanly" — closing that gap needs an exit-path call in `main.rs` (one more line)
+or a clean-shutdown hook in the app layer. Logs currently land in the working
+directory's `appdata/` until D12 moves them into `%APPDATA%\Quire\` with the
+database, which also means a portable run keeps its log beside its own database.
+The `Logger` is constructed per directory and every write opens the file, so
+tests rotate against a 200-byte limit instead of a megabyte.
+
 ## ADR-0017 · Shell identity is a build-time resource; the installer installs
 per-user
 Decision: the exe's icon and version block come from a resource script that

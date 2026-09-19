@@ -192,3 +192,31 @@ M8 Windows RC (packaging, crash recovery, import/export) → M9 Android
 ## Explicitly out of scope for v1
 Sync, collaboration, cloud, plugin market, AI, multi-process IPC,
 custom TSF/IME implementation, image/table/toggle/database blocks.
+
+## M8 hardening · Track B (2026-09-19, branch `m8-hardening`)
+
+Based on `master` at `f2eb855` (after M8 D5–D8 and the merged markdown pair).
+Four deliverables, one commit each: D9 logging, D10 backup retention, D11 the
+M7 performance matrix, D12 the data-location move.
+
+### D9 · log infrastructure ✅
+- `services/logging.rs`: `quire.log` beside the database, family of three
+  (`quire.log`, `.1`, `.2`) at ≤1 MB each, one physical line per record with a
+  UTC stamp, `Level::{Info,Warn,Error,Panic}`.
+- `init()` is the only thing `main.rs` gained (one line). It creates the
+  directory, writes the startup record and installs a panic hook that chains the
+  previous one, so stderr keeps the usual message.
+- A panic appends `[panic] …` and writes `panic-report.txt`; the next `start()`
+  turns it into the `last_session_aborted` entry of `session.meta`, logs it once,
+  and deletes the report. `meta_entries()` is the seam for Track A to carry it
+  into the `metadata` table (M8_FEEDBACK #9).
+- Tests (9, in-module because `Cargo.toml` is out of reach — feedback #11):
+  rotation caps the family at three files and drops the oldest, generations
+  shift the right way, a panic → abort-metadata → consumed-once chain, a clean
+  start reports no abort, metadata escaping across a reopen, the hook firing
+  through a real `catch_unwind` panic, and UTC stamp arithmetic.
+- Checked end to end: a scratch-directory run writes
+  `2026-09-19T08:21:55.169Z [info] session started (pid 67564)` to
+  `appdata/quire.log` and exits 0.
+- Known limit (ADR-0018): a kill or a native crash leaves no report, so
+  `last_session_aborted` means "panicked", not "ended badly".
