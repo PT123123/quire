@@ -8,12 +8,12 @@
 
 use crate::app::workspace::{SearchHit, Workspace, BENCH_ID_BASE, MAX_RECENTS};
 use crate::core::persistence::{Change, Repository};
-use crate::storage::search_index::SearchRequest;
-use crate::storage::SqliteRepository;
 use crate::core::{Block, BlockId, BlockKind, Command, Document, History, OrderKey, PageId};
 use crate::services::persistence::PersistenceService;
 use crate::services::search_service::SearchService;
-use crate::{BlockRow, CommandRow, MenuRow, SearchRow, SlashRow, SidebarNode, TextRun};
+use crate::storage::search_index::SearchRequest;
+use crate::storage::SqliteRepository;
+use crate::{BlockRow, CommandRow, MenuRow, SearchRow, SidebarNode, SlashRow, TextRun};
 use slint::{Model, ModelRc, VecModel};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -51,6 +51,9 @@ pub struct AppState {
     clipboard: RefCell<Option<Block>>,
     /// Persisted settings (theme etc.), loaded from storage at startup.
     settings: RefCell<HashMap<String, String>>,
+    /// UI weak handle, installed by the controller at wire time — lets the
+    /// state push display-only projections (page stats) without a callback.
+    ui: RefCell<Option<slint::Weak<crate::UIState<'static>>>>,
     /// Persisted recent-page ids, restored before first open.
     recents_restored: Cell<Vec<i32>>,
     /// Startup notice (e.g. database restored from backup); consumed by the
@@ -223,7 +226,11 @@ impl AppState {
         }
         let _ = seed;
 
-        let open = if args.blocks > 0 { PAGE_ATLAS } else { PAGE_GETTING_STARTED };
+        let open = if args.blocks > 0 {
+            PAGE_ATLAS
+        } else {
+            PAGE_GETTING_STARTED
+        };
         let all_commands = mock_commands(&workspace);
         let blocks = Rc::new(VecModel::from(Vec::new()));
         let commands = Rc::new(VecModel::from(all_commands.clone()));
@@ -239,6 +246,7 @@ impl AppState {
             clipboard: RefCell::new(None),
             settings: RefCell::new(restored_settings),
             recents_restored: Cell::new(restored_recents),
+            ui: RefCell::new(None),
             db_notice: RefCell::new(None),
             all_commands,
             doc: RefCell::new(doc),
@@ -315,11 +323,7 @@ impl AppState {
         if !favorites.is_empty() {
             push(&mut rows, &mut y, header("Favorites"));
             for (id, title) in favorites {
-                push(
-                    &mut rows,
-                    &mut y,
-                    leaf_row(id, &title, "favorite", false),
-                );
+                push(&mut rows, &mut y, leaf_row(id, &title, "favorite", false));
             }
         }
         let recents = ws.recents();
@@ -401,7 +405,37 @@ impl AppState {
             project_blocks(doc.page_blocks(core_page_id(page)))
         };
         self.blocks.set_vec(rows);
+        self.update_page_stats();
     }
+
+    /// Controller installs the UI weak handle at wire time.
+    pub fn set_ui(&self, ui: slint::Weak<crate::UIState<'static>>) {
+        *self.ui.borrow_mut() = Some(ui);
+    }
+
+    /// Word/char counts for the editor footer (display-only push).
+    pub fn update_page_stats(&self) {
+        let page = core_page_id(self.open_page.get());
+        let (words, chars) = {
+            let doc = self.doc.borrow();
+            let mut words = 0;
+            let mut chars = 0;
+            for b in doc.page_blocks(page) {
+                let t = b.text.trim();
+                if !t.is_empty() {
+                    words += t.split_whitespace().count();
+                }
+                chars += b.text.chars().count();
+            }
+            (words, chars)
+        };
+        if let Some(ui) = self.ui.borrow().clone() {
+            let g = ui.upgrade().unwrap();
+            g.set_page_stats(format!("{words} words · {chars} chars").into());
+        }
+    }
+
+    /// Controller installs the UI weak handle at wire time.
 
     /// Poll the in-flight search; called by the controller on a short
     /// timer while a query is pending. Returns rows when a result landed.
@@ -424,10 +458,7 @@ impl AppState {
                         page_id: h.page.0 as i32,
                         title: h.title.clone().into(),
                         snippet: if h.snippet.is_empty() {
-                            self.workspace
-                                .borrow()
-                                .breadcrumb(h.page.0 as i32)
-                                .into()
+                            self.workspace.borrow().breadcrumb(h.page.0 as i32).into()
                         } else {
                             h.snippet.clone().into()
                         },
@@ -459,10 +490,7 @@ impl AppState {
                             page_id: h.page.0 as i32,
                             title: h.title.clone().into(),
                             snippet: if h.snippet.is_empty() {
-                                self.workspace
-                                    .borrow()
-                                    .breadcrumb(h.page.0 as i32)
-                                    .into()
+                                self.workspace.borrow().breadcrumb(h.page.0 as i32).into()
                             } else {
                                 h.snippet.clone().into()
                             },
@@ -486,7 +514,11 @@ impl AppState {
     }
 
     pub fn page_order_of(&self, id: i32) -> OrderKey {
-        *self.page_order.borrow().get(&id).unwrap_or(&OrderKey::FIRST)
+        *self
+            .page_order
+            .borrow()
+            .get(&id)
+            .unwrap_or(&OrderKey::FIRST)
     }
 
     /// Queue a change batch for the debounced flush and arm the timer.
@@ -565,9 +597,7 @@ impl AppState {
         let needle = filter.to_lowercase();
         let rows: Vec<SlashRow> = SLASH_ITEMS
             .iter()
-            .filter(|(_, label, _)| {
-                needle.is_empty() || label.to_lowercase().contains(&needle)
-            })
+            .filter(|(_, label, _)| needle.is_empty() || label.to_lowercase().contains(&needle))
             .map(|(kind, label, hint)| SlashRow {
                 id: kind_to_int(*kind),
                 label: (*label).into(),
@@ -592,15 +622,45 @@ impl AppState {
     /// internal clipboard holds a block.
     pub fn fill_block_menu(&self) {
         let mut rows = vec![
-            MenuRow { id: 1, label: "Move up".into(), icon: "chevron-up".into(), danger: false },
-            MenuRow { id: 2, label: "Move down".into(), icon: "chevron-down".into(), danger: false },
-            MenuRow { id: 3, label: "Duplicate".into(), icon: "copy".into(), danger: false },
-            MenuRow { id: 4, label: "Copy block".into(), icon: "copy".into(), danger: false },
+            MenuRow {
+                id: 1,
+                label: "Move up".into(),
+                icon: "chevron-up".into(),
+                danger: false,
+            },
+            MenuRow {
+                id: 2,
+                label: "Move down".into(),
+                icon: "chevron-down".into(),
+                danger: false,
+            },
+            MenuRow {
+                id: 3,
+                label: "Duplicate".into(),
+                icon: "copy".into(),
+                danger: false,
+            },
+            MenuRow {
+                id: 4,
+                label: "Copy block".into(),
+                icon: "copy".into(),
+                danger: false,
+            },
         ];
         if self.clipboard.borrow().is_some() {
-            rows.push(MenuRow { id: 5, label: "Paste below".into(), icon: "import".into(), danger: false });
+            rows.push(MenuRow {
+                id: 5,
+                label: "Paste below".into(),
+                icon: "import".into(),
+                danger: false,
+            });
         }
-        rows.push(MenuRow { id: 6, label: "Delete".into(), icon: "trash".into(), danger: true });
+        rows.push(MenuRow {
+            id: 6,
+            label: "Delete".into(),
+            icon: "trash".into(),
+            danger: true,
+        });
         self.block_menu.set_vec(rows);
     }
 
@@ -626,8 +686,11 @@ impl AppState {
 
     pub fn undo_open_page(&self) -> Option<Vec<Change>> {
         let page = core_page_id(self.open_page.get());
-        let applied =
-            crate::core::undo(&mut self.doc.borrow_mut(), &mut self.history.borrow_mut(), page)?;
+        let applied = crate::core::undo(
+            &mut self.doc.borrow_mut(),
+            &mut self.history.borrow_mut(),
+            page,
+        )?;
         self.record(applied.clone());
         self.reproject_blocks();
         Some(applied)
@@ -635,8 +698,11 @@ impl AppState {
 
     pub fn redo_open_page(&self) -> Option<Vec<Change>> {
         let page = core_page_id(self.open_page.get());
-        let applied =
-            crate::core::redo(&mut self.doc.borrow_mut(), &mut self.history.borrow_mut(), page)?;
+        let applied = crate::core::redo(
+            &mut self.doc.borrow_mut(),
+            &mut self.history.borrow_mut(),
+            page,
+        )?;
         self.record(applied.clone());
         self.reproject_blocks();
         Some(applied)
@@ -651,10 +717,7 @@ impl AppState {
     }
 
     pub fn create_page(&self, parent: Option<i32>) -> i32 {
-        let id = self
-            .workspace
-            .borrow_mut()
-            .create(parent, "Untitled");
+        let id = self.workspace.borrow_mut().create(parent, "Untitled");
         // the new page is the last sibling: order = previous last + 1
         let order = {
             let kids = self.workspace.borrow().children_of(parent);
@@ -744,7 +807,9 @@ impl AppState {
                     .and_then(|k| self.page_order.borrow().get(k).copied());
                 let orig = self.page_order.borrow().get(&id).copied();
                 let key = OrderKey::between(orig, next).or_else(|| {
-                    let last = kids.last().and_then(|k| self.page_order.borrow().get(k).copied());
+                    let last = kids
+                        .last()
+                        .and_then(|k| self.page_order.borrow().get(k).copied());
                     OrderKey::between(last, None)
                 });
                 (parent, key.expect("order space exhausted"))
@@ -779,7 +844,9 @@ impl AppState {
                 doc.drop_page(core_page_id(*r));
             }
         }
-        self.record(vec![Change::PageDeleted { id: PageId(id as u32 as u64) }]);
+        self.record(vec![Change::PageDeleted {
+            id: PageId(id as u32 as u64),
+        }]);
         if had_open {
             // stale until the controller opens a fallback page
             self.open_page.set(0);
@@ -790,7 +857,12 @@ impl AppState {
 
     pub fn toggle_favorite(&self, id: i32) {
         self.workspace.borrow_mut().toggle_favorite(id);
-        let favorite = self.workspace.borrow().get(id).map(|p| p.favorite).unwrap_or(false);
+        let favorite = self
+            .workspace
+            .borrow()
+            .get(id)
+            .map(|p| p.favorite)
+            .unwrap_or(false);
         self.record(vec![Change::PageFavoriteSet {
             id: PageId(id as u32 as u64),
             favorite,
@@ -800,7 +872,12 @@ impl AppState {
 
     pub fn toggle_expanded(&self, id: i32) {
         self.workspace.borrow_mut().toggle_expanded(id);
-        let expanded = self.workspace.borrow().get(id).map(|p| p.expanded).unwrap_or(false);
+        let expanded = self
+            .workspace
+            .borrow()
+            .get(id)
+            .map(|p| p.expanded)
+            .unwrap_or(false);
         self.record(vec![Change::PageExpandedSet {
             id: PageId(id as u32 as u64),
             expanded,
@@ -815,7 +892,10 @@ impl AppState {
         let title = ws.title_of(id).unwrap_or("").to_string();
         let n = ws.subtree_size(id);
         let message = if n > 1 {
-            format!("“{title}” and its {} sub-pages will be deleted. This cannot be undone.", n - 1)
+            format!(
+                "“{title}” and its {} sub-pages will be deleted. This cannot be undone.",
+                n - 1
+            )
         } else {
             format!("“{title}” will be deleted. This cannot be undone.")
         };
@@ -881,11 +961,36 @@ impl AppState {
             "Add to favorites"
         };
         let rows = vec![
-            MenuRow { id: MENU_NEW_SUBPAGE, label: "New subpage".into(), icon: "plus".into(), danger: false },
-            MenuRow { id: MENU_RENAME, label: "Rename".into(), icon: "pencil".into(), danger: false },
-            MenuRow { id: MENU_DUPLICATE, label: "Duplicate".into(), icon: "copy".into(), danger: false },
-            MenuRow { id: MENU_FAVORITE, label: fav_label.into(), icon: "star".into(), danger: false },
-            MenuRow { id: MENU_DELETE, label: "Delete".into(), icon: "trash".into(), danger: true },
+            MenuRow {
+                id: MENU_NEW_SUBPAGE,
+                label: "New subpage".into(),
+                icon: "plus".into(),
+                danger: false,
+            },
+            MenuRow {
+                id: MENU_RENAME,
+                label: "Rename".into(),
+                icon: "pencil".into(),
+                danger: false,
+            },
+            MenuRow {
+                id: MENU_DUPLICATE,
+                label: "Duplicate".into(),
+                icon: "copy".into(),
+                danger: false,
+            },
+            MenuRow {
+                id: MENU_FAVORITE,
+                label: fav_label.into(),
+                icon: "star".into(),
+                danger: false,
+            },
+            MenuRow {
+                id: MENU_DELETE,
+                label: "Delete".into(),
+                icon: "trash".into(),
+                danger: true,
+            },
         ];
         self.menu.set_vec(rows);
     }
@@ -1064,15 +1169,23 @@ fn build_runs(text: &str, marks: &[crate::core::Mark]) -> Vec<TextRun> {
             if s == e {
                 return None;
             }
-            let link_mark = marks.iter().find(|m| {
-                m.kind == crate::core::MarkKind::Link && m.start <= s && m.end >= e
-            });
+            let link_mark = marks
+                .iter()
+                .find(|m| m.kind == crate::core::MarkKind::Link && m.start <= s && m.end >= e);
             Some(TextRun {
                 text: text[s..e].into(),
-                bold: marks.iter().any(|m| m.kind == crate::core::MarkKind::Bold && m.start <= s && m.end >= e),
-                italic: marks.iter().any(|m| m.kind == crate::core::MarkKind::Italic && m.start <= s && m.end >= e),
-                strike: marks.iter().any(|m| m.kind == crate::core::MarkKind::Strike && m.start <= s && m.end >= e),
-                code: marks.iter().any(|m| m.kind == crate::core::MarkKind::Code && m.start <= s && m.end >= e),
+                bold: marks
+                    .iter()
+                    .any(|m| m.kind == crate::core::MarkKind::Bold && m.start <= s && m.end >= e),
+                italic: marks
+                    .iter()
+                    .any(|m| m.kind == crate::core::MarkKind::Italic && m.start <= s && m.end >= e),
+                strike: marks
+                    .iter()
+                    .any(|m| m.kind == crate::core::MarkKind::Strike && m.start <= s && m.end >= e),
+                code: marks
+                    .iter()
+                    .any(|m| m.kind == crate::core::MarkKind::Code && m.start <= s && m.end >= e),
                 link: link_mark.is_some(),
                 url: link_mark.map(|m| m.url.clone()).unwrap_or_default().into(),
             })
@@ -1327,13 +1440,31 @@ fn mock_commands(ws: &Workspace) -> Vec<CommandRow> {
     };
     cmd(CMD_NEW_PAGE, "New Page", "Ctrl+N", "Editor", "plus");
     cmd(CMD_SEARCH, "Search Pages…", "Ctrl+P", "Navigate", "search");
-    cmd(CMD_TOGGLE_SIDEBAR, "Toggle Sidebar", "Ctrl+B", "Interface", "panel-left");
-    cmd(CMD_TOGGLE_THEME, "Toggle Dark Mode", "Ctrl+Shift+L", "Interface", "moon");
+    cmd(
+        CMD_TOGGLE_SIDEBAR,
+        "Toggle Sidebar",
+        "Ctrl+B",
+        "Interface",
+        "panel-left",
+    );
+    cmd(
+        CMD_TOGGLE_THEME,
+        "Toggle Dark Mode",
+        "Ctrl+Shift+L",
+        "Interface",
+        "moon",
+    );
     cmd(CMD_SETTINGS, "Settings", "", "Navigate", "settings");
     cmd(CMD_RENAME_PAGE, "Rename Page", "F2", "Page", "pencil");
     cmd(CMD_DUPLICATE_PAGE, "Duplicate Page", "", "Page", "copy");
     cmd(CMD_DELETE_PAGE, "Delete Page", "", "Page", "trash");
-    cmd(CMD_EXPORT_PAGE, "Export Page as Markdown…", "", "Page", "export");
+    cmd(
+        CMD_EXPORT_PAGE,
+        "Export Page as Markdown…",
+        "",
+        "Page",
+        "export",
+    );
     cmd(CMD_IMPORT_MD, "Import Markdown…", "", "Page", "import");
     for id in ws.dfs_order() {
         if id >= BENCH_ID_BASE {
