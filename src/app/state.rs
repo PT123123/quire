@@ -489,6 +489,7 @@ impl AppState {
                         } else {
                             h.snippet.clone().into()
                         },
+                        hit_block_id: h.block.map(|b| b.0 as i32).unwrap_or(-1),
                     })
                     .collect();
                 Some(rows)
@@ -521,6 +522,7 @@ impl AppState {
                             } else {
                                 h.snippet.clone().into()
                             },
+                            hit_block_id: h.block.map(|b| b.0 as i32).unwrap_or(-1),
                         })
                         .collect(),
                     Err(_) => Vec::new(),
@@ -1066,6 +1068,8 @@ impl AppState {
                 } else {
                     h.snippet.into()
                 },
+                // the blob scan has no block addressing; only FTS hits do
+                hit_block_id: -1,
             })
             .collect();
         self.search.set_vec(rows);

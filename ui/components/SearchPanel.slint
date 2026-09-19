@@ -178,7 +178,11 @@ export component SearchPanel inherits PopupWindow {
                             mouse-cursor: MouseCursor.pointer;
                             clicked => {
                                 UIState.search-selected-id = row.page-id;
-                                UIState.search-invoked();
+                                if row.hit-block-id >= 0 {
+                                    UIState.search-open-hit(row.page-id, row.hit-block-id);
+                                } else {
+                                    UIState.search-invoked();
+                                }
                             }
                         }
                     }
