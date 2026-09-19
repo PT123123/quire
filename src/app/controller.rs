@@ -426,6 +426,37 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
     {
         let gw = gw.clone();
         let s = state.clone();
+        ui.global::<UIState>().on_search_open_hit(move |page, block| {
+            let g = gw.upgrade().unwrap();
+            if page <= 0 || block <= 0 {
+                return;
+            }
+            g.set_search_open(false);
+            g.set_search_query("".into());
+            open(&g, &s, page);
+            // open the hit block in edit mode with its text selected — the
+            // same mechanism the find bar uses for its navigation
+            let (text, len) = {
+                let d = s.doc.borrow();
+                d.block(crate::core::BlockId(block as u64))
+                    .map(|b| (b.text.clone(), b.text.len()))
+                    .unwrap_or_default()
+            };
+            if len > 0 {
+                g.set_editing_text(text.into());
+                g.set_pending_sel_start(0);
+                g.set_pending_sel_end(len as i32);
+                g.set_editing_id(-1);
+                g.set_editing_id(block);
+                let gen = g.get_find_sel_gen() + 1;
+                g.set_find_sel_gen(gen);
+            }
+        });
+    }
+
+    {
+        let gw = gw.clone();
+        let s = state.clone();
         ui.global::<UIState>().on_search_invoked(move || {
             let g = gw.upgrade().unwrap();
             let id = search_target(&g, &s);

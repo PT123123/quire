@@ -45,6 +45,7 @@ export struct SearchRow {
     page-id: int,
     title: string,
     snippet: string, // content excerpt or breadcrumb for title/recents hits
+    hit-block-id: int, // -1 for title/recents hits; else the matched block
 }
 
 export struct SlashRow {
@@ -214,6 +215,8 @@ export global UIState {
     callback search-query-changed();
     callback search-move(int);
     callback search-invoked();
+    // opens a content hit with its matched block selected
+    callback search-open-hit(int, int);
     callback dialog-confirmed();
     callback dialog-cancelled();
     callback settings-open-requested();
