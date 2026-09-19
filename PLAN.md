@@ -504,6 +504,17 @@ the app ever constructed it — SPEC §十七's "Move page" never shipped.
   (the clamp moves the anchor, cannot shrink a menu) — same class as the
   block menu's mover; a scrollable menu is a later polish item
 
+## Track A round 12 — sidebar page-tree drag (2026-09-20, on `master`)
+
+The last interaction in SPEC §八's Sidebar list: drag a page row onto
+another page to nest it (one PageMoved), onto the Workspace header for
+the top level. Same DragArea/DropArea rails as the block handle; the
+landing row tints; favorites/recents/new-page rows are not targets;
+workspace::can_move_page (extracted, read-only) refuses cycles per hover
+frame. Payload MIME 'slint-notion/page:' keeps page drags distinct from
+block drags. Test covers nest / refused cycle / non-target rejection /
+top-level return; default scene render unchanged (`13a011a`).
+
 
 
 
