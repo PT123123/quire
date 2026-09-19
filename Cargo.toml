@@ -31,6 +31,7 @@ skia-opengl = ["slint/renderer-skia-opengl"]
 software = ["slint/renderer-software"]
 
 [build-dependencies]
+embed-resource = "3.0.11"
 slint-build = "1.18"
 
 [[test]]

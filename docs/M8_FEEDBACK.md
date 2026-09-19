@@ -100,3 +100,27 @@ remove the choice instead of repeating it.
   on char boundaries (the same convention `Mark` uses, so the same selection
   model highlights it). No IO, so a debounced rebuild costs one linear scan of
   the page; `query_in_page` stays what it is for the cross-page panel.
+
+- **Windows packaging (D8) lives in `install/`, and asks Track A for two
+  lines.** `build.rs` writes the exe's `.rc` (icon + version block) and
+  `install/quire.iss` builds the setup program; both are outside `ui/**` and
+  `src/app/**`. These two are not:
+
+  1. **Window/taskbar icon.** Slint exposes the window icon as a *property*, so
+     it has to be set where the window is declared — in `ui/AppWindow.slint`
+     (the root `Window`, or the `AppWindow` element that owns it):
+
+     ```slint
+     icon: @image-url("../install/quire.png");
+     ```
+
+     `install/quire.png` is the 256 px frame `make_icon.ps1` writes next to the
+     `.ico`; Slint embeds it at compile time, so no loose file ships and the
+     path is relative to the `.slint` file.
+  2. **`.md` "Open with".** The registry verb the installer's optional task
+     writes is `"{app}\quire.exe" --open "%1"`. `parse_launch_args` in
+     `main.rs` ignores unknown arguments today, so double-clicking a `.md` file
+     only launches the app. To finish it: add a `("--open", Some(v))` arm, and
+     after `controller::wire(&ui, &state)` hand the path to the same sequence
+     `import_markdown_dialog` runs (read file → `import_service::import_markdown`
+     → apply the changes) minus the `rfd` picker.
