@@ -34,6 +34,7 @@ pub fn bind(ui: &AppWindow, state: &Rc<AppState>) {
     g.set_page_breadcrumb(crumb.into());
     g.set_renderer_name(renderer_name().into());
     g.set_dark(state.dark_setting());
+    g.set_lan_sharing(state.setting_flag("lan.share"));
     state.update_page_stats();
     if let Some(notice) = state.take_db_notice() {
         g.set_db_notice(notice.into());
@@ -990,6 +991,14 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         });
     }
 
+    {
+        let s = state.clone();
+        ui.global::<UIState>().on_toggle_lan_sharing(move || {
+            let on = !s.setting_flag("lan.share");
+            s.record_setting("lan.share", if on { "1" } else { "0" });
+        });
+    }
+
     // ---- page title in-place editing ----
     {
         let gw = gw.clone();
@@ -1191,6 +1200,52 @@ fn refresh_focused_text(g: &UIState<'_>, state: &Rc<AppState>) {
         }
         None => g.set_editing_id(-1),
     }
+}
+
+/// Import every (title, markdown) pair from a LAN pull as new pages.
+/// Returns the number of pages imported.
+pub fn import_lan_pages(
+    g: &UIState<'_>,
+    state: &Rc<AppState>,
+    url: &str,
+    pages: Vec<(String, String)>,
+) -> usize {
+    let mut imported = 0;
+    for (title, md) in pages {
+        let safe_title = if title.trim().is_empty() {
+            "Imported".to_string()
+        } else {
+            title.trim().to_string()
+        };
+        let new_id = state.create_page(None);
+        let core_page = crate::core::Page {
+            id: crate::core::PageId(new_id as u32 as u64),
+            title: safe_title.clone(),
+            parent: None,
+            order: state.page_order_of(new_id),
+            favorite: false,
+            expanded: false,
+        };
+        let changes = {
+            let mut doc = state.doc.borrow_mut();
+            let mut alloc = || doc.alloc_block_id();
+            crate::services::import_service::import_markdown(&md, &core_page, &mut alloc)
+        };
+        let rest = changes.into_iter().skip(1).collect::<Vec<_>>();
+        {
+            let mut d = state.doc.borrow_mut();
+            d.apply(&rest);
+        }
+        state.record(rest);
+        state.rename_page(new_id, &safe_title);
+        imported += 1;
+    }
+    if imported > 0 {
+        g.set_db_notice(format!("Imported {imported} page(s) from {url}").into());
+        open(g, state, state.open_page.get());
+        state.reproject_blocks();
+    }
+    imported
 }
 
 /// Export the open page's blocks to a .md file via the native save dialog.
