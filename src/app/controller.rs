@@ -35,6 +35,7 @@ pub fn bind(ui: &AppWindow, state: &Rc<AppState>) {
     g.set_renderer_name(renderer_name().into());
     g.set_dark(state.dark_setting());
     g.set_lan_sharing(state.setting_flag("lan.share"));
+    g.set_sidebar_open(!state.setting_flag("sidebar.closed"));
     state.update_page_stats();
     if let Some(notice) = state.take_db_notice() {
         g.set_db_notice(notice.into());
@@ -67,9 +68,12 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
     // ---- shell ----
     {
         let gw = gw.clone();
+        let s = state.clone();
         ui.global::<UIState>().on_toggle_sidebar(move || {
             let g = gw.upgrade().unwrap();
-            g.set_sidebar_open(!g.get_sidebar_open());
+            let open = !g.get_sidebar_open();
+            g.set_sidebar_open(open);
+            s.record_setting("sidebar.closed", if open { "0" } else { "1" });
         });
     }
 
