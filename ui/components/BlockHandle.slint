@@ -9,6 +9,9 @@ export component BlockHandle inherits Rectangle {
     in property <bool> visible-flag: false;
     callback plus-clicked();
     callback grip-clicked();
+    // the handle's own TouchAreas sit above the row's and take the hover —
+    // the row must keep the handle visible while the cursor is on them
+    out property <bool> hovered: ta1.has-hover || ta2.has-hover;
     width: 44px;
     height: 26px;
     opacity: visible-flag ? 1 : 0;
