@@ -53,6 +53,9 @@ pub struct AppState {
     settings: RefCell<HashMap<String, String>>,
     /// Persisted recent-page ids, restored before first open.
     recents_restored: Cell<Vec<i32>>,
+    /// Startup notice (e.g. database restored from backup); consumed by the
+    /// controller and shown once in the shell.
+    db_notice: RefCell<Option<String>>,
     /// Currently open page (0 = none / empty workspace).
     pub open_page: Cell<i32>,
     /// Page awaiting delete confirmation.
@@ -236,6 +239,7 @@ impl AppState {
             clipboard: RefCell::new(None),
             settings: RefCell::new(restored_settings),
             recents_restored: Cell::new(restored_recents),
+            db_notice: RefCell::new(None),
             all_commands,
             doc: RefCell::new(doc),
             history: RefCell::new(History::default()),
@@ -471,6 +475,14 @@ impl AppState {
             }
         }
         self.set_search_query(query);
+    }
+
+    pub fn set_db_notice(&self, notice: String) {
+        *self.db_notice.borrow_mut() = Some(notice);
+    }
+
+    pub fn take_db_notice(&self) -> Option<String> {
+        self.db_notice.borrow_mut().take()
     }
 
     pub fn page_order_of(&self, id: i32) -> OrderKey {

@@ -4,7 +4,9 @@
 
 import { Theme } from "../Theme.slint";
 import { Colors } from "../Colors.slint";
+import { Typography } from "../Typography.slint";
 import { TopBar } from "./TopBar.slint";
+import { IconButton } from "./IconButton.slint";
 import { Sidebar } from "./Sidebar.slint";
 import { Editor } from "./Editor.slint";
 import { UIState } from "../Types.slint";
@@ -24,6 +26,33 @@ export component AppShell inherits Rectangle {
         || UIState.block-menu-open-id >= 0;
 
     VerticalLayout {
+        if UIState.db-notice != "" : Rectangle {
+            height: 30px;
+            background: #f6e7b2;
+            HorizontalLayout {
+                padding-left: Theme.spacing-md;
+                padding-right: Theme.spacing-xs;
+                spacing: Theme.spacing-sm;
+                Text {
+                    text: UIState.db-notice;
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-caption;
+                    color: #5a4a17;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                }
+                IconButton {
+                    vertical-stretch: 0;
+                    cross-axis-self-alignment: center;
+                    icon-name: "x";
+                    size: 22px;
+                    clicked => {
+                        UIState.close-db-notice();
+                    }
+                }
+            }
+        }
         TopBar {
             minimize-requested => {
                 root.minimize-requested();

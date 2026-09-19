@@ -96,6 +96,7 @@ fn real_main() -> Result<(), String> {
     // Persistence (M3): open (or create) the database. A failure to open
     // means the session runs in memory only — never fall back to writing
     // over a database we could not read.
+    let mut recovered: Option<std::path::PathBuf> = None;
     let repo: Option<std::sync::Arc<quire::storage::SqliteRepository>> = {
         let path = launch
             .db
@@ -106,6 +107,9 @@ fn real_main() -> Result<(), String> {
         }
         match quire::storage::SqliteRepository::open_with_report(&path) {
             Ok((r, report)) => {
+                if let Some(from) = &report.recovered_from {
+                    recovered = Some(from.clone());
+                }
                 report.log();
                 Some(std::sync::Arc::new(r))
             }
@@ -122,6 +126,12 @@ fn real_main() -> Result<(), String> {
     };
     let ui = AppWindow::new().map_err(|e| e.to_string())?;
     let state = AppState::new(&args, repo);
+    if let Some(from) = &recovered {
+        state.set_db_notice(format!(
+            "The database was damaged — this session was restored from a backup ({}). The damaged file was kept beside it.",
+            from.display()
+        ));
+    }
     controller::bind(&ui, &state);
     controller::wire(&ui, &state);
 

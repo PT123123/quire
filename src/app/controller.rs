@@ -33,6 +33,12 @@ pub fn bind(ui: &AppWindow, state: &Rc<AppState>) {
     g.set_page_breadcrumb(crumb.into());
     g.set_renderer_name(renderer_name().into());
     g.set_dark(state.dark_setting());
+    if let Some(notice) = state.take_db_notice() {
+        g.set_db_notice(notice.into());
+    }
+    if let Some(notice) = state.take_db_notice() {
+        g.set_db_notice(notice.into());
+    }
 }
 
 fn renderer_name() -> &'static str {
@@ -827,6 +833,14 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         });
     }
 
+    {
+        let gw = gw.clone();
+        ui.global::<UIState>().on_close_db_notice(move || {
+            let g = gw.upgrade().unwrap();
+            g.set_db_notice("".into());
+        });
+    }
+
     // ---- link dialog (M6) ----
     {
         let gw = gw.clone();
@@ -1114,6 +1128,11 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
         }
         "block-menu" => {}
         "link" => apply_scene_overlay(ui, state, "link-dlg"),
+        "recovered" => {
+            state.set_db_notice(
+                "The database was damaged — this session was restored from a backup (appdata/quire.db.bak1). The damaged file was kept beside it.".into(),
+            );
+        }
 
         "rename" => {
             g.set_renaming_id(108);
