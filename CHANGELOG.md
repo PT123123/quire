@@ -23,6 +23,9 @@ First functional release: a local, single-file-database notes workspace.
   menu and Turn-into list only kinds without a symbol shortcut; fixed the
   menu popup never showing from a real handle click (it only ever rendered
   in the visual-test scene) and anchored it beside the handle
+- Fixed the handle (+/⋮⋮) being clickable while invisible on the block
+  being edited: it now shows whenever the row or the buttons are hovered,
+  editing or not
 - Inline marks: bold (Ctrl+B), italic (Ctrl+I), inline code (Ctrl+E),
   strikethrough (Ctrl+Shift+X), links (Ctrl+L + dialog; click a link to
   open it)
