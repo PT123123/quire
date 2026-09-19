@@ -23,6 +23,9 @@ the same property/callback path a real keystroke uses, and samples the
 single-threaded latencies itself.
 GPU-side memory is *not* Working Set; when it matters we record it from
 Task Manager's "GPU Memory" column / pdh counters and say so.
+Startup latency has two measurements, not one: `bench.ps1`'s `startup_ms` is
+window-handle-up, and `startup_bench.ps1`'s `first_paint_ms` is the first
+painted frame (see the A2 section at the end — they differ by ~4×).
 
 ## Scenes
 | id | scene | command |
@@ -314,3 +317,72 @@ the resolution this harness can honestly claim.
 or typing CPU by more than the ≈2 MB / ≈3 pp noise floor. None of the four
 §二十四 knobs does, so the audit's answer is "already right", recorded as a
 measured outcome rather than an assumption.
+
+## M8 · first paint, not window-up (A2, 2026-09-20)
+
+Closes the gap carried in PLAN since M0/M1: *"window startup_ms measures
+window-up, not first paint."*
+
+**Method.** `quire.exe --measure-startup` installs a Slint rendering notifier
+(`slint::Window::set_rendering_notifier`, the 1.18 public API) while the
+window is still hidden, and prints one JSON line to stderr the first time the
+backend reports `RenderingState::AfterRendering` — the first painted frame —
+with the latency timed from the top of `main()`. Driver:
+`benchmarks/scripts/startup_bench.ps1`, which also times the *old* proxy
+(process → main-window-handle) in the same run, so the two numbers are never
+compared across rounds. Raw rows:
+`benchmarks/results/2026-09-20-first-paint-{a-shell,d-10k}.jsonl`. Normal runs
+without the flag install nothing — no timer, no thread, no extra frame — and
+emit no line (verified: stderr empty, exit 0).
+
+**Boundary and its bias.** In the vendored femtovg backend the notifier fires
+after the scene is rendered and the GPU commands are submitted, immediately
+before `present_surface` (`i-slint-renderer-femtovg-1.18.0/lib.rs`, end of
+`draw()`), so the number is a *sub-millisecond underestimate* of true
+on-screen time. It also starts at `main()`, excluding OS process creation and
+dynamic-linking — the harness's `stderr_paint_ms` column shows that preamble
+to be ≈60–100 ms, so total launch-to-pixel is the reported figure plus that.
+The **software** renderer exposes no notifier (`set_rendering_notifier`
+returns `Unsupported`), and there the flag falls back to a documented proxy:
+the first timer to run inside the event loop, which lands *before* any frame
+is drawn — an underestimate of paint latency, marked
+`"method":"event_loop_proxy","confidence":"low"` in its own line so it can
+never be confused with the real thing. `renderer_name()` comes from the
+build's own features, so each binary labels itself correctly.
+
+**Numbers** (Release, femtovg, 100% scale, warm, 5 + 4 runs, medians):
+
+| scene | window-up (old `startup_ms`) | **first paint** | invisible gap |
+|-------|-----------------------------:|----------------:|--------------:|
+| A empty shell | 133–142 ms (median) | **549 ms** | ≈410 ms |
+| D 10 000 blocks | 124–125 ms | **693 ms** | ≈570 ms |
+
+Run 1 of the A batch is excluded from the window-up range and called out: its
+handle appeared at 940 ms (first launch of a freshly linked exe — AV scan /
+cold image load) while its *first paint* was 579.7 ms, in band with the other
+four. The paint number is stable even when the handle number is not, which is
+the practical argument for measuring paint.
+
+**Reading.** The window handle is up in ~140 ms and the user sees a complete
+frame ~400–550 ms later — the old number understated perceived startup by
+**3.9× (scene A) and 5.6× (scene D)**. The gap is *not* decomposed here; the
+candidates in it are the app's own pre-loop work (open + integrity-check the
+SQLite file, rebuild the workspace tree and document, bind the controller) and
+Slint's first-frame setup (glyph atlas, shader/program build). What the data
+does say is that the gap barely scales with the document: 10 000 blocks add
+only ≈145 ms to first paint, because virtualization means the frame renders
+the visible rows, not the page — so the fixed part (setup, not content)
+dominates.
+
+**Conclusions.** (1) Quote first-paint, not window-up, as startup latency;
+bench.ps1's `startup_ms` remains what it always measured (handle-up) and the
+two are not interchangeable. (2) ≈410 ms of pre-paint work is now visible to
+attack, and the storage layer is already known not to be most of it: the ADR-
+0015 probe puts a full `SqliteRepository::open` — 10 000 blocks, rotate +
+snapshot — at 46–116 ms, i.e. ≤ 25 % of scene D's gap even at the pessimistic
+end. The remaining ~300–500 ms is the tree/document rebuild plus Slint's
+first-frame setup, so a follow-up worth its cost would stamp the phases inside
+`real_main` behind the same flag and see which half moves. (3) The skia
+comparison is deliberately not claimed here: it needs its own release build,
+and A3's lesson about measuring while a parallel track compiles applies. Left
+as a follow-up (`--features skia` + the same script).

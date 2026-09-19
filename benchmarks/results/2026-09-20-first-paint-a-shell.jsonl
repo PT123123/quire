@@ -1,0 +1,6 @@
+{"label":"a-shell","run":1,"exe":"target/release/quire.exe","blocks":0,"renderer":"femtovg","method":"AfterRendering","first_paint_ms":579.7,"window_up_ms":940,"stderr_paint_ms":1442,"exit_code":0}
+{"label":"a-shell","run":2,"exe":"target/release/quire.exe","blocks":0,"renderer":"femtovg","method":"AfterRendering","first_paint_ms":550.7,"window_up_ms":133,"stderr_paint_ms":636,"exit_code":0}
+{"label":"a-shell","run":3,"exe":"target/release/quire.exe","blocks":0,"renderer":"femtovg","method":"AfterRendering","first_paint_ms":548.8,"window_up_ms":198,"stderr_paint_ms":649,"exit_code":0}
+{"label":"a-shell","run":4,"exe":"target/release/quire.exe","blocks":0,"renderer":"femtovg","method":"AfterRendering","first_paint_ms":509.9,"window_up_ms":142,"stderr_paint_ms":603,"exit_code":0}
+{"label":"a-shell","run":5,"exe":"target/release/quire.exe","blocks":0,"renderer":"femtovg","method":"AfterRendering","first_paint_ms":488.8,"window_up_ms":134,"stderr_paint_ms":565,"exit_code":0}
+{"label":"a-shell","exe":"target/release/quire.exe","runs":5,"blocks":0,"renderer":"femtovg","method":"AfterRendering","first_paint_ms_min":489,"first_paint_ms_median":549,"first_paint_ms_max":580,"window_up_ms_min":133,"window_up_ms_median":142,"window_up_ms_max":940,"stderr_paint_ms_min":565,"stderr_paint_ms_median":636,"stderr_paint_ms_max":1442}

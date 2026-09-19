@@ -36,6 +36,10 @@ pub struct LaunchArgs {
     pub pull: Option<String>,
     /// Debug: print loaded page/block counts to stderr (--dump-state).
     pub dump_state: bool,
+    /// A2: measure the first painted frame and print one JSON line to stderr
+    /// (--measure-startup). Normal runs never set this: no timer, no thread,
+    /// no extra frame.
+    pub measure_startup: bool,
 }
 
 fn parse_launch_args() -> LaunchArgs {
@@ -52,6 +56,7 @@ fn parse_launch_args() -> LaunchArgs {
         open: None,
         share: None,
         pull: None,
+        measure_startup: false,
     };
     let mut i = 1;
     while i < argv.len() {
@@ -102,6 +107,9 @@ fn parse_launch_args() -> LaunchArgs {
                 a.pull = Some(v.clone());
                 i += 1;
             }
+            ("--measure-startup", _) => {
+                a.measure_startup = true;
+            }
             (positional, _) if !positional.starts_with('-') => {
                 if a.open.is_none() {
                     a.open = Some(std::path::PathBuf::from(positional));
@@ -120,6 +128,7 @@ fn leak_timer(t: Timer) {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let start = std::time::Instant::now();
     // The UI event loop runs on its own thread with a generous stack:
     // Slint 1.18 evaluates the initial property/layout bindings of the
     // component tree recursively on the C stack, and Quire's shell sits
@@ -127,12 +136,91 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // more when they open). 8 MB is the standard Linux default and costs
     // nothing but address-space reservation. See DECISIONS.md ADR-0009.
     let child = std::thread::Builder::new().stack_size(8 * 1024 * 1024)
-        .spawn(|| real_main()).expect("spawn UI thread");
+        .spawn(move || real_main(start)).expect("spawn UI thread");
     child.join().map_err(|_| "UI thread panicked".to_string())??;
     Ok(())
 }
 
-fn real_main() -> Result<(), String> {
+/// The renderer name baked in at compile time (no runtime cost, no ambiguity:
+/// each feature-gated build reports its own renderer).
+fn renderer_name() -> &'static str {
+    #[cfg(feature = "femtovg")]
+    return "femtovg";
+    #[cfg(all(not(feature = "femtovg"), feature = "femtovg-wgpu"))]
+    return "femtovg-wgpu";
+    #[cfg(all(
+        not(feature = "femtovg"),
+        not(feature = "femtovg-wgpu"),
+        any(feature = "skia", feature = "skia-opengl")
+    ))]
+    return "skia";
+    #[cfg(all(
+        not(feature = "femtovg"),
+        not(feature = "femtovg-wgpu"),
+        not(any(feature = "skia", feature = "skia-opengl")),
+        feature = "software"
+    ))]
+    return "software";
+    #[cfg(all(
+        not(feature = "femtovg"),
+        not(feature = "femtovg-wgpu"),
+        not(any(feature = "skia", feature = "skia-opengl")),
+        not(feature = "software")
+    ))]
+    return "unknown";
+}
+
+/// A2 · first-paint measurement (--measure-startup).
+///
+/// Slint 1.18 exposes `Window::set_rendering_notifier`; femtovg and skia
+/// support it and fire `AfterRendering` once per drawn frame, so the first
+/// firing is the first painted frame (its exact boundary: after the scene is
+/// rendered and the GPU commands submitted, immediately before presentation —
+/// see `i-slint-renderer-femtovg` draw(); a sub-millisecond underestimate of
+/// true on-screen time). The software renderer has no notifier; there the
+/// proxy is the first timer to run inside the event loop, which lands before
+/// any frame is drawn (so it under-reports paint, over-reports readiness —
+/// flagged `"confidence":"low"` and documented in PERFORMANCE.md).
+///
+/// The window is still hidden at install time, so no frame can be missed.
+/// Normal runs never call this — no timer, no thread, no extra frame.
+fn install_startup_measurement(ui: &AppWindow, start: std::time::Instant) {
+    let reported = std::rc::Rc::new(std::cell::Cell::new(false));
+    let reported2 = reported.clone();
+    let result = ui.window().set_rendering_notifier(move |s, _api| {
+        if matches!(s, slint::RenderingState::AfterRendering) && !reported2.get() {
+            reported2.set(true);
+            eprintln!(
+                "{{\"event\":\"first_paint\",\"renderer\":\"{}\",\"first_paint_ms\":{:.1},\"method\":\"AfterRendering\"}}",
+                renderer_name(),
+                start.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+    });
+    if result.is_err() {
+        eprintln!("quire: [measure] set_rendering_notifier failed: {:?}", result.err());
+        // No notifier on this backend: the 1 ms single-shot runs as the first
+        // event-loop callback, before any drawn frame exists.
+        let t = Timer::default();
+        t.start(
+            slint::TimerMode::SingleShot,
+            std::time::Duration::from_millis(1),
+            move || {
+                if !reported.get() {
+                    reported.set(true);
+                    eprintln!(
+                        "{{\"event\":\"first_paint\",\"renderer\":\"{}\",\"first_paint_ms\":{:.1},\"method\":\"event_loop_proxy\",\"confidence\":\"low\"}}",
+                        renderer_name(),
+                        start.elapsed().as_secs_f64() * 1000.0
+                    );
+                }
+            },
+        );
+        leak_timer(t);
+    }
+}
+
+fn real_main(start: std::time::Instant) -> Result<(), String> {
     // The argument parser reads only strings — no I/O to fail — so running it
     // before logging costs no coverage: `logging::init` installs the panic
     // hook as its first act, and needs the flags to know which directory the
@@ -185,6 +273,9 @@ fn real_main() -> Result<(), String> {
         bench_pages: launch.bench_pages,
     };
     let ui = AppWindow::new().map_err(|e| e.to_string())?;
+    if launch.measure_startup {
+        install_startup_measurement(&ui, start);
+    }
     // Window::set_icon does not exist in Slint 1.18 (M8_FEEDBACK #4/#5 note):
     // the taskbar/explorer icon comes from the exe's embedded resource (D8),
     // and the frameless window shows no title bar — nothing user-visible is
