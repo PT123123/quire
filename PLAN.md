@@ -405,3 +405,32 @@ M7 performance matrix, D12 the data-location move.
       M8 hardening feedback #1/#9/#10 all resolved — branch merged to
       `master`
 
+## Track A round 8 — Page block (2026-09-20, branch `m8-page-block`)
+
+The round-5 deferral ("Page & Link-to-page blocks need a child-page
+column + lifecycle") lands, on `master` after the D13 merge.
+
+- [x] data layer (`08a2e1f`): BlockKind::Page ("page"), `Block.page_ref:
+      Option<PageId>`, schema v5 (`blocks.page_ref`, conditional column
+      add like v4), `Change::BlockRefSet`; repository insert/load/apply
+      carry the column; export renders a Page block as
+      `[title](quire://page/<id>)` (re-imports as a clickable link mark)
+- [x] lifecycle (`b869afa`): "+" insert menu's Page row is real — one
+      batch creates the child page (under the current page) and converts
+      the row; the row shows the child's live title (rename path
+      reprojections), click opens (block-activate routes kind 11 to
+      open_page; the row is never editable), delete takes the child page,
+      duplicate deep-copies the child and retargets the copy, paste lands
+      the title as plain text (no shared targets)
+- [x] document.apply gained the BlockRefSet arm — its absence was caught
+      by the headless scene (row rendered "(deleted page)" while the
+      sidebar had the child): the scene-first workflow paying off
+- [x] tests: storage round-trip (ref set/cleared survive), markdown
+      export shape (link + dangling fallback); suite green (199 pass /
+      4 ignored); scene `page-block` rendered and reviewed (icon + live
+      title + sidebar child, light theme)
+- deferred (follow-ups): Link-to-page block needs a page picker; turning
+  a Page block into another kind keeps the child in the tree; a
+  duplicated page's embedded page blocks still share the original's
+  child references (recursive copy is v2)
+

@@ -30,12 +30,17 @@ First functional release: a local, single-file-database notes workspace.
   quire://page link jumps inside the app. The slash menu and Turn-into
   list only carry kinds without a symbol shortcut (ADR-0022)
 - "+" handle opens Notion's insert menu: it creates the empty line below
-  and shows the full block list (Text, To-do, Headings, Bulleted /
+  and shows the full block list (Text, Page, To-do, Headings, Bulleted /
   Numbered, Quote, Divider, Callout, Code) — picking a row converts the
   new line, clicking away or Escape keeps the empty line, typing filters
-  the menu. Page / Toggle list and the database views (Table, Board,
-  Gallery, List, Calendar, Timeline) appear as muted "later" placeholders
-  and cannot be picked yet
+  the menu. Toggle list and the database views (Table, Board, Gallery,
+  List, Calendar, Timeline) appear as muted "later" placeholders and
+  cannot be picked yet
+- Page block: embeds a child page (insert menu "Page"). The row shows a
+  page icon and the child's live title (renames propagate), clicking it
+  opens the child, deleting the block deletes the child page, and
+  duplicating copies the child so the two blocks never share a target.
+  Exports as a `quire://page` link that re-imports clickable
 - Every popup (page menus, ⋮⋮ menu, slash menu, command palette, search)
   dismisses on a click outside it and on Escape; UI state follows so
   nothing stays blocked behind an already-closed menu
