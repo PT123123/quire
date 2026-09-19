@@ -5,6 +5,25 @@ TextInput editing), M5 slash/block menus landed, M6 marks model +
 persistence landed. This doc records the design AND the platform walls hit
 during implementation.
 
+## List nesting (M4)
+
+Tab / Shift+Tab on bullet/numbered/todo items nest and promote (depth 1
+max). The model is honest: `parent` + order keys, children sort between
+their parent and the parent's next sibling; the projection computes each
+block's depth and the renderer indents by 24px per level. Empty list
+items leave the list on Enter (convert to a top-level paragraph, one
+undo step) and on Backspace-at-start. `MoveBlock` stays within a sibling
+run — cross-parent swaps are refused at plan time.
+
+## In-page find (M7)
+
+The Ctrl+F bar consumes Track B's `FindSession` (services/find_service.rs):
+every keystroke rebuilds the session (linear page scan, no IO); stepping
+navigates hits by routing through the hit block's editing input — the
+delegate re-creates with a pending byte-range selection so the hit is
+visibly selected. Scroll-to-block is NOT possible yet (ListView delegates
+give no absolute geometry) — navigation is selection-based.
+
 ## Platform wall: inline rich text rendering
 
 Slint `Text` has no inline formatting (no per-run style, no decoration).

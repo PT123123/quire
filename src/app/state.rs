@@ -412,6 +412,13 @@ impl AppState {
         }]);
         self.open_page.set(id);
         self.reproject_blocks();
+        // a fresh page starts at the top (the old viewport offset would
+        // otherwise leak across pages)
+        if let Some(ui) = self.ui.borrow().clone() {
+            ui.upgrade()
+                .unwrap()
+                .set_editor_scroll_y(0.0);
+        }
         self.rebuild_sidebar();
     }
 

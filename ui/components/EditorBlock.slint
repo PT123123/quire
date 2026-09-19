@@ -239,6 +239,9 @@ export component EditorBlock inherits Rectangle {
                 && (block.kind == 4 || block.kind == 5 || block.kind == 6)) {
                 UIState.outdent-list(block.id);
                 accept
+            } else if (event.modifiers.control && event.text == Key.D) {
+                UIState.duplicate-block(block.id);
+                accept
             } else if (event.modifiers.control && event.text == Key.L
                 && self.anchor-position-byte-offset != self.cursor-position-byte-offset) {
                 UIState.link-start = Math.min(self.anchor-position-byte-offset, self.cursor-position-byte-offset);
@@ -255,6 +258,9 @@ export component EditorBlock inherits Rectangle {
                 && event.modifiers.shift
                 && (block.kind == 4 || block.kind == 5 || block.kind == 6)) {
                 UIState.outdent-list(block.id);
+                accept
+            } else if (event.modifiers.control && event.text == Key.D) {
+                UIState.duplicate-block(block.id);
                 accept
             } else if (event.modifiers.control && event.text == Key.L
                 && self.anchor-position-byte-offset != self.cursor-position-byte-offset) {
