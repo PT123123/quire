@@ -761,6 +761,12 @@ impl AppState {
                 danger: false,
             },
             MenuRow {
+                id: 7,
+                label: "Turn into".into(),
+                icon: "chevron-right".into(),
+                danger: false,
+            },
+            MenuRow {
                 id: 3,
                 label: "Duplicate".into(),
                 icon: "copy".into(),
@@ -788,6 +794,40 @@ impl AppState {
             danger: true,
         });
         self.block_menu.set_vec(rows);
+    }
+
+    /// Second-level "Turn into" menu for one block: the curated kinds minus
+    /// the block's own. Action ids encode the target kind as 100 + kind int.
+    pub fn fill_block_menu_turn_into(&self, id: i32) {
+        let current = self.block_kind(id);
+        let mut rows = vec![MenuRow {
+            id: 8,
+            label: "Back".into(),
+            icon: "chevron-left".into(),
+            danger: false,
+        }];
+        for (kind, label, _) in TURN_INTO_ITEMS {
+            if Some(*kind) != current {
+                rows.push(MenuRow {
+                    id: 100 + kind_to_int(*kind),
+                    label: (*label).into(),
+                    icon: match kind {
+                        BlockKind::Paragraph => "pencil",
+                        BlockKind::Code => "page",
+                        _ => "minimize",
+                    }
+                    .into(),
+                    danger: false,
+                });
+            }
+        }
+        self.block_menu.set_vec(rows);
+    }
+
+    /// Kind of one block (editing-flow decisions: markdown shortcuts,
+    /// Turn-into filtering).
+    pub fn block_kind(&self, id: i32) -> Option<BlockKind> {
+        self.doc.borrow().block(BlockId(id as u64)).map(|b| b.kind)
     }
 
     pub fn copy_block(&self, id: i32) {
@@ -1216,19 +1256,17 @@ pub fn core_page_id(id: i32) -> PageId {
 }
 
 /// Slash-menu descriptors: Rust owns the list (SPEC §十五), the UI only
-/// renders labels. ids are BlockKind ints (see kind_from_int).
+/// renders labels. ids are BlockKind ints (see kind_from_int). Kinds with a
+/// markdown line-shortcut ("# ", "- ", …) are deliberately absent — typing
+/// the symbol converts, so the menu only lists the rest (ADR-0022).
 const SLASH_ITEMS: &[(BlockKind, &str, &str)] = &[
     (BlockKind::Paragraph, "Text", "Plain paragraph"),
-    (BlockKind::Heading1, "Heading 1", "Large section heading"),
-    (BlockKind::Heading2, "Heading 2", "Medium section heading"),
-    (BlockKind::Heading3, "Heading 3", "Small section heading"),
-    (BlockKind::Bullet, "Bullet list", "Simple bulleted list"),
-    (BlockKind::Numbered, "Numbered list", "List with numbering"),
-    (BlockKind::Todo, "To-do list", "Track tasks with checkboxes"),
-    (BlockKind::Quote, "Quote", "Capture a quotation"),
-    (BlockKind::Code, "Code", "Monospaced code block"),
-    (BlockKind::Divider, "Divider", "Visual separator"),
+    (BlockKind::Code, "Code", "Monospaced block — or type ```"),
+    (BlockKind::Divider, "Divider", "Visual separator — or type ---"),
 ];
+
+/// "Turn into" targets: the same curation as the slash menu.
+const TURN_INTO_ITEMS: &[(BlockKind, &str, &str)] = SLASH_ITEMS;
 
 fn slash_items(filter: &str) -> Vec<SlashRow> {
     let needle = filter.to_lowercase();
@@ -1243,8 +1281,9 @@ fn slash_items(filter: &str) -> Vec<SlashRow> {
         .collect()
 }
 
-fn kind_from_int(kind: i32) -> BlockKind {
-    match kind {
+/// BlockKind int (UI menu ids) -> kind. Public: the controller resolves
+/// Turn-into menu actions with it.
+pub fn kind_from_int(kind: i32) -> BlockKind {    match kind {
         1 => BlockKind::Heading1,
         2 => BlockKind::Heading2,
         3 => BlockKind::Heading3,

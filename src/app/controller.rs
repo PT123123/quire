@@ -6,9 +6,9 @@
 // 'static callbacks capture a Weak and upgrade() it at fire time.
 
 use crate::app::state::{
-    core_page_id, AppState, CMD_EXPORT_PAGE, CMD_IMPORT_MD, CMD_PAGE_BASE, MENU_DELETE,
-    MENU_DUPLICATE, MENU_FAVORITE, MENU_NEW_SUBPAGE, MENU_RENAME, PAGE_GETTING_STARTED,
-    ROW_NEW_PAGE,
+    core_page_id, kind_from_int, AppState, CMD_EXPORT_PAGE, CMD_IMPORT_MD, CMD_PAGE_BASE,
+    MENU_DELETE, MENU_DUPLICATE, MENU_FAVORITE, MENU_NEW_SUBPAGE, MENU_RENAME,
+    PAGE_GETTING_STARTED, ROW_NEW_PAGE,
 };
 use crate::core::{BlockId, Change, Command};
 use crate::{AppWindow, UIState};
@@ -31,6 +31,7 @@ fn block_drag_id(data: &slint::DataTransfer) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::BlockKind;
 
     #[test]
     fn block_drag_payload_roundtrip() {
@@ -42,6 +43,47 @@ mod tests {
         foreign.set_plain_text("some pasted text".into());
         assert_eq!(block_drag_id(&foreign), None);
         assert_eq!(block_drag_id(&slint::DataTransfer::default()), None);
+    }
+
+    #[test]
+    fn markdown_shortcuts_convert_and_strip() {
+        let conv = |t: &str| markdown_convert(t, Some(BlockKind::Paragraph)).map(|(k, r, _)| (k, r));
+        assert_eq!(conv("# "), Some((BlockKind::Heading1, "".to_string())));
+        assert_eq!(conv("## Big"), Some((BlockKind::Heading2, "Big".into())));
+        assert_eq!(conv("### Small"), Some((BlockKind::Heading3, "Small".into())));
+        assert_eq!(conv("- item"), Some((BlockKind::Bullet, "item".into())));
+        assert_eq!(conv("* item"), Some((BlockKind::Bullet, "item".into())));
+        assert_eq!(conv("1. first"), Some((BlockKind::Numbered, "first".into())));
+        assert_eq!(conv("12. x"), Some((BlockKind::Numbered, "x".into())));
+        assert_eq!(conv("[] buy"), Some((BlockKind::Todo, "buy".into())));
+        assert_eq!(conv("[ ] buy"), Some((BlockKind::Todo, "buy".into())));
+        assert_eq!(conv("> note"), Some((BlockKind::Quote, "note".into())));
+        assert_eq!(conv("---"), Some((BlockKind::Divider, "".into())));
+        assert_eq!(conv("```"), Some((BlockKind::Code, "".into())));
+        // non-triggers
+        assert_eq!(conv("#no-space"), None);
+        assert_eq!(conv("then # "), None);
+        assert_eq!(conv("a. x"), None);
+        assert_eq!(conv(". x"), None);
+        assert_eq!(conv("-"), None);
+        assert_eq!(conv("----"), None);
+        assert_eq!(conv(""), None);
+    }
+
+    #[test]
+    fn markdown_shortcut_checked_todo_and_code_exemption() {
+        // "[x] " lands checked
+        let (kind, rest, checked) = markdown_convert("[x] done", Some(BlockKind::Paragraph)).unwrap();
+        assert_eq!(kind, BlockKind::Todo);
+        assert_eq!(rest, "done");
+        assert_eq!(checked, Some(true));
+        // an already-Todo block typing "[x] ": the fn still reports the
+        // intent, the caller skips the toggle for same-kind blocks
+        let (_, _, checked) = markdown_convert("[x] done", Some(BlockKind::Todo)).unwrap();
+        assert_eq!(checked, Some(true));
+        // code and divider text is exempt: "# " is legitimate content there
+        assert_eq!(markdown_convert("# comment", Some(BlockKind::Code)), None);
+        assert_eq!(markdown_convert("---", Some(BlockKind::Divider)), None);
     }
 }
 
@@ -618,10 +660,36 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                 let gw = gw.clone();
                 let s = s.clone();
                 if let Some(g) = gw.upgrade() {
+                    let text = g.get_editing_text().to_string();
+                    // markdown line-shortcuts convert before anything else
+                    // looks at the text (slash filter included); the block
+                    // kind gates which triggers are eligible
+                    let editing = g.get_editing_id();
+                    if editing > 0 {
+                        let current = s.block_kind(editing);
+                        if let Some((kind, cleaned, checked)) =
+                            markdown_convert(&text, current)
+                        {
+                            let bid = BlockId(editing as u64);
+                            let mut cmds = vec![
+                                Command::ReplaceText { id: bid, text: cleaned.clone() },
+                                Command::SetBlockType { id: bid, kind },
+                            ];
+                            // "[x] " lands checked — unless it already is one
+                            if checked == Some(true) && current != Some(crate::core::BlockKind::Todo) {
+                                cmds.push(Command::ToggleTodoChecked { id: bid });
+                            }
+                            let _ = s.exec_all_on_open_page(cmds);
+                            g.set_slash_open(false);
+                            g.set_editing_text(cleaned.into());
+                            g.set_pending_caret(0);
+                            g.set_editing_id(editing);
+                            return;
+                        }
+                    }
                     // "/" at block start opens the slash menu with the rest of
                     // the line as the filter (SPEC §十五); anchored below the
                     // editing block
-                    let text = g.get_editing_text().to_string();
                     if let Some(filter) = text.strip_prefix('/') {
                         s.open_slash(filter);
                         g.set_slash_filter(filter.into());
@@ -814,10 +882,17 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         let gw = gw.clone();
         let s = state.clone();
         ui.global::<UIState>()
-            .on_block_menu_opened(move |id, row_y| {
+            .on_block_menu_opened(move |id, handle_y, content_x| {
                 let g = gw.upgrade().unwrap();
-                eprintln!("debug: block-menu row_y={:.1}", (row_y as f32));
                 s.fill_block_menu();
+                // anchor beside the handle: window y = top bar + list-layout
+                // y (pre-scroll) - scroll; x aligns with the text column
+                let scroll = g.get_editor_scroll_y();
+                let edge = if g.get_sidebar_open() { 260.0 } else { 0.0 };
+                let y = (40.0 + handle_y as f32 - scroll + 2.0)
+                    .clamp(48.0, (g.get_window_h() - 208.0).max(48.0));
+                g.set_block_menu_x(edge + content_x as f32 + 2.0);
+                g.set_block_menu_y(y);
                 g.set_block_menu_open_id(id);
             });
     }
@@ -828,10 +903,19 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         ui.global::<UIState>().on_block_menu_action(move |action| {
             let g = gw.upgrade().unwrap();
             let id = g.get_block_menu_open_id();
-            g.set_block_menu_open_id(-1);
             if id <= 0 {
                 return;
             }
+            // submenu navigation swaps the rows and keeps the popup open
+            if action == 7 {
+                s.fill_block_menu_turn_into(id);
+                return;
+            }
+            if action == 8 {
+                s.fill_block_menu();
+                return;
+            }
+            g.set_block_menu_open_id(-1);
             match action {
                 1 => {
                     let _ = s.exec_on_open_page(Command::MoveBlock {
@@ -861,6 +945,12 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                     if g.get_editing_id() == id {
                         g.set_editing_id(-1);
                     }
+                }
+                a if (100..200).contains(&a) => {
+                    let _ = s.exec_on_open_page(Command::SetBlockType {
+                        id: BlockId(id as u64),
+                        kind: kind_from_int(a - 100),
+                    });
                 }
                 _ => {}
             }
@@ -1385,6 +1475,55 @@ fn find_inserted_id(changes: &[Change]) -> Option<i32> {
     })
 }
 
+/// Markdown line-shortcuts (ADR-0022): typing a trigger prefix + space (or
+/// the exact token) converts the block being edited, with the trigger
+/// stripped. The slash menu and Turn-into list omit every kind reachable
+/// this way, so the symbol is the only path to them. Returns
+/// `(kind, remaining text, set-checked)`. Code and divider blocks never
+/// convert — their text legitimately starts with these characters.
+fn markdown_convert(
+    text: &str,
+    current: Option<crate::core::BlockKind>,
+) -> Option<(crate::core::BlockKind, String, Option<bool>)> {
+    use crate::core::BlockKind;
+    if matches!(current, Some(BlockKind::Code) | Some(BlockKind::Divider)) {
+        return None;
+    }
+    let conv = |kind, rest: &str| Some((kind, rest.to_string(), None));
+    if let Some(rest) = text.strip_prefix("### ") {
+        conv(BlockKind::Heading3, rest)
+    } else if let Some(rest) = text.strip_prefix("## ") {
+        conv(BlockKind::Heading2, rest)
+    } else if let Some(rest) = text.strip_prefix("# ") {
+        conv(BlockKind::Heading1, rest)
+    } else if let Some(rest) = text.strip_prefix("- ").or_else(|| text.strip_prefix("* ")) {
+        conv(BlockKind::Bullet, rest)
+    } else if let Some(rest) = text.strip_prefix("[x] ") {
+        Some((BlockKind::Todo, rest.to_string(), Some(true)))
+    } else if let Some(rest) = text.strip_prefix("[] ").or_else(|| text.strip_prefix("[ ] ")) {
+        conv(BlockKind::Todo, rest)
+    } else if let Some(rest) = text.strip_prefix("> ") {
+        conv(BlockKind::Quote, rest)
+    } else if let Some(rest) = numbered_prefix(text) {
+        conv(BlockKind::Numbered, rest)
+    } else if text == "---" {
+        conv(BlockKind::Divider, "")
+    } else if text == "```" {
+        conv(BlockKind::Code, "")
+    } else {
+        None
+    }
+}
+
+/// `12. rest` → `rest`; digits + ". " only.
+fn numbered_prefix(text: &str) -> Option<&str> {
+    let dot = text.find(". ")?;
+    if dot == 0 || !text[..dot].bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    text.get(dot + 2..)
+}
+
 /// Open a page, sync the top bar, and highlight it in the tree.
 fn open(g: &UIState<'_>, state: &Rc<AppState>, id: i32) {
     if !state.workspace.borrow().contains(id) {
@@ -1633,7 +1772,6 @@ pub fn apply_scene_overlay(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
                 g.set_block_menu_x(320.0);
                 g.set_block_menu_y(300.0);
                 g.set_block_menu_open_id(id);
-                g.set_block_menu_open(true);
             }
         }
         "link-dlg" => {

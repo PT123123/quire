@@ -92,6 +92,7 @@ component DocumentRow inherits Rectangle {
         block: root.block;
         depth: root.block.depth;
         index: root.index;
+        row-y: parent.y + head.height;
         content-x: root.content-x;
         content-width: root.content-width;
     }

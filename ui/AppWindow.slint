@@ -257,7 +257,7 @@ export component AppWindow inherits Window {
     in-out property <string> search-query <=> UIState.search-query;
     in-out property <bool> menu-open <=> UIState.menu-open;
     in-out property <bool> slash-open <=> UIState.slash-open;
-    in-out property <bool> block-menu-open <=> UIState.block-menu-open;
+    in-out property <int> block-menu-open-id <=> UIState.block-menu-open-id;
     in-out property <bool> link-open <=> UIState.link-open;
     in-out property <bool> dialog-open <=> UIState.dialog-open;
     in-out property <bool> settings-open <=> UIState.settings-open;
@@ -310,8 +310,10 @@ export component AppWindow inherits Window {
         }
     }
 
-    changed block-menu-open => {
-        if (block-menu-open) {
+    // the block menu exists iff a block id is set; the same signal closes it,
+    // so there is no second bool to keep in sync
+    changed block-menu-open-id => {
+        if (block-menu-open-id >= 0) {
             blockMenu.show();
         } else {
             blockMenu.close();
