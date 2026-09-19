@@ -82,9 +82,11 @@ UI 不直接碰数据库或磁盘 IO。Renderer 需实测对比 FemtoVG·wgpu �
 | M5 | Notion 交互：Slash 菜单、Markdown 快捷方式、块拖拽、⋮⋮ 菜单（含 Copy link / Move to / 块颜色） | ✅ |
 | M6 | 富文本 inline marks（bold/italic/code/link…） | ✅（含导入导出与链接 UI；行内折行渲染有平台限制） |
 | M7 | 性能：虚拟化、后台搜索、基准矩阵（1000/10000 blocks 实测） | ✅ 矩阵实测完成（femtovg/skia 对比） |
-| M8 | Windows RC：crash recovery、打包、导入导出 | 🔄 RC 硬化中（安装包/日志/快照/数据迁移/LAN 分享已落地） |
+| M8 | Windows RC：crash recovery、打包、导入导出、性能审计 | ✅ 主体完成（日志/轮换快照/数据迁移/安装器/LAN 分享/release profile 审计已落地；页面可移动、Page/Link 块、富粘贴、设置存储行已进；IME 人工验收 + 视觉 sweep 待完成） |
 | M9 | Android（共享核心模型，UI 重新设计） | 待办 |
 
-First release (Windows): block editor (with callouts, block colors, and
-cross-page moves), local SQLite storage, command palette, Chinese input
-via the OS IME — nothing cloud, nothing sync, yet.
+First release (Windows): block editor (with callouts, block colors, page
+& link-to-page blocks, cross-page moves), rich paste of markdown into
+blocks, a movable page tree, local SQLite storage with rotating backups,
+command palette, Chinese input via the OS IME — nothing cloud, nothing
+sync, yet.

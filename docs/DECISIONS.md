@@ -2,6 +2,27 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0025 · Clipboard reads are direct Win32 FFI — no clipboard crate, no subprocess
+Decision: `platform::read_clipboard` opens the clipboard through
+`OpenClipboard` / `GetClipboardData(CF_UNICODETEXT)` / `GlobalLock` declared
+in-module (`user32`/`kernel32`, already linked for winit) — writes stay on
+`clip.exe` stdin.
+Why: rich paste (§二十七) needs the text *any* source app put on the
+clipboard. The zero-dependency alternatives both fail: `clip.exe` is
+write-only, and a `Get-Clipboard` subprocess measured **7–10 s** on the dev
+desktop (PowerShell startup under AV) — no paste can wait for that. A
+clipboard crate (arboard) would be the first new runtime dependency since
+M3 to buy ~40 lines of FFI the toolchain already links. CF_UNICODETEXT is
+the format every text source supplies; UTF-16 → `String` via
+`from_utf16_lossy`, and a 5×2 ms retry rides out transient clipboard locks
+held by other processes. Writes keep `clip.exe` because the only payloads
+the app writes (`quire://` links, ADR-0023) are ASCII, so the
+OEM-codepage stdin caveat is moot.
+Consequences: reads are microseconds and CJK-safe from any source app;
+writing non-ASCII *from the app* would garble through `clip.exe` — the day
+a feature needs that ("copy page as markdown"), switch the write path to
+the same FFI (`SetClipboardData`) rather than adding a crate.
+
 ## ADR-0024 · The release profile stays as shipped — no fat LTO, no panic = abort
 Decision: `[profile.release]` keeps thin LTO + `codegen-units = 1` +
 `strip = "debuginfo"`. Fat LTO is rejected, `panic = "abort"` is rejected,

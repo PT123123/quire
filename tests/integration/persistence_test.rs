@@ -223,3 +223,50 @@ fn title_at(path: &Path) -> Option<String> {
     })
     .ok()
 }
+
+#[test]
+fn settings_storage_row_reports_the_folder_and_snapshots_on_demand() {
+    use quire::app::state::{AppState, HandleArgs};
+
+    let path = temp_db("settings-storage-row");
+    let repo = seeded(&path);
+    let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0 };
+    let state = AppState::new(&args, Some(repo.clone()));
+
+    // the storage row shows the database's parent directory
+    let dir = state.data_dir().expect("a file-backed session has a data dir");
+    assert_eq!(
+        std::path::Path::new(&dir).canonicalize().unwrap(),
+        path.parent().unwrap().canonicalize().unwrap()
+    );
+
+    // "Back up now" must capture CURRENT state: a probe written after the
+    // open-time snapshot may only reach .bak1 through the manual backup
+    repo.apply(&[Change::SettingSet {
+        key: "backup-probe".into(),
+        value: "in".into(),
+    }])
+    .unwrap();
+    assert!(state.backup_now().is_ok());
+
+    let bak = std::path::PathBuf::from(format!("{}.bak1", path.display()));
+    assert!(bak.exists(), "the on-demand snapshot landed beside the db");
+    let probe = rusqlite::Connection::open_with_flags(
+        bak,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()
+    .and_then(|c| {
+        c.query_row(
+            "SELECT value FROM settings WHERE key = 'backup-probe'",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .ok()
+    });
+    assert_eq!(
+        probe.as_deref(),
+        Some("in"),
+        "the probe row is inside the fresh .bak1"
+    );
+}

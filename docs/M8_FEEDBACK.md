@@ -262,9 +262,9 @@ remove the choice instead of repeating it.
   take precedence, and a torn last line aborts. ADR-0018 carries the update.
   Residual false positives (two instances, an externally killed bench run)
   are accepted and recorded there.
-- **#13 (partial).** `main.rs`'s dead `library_moved` initializer is gone.
-  Still open: the `--portable` re-scan stays load-bearing, and the
-  `OpenReport::migrated_from` field — `main.rs` resolves the library move
-  itself with a second `effective_path` call, which works and shows the
-  notice; the field would only remove the duplicate resolve.
+- **#13 — resolved (A1, `87ec1dc`).** `--portable` is a real `LaunchArgs`
+  flag that reaches storage explicitly; `data_location` no longer re-scans
+  `std::env::args()`; `main.rs` resolves the effective path once and the
+  library-move notice comes from `OpenReport::migrated_from`, so the
+  duplicate resolve is gone too.
 
