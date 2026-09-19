@@ -449,3 +449,66 @@ sooner (paint the frame before the GL/shader warm-up completes, or a splash
 that is honest about it), not shaving our own ~84 ms. (3) `state_new` is the
 term that scales, so it is the one to watch if the model rebuild grows; a
 5 000-block point would tell us whether 148 ms is linear or a cliff.
+
+## M8 · is the scaling term linear? (A2 follow-up #2, 2026-09-20)
+
+Conclusion (3) above asked for the 5 000-block point and got a whole series:
+four points in one batch, same build, same machine moment, 7 runs each.
+
+**Method.** `startup_bench.ps1 -Exe target\release\quire.exe -Runs 7 -Blocks N`
+with N = 0 / 1 000 / 5 000 / 10 000, labels `scale-a`, `scale-1k`, `scale-5k`,
+`scale-10k`; each run gets its own scratch database. The exe is the release
+build of `6c115b5` (the newest Rust/UI commit — everything after it in this
+session touched docs and scripts only). Raw rows:
+`benchmarks/results/2026-09-20-first-paint-scale-*.jsonl`.
+
+**Numbers** (medians, ms):
+
+| phase | shell | 1 000 | 5 000 | 10 000 |
+|-------|------:|------:|------:|-------:|
+| `repo_open` | 51 | 51 | 52 | 51 |
+| `appwindow_new` | 21 | 20 | 22 | 21 |
+| **`state_new`** | **5** | **17** | **68** | **136** |
+| `logging_init` | 2 | 2 | 2 | 2 |
+| everything else | 0 | 0 | 0 | 1 |
+| inside `ui.run()` to the first frame | 388 | 388 | 378 | 369 |
+| **first paint** | **466** | **485** | **522** | **581** |
+| window-up (old proxy) | 136 | 148 | 124 | 144 |
+
+**Answer: linear, no cliff.** Fitting `state_new` on the four points gives
+`≈ 4 + 13.1 × (blocks / 1000)` ms, and that line predicts 4.1 / 17.2 / 69.6 /
+135.2 against the measured 5 / 17 / 68 / 136 — the worst residual is 1.5 ms.
+The 148 ms of the previous section was not the start of a knee; it is the same
+13 ms per thousand blocks the 1 000-block page already pays. A 20 000-block
+page should therefore cost ≈266 ms of rebuild, and SPEC §六's "10 000 blocks
+without hitching" budget can be stated as a formula instead of a data point.
+
+**Two things the series settles that two points could not.**
+
+1. **`repo_open` is O(1) in document size.** 51 / 51 / 52 / 51 ms while the
+   database it opens grows to 10 000 blocks. The SQLite open, integrity probe
+   and snapshot rotation never look at the rows — the whole load cost is in
+   `state_new`. That also re-pins the ADR-0015 band: its 46–116 ms was measured
+   *with* a 10 000-block file, and the flat column says the size contribution
+   inside that figure is nil.
+2. **The `ui.run()` floor is flat over a 20× document range**, not just over
+   the two scenes measured before: 388 → 369 ms, a spread of 19 ms against a
+   first-paint change of 115 ms. Virtualization is doing exactly what M7
+   claimed — the frame renders the visible rows.
+
+**Cross-batch drift, stated plainly.** The shell scene has now been measured
+three times today at 549 (5 runs, pre-phase build), 501 (7 runs, same build)
+and 466 ms (7 runs, `6c115b5`). The floor moved the same way (≈419 → ≈388).
+Two of those batches differ in build *and* in machine moment, so none of it is
+attributable — treat it as ±15 % session drift, which is why the fit above uses
+one batch only. The practical rule for anyone re-running this: quote deltas
+within a batch, never across.
+
+**Conclusions.** (1) The startup story is now: ≈380 ms renderer/window floor
+(document-independent, upstream), ≈75 ms of fixed app setup (of which storage
+is 51 ms), and one linear term at 13 ms per 1 000 blocks. (2) If someone wants
+a faster start for the common case, the floor is the only prize; for the heavy
+case, the rebuild is the only term that grows, and it grows slowly enough that
+no cliff is hiding between 10 000 and 20 000 blocks. (3) The skia comparison is
+still open for the same reason as before — it needs its own release build, and
+this batch was taken with the femtovg default.
