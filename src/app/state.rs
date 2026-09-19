@@ -982,13 +982,17 @@ fn build_runs(text: &str, marks: &[crate::core::Mark]) -> Vec<TextRun> {
             if s == e {
                 return None;
             }
+            let link_mark = marks.iter().find(|m| {
+                m.kind == crate::core::MarkKind::Link && m.start <= s && m.end >= e
+            });
             Some(TextRun {
                 text: text[s..e].into(),
                 bold: marks.iter().any(|m| m.kind == crate::core::MarkKind::Bold && m.start <= s && m.end >= e),
                 italic: marks.iter().any(|m| m.kind == crate::core::MarkKind::Italic && m.start <= s && m.end >= e),
                 strike: marks.iter().any(|m| m.kind == crate::core::MarkKind::Strike && m.start <= s && m.end >= e),
                 code: marks.iter().any(|m| m.kind == crate::core::MarkKind::Code && m.start <= s && m.end >= e),
-                link: marks.iter().any(|m| m.kind == crate::core::MarkKind::Link && m.start <= s && m.end >= e),
+                link: link_mark.is_some(),
+                url: link_mark.map(|m| m.url.clone()).unwrap_or_default().into(),
             })
         })
         .collect()
