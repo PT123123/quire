@@ -9,15 +9,20 @@ import { UIState, SidebarNode } from "../Types.slint";
 
 export component SidebarItem inherits Rectangle {
     in property <SidebarNode> node;
+    in property <int> index; // model row: the page-drag callbacks address rows by it
 
     property <bool> is-header: node.kind == "header";
     property <bool> is-page: node.kind == "page";
     property <bool> is-new-page: node.kind == "new-page";
     property <bool> renaming: is-page && UIState.renaming-id == node.id;
+    // a page row or the Workspace header shows the "landing here" tint
+    property <bool> drop-target: UIState.page-drop-target-id == node.id
+        && (is-page || (is-header && node.id == -100));
 
     height: is-header ? 26px : 28px;
     border-radius: Theme.radius-sm;
-    background: node.selected
+    background: drop-target ? Colors.accent-soft
+        : node.selected
         ? Colors.surface-selected
         : (ta.has-hover && !renaming ? Colors.hover-fill : transparent);
     animate background { duration: Theme.duration-instant; }
@@ -114,6 +119,18 @@ export component SidebarItem inherits Rectangle {
         }
     }
 
+    // drag source for page rows: a press that moves past the threshold
+    // starts the move-drag, a plain click still reaches the TouchArea below
+    // (the block handle's pattern). Right-click passes through untouched.
+    drag := DragArea {
+        enabled: is-page && !renaming;
+        allow-move: true;
+        data: UIState.page-drag-payload(node.id);
+        drag-finished => {
+            UIState.page-drop-target-id = -1;
+        }
+    }
+
     ta := TouchArea {
         enabled: !renaming;
         mouse-cursor: MouseCursor.pointer;
@@ -127,6 +144,25 @@ export component SidebarItem inherits Rectangle {
                 && is-page) {
                 UIState.node-context(node.id);
             }
+        }
+    }
+
+    // drop target: pages accept drops INTO them (the page becomes a child),
+    // the Workspace header accepts a drop at the top level
+    DropArea {
+        can-drop(event) => {
+            if (UIState.page-drag-hover(event.data, root.index)) {
+                UIState.page-drop-target-id = node.id;
+                DragAction.move
+            } else {
+                UIState.page-drop-target-id = -1;
+                DragAction.none
+            }
+        }
+        dropped(event) => {
+            UIState.page-dropped(event.data, root.index);
+            UIState.page-drop-target-id = -1;
+            DragAction.move
         }
     }
 }

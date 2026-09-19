@@ -144,23 +144,32 @@ impl Workspace {
         }
     }
 
-    /// Move `id` (its whole subtree travels with it) under `new_parent`
-    /// (root when `None`), appended after `after` (the end when `None`).
-    /// Refused — without touching anything — when `id` is missing or the
-    /// target is `id` itself or one of its descendants (a cycle). The target
-    /// parent is expanded so the moved page is visible on arrival.
-    pub fn move_page(&mut self, id: i32, new_parent: Option<i32>, after: Option<i32>) -> bool {
+    /// Would moving `id` under `new_parent` (root when `None`) be legal?
+    /// False for a missing page, the page itself, or any of its own
+    /// descendants (a cycle). Read-only: the drag hover path calls this per
+    /// frame of the gesture.
+    pub fn can_move_page(&self, id: i32, new_parent: Option<i32>) -> bool {
         if !self.pages.contains_key(&id) || new_parent == Some(id) {
             return false;
         }
-        // walk the target's ancestor chain: landing inside the moved
-        // subtree would orphan the subtree root
         let mut cursor = new_parent;
         while let Some(c) = cursor {
             if c == id {
                 return false;
             }
             cursor = self.pages.get(&c).and_then(|p| p.parent);
+        }
+        true
+    }
+
+    /// Move `id` (its whole subtree travels with it) under `new_parent`
+    /// (root when `None`), appended after `after` (the end when `None`).
+    /// Refused — without touching anything — when the move is illegal (see
+    /// `can_move_page`). The target parent is expanded so the moved page is
+    /// visible on arrival.
+    pub fn move_page(&mut self, id: i32, new_parent: Option<i32>, after: Option<i32>) -> bool {
+        if !self.can_move_page(id, new_parent) {
+            return false;
         }
         let old_parent = self.pages.get(&id).expect("page exists").parent;
         match old_parent {

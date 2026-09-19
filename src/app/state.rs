@@ -401,7 +401,20 @@ impl AppState {
             }
         }
 
-        push(&mut rows, &mut y, header("Workspace"));
+        push(
+            &mut rows,
+            &mut y,
+            SidebarNode {
+                id: WORKSPACE_HEADER_ID,
+                label: "Workspace".into(),
+                kind: "header".into(),
+                depth: 0,
+                expanded: false,
+                has_children: false,
+                selected: false,
+                y: 0,
+            },
+        );
         for r in ws.tree_rows() {
             rows.push(SidebarNode {
                 id: r.id,
@@ -1626,6 +1639,38 @@ impl AppState {
         true
     }
 
+    /// The drop target behind a sidebar row index, for the page-tree drag:
+    /// `Some(None)` = the Workspace header (top level), `Some(Some(pid))` =
+    /// drop into that page, `None` = not a target (other headers, recents,
+    /// the "New page" row).
+    pub fn page_drop_target(&self, index: i32) -> Option<Option<i32>> {
+        let row = self.sidebar.row_data(index.max(0) as usize)?;
+        match row.kind.as_str() {
+            "page" => Some(Some(row.id)),
+            "header" if row.id == WORKSPACE_HEADER_ID => Some(None),
+            _ => None,
+        }
+    }
+
+    /// Drag-hover validity for the page tree (called per frame of the
+    /// gesture — read-only, like the block drag's hover check).
+    pub fn page_drop_target_valid(&self, id: i32, index: i32) -> bool {
+        let Some(target) = self.page_drop_target(index) else {
+            return false;
+        };
+        let ws = self.workspace.borrow();
+        ws.can_move_page(id, target)
+    }
+
+    /// Commit a page-tree drag: the dragged page moves under the row it was
+    /// dropped on (the Workspace header moves it to the top level).
+    pub fn page_dropped(&self, id: i32, index: i32) -> bool {
+        let Some(target) = self.page_drop_target(index) else {
+            return false;
+        };
+        self.move_page(id, target)
+    }
+
     /// Swap a page with the sibling one slot up (-1) / down (+1): the two
     /// order keys trade places, recorded as two `PageMoved` changes.
     pub fn move_page_by(&self, id: i32, delta: i32) -> bool {
@@ -1939,6 +1984,9 @@ pub const MENU_BACK: i32 = 9;
 pub const PAGE_MOVE_TO_ROOT: i32 = 499_999;
 /// Page-menu Move-to targets encode the destination page above this base.
 pub const PAGE_MOVE_TO_BASE: i32 = 500_000;
+/// SidebarNode id of the Workspace section header — the drag-drop target
+/// that moves a page to the top level. Page rows target themselves.
+pub const WORKSPACE_HEADER_ID: i32 = -100;
 
 fn header(label: &str) -> SidebarNode {
     SidebarNode {

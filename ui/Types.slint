@@ -221,6 +221,13 @@ export global UIState {
     in-out property <bool> storage-available: false;
     callback open-data-folder();
     callback backup-now();
+    // page-tree drag (SPEC §八): drag a page row onto another page (or the
+    // Workspace header) to move it; page-drop-target-id drives the hover
+    // highlight on the row being landed into
+    pure callback page-drag-payload(int) -> data-transfer;
+    callback page-drag-hover(data-transfer, int) -> bool;
+    callback page-dropped(data-transfer, int);
+    in-out property <int> page-drop-target-id: -1;
     callback editing-changed(length, length, length);
     callback enter-at-caret(int);
     callback backspace-at-start();

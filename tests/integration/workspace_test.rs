@@ -282,3 +282,51 @@ fn the_page_picker_lists_pages_and_the_link_conversion_guards_its_inputs() {
         Some(quire::core::PageId(PAGE_GETTING_STARTED as u64))
     );
 }
+
+#[test]
+fn page_tree_drag_moves_pages_and_refuses_illegal_lands() {
+    use quire::app::state::PAGE_ATLAS;
+    use slint::Model;
+
+    let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0 };
+    let state = AppState::new(&args, None);
+    let rows = state.sidebar_model().row_count() as i32;
+
+    let header_row = (0..rows)
+        .find(|&i| state.page_drop_target(i) == Some(None))
+        .expect("the Workspace header targets the top level");
+    let atlas_row = (0..rows)
+        .find(|&i| state.page_drop_target(i) == Some(Some(PAGE_ATLAS)))
+        .expect("Atlas has a page row");
+
+    // drop Getting Started onto Atlas: it nests as Atlas's child
+    assert!(state.page_dropped(PAGE_GETTING_STARTED, atlas_row));
+    assert_eq!(
+        state.workspace.borrow().get(PAGE_GETTING_STARTED).unwrap().parent,
+        Some(PAGE_ATLAS)
+    );
+
+    // dropping the parent onto its own child is a cycle: refused, tree intact
+    let gs_row = (0..rows)
+        .find(|&i| state.page_drop_target(i) == Some(Some(PAGE_GETTING_STARTED)))
+        .expect("Getting Started has a row after nesting");
+    assert!(!state.page_dropped(PAGE_ATLAS, gs_row));
+    assert_eq!(
+        state.workspace.borrow().get(PAGE_GETTING_STARTED).unwrap().parent,
+        Some(PAGE_ATLAS),
+        "the refused drop left the tree alone"
+    );
+
+    // non-target rows (favorites, recents, new-page) reject drops
+    let non_target = (0..rows)
+        .find(|&i| state.page_drop_target(i).is_none())
+        .expect("favorites/recents/new-page rows are not targets");
+    assert!(!state.page_dropped(PAGE_ATLAS, non_target));
+
+    // back to the top level via the Workspace header
+    assert!(state.page_dropped(PAGE_GETTING_STARTED, header_row));
+    assert_eq!(
+        state.workspace.borrow().get(PAGE_GETTING_STARTED).unwrap().parent,
+        None
+    );
+}

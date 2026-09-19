@@ -11,8 +11,9 @@ export component PageTree inherits ListView {
     content-width: self.width;
     content-y <=> UIState.tree-viewport-y;
 
-    for node in UIState.sidebar-rows : SidebarItem {
+    for node[index] in UIState.sidebar-rows : SidebarItem {
         node: node;
+        index: index;
         width: parent.content-width;
     }
 }

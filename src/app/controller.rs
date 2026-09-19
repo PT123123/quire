@@ -24,9 +24,14 @@ pub const TREE_TOP_PX: f32 = 140.0;
 /// "slint-notion/block:<id>". Foreign drops (files etc.) don't carry it and
 /// are rejected by the row DropAreas.
 const BLOCK_DRAG_MIME: &str = "slint-notion/block:";
+const PAGE_DRAG_MIME: &str = "slint-notion/page:";
 
 fn block_drag_id(data: &slint::DataTransfer) -> Option<i32> {
     data.plain_text().ok()?.strip_prefix(BLOCK_DRAG_MIME)?.parse().ok()
+}
+
+fn page_drag_id(data: &slint::DataTransfer) -> Option<i32> {
+    data.plain_text().ok()?.strip_prefix(PAGE_DRAG_MIME)?.parse().ok()
 }
 
 #[cfg(test)]
@@ -194,6 +199,29 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
             let mut data = slint::DataTransfer::default();
             data.set_plain_text(format!("{BLOCK_DRAG_MIME}{id}").into());
             data
+        });
+    }
+    // ---- page-tree drag-move (SPEC §八): drop ONTO a page to nest, onto
+    // the Workspace header for the top level ----
+    {
+        ui.global::<UIState>().on_page_drag_payload(|id| {
+            let mut data = slint::DataTransfer::default();
+            data.set_plain_text(format!("{PAGE_DRAG_MIME}{id}").into());
+            data
+        });
+    }
+    {
+        let s = state.clone();
+        ui.global::<UIState>().on_page_drag_hover(move |data, index| {
+            let Some(id) = page_drag_id(&data) else { return false };
+            s.page_drop_target_valid(id, index)
+        });
+    }
+    {
+        let s = state.clone();
+        ui.global::<UIState>().on_page_dropped(move |data, index| {
+            let Some(id) = page_drag_id(&data) else { return };
+            s.page_dropped(id, index);
         });
     }
     {
