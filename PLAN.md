@@ -178,6 +178,18 @@ that wiring decision, not the storage layer.
 - [ ] final build/test/render verification rides on Track B's in-flight
       D6 export/import mark parsing (services/export_service.rs WIP)
 
+## Track A round 4 (2026-09-19)
+- [x] dark-mode QA of every new surface (slash / block menu / marks /
+      find bar / link dialog / title edit): combined dark scenes added,
+      all render correctly on dark surfaces
+- [x] find-as-you-type (session rebuilds per keystroke)
+- [x] README screenshots (docs/screenshots, 6 shots) + window size
+      persistence (settings table, restore before first paint, save at
+      close) + version footer cleanup
+- [x] M8_FEEDBACK all 8 items triaged: 4 resolved, 2 accepted with
+      rationale, 2 partially resolved pending Track B's D5-D6 landing
+      (now landed and merged)
+
 ## Next: M4 · Block editor MVP (remaining)
 - block-type switching menu (BlockHandle affordance), cross-block
   clipboard, 1000-block editing responsiveness check, Chinese IME
