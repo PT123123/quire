@@ -1378,27 +1378,44 @@ impl AppState {
             let blob = block_search_blob(&title, &project_blocks(&copies));
 
             // order: right after the original when a gap exists, else the
-            // end of the sibling run (known drift: the copy may sort last
-            // after a restart; the tree session view keeps it adjacent)
-            let (parent, order) = {
+            // end of the sibling run. The workspace children vec must agree
+            // with the key in BOTH branches — duplicate() attaches the copy
+            // adjacent to the original, so the append fallback re-attaches
+            // at the end; otherwise the session view (vec order) and the
+            // restart projection (key order) would disagree.
+            let (parent, order, appended) = {
                 let ws = self.workspace.borrow();
                 let parent = ws.get(nid).and_then(|p| p.parent);
                 let kids = ws.children_of(parent);
+                // the sibling AFTER the original — skipping the fresh copy,
+                // which duplicate() parked right there without a key yet
                 let next = kids
                     .iter()
                     .skip_while(|&&k| k != id)
-                    .nth(1)
+                    .skip(1)
+                    .find(|&&k| k != nid)
                     .and_then(|k| self.page_order.borrow().get(k).copied());
                 let orig = self.page_order.borrow().get(&id).copied();
-                let key = OrderKey::between(orig, next).or_else(|| {
-                    let last = kids
-                        .last()
-                        .and_then(|k| self.page_order.borrow().get(k).copied());
-                    OrderKey::between(last, None)
-                });
-                (parent, key.expect("order space exhausted"))
+                match OrderKey::between(orig, next) {
+                    Some(key) => (parent, key, false),
+                    None => {
+                        let last = kids
+                            .iter()
+                            .filter(|&&k| k != nid)
+                            .last()
+                            .and_then(|k| self.page_order.borrow().get(k).copied());
+                        (
+                            parent,
+                            OrderKey::between(last, None).expect("order space exhausted"),
+                            true,
+                        )
+                    }
+                }
             };
             self.page_order.borrow_mut().insert(nid, order);
+            if appended {
+                self.workspace.borrow_mut().move_page(nid, parent, None);
+            }
 
             let mut batch = vec![Change::PageCreated(crate::core::Page {
                 id: PageId(nid as u32 as u64),

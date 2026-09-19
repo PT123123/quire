@@ -32,6 +32,11 @@ dist:
     cargo build --release
     powershell -NoProfile -ExecutionPolicy Bypass -File benchmarks\scripts\dist.ps1
 
+# installer end-to-end regression (D8/A6): build iss, silent install,
+# verify, silent uninstall, residue check (needs Inno Setup)
+verify-install:
+    powershell -NoProfile -ExecutionPolicy Bypass -File installerify-installer.ps1
+
 # remove build artifacts: ./target + skia/wgpu benchmark target dirs
 clean:
     cargo clean

@@ -330,3 +330,29 @@ fn page_tree_drag_moves_pages_and_refuses_illegal_lands() {
         None
     );
 }
+
+#[test]
+fn duplicate_appends_consistently_when_the_gap_is_exhausted() {
+    let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0 };
+    let state = AppState::new(&args, None);
+
+    // two fresh roots get consecutive order keys, so duplicating the first
+    // finds no gap and falls back to appending at the end of the run
+    let a = state.create_page(None);
+    let b = state.create_page(None);
+    let copy = state.duplicate_page(a).expect("duplicates");
+
+    // the key ordering puts the copy last...
+    assert!(state.page_order_of(copy) > state.page_order_of(a));
+    assert!(state.page_order_of(copy) > state.page_order_of(b));
+    // ...and the session's children vec agrees with the keys — the old
+    // drift had the vec showing the copy adjacent while the restart
+    // projection (key order) sorted it last
+    let kids = state.workspace.borrow().children_of(None);
+    let keys_in_vec: Vec<quire::core::OrderKey> =
+        kids.iter().map(|k| state.page_order_of(*k)).collect();
+    let mut sorted = keys_in_vec.clone();
+    sorted.sort();
+    assert_eq!(keys_in_vec, sorted, "session order == restart order");
+    assert_eq!(*kids.last().unwrap(), copy, "the copy is the run's last");
+}
