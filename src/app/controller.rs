@@ -1211,6 +1211,7 @@ pub fn import_from_path(g: &UIState<'_>, state: &Rc<AppState>, path: &std::path:
         .unwrap_or_else(|| "Imported".into());
 
     let new_id = state.create_page(None);
+    g.set_db_notice(format!("Imported {} as a new page", title).into());
     let core_page = crate::core::Page {
         id: crate::core::PageId(new_id as u32 as u64),
         title: title.clone(),

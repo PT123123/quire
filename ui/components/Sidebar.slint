@@ -132,6 +132,16 @@ export component Sidebar inherits Rectangle {
             content-width: self.width;
         }
 
+        if UIState.workspace-empty : Text {
+            x: Theme.spacing-md;
+            height: 24px;
+            text: "No pages yet — Ctrl+N";
+            font-family: Typography.ui-font;
+            font-size: Typography.size-caption;
+            color: Colors.text-muted;
+            vertical-alignment: center;
+        }
+
         // ---- footer ----
         Rectangle {
             height: 1px;
