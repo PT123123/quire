@@ -630,9 +630,9 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
     }
 
     // rich paste (SPEC §二十七): the clipboard's markdown structure lands
-    // as blocks. The clipboard read is a blocking PowerShell subprocess
-    // (~100-300 ms) on the UI thread — accepted for v1, noted in PLAN; a
-    // false return lets the key fall through to the native plain paste.
+    // as blocks. The clipboard read is direct Win32 FFI (microseconds — a
+    // Get-Clipboard subprocess measured 7-10 s on the dev desktop); a false
+    // return lets the key fall through to the native plain paste.
     {
         let gw = gw.clone();
         let s = state.clone();

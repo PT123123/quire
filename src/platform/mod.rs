@@ -34,32 +34,71 @@ pub fn copy_to_clipboard(text: &str) -> bool {
 }
 
 /// Read the system clipboard as text (the rich-paste path, SPEC §二十七).
-/// PowerShell's `Get-Clipboard -Raw` is the same zero-dependency route
-/// `copy_to_clipboard` takes with `clip.exe`; UTF-8 output encoding keeps
-/// CJK text intact across the console codepage. The subprocess costs
-/// ~100-300 ms and blocks the caller — acceptable for a user-initiated
-/// paste, and the reason this is not used anywhere hot. Other targets
-/// report absence instead of pretending.
+/// Direct Win32 FFI: a `Get-Clipboard` subprocess was measured at 7-10 s on
+/// the dev desktop (PowerShell startup under AV), which no paste can wait
+/// for, while `OpenClipboard`/`GetClipboardData` are microseconds and the
+/// MSVC toolchain already links user32/kernel32 for winit — so no clipboard
+/// crate is pulled in (dependency policy in DECISIONS). Reads
+/// CF_UNICODETEXT only; other targets report absence instead of pretending.
 pub fn read_clipboard() -> Option<String> {
     #[cfg(target_os = "windows")]
     {
-        let out = std::process::Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-Command",
-                "[Console]::OutputEncoding=[Text.Encoding]::UTF8; Get-Clipboard -Raw",
-            ])
-            .output()
-            .ok()?;
-        if !out.status.success() {
-            return None;
+        const CF_UNICODETEXT: u32 = 13;
+
+        #[link(name = "user32")]
+        extern "system" {
+            fn IsClipboardFormatAvailable(format: u32) -> i32;
+            fn OpenClipboard(hwnd: isize) -> i32;
+            fn CloseClipboard() -> i32;
+            fn GetClipboardData(format: u32) -> isize;
         }
-        let text = String::from_utf8(out.stdout).ok()?;
-        let text = text.trim_end_matches(['\r', '\n']);
-        if text.is_empty() {
-            None
-        } else {
-            Some(text.to_string())
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GlobalLock(hmem: isize) -> *mut u16;
+            fn GlobalUnlock(hmem: isize) -> i32;
+        }
+
+        unsafe {
+            if IsClipboardFormatAvailable(CF_UNICODETEXT) == 0 {
+                return None;
+            }
+            // another process may hold the clipboard open: a short retry
+            // beats failing a paste over a transient lock
+            let mut opened = false;
+            for _ in 0..5 {
+                if OpenClipboard(0) != 0 {
+                    opened = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            if !opened {
+                return None;
+            }
+            let text = (|| {
+                let handle = GetClipboardData(CF_UNICODETEXT);
+                if handle == 0 {
+                    return None;
+                }
+                let ptr = GlobalLock(handle);
+                if ptr.is_null() {
+                    return None;
+                }
+                let mut len = 0usize;
+                while *ptr.add(len) != 0 {
+                    len += 1;
+                }
+                let s = String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len));
+                GlobalUnlock(handle);
+                Some(s)
+            })();
+            CloseClipboard();
+            let text = text?.trim_end_matches(['\r', '\n']).to_string();
+            if text.is_empty() {
+                None
+            } else {
+                Some(text)
+            }
         }
     }
     #[cfg(not(target_os = "windows"))]
