@@ -13,6 +13,7 @@ import { BlockRow, UIState } from "../Types.slint";
 export component EditorBlock inherits Rectangle {
     in property <BlockRow> block;
     in property <int> depth;
+    in property <int> index;
     in property <length> content-width;
     in property <length> content-x;
 
@@ -86,6 +87,7 @@ export component EditorBlock inherits Rectangle {
     handle := BlockHandle {
         x: root.content-x - 48px;
         y: top-margin;
+        block-id: block.id;
         // visible while the cursor is on the row OR on the handle itself —
         // without the second term the handle vanishes as the cursor reaches it
         visible-flag: (ta.has-hover || handle.hovered) && !editing;
@@ -98,6 +100,26 @@ export component EditorBlock inherits Rectangle {
             } else {
                 UIState.block-menu-opened(block.id, self.y);
             }
+        }
+    }
+
+    // drag-reorder target: fills the row, accepts only our own block payload.
+    // Normal clicks pass straight through (DropArea ignores non-drag events).
+    DropArea {
+        can-drop(event) => {
+            let below: bool = event.position.y * 2 > self.height;
+            if (UIState.block-drag-hover(event.data, root.index, below)) {
+                UIState.drop-line-row = root.index + (below ? 1 : 0);
+                DragAction.move
+            } else {
+                UIState.drop-line-row = -1;
+                DragAction.none
+            }
+        }
+        dropped(event) => {
+            let below: bool = event.position.y * 2 > self.height;
+            UIState.block-dropped(event.data, root.index, below);
+            DragAction.move
         }
     }
 
@@ -419,5 +441,24 @@ export component EditorBlock inherits Rectangle {
         height: 1px;
         visible: block.kind == 9;
         background: Colors.divider;
+    }
+
+    // drag-reorder drop indicator: accent line where the block would land.
+    // "Below the last block" paints on the tail row's bottom edge instead.
+    Rectangle {
+        x: root.content-x - 8px;
+        width: root.content-width + 16px;
+        y: -1px;
+        height: 2px;
+        background: Colors.accent;
+        visible: UIState.drop-line-row == root.index;
+    }
+    Rectangle {
+        x: root.content-x - 8px;
+        width: root.content-width + 16px;
+        y: root.height - 1px;
+        height: 2px;
+        background: Colors.accent;
+        visible: block.tail && UIState.drop-line-row == UIState.blocks.length;
     }
 }

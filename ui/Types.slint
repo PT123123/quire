@@ -171,6 +171,14 @@ export global UIState {
     callback toggle-theme();
     callback set-dark(bool);
     callback move-block(int);
+    // drag-reorder (grip handle): Rust packs/unpacks the payload, hovers
+    // validate the landing, drops commit one MoveBlockTo command
+    pure callback block-drag-payload(int) -> data-transfer;
+    callback block-drag-hover(data-transfer, int, bool) -> bool;
+    callback block-dropped(data-transfer, int, bool);
+    // insert-above row index shown as the accent drop line; == blocks.length
+    // means "below the last block", -1 hidden
+    in-out property <int> drop-line-row: -1;
     callback toggle-mark(int, int, int); // kind(0 bold,1 italic,2 strike,3 code), start, end
     callback indent-list(int);
     callback outdent-list(int);

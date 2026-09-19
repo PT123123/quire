@@ -19,6 +19,32 @@ use std::rc::Rc;
 /// workspace header (36) + search row (28) + settings row (28) + spacer (8).
 pub const TREE_TOP_PX: f32 = 140.0;
 
+/// plain-text marker identifying the app's own drag payload:
+/// "slint-notion/block:<id>". Foreign drops (files etc.) don't carry it and
+/// are rejected by the row DropAreas.
+const BLOCK_DRAG_MIME: &str = "slint-notion/block:";
+
+fn block_drag_id(data: &slint::DataTransfer) -> Option<i32> {
+    data.plain_text().ok()?.strip_prefix(BLOCK_DRAG_MIME)?.parse().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn block_drag_payload_roundtrip() {
+        let mut data = slint::DataTransfer::default();
+        data.set_plain_text(format!("{BLOCK_DRAG_MIME}42").into());
+        assert_eq!(block_drag_id(&data), Some(42));
+        // foreign payloads (files, external text) never parse to a block
+        let mut foreign = slint::DataTransfer::default();
+        foreign.set_plain_text("some pasted text".into());
+        assert_eq!(block_drag_id(&foreign), None);
+        assert_eq!(block_drag_id(&slint::DataTransfer::default()), None);
+    }
+}
+
 pub fn bind(ui: &AppWindow, state: &Rc<AppState>) {
     let g = ui.global::<UIState>();
     state.set_ui(ui.global::<UIState>().as_weak());
@@ -112,6 +138,32 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                 delta,
             });
             refresh_focused_text(&g, &s);
+        });
+    }
+
+    // ---- grip-handle drag-reorder (Slint DragArea/DropArea) ----
+    {
+        ui.global::<UIState>().on_block_drag_payload(|id| {
+            let mut data = slint::DataTransfer::default();
+            data.set_plain_text(format!("{BLOCK_DRAG_MIME}{id}").into());
+            data
+        });
+    }
+    {
+        let s = state.clone();
+        ui.global::<UIState>().on_block_drag_hover(move |data, index, below| {
+            let Some(id) = block_drag_id(&data) else { return false };
+            s.can_move_block_to(id, index + (below as i32))
+        });
+    }
+    {
+        let s = state.clone();
+        ui.global::<UIState>().on_block_dropped(move |data, index, below| {
+            let Some(id) = block_drag_id(&data) else { return };
+            let _ = s.exec_on_open_page(Command::MoveBlockTo {
+                id: BlockId(id as u64),
+                index: index + (below as i32),
+            });
         });
     }
 

@@ -603,6 +603,18 @@ impl AppState {
         Some(changes)
     }
 
+    /// Read-only check whether a drag landing is valid (hover feedback must
+    /// not mutate the document).
+    pub fn can_move_block_to(&self, id: i32, index: i32) -> bool {
+        let page = core_page_id(self.open_page.get());
+        crate::core::command::can_move_block_to(
+            &self.doc.borrow(),
+            page,
+            BlockId(id as u64),
+            index,
+        )
+    }
+
     /// Set the theme and persist it (settings table; key spelling matches
     /// services/settings_store.rs `Settings::KEY_THEME`).
     pub fn set_dark(&self, dark: bool) {
