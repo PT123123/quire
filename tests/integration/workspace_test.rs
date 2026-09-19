@@ -1,7 +1,7 @@
 // Integration tests: exercise the workspace model and the state projection
 // through the public crate API, the way a future `core/` consumer would.
 
-use quire::app::state::{AppState, HandleArgs};
+use quire::app::state::{AppState, HandleArgs, PAGE_GETTING_STARTED};
 use quire::app::workspace::Workspace;
 use slint::Model;
 
@@ -146,4 +146,46 @@ fn delete_open_page_resets_selection() {
     let fallback = state.workspace.borrow().first_root();
     state.open_page(fallback.expect("sample keeps a root"));
     assert_eq!(state.open_page.get(), fallback.unwrap());
+}
+
+#[test]
+fn move_page_reparents_refuses_cycles_and_swaps_siblings() {
+    use quire::app::state::PAGE_ATLAS;
+
+    let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0 };
+    let state = AppState::new(&args, None);
+
+    // reparent: Atlas moves under Getting Started, appended last
+    assert!(state.move_page(PAGE_ATLAS, Some(PAGE_GETTING_STARTED)));
+    {
+        let ws = state.workspace.borrow();
+        let kids = ws.children_of(Some(PAGE_GETTING_STARTED));
+        assert!(kids.contains(&PAGE_ATLAS), "Atlas is a child now");
+        assert!(!ws.children_of(None).contains(&PAGE_ATLAS), "no longer a root");
+        assert_eq!(
+            ws.get(PAGE_ATLAS).unwrap().parent,
+            Some(PAGE_GETTING_STARTED)
+        );
+    }
+
+    // a page cannot move into its own subtree (Getting Started under Atlas)
+    assert!(!state.move_page(PAGE_GETTING_STARTED, Some(PAGE_ATLAS)));
+
+    // sibling swap: Atlas lands one slot up among the children
+    let kids = state.workspace.borrow().children_of(Some(PAGE_GETTING_STARTED));
+    let count = kids.len();
+    let before_neighbor = kids[count - 2];
+    assert!(state.move_page_by(PAGE_ATLAS, -1));
+    let kids = state.workspace.borrow().children_of(Some(PAGE_GETTING_STARTED));
+    assert_eq!(kids.len(), count);
+    assert_eq!(kids[count - 2], PAGE_ATLAS, "swapped one slot up");
+    assert_eq!(kids[count - 1], before_neighbor);
+
+    // the first child cannot move up further
+    let first = kids[0];
+    assert!(!state.move_page_by(first, -1));
+
+    // move back to the top level: the page is a root again
+    assert!(state.move_page(PAGE_ATLAS, None));
+    assert!(state.workspace.borrow().children_of(None).contains(&PAGE_ATLAS));
 }

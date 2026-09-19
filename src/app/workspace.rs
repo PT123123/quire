@@ -144,6 +144,63 @@ impl Workspace {
         }
     }
 
+    /// Move `id` (its whole subtree travels with it) under `new_parent`
+    /// (root when `None`), appended after `after` (the end when `None`).
+    /// Refused — without touching anything — when `id` is missing or the
+    /// target is `id` itself or one of its descendants (a cycle). The target
+    /// parent is expanded so the moved page is visible on arrival.
+    pub fn move_page(&mut self, id: i32, new_parent: Option<i32>, after: Option<i32>) -> bool {
+        if !self.pages.contains_key(&id) || new_parent == Some(id) {
+            return false;
+        }
+        // walk the target's ancestor chain: landing inside the moved
+        // subtree would orphan the subtree root
+        let mut cursor = new_parent;
+        while let Some(c) = cursor {
+            if c == id {
+                return false;
+            }
+            cursor = self.pages.get(&c).and_then(|p| p.parent);
+        }
+        let old_parent = self.pages.get(&id).expect("page exists").parent;
+        match old_parent {
+            Some(p) => self
+                .pages
+                .get_mut(&p)
+                .expect("parent exists")
+                .children
+                .retain(|&c| c != id),
+            None => self.roots.retain(|&c| c != id),
+        }
+        self.attach(id, new_parent, after);
+        if let Some(p) = new_parent {
+            self.pages.get_mut(&p).expect("parent exists").expanded = true;
+        }
+        true
+    }
+
+    /// Swap `id` with the sibling `delta` slots away (±1). Refused at the
+    /// run's edges or when the page is missing.
+    pub fn swap_with_neighbor(&mut self, id: i32, delta: i32) -> bool {
+        let parent = match self.pages.get(&id) {
+            Some(p) => p.parent,
+            None => return false,
+        };
+        let list: &mut Vec<i32> = match parent {
+            Some(p) => &mut self.pages.get_mut(&p).expect("parent exists").children,
+            None => &mut self.roots,
+        };
+        let Some(idx) = list.iter().position(|&c| c == id) else {
+            return false;
+        };
+        let target = idx as isize + delta as isize;
+        if target < 0 || target as usize >= list.len() {
+            return false;
+        }
+        list.swap(idx, target as usize);
+        true
+    }
+
     /// Deep-copy the subtree; the copy lands directly after the original and
     /// is titled "Copy of …". Returns the new root id.
     pub fn duplicate(&mut self, id: i32) -> Option<i32> {

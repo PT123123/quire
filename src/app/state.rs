@@ -995,7 +995,29 @@ impl AppState {
     /// anchor doubles as a link-mark URL; clicking one jumps in-app, see
     /// the controller's open-link wiring).
     pub fn block_link(&self, id: i32) -> String {
+        // a Page/Link row anchors to its TARGET page, so a copied link opens
+        // the page everywhere (the in-app resolver jumps to it directly)
+        if matches!(
+            self.block_kind_of(id),
+            Some(BlockKind::Page) | Some(BlockKind::Link)
+        ) {
+            if let Some(r) = self.block_page_ref(id) {
+                return format!("quire://page/{}", r);
+            }
+        }
         format!("quire://block/{}", id)
+    }
+
+    /// Drop a Page/Link block's reference — the Turn-into path leaving those
+    /// kinds. A Page's child page survives in the tree, unowned from here on.
+    pub fn clear_block_ref(&self, id: i32) {
+        let change = Change::BlockRefSet {
+            id: BlockId(id as u64),
+            page: None,
+        };
+        self.doc.borrow_mut().apply(std::slice::from_ref(&change));
+        self.record(vec![change]);
+        self.reproject_blocks();
     }
 
     /// Cross-page move (⋮⋮ "Move to"): one undo step for the whole subtree.
@@ -1545,6 +1567,78 @@ impl AppState {
         Some(new_id.as_u64() as i32)
     }
 
+    /// Move a page (and its subtree) under `new_parent` (root when `None`),
+    /// appended as the parent's last child. One `PageMoved` change; the
+    /// workspace refuses cycles (a parent cannot move into its own subtree).
+    pub fn move_page(&self, id: i32, new_parent: Option<i32>) -> bool {
+        let order = {
+            let ws = self.workspace.borrow();
+            let last = ws
+                .children_of(new_parent)
+                .last()
+                .and_then(|k| self.page_order.borrow().get(k).copied());
+            OrderKey::between(last, None).expect("append order exhausted")
+        };
+        if !self
+            .workspace
+            .borrow_mut()
+            .move_page(id, new_parent, None)
+        {
+            return false;
+        }
+        self.page_order.borrow_mut().insert(id, order);
+        self.record(vec![Change::PageMoved {
+            id: PageId(id as u32 as u64),
+            parent: new_parent.map(|v| PageId(v as u32 as u64)),
+            order,
+        }]);
+        self.rebuild_sidebar();
+        true
+    }
+
+    /// Swap a page with the sibling one slot up (-1) / down (+1): the two
+    /// order keys trade places, recorded as two `PageMoved` changes.
+    pub fn move_page_by(&self, id: i32, delta: i32) -> bool {
+        let (parent, neighbor) = {
+            let ws = self.workspace.borrow();
+            let Some(parent) = ws.get(id).map(|p| p.parent) else {
+                return false;
+            };
+            let kids = ws.children_of(parent);
+            let Some(idx) = kids.iter().position(|&c| c == id) else {
+                return false;
+            };
+            let nidx = idx as isize + delta as isize;
+            if nidx < 0 || nidx as usize >= kids.len() {
+                return false;
+            }
+            (parent, kids[nidx as usize])
+        };
+        if !self.workspace.borrow_mut().swap_with_neighbor(id, delta) {
+            return false;
+        }
+        let mut map = self.page_order.borrow_mut();
+        let a = map.get(&id).copied().unwrap_or(OrderKey::FIRST);
+        let b = map.get(&neighbor).copied().unwrap_or(OrderKey::FIRST);
+        map.insert(id, b);
+        map.insert(neighbor, a);
+        drop(map);
+        self.record(vec![
+            Change::PageMoved {
+                id: PageId(id as u32 as u64),
+                parent: parent.map(|v| PageId(v as u32 as u64)),
+                order: b,
+            },
+            Change::PageMoved {
+                id: PageId(neighbor as u32 as u64),
+                parent: parent.map(|v| PageId(v as u32 as u64)),
+                order: a,
+            },
+        ]);
+        self.rebuild_sidebar();
+        true
+    }
+
     pub fn toggle_favorite(&self, id: i32) {
         self.workspace.borrow_mut().toggle_favorite(id);
         let favorite = self
@@ -1681,6 +1775,33 @@ impl AppState {
                 check: false,
             },
             MenuRow {
+                id: MENU_MOVE_UP,
+                label: "Move up".into(),
+                icon: "chevron-up".into(),
+                danger: false,
+                swatch: -1,
+                swatch_bg: false,
+                check: false,
+            },
+            MenuRow {
+                id: MENU_MOVE_DOWN,
+                label: "Move down".into(),
+                icon: "chevron-down".into(),
+                danger: false,
+                swatch: -1,
+                swatch_bg: false,
+                check: false,
+            },
+            MenuRow {
+                id: MENU_MOVE_TO,
+                label: "Move to".into(),
+                icon: "arrow-right".into(),
+                danger: false,
+                swatch: -1,
+                swatch_bg: false,
+                check: false,
+            },
+            MenuRow {
                 id: MENU_FAVORITE,
                 label: fav_label.into(),
                 icon: "star".into(),
@@ -1699,6 +1820,58 @@ impl AppState {
                 check: false,
             },
         ];
+        self.menu.set_vec(rows);
+    }
+
+    /// Second-level "Move to" menu for a page: every legal target — any page
+    /// that is not the moved page and not inside its subtree (the walk skips
+    /// the whole branch, so a cycle is impossible by construction) — plus
+    /// "Top level" for moving to the root. Swaps the rows and keeps the
+    /// popup open, like the block menu's mover.
+    pub fn fill_page_menu_move_to(&self, id: i32) {
+        let mut rows = vec![row(
+            MENU_BACK,
+            "Back",
+            "chevron-left",
+            false,
+            -1,
+            false,
+        )];
+        rows.push(row(
+            PAGE_MOVE_TO_ROOT,
+            "Top level",
+            "export",
+            false,
+            -1,
+            false,
+        ));
+        let ws = self.workspace.borrow();
+        fn walk(
+            ws: &Workspace,
+            parent: Option<i32>,
+            depth: usize,
+            skip: i32,
+            out: &mut Vec<MenuRow>,
+        ) {
+            for cid in ws.children_of(parent) {
+                if cid == skip {
+                    continue;
+                }
+                let indent = "\u{2003}".repeat(depth);
+                let title = ws.title_of(cid).unwrap_or("Untitled");
+                out.push(row(
+                    PAGE_MOVE_TO_BASE + cid,
+                    format!("{indent}{title}"),
+                    "page",
+                    false,
+                    -1,
+                    false,
+                ));
+                walk(ws, Some(cid), depth + 1, skip, out);
+            }
+        }
+        walk(&ws, None, 0, id, &mut rows);
+        drop(ws);
         self.menu.set_vec(rows);
     }
 
@@ -1728,6 +1901,14 @@ pub const MENU_RENAME: i32 = 2;
 pub const MENU_DUPLICATE: i32 = 3;
 pub const MENU_FAVORITE: i32 = 4;
 pub const MENU_DELETE: i32 = 5;
+pub const MENU_MOVE_UP: i32 = 6;
+pub const MENU_MOVE_DOWN: i32 = 7;
+pub const MENU_MOVE_TO: i32 = 8;
+pub const MENU_BACK: i32 = 9;
+/// "Top level" target of the page-menu Move-to submenu (root, `None` parent).
+pub const PAGE_MOVE_TO_ROOT: i32 = 499_999;
+/// Page-menu Move-to targets encode the destination page above this base.
+pub const PAGE_MOVE_TO_BASE: i32 = 500_000;
 
 fn header(label: &str) -> SidebarNode {
     SidebarNode {

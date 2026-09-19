@@ -7,8 +7,9 @@
 
 use crate::app::state::{
     core_page_id, kind_from_int, AppState, CMD_EXPORT_PAGE, CMD_IMPORT_MD, CMD_PAGE_BASE,
-    MENU_DELETE, MENU_DUPLICATE, MENU_FAVORITE, MENU_NEW_SUBPAGE, MENU_RENAME,
-    PAGE_GETTING_STARTED, ROW_NEW_PAGE,
+    MENU_BACK, MENU_DELETE, MENU_DUPLICATE, MENU_FAVORITE, MENU_MOVE_DOWN, MENU_MOVE_TO,
+    MENU_MOVE_UP, MENU_NEW_SUBPAGE, MENU_RENAME, PAGE_GETTING_STARTED, PAGE_MOVE_TO_BASE,
+    PAGE_MOVE_TO_ROOT, ROW_NEW_PAGE,
 };
 use crate::core::{BlockId, Change, Command};
 use crate::{AppWindow, UIState};
@@ -274,6 +275,22 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         ui.global::<UIState>().on_menu_action(move |action| {
             let g = gw.upgrade().unwrap();
             let id = g.get_menu_node_id();
+            // submenu navigation swaps the rows and keeps the popup open;
+            // the taller Move-to list re-anchors so it stays on the window
+            if action == MENU_MOVE_TO {
+                s.fill_page_menu_move_to(id);
+                let menu_h = g.get_menu_rows().row_count() as f32 * 28.0 + 16.0;
+                let y = g.get_menu_y().clamp(
+                    48.0,
+                    (g.get_window_h() - menu_h - 8.0).max(48.0),
+                );
+                g.set_menu_y(y);
+                return;
+            }
+            if action == MENU_BACK {
+                s.fill_menu(id);
+                return;
+            }
             g.set_menu_open(false);
             g.set_menu_node_id(-1);
             match action {
@@ -288,6 +305,26 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                 MENU_DUPLICATE => {
                     if let Some(new_id) = s.duplicate_page(id) {
                         open(&g, &s, new_id);
+                    }
+                }
+                MENU_MOVE_UP => {
+                    if id > 0 {
+                        s.move_page_by(id, -1);
+                    }
+                }
+                MENU_MOVE_DOWN => {
+                    if id > 0 {
+                        s.move_page_by(id, 1);
+                    }
+                }
+                PAGE_MOVE_TO_ROOT => {
+                    if id > 0 {
+                        s.move_page(id, None);
+                    }
+                }
+                a if (PAGE_MOVE_TO_BASE..PAGE_MOVE_TO_BASE + 1_000_000).contains(&a) => {
+                    if id > 0 {
+                        s.move_page(id, Some(a - PAGE_MOVE_TO_BASE));
                     }
                 }
                 MENU_FAVORITE => s.toggle_favorite(id),
@@ -1099,10 +1136,20 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                     }
                 }
                 a if (100..200).contains(&a) => {
+                    // leaving Page/Link via Turn-into drops the reference; a
+                    // Page's child page survives in the tree, unowned
+                    let old_kind = s.block_kind_of(id);
                     let _ = s.exec_on_open_page(Command::SetBlockType {
                         id: BlockId(id as u64),
                         kind: kind_from_int(a - 100),
                     });
+                    if matches!(
+                        old_kind,
+                        Some(crate::core::BlockKind::Page)
+                            | Some(crate::core::BlockKind::Link)
+                    ) {
+                        s.clear_block_ref(id);
+                    }
                 }
                 _ => {}
             }
@@ -2043,6 +2090,16 @@ pub fn apply_scene_overlay(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
         }
         "menu" => {
             state.fill_menu(106);
+            g.set_menu_node_id(106);
+            let row_y = state.sidebar_row_y(106) as f32;
+            g.set_menu_y(TREE_TOP_PX + row_y - 4.0);
+            g.set_menu_x(240.0);
+            g.set_menu_open(true);
+        }
+        "page-move-to" => {
+            // the sidebar menu's Move-to submenu for page 106: Back, Top
+            // level, then every legal target (106's own subtree is skipped)
+            state.fill_page_menu_move_to(106);
             g.set_menu_node_id(106);
             let row_y = state.sidebar_row_y(106) as f32;
             g.set_menu_y(TREE_TOP_PX + row_y - 4.0);
