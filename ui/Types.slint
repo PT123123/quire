@@ -24,7 +24,7 @@ export struct TextRun {
 
 export struct BlockRow {
     id: int,
-    kind: int, // 0 para, 1 h1, 2 h2, 3 h3, 4 bullet, 5 numbered, 6 todo, 7 quote, 8 code, 9 divider, 10 callout
+    kind: int, // 0 para, 1 h1, 2 h2, 3 h3, 4 bullet, 5 numbered, 6 todo, 7 quote, 8 code, 9 divider, 10 callout, 11 page
     text: string,
     checked: bool,
     number: int,
@@ -33,6 +33,7 @@ export struct BlockRow {
     depth: int, // list nesting level (0-1 in M4; drives the indent)
     color: int, // text palette slot (0 = theme default, 1.. = gray..red)
     bg: int,    // row background palette slot (0 = transparent)
+    page-ref: int, // the page a Page-kind block (11) opens; -1 = none/dangling
 }
 
 export struct CommandRow {

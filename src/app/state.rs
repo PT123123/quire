@@ -473,10 +473,16 @@ impl AppState {
     /// structural edits). Typing never goes through here.
     pub fn reproject_blocks(&self) {
         let page = self.open_page.get();
-        let rows = {
+        let mut rows = {
             let doc = self.doc.borrow();
             project_blocks(doc.page_blocks(core_page_id(page)))
         };
+        // a Page block shows the child page's live title, not stale text;
+        // a reference whose page is gone reads as deleted
+        let ws = self.workspace.borrow();
+        for row in rows.iter_mut().filter(|r| r.kind == BLOCK_PAGE) {
+            row.text = ws.title_of(row.page_ref).unwrap_or("(deleted page)").into();
+        }
         self.blocks.set_vec(rows);
         self.update_page_stats();
     }
@@ -1036,13 +1042,21 @@ impl AppState {
     pub fn paste_below(&self, id: i32) -> bool {
         let clip = self.clipboard.borrow().clone();
         match clip {
-            Some(c) => self
-                .exec_on_open_page(Command::InsertBlockAfter {
+            Some(c) => {
+                // pasting a Page block would share the source's child page;
+                // land the title as plain text instead
+                let (kind, text) = if c.kind == BlockKind::Page {
+                    (BlockKind::Paragraph, c.text)
+                } else {
+                    (c.kind, c.text)
+                };
+                self.exec_on_open_page(Command::InsertBlockAfter {
                     id: BlockId(id as u64),
-                    kind: c.kind,
-                    text: c.text,
+                    kind,
+                    text,
                 })
-                .is_some(),
+                .is_some()
+            }
             None => false,
         }
     }
@@ -1145,6 +1159,8 @@ impl AppState {
             title: title.to_string(),
         }]);
         self.rebuild_sidebar();
+        // Page blocks embedding this page show its live title
+        self.reproject_blocks();
     }
 
     pub fn duplicate_page(&self, id: i32) -> Option<i32> {
@@ -1246,6 +1262,96 @@ impl AppState {
         }
         self.rebuild_sidebar();
         had_open
+    }
+
+    /// The page a `Page`-kind block points at, if it is still there.
+    pub fn block_page_ref(&self, id: i32) -> Option<i32> {
+        let doc = self.doc.borrow();
+        doc.block(BlockId(id as u64))
+            .and_then(|b| b.page_ref)
+            .map(|p| p.as_u64() as i32)
+    }
+
+    /// Turn the empty paragraph `after_id` (the "+" handle's fresh line, or a
+    /// row the insert menu is applying to) into a Page block: one child page
+    /// is created under the current page and the block points at it. One
+    /// recorded batch. Page creation is not undoable (same as the sidebar
+    /// flow), so undo restores the block kind but not the page.
+    pub fn create_page_block(&self, after_id: i32) -> Option<i32> {
+        let block_id = BlockId(after_id as u64);
+        let parent_page = self.open_page.get();
+        {
+            let doc = self.doc.borrow();
+            let b = doc
+                .page_blocks(core_page_id(parent_page))
+                .iter()
+                .find(|b| b.id == block_id)?;
+            if b.kind != BlockKind::Paragraph || !b.text.is_empty() {
+                return None;
+            }
+        }
+        let child = self.workspace.borrow_mut().create(Some(parent_page), "Untitled");
+        let order = {
+            let kids = self.workspace.borrow().children_of(Some(parent_page));
+            let map = self.page_order.borrow();
+            let prev = kids
+                .len()
+                .checked_sub(2)
+                .and_then(|i| kids.get(i))
+                .and_then(|pid| map.get(pid).copied());
+            OrderKey::between(prev, None).expect("append order exhausted")
+        };
+        self.page_order.borrow_mut().insert(child, order);
+        self.workspace
+            .borrow_mut()
+            .set_search_text(child, "Untitled".into());
+        let child_id = PageId(child as u32 as u64);
+        let changes = vec![
+            Change::PageCreated(crate::core::Page {
+                id: child_id,
+                title: "Untitled".into(),
+                parent: Some(PageId(parent_page as u32 as u64)),
+                order,
+                favorite: false,
+                expanded: false,
+            }),
+            Change::BlockRefSet {
+                id: block_id,
+                page: Some(child_id),
+            },
+            Change::BlockKindSet {
+                id: block_id,
+                kind: BlockKind::Page,
+            },
+        ];
+        self.doc.borrow_mut().apply(&changes);
+        self.record(changes);
+        self.rebuild_sidebar();
+        self.reproject_blocks();
+        Some(child)
+    }
+
+    /// Duplicate a Page block: the child page is deep-copied (sidebar
+    /// semantics) and the fresh block points at the copy, so two blocks never
+    /// share a target — deleting one would not orphan the other.
+    pub fn duplicate_page_block(&self, id: i32) -> Option<i32> {
+        let page_ref = self.block_page_ref(id)?;
+        let copy_page = self.duplicate_page(page_ref)?;
+        let changes = self.exec_on_open_page(Command::DuplicateBlock {
+            id: BlockId(id as u64),
+        })?;
+        let new_id = changes.iter().find_map(|c| match c {
+            Change::BlockInserted(b) => Some(b.id),
+            _ => None,
+        })?;
+        let change = Change::BlockRefSet {
+            id: new_id,
+            page: Some(PageId(copy_page as u32 as u64)),
+        };
+        self.doc.borrow_mut().apply(std::slice::from_ref(&change));
+        self.record(vec![change]);
+        self.reproject_blocks();
+        Some(new_id.as_u64() as i32)
     }
 
     pub fn toggle_favorite(&self, id: i32) {
@@ -1484,12 +1590,12 @@ const TURN_INTO_ITEMS: &[(BlockKind, &str, &str)] = SLASH_ITEMS;
 /// Insert-menu ("+" handle) descriptors: the full Notion-style list, unlike
 /// the curated "/" menu (ADR-0022). Rows whose id is a BlockKind int are
 /// insertable today; id < 0 marks the v1-excluded kinds (PLAN.md "out of
-/// scope": Page, Toggle, database views) as disabled placeholders, so the
-/// menu shape matches Notion and the roadmap stays visible. Keyboard
-/// navigation skips placeholders and applying to one is a no-op.
+/// scope": Toggle, database views) as disabled placeholders, so the menu
+/// shape matches Notion and the roadmap stays visible. Keyboard navigation
+/// skips placeholders and applying to one is a no-op.
 const INSERT_ITEMS: &[(i32, &str, &str)] = &[
     (kind_to_int(BlockKind::Paragraph), "Text", "Plain paragraph"),
-    (-1, "Page", "Child page · later"),
+    (kind_to_int(BlockKind::Page), "Page", "Embed a child page"),
     (kind_to_int(BlockKind::Todo), "To-do list", "Track tasks with a checkbox"),
     (kind_to_int(BlockKind::Heading1), "Heading 1", "Big section heading"),
     (kind_to_int(BlockKind::Heading2), "Heading 2", "Medium section heading"),
@@ -1687,6 +1793,7 @@ pub fn project_blocks(blocks: &[Block]) -> Vec<BlockRow> {
             depth: block_depth(blocks, b),
             color: b.color.slot(),
             bg: b.background.slot(),
+            page_ref: b.page_ref.map(|p| p.as_u64() as i32).unwrap_or(-1),
         })
         .collect();
     let mut n = 0;
@@ -1713,6 +1820,7 @@ pub const BLOCK_QUOTE: i32 = 7;
 pub const BLOCK_CODE: i32 = 8;
 pub const BLOCK_DIVIDER: i32 = 9;
 pub const BLOCK_CALLOUT: i32 = 10;
+pub const BLOCK_PAGE: i32 = 11;
 
 fn block(kind: i32, text: &str) -> BlockRow {
     BlockRow {
@@ -1726,6 +1834,7 @@ fn block(kind: i32, text: &str) -> BlockRow {
         depth: 0,
         color: 0,
         bg: 0,
+        page_ref: -1,
     }
 }
 

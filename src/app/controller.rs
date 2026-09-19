@@ -611,6 +611,12 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                 return;
             }
             flush_pending_edit(&g, &s);
+            // a Page block is open-only: activating it opens the child page
+            // (the row is never editable, so this is its whole interaction)
+            if let Some(child) = s.block_page_ref(id) {
+                s.open_page(child);
+                return;
+            }
             let (text, len) = {
                 let d = s.doc.borrow();
                 d.block(BlockId(id as u64))
@@ -864,6 +870,14 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
             if id <= 0 {
                 return;
             }
+            // Page is insert-menu-only: applying it creates the child page
+            // and converts the (empty insert-mode) row; no text edit involved
+            if kind == crate::core::BlockKind::Page {
+                s.create_page_block(id);
+                g.set_slash_open(false);
+                g.set_slash_insert(false);
+                return;
+            }
             let _ = s.exec_on_open_page(Command::ReplaceText {
                 id: BlockId(id as u64),
                 text: cleaned.clone(),
@@ -984,18 +998,30 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                     });
                 }
                 3 => {
-                    let _ = s.exec_on_open_page(Command::DuplicateBlock {
-                        id: BlockId(id as u64),
-                    });
+                    // a Page block duplicates its child page too, so the copy
+                    // never shares a target with the original
+                    if s
+                        .duplicate_page_block(id)
+                        .is_none()
+                    {
+                        let _ = s.exec_on_open_page(Command::DuplicateBlock {
+                            id: BlockId(id as u64),
+                        });
+                    }
                 }
                 4 => s.copy_block(id),
                 5 => {
                     s.paste_below(id);
                 }
                 6 => {
+                    // deleting a Page block takes its child page with it
+                    let page_ref = s.block_page_ref(id);
                     let _ = s.exec_on_open_page(Command::DeleteBlock {
                         id: BlockId(id as u64),
                     });
+                    if let Some(child) = page_ref {
+                        s.delete_page(child);
+                    }
                     if g.get_editing_id() == id {
                         g.set_editing_id(-1);
                     }
@@ -1725,6 +1751,29 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             g.set_db_notice(
                 "The database was damaged — this session was restored from a backup (appdata/quire.db.bak1). The damaged file was kept beside it.".into(),
             );
+        }
+
+        "page-block" => {
+            // seed an embedded child page: an empty line after the first
+            // block turns into a Page block (PageCreated + ref + kind in one
+            // batch), then the child gets a real title for the shot
+            let first = {
+                let d = state.doc.borrow();
+                d.page_blocks(core_page_id(state.open_page.get()))
+                    .first()
+                    .map(|b| b.id.0 as i32)
+            };
+            let Some(first) = first else { return };
+            let changes = state.exec_on_open_page(Command::InsertBlockAfter {
+                id: BlockId(first as u64),
+                kind: crate::core::BlockKind::Paragraph,
+                text: String::new(),
+            });
+            if let Some(nid) = changes.as_deref().and_then(find_inserted_id) {
+                if let Some(child) = state.create_page_block(nid) {
+                    state.rename_page(child, "Project Atlas");
+                }
+            }
         }
 
         "rename" => {
