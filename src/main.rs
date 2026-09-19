@@ -24,6 +24,12 @@ pub struct LaunchArgs {
     /// Markdown file to import and open at startup (--open <path>; also the
     /// bare positional, which is what the .md file association passes).
     pub open: Option<std::path::PathBuf>,
+    /// Serve the workspace read-only on the LAN (--share [port], default
+    /// 5877).
+    pub share: Option<u16>,
+    /// Pull a framed workspace from another Quire and import it
+    /// (--pull http://host:5877).
+    pub pull: Option<String>,
     /// Debug: print loaded page/block counts to stderr (--dump-state).
     pub dump_state: bool,
 }
@@ -39,6 +45,8 @@ fn parse_launch_args() -> LaunchArgs {
         db: None,
         dump_state: false,
         open: None,
+        share: None,
+        pull: None,
     };
     let mut i = 1;
     while i < argv.len() {
@@ -71,6 +79,19 @@ fn parse_launch_args() -> LaunchArgs {
             }
             ("--open", Some(v)) => {
                 a.open = Some(std::path::PathBuf::from(v));
+                i += 1;
+            }
+            ("--share", _) => {
+                a.share = Some(quire::services::lan_server::DEFAULT_PORT);
+            }
+            ("--share-port", Some(v)) => {
+                if let Ok(p) = v.parse() {
+                    a.share = Some(p);
+                }
+                i += 1;
+            }
+            ("--pull", Some(v)) => {
+                a.pull = Some(v.clone());
                 i += 1;
             }
             (positional, _) if !positional.starts_with('-') => {
@@ -143,6 +164,7 @@ fn real_main() -> Result<(), String> {
     // the taskbar/explorer icon comes from the exe's embedded resource (D8),
     // and the frameless window shows no title bar — nothing user-visible is
     // missing. Revisit on Slint upgrade.
+    let repo_for_lan = repo.clone();
     let state = AppState::new(&args, repo);
     if let Some(from) = &recovered {
         state.set_db_notice(format!(
@@ -163,6 +185,41 @@ fn real_main() -> Result<(), String> {
     if let Some(path) = launch.open.clone() {
         let g = ui.global::<quire::UIState>();
         controller::import_from_path(&g, &state, &path);
+    }
+
+    // LAN share: serve the committed workspace read-only on its own thread.
+    // Enabled via --share or the persisted settings toggle (lan.share).
+    let share_port = launch.share.or_else(|| {
+        if state.setting_flag("lan.share") {
+            Some(quire::services::lan_server::DEFAULT_PORT)
+        } else {
+            None
+        }
+    });
+    if let Some(port) = share_port {
+        match &repo_for_lan {
+            Some(repo) => {
+                let server =
+                    quire::services::lan_server::LanServer::new(repo.clone(), port);
+                std::thread::spawn(move || match server.bind() {
+                    Ok(listener) => server.serve(listener),
+                    Err(e) => eprintln!("quire: lan bind failed: {e}"),
+                });
+            }
+            None => eprintln!("quire: --share needs a database; sharing disabled"),
+        }
+    }
+
+    // LAN pull: import every page from a peer's share endpoint
+    if let Some(url) = &launch.pull {
+        match quire::services::lan_client::pull_workspace(url) {
+            Ok(pages) => {
+                let g = ui.global::<quire::UIState>();
+                let count = controller::import_lan_pages(&g, &state, url, pages);
+                eprintln!("quire: imported {count} pages from {url}");
+            }
+            Err(e) => eprintln!("quire: pull failed: {e}"),
+        }
     }
 
     if launch.dump_state {

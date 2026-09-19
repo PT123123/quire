@@ -637,6 +637,22 @@ impl AppState {
         ]);
     }
 
+    /// Read a persisted settings flag (value "1"/"0").
+    pub fn setting_flag(&self, key: &str) -> bool {
+        self.settings.borrow().get(key).map(|v| v == "1").unwrap_or(false)
+    }
+
+    /// Persist a settings flag (one batch, flushed with the session).
+    pub fn record_setting(&self, key: &str, value: &str) {
+        self.settings
+            .borrow_mut()
+            .insert(key.into(), value.into());
+        self.record(vec![Change::SettingSet {
+            key: key.into(),
+            value: value.into(),
+        }]);
+    }
+
     pub fn dark_setting(&self) -> bool {
         self.settings
             .borrow()

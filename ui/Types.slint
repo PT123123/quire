@@ -101,6 +101,9 @@ export global UIState {
 
     // startup notice (e.g. database restored from backup); empty = hidden
     in-out property <string> db-notice: "";
+    // LAN sharing (read-only server on :5877); persisted, restart applies
+    in-out property <bool> lan-sharing: false;
+    callback toggle-lan-sharing();
     // true when the workspace has no pages: the empty state grows a CTA
     in-out property <bool> workspace-empty: false;
 
