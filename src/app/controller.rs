@@ -1079,13 +1079,18 @@ fn export_current_page(g: &UIState<'_>, state: &Rc<AppState>) {
 
 /// Import a .md file as a new page via the native open dialog.
 fn import_markdown_dialog(g: &UIState<'_>, state: &Rc<AppState>) {
-    let Some(path) = rfd::FileDialog::new()
+    if let Some(path) = rfd::FileDialog::new()
         .add_filter("Markdown", &["md"])
         .pick_file()
-    else {
-        return;
-    };
-    let Ok(src) = std::fs::read_to_string(&path) else {
+    {
+        import_from_path(g, state, &path);
+    }
+}
+
+/// Import `path` as a new page, record it, and open it. Shared by the
+/// palette command and the .md file-association dispatch (--open).
+pub fn import_from_path(g: &UIState<'_>, state: &Rc<AppState>, path: &std::path::Path) {
+    let Ok(src) = std::fs::read_to_string(path) else {
         eprintln!("quire: import failed: cannot read {}", path.display());
         return;
     };

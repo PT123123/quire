@@ -124,3 +124,14 @@ remove the choice instead of repeating it.
      after `controller::wire(&ui, &state)` hand the path to the same sequence
      `import_markdown_dialog` runs (read file → `import_service::import_markdown`
      → apply the changes) minus the `rfd` picker.
+
+## Track A resolutions (post-merge)
+
+- **#4 addendum (Window::icon):** `Window::set_icon` does not exist in
+  Slint 1.18 — implemented in a later release. The user-visible icon is
+  already covered by the exe's embedded resource (D8): taskbar, explorer,
+  installer shortcuts. Revisit when Slint ships the API.
+- **#5 resolution:** `load()`-time `Corrupt` currently quarantines the
+  session to memory (state.rs) while D4's restore-at-open covers physical
+  damage; a full "quarantine file + reopen from snapshot + banner" chain
+  lands with the OpenReport consumption in app/state.rs.

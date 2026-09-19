@@ -21,6 +21,9 @@ pub struct LaunchArgs {
     pub scene: Option<String>,
     /// Database file (--db <path>; default appdata/quire.db).
     pub db: Option<std::path::PathBuf>,
+    /// Markdown file to import and open at startup (--open <path>; also the
+    /// bare positional, which is what the .md file association passes).
+    pub open: Option<std::path::PathBuf>,
     /// Debug: print loaded page/block counts to stderr (--dump-state).
     pub dump_state: bool,
 }
@@ -35,6 +38,7 @@ fn parse_launch_args() -> LaunchArgs {
         scene: None,
         db: None,
         dump_state: false,
+        open: None,
     };
     let mut i = 1;
     while i < argv.len() {
@@ -64,6 +68,15 @@ fn parse_launch_args() -> LaunchArgs {
             }
             ("--dump-state", _) => {
                 a.dump_state = true;
+            }
+            ("--open", Some(v)) => {
+                a.open = Some(std::path::PathBuf::from(v));
+                i += 1;
+            }
+            (positional, _) if !positional.starts_with('-') => {
+                if a.open.is_none() {
+                    a.open = Some(std::path::PathBuf::from(positional));
+                }
             }
             _ => {}
         }
@@ -125,6 +138,10 @@ fn real_main() -> Result<(), String> {
         bench_pages: launch.bench_pages,
     };
     let ui = AppWindow::new().map_err(|e| e.to_string())?;
+    // Window::set_icon does not exist in Slint 1.18 (M8_FEEDBACK #4/#5 note):
+    // the taskbar/explorer icon comes from the exe's embedded resource (D8),
+    // and the frameless window shows no title bar — nothing user-visible is
+    // missing. Revisit on Slint upgrade.
     let state = AppState::new(&args, repo);
     if let Some(from) = &recovered {
         state.set_db_notice(format!(
@@ -134,6 +151,12 @@ fn real_main() -> Result<(), String> {
     }
     controller::bind(&ui, &state);
     controller::wire(&ui, &state);
+
+    // .md file association: double-clicking a markdown file lands here
+    if let Some(path) = launch.open.clone() {
+        let g = ui.global::<quire::UIState>();
+        controller::import_from_path(&g, &state, &path);
+    }
 
     if launch.dump_state {
         let pages = state.workspace.borrow().page_count();
