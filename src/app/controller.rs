@@ -6,10 +6,7 @@
 // 'static callbacks capture a Weak and upgrade() it at fire time.
 
 use crate::app::state::{
-    core_page_id, kind_from_int, AppState, CMD_EXPORT_PAGE, CMD_IMPORT_MD, CMD_PAGE_BASE,
-    MENU_BACK, MENU_DELETE, MENU_DUPLICATE, MENU_FAVORITE, MENU_MOVE_DOWN, MENU_MOVE_TO,
-    MENU_MOVE_UP, MENU_NEW_SUBPAGE, MENU_RENAME, PAGE_GETTING_STARTED, PAGE_MOVE_TO_BASE,
-    PAGE_MOVE_TO_ROOT, ROW_NEW_PAGE,
+    core_page_id, kind_from_int, AppState, PAGE_GETTING_STARTED, ROW_NEW_PAGE,
 };
 use crate::core::{BlockId, Change, Command};
 use crate::{AppWindow, UIState};
@@ -328,7 +325,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
             let id = g.get_menu_node_id();
             // submenu navigation swaps the rows and keeps the popup open;
             // the taller Move-to list re-anchors so it stays on the window
-            if action == MENU_MOVE_TO {
+            if action == crate::app::state::MENU_MOVE_TO {
                 s.fill_page_menu_move_to(id);
                 let menu_h = g.get_menu_rows().row_count() as f32 * 28.0 + 16.0;
                 let y = g.get_menu_y().clamp(
@@ -338,48 +335,51 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                 g.set_menu_y(y);
                 return;
             }
-            if action == MENU_BACK {
+            if action == crate::app::state::MENU_BACK {
                 s.fill_menu(id);
                 return;
             }
             g.set_menu_open(false);
             g.set_menu_node_id(-1);
             match action {
-                MENU_NEW_SUBPAGE => {
+                crate::app::state::MENU_NEW_SUBPAGE => {
                     let new_id = s.create_page(Some(id));
                     open(&g, &s, new_id);
                     g.set_renaming_id(new_id);
                 }
-                MENU_RENAME => {
+                crate::app::state::MENU_RENAME => {
                     g.set_renaming_id(id);
                 }
-                MENU_DUPLICATE => {
+                crate::app::state::MENU_DUPLICATE => {
                     if let Some(new_id) = s.duplicate_page(id) {
                         open(&g, &s, new_id);
                     }
                 }
-                MENU_MOVE_UP => {
+                crate::app::state::MENU_MOVE_UP => {
                     if id > 0 {
                         s.move_page_by(id, -1);
                     }
                 }
-                MENU_MOVE_DOWN => {
+                crate::app::state::MENU_MOVE_DOWN => {
                     if id > 0 {
                         s.move_page_by(id, 1);
                     }
                 }
-                PAGE_MOVE_TO_ROOT => {
+                crate::app::state::PAGE_MOVE_TO_ROOT => {
                     if id > 0 {
                         s.move_page(id, None);
                     }
                 }
-                a if (PAGE_MOVE_TO_BASE..PAGE_MOVE_TO_BASE + 1_000_000).contains(&a) => {
+                a if (crate::app::state::PAGE_MOVE_TO_BASE
+                    ..crate::app::state::PAGE_MOVE_TO_BASE + 1_000_000)
+                    .contains(&a) =>
+                {
                     if id > 0 {
-                        s.move_page(id, Some(a - PAGE_MOVE_TO_BASE));
+                        s.move_page(id, Some(a - crate::app::state::PAGE_MOVE_TO_BASE));
                     }
                 }
-                MENU_FAVORITE => s.toggle_favorite(id),
-                MENU_DELETE => {
+                crate::app::state::MENU_FAVORITE => s.toggle_favorite(id),
+                crate::app::state::MENU_DELETE => {
                     let (_title, message) = s.delete_dialog_text(id);
                     g.set_dialog_title("Delete page?".into());
                     g.set_dialog_message(message.into());
@@ -545,11 +545,16 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                         g.set_dialog_open(true);
                     }
                 }
-                CMD_EXPORT_PAGE => export_current_page(&g, &s),
-                CMD_IMPORT_MD => import_markdown_dialog(&g, &s),
-                CMD_COPY_MD => copy_current_page_markdown(&g, &s),
-                other if other >= CMD_PAGE_BASE => {
-                    open(&g, &s, other - CMD_PAGE_BASE);
+                // fully qualified on purpose: a bare identifier in a match
+                // pattern silently becomes a catch-all binding when its
+                // import is missing (that exact bug shadowed every command
+                // with id >= 9 for one round — rustc warns, tests don't walk
+                // this dispatch)
+                crate::app::state::CMD_EXPORT_PAGE => export_current_page(&g, &s),
+                crate::app::state::CMD_IMPORT_MD => import_markdown_dialog(&g, &s),
+                crate::app::state::CMD_COPY_MD => copy_current_page_markdown(&g, &s),
+                other if other >= crate::app::state::CMD_PAGE_BASE => {
+                    open(&g, &s, other - crate::app::state::CMD_PAGE_BASE);
                 }
                 _ => {}
             }

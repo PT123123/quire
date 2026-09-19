@@ -567,5 +567,45 @@ notice-bar feedback for empty pages and clipboard failures.
       identity comes from build.rs's embedded IDI_MAIN resource. Track A
       decision: drop the 7.4 KB asset from the installer (the M8_FEEDBACK
       #4 @image-url plan stays retired)
-- [ ] A4 · visual sweep: RUNNING (34 scenes, sweep.ps1; Track A holding
-      ui/** until the snapshot lands)
+- [x] A4 · visual sweep (`7e6f07b` harness + `2ec7c17` verdict, re-swept as
+      sweep2 after Track A's fixes): 13/34 clean at first pass; the three
+      HIGHs and most MEDIUMs fixed by Track A (`e4878f1`, `6c115b5`) —
+      D1's "overprint" was the marks SCENE's hardcoded offsets (fixed by
+      word-derived offsets; the wrap limitation stays documented as
+      accepted design debt, not a regression). Remaining: 4 LOW-ish items
+      (notice-bar layout, link-dialog gap, swatch contrast, snippet elide)
+- [x] A1 follow-up: `install/verify-portable.ps1` — 24/24 over the
+      portable layout, log following, migration suppression, --db
+      precedence, legacy migration, %APPDATA% hash untouched
+- [x] A2 follow-ups: real_main phase stamps (the pre-paint gap split);
+      scaling answer LINEAR (state_new ≈ 4 + 13.1 ms per 1000 blocks,
+      max residual 1.5 ms); repo_open flat ≈51 ms across 0–10k blocks
+      (re-pins ADR-0015's floor); first-paint floor ≈370 ms flat over a
+      20× document range; same-batch-only comparison rule recorded
+- [x] `benchmarks/scripts/audit_results.ps1`: recomputes every stored
+      summary from raw lines, exit 1 on mismatch — tables are renewable
+- [x] M8 verification snapshot at `6c115b5`: 209 passed / 0 failed /
+      4 ignored, release build clean, installer E2E re-run 4/4 on the new
+      exe (7.94 MB, --open 14→15, zero uninstall residue)
+
+### CRITICAL fix — palette dispatch shadowing (Track A, round 13's own bug)
+
+`CMD_COPY_MD` was missing from controller.rs's import list, so the match
+arm became a catch-all binding: every palette command with id ≥ 9
+(Export/Import/Copy Markdown and every Jump-to-page) ran
+copy_current_page_markdown. Caught by Track B's audit — the tests never
+walk this dispatch, and the rustc warnings went unheeded by Track A.
+Fixed by the import plus converting ALL const match patterns in both
+dispatch closures to fully qualified paths, which the compiler rejects
+instead of silently binding.
+
+### Pending decisions/actions
+
+- quire.png: CONFIRMED dropped from the installer (nothing references it;
+  shell identity = build.rs IDI_MAIN). Track B updates quire.iss +
+  verify-installer.ps1's payload assertion together.
+- Shortcuts carry no explicit WorkingDirectory — only relevant if a
+  --portable installer option ever ships (recorded, no action).
+- Track A next: skia comparison is blocked by the shared target lock
+  (needs a CARGO_TARGET_DIR policy decision); renderer_name() duplication
+  in main.rs vs controller.rs is Track A's to consolidate.

@@ -34,6 +34,11 @@ dist:
 
 # installer end-to-end regression (D8/A6): build iss, silent install,
 # verify, silent uninstall, residue check (needs Inno Setup)
+# --portable end-to-end regression (A1 follow-up): 24 checks over the
+# portable layout, log following, migration suppression, --db precedence
+verify-portable:
+    powershell -NoProfile -ExecutionPolicy Bypass -File install\verify-portable.ps1
+
 verify-install:
     powershell -NoProfile -ExecutionPolicy Bypass -File install\verify-installer.ps1
 
