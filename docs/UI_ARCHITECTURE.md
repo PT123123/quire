@@ -69,9 +69,13 @@ drops them (see `Icons.slint` comment).
 
 `just shot <scene>` renders the real UI headlessly through the software
 renderer (`quire-shot`, ADR-0011) into `.scratch/shots/latest.png`. Scenes
-live in `controller::apply_scene` (default, dark, palette, search-notes,
-menu, rename, settings, dialog, empty). Every visual change should ship
-with re-shot scenes; the M2 acceptance set is the baseline.
+live in `controller::apply_scene` + `apply_scene_overlay` — popups open in
+the overlay half so headless two-pass renders see their transitions.
+Current set: default, dark, palette, search-notes, menu, rename, settings,
+dialog, empty, edit, slash, block-menu, marks, link, find, nest, recovered,
+title-edit, plus dark combos (dark-slash, dark-find, dark-marks, dark-link,
+dark-block-menu, dark-title-edit). Every visual change ships with re-shot
+scenes; the judge-reviewed set is the regression baseline.
 
 ## Adding a component (checklist)
 

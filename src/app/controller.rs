@@ -907,6 +907,25 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         });
     }
 
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_duplicate_block(move |id| {
+            let g = gw.upgrade().unwrap();
+            if id <= 0 {
+                return;
+            }
+            flush_pending_edit(&g, &s);
+            if let Some(nid) = s
+                .exec_on_open_page(Command::DuplicateBlock { id: BlockId(id as u64) })
+                .as_deref()
+                .and_then(find_inserted_id)
+            {
+                focus_block(&g, &s, nid, 0);
+            }
+        });
+    }
+
     // ---- list nesting (Tab / Shift+Tab) ----
     {
         let gw = gw.clone();
@@ -1280,6 +1299,30 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
         }
         "block-menu" => {}
         "link" => apply_scene_overlay(ui, state, "link-dlg"),
+        "dark-slash" => {
+            g.set_dark(true);
+            apply_scene(ui, state, "slash");
+        }
+        "dark-find" => {
+            g.set_dark(true);
+            apply_scene(ui, state, "find");
+        }
+        "dark-marks" => {
+            g.set_dark(true);
+            apply_scene(ui, state, "marks");
+        }
+        "dark-link" => {
+            g.set_dark(true);
+            apply_scene_overlay(ui, state, "link-dlg");
+        }
+        "dark-block-menu" => {
+            g.set_dark(true);
+            apply_scene_overlay(ui, state, "block-menu");
+        }
+        "dark-title-edit" => {
+            g.set_dark(true);
+            apply_scene(ui, state, "title-edit");
+        }
         "title-edit" => {
             g.set_page_title("Renaming in place…".into());
             g.set_title_editing(true);
@@ -1418,6 +1461,7 @@ pub fn apply_scene_overlay(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             g.set_dialog_open(true);
         }
         "settings" => g.set_settings_open(true),
+        "dark-slash" => apply_scene_overlay(ui, state, "slash"),
         "slash" => {
             state.open_slash("");
             g.set_slash_focus(0);
