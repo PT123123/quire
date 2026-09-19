@@ -16,6 +16,13 @@ First functional release: a local, single-file-database notes workspace.
 - Drag the block handle (⋮⋮) to reorder: an accent line marks the landing
   spot and the drop commits one undo-able move; landings that would split a
   nested list away from its parent are rejected
+- Markdown line-shortcuts: type "# ", "## ", "### ", "- ", "* ", "1. ",
+  "[] ", "[x] ", "> ", "---" or "```" at a block start to convert it as you
+  type (one undo step)
+- Block menu (⋮⋮): Turn into submenu (Text / Code / Divider); the slash
+  menu and Turn-into list only kinds without a symbol shortcut; fixed the
+  menu popup never showing from a real handle click (it only ever rendered
+  in the visual-test scene) and anchored it beside the handle
 - Inline marks: bold (Ctrl+B), italic (Ctrl+I), inline code (Ctrl+E),
   strikethrough (Ctrl+Shift+X), links (Ctrl+L + dialog; click a link to
   open it)

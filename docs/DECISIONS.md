@@ -2,6 +2,30 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0022 · Markdown line-shortcuts; the menus list only what symbols can't reach
+Decision: typing a trigger at the block start converts the block live —
+`# `/`## `/`### ` → Heading 1/2/3, `- `/`* ` → Bullet, `12. ` → Numbered,
+`[] `/`[ ] ` → To-do, `[x] ` → checked To-do, `> ` → Quote, `---` →
+Divider, ` ``` ` → Code — as one undo step (`exec_all`, which now skips
+no-op parts of a compound command instead of failing wholesale). The slash
+menu and the ⋮⋮ "Turn into" list carry only Text/Code/Divider: every other
+kind has a symbol path. Notion's Comment / Suggest edits / Ask AI / Color /
+Copy-link / Move-to stay out (collab+AI are v1 out-of-scope; no block
+anchors or cross-page moves yet).
+Why: the user wants the pickers short — entries reachable by blind typing
+are noise; the symbol is the only path to the removed kinds, which keeps
+the menus honest.
+Consequences: code/divider blocks are exempt from conversion (their text
+legitimately starts with these characters); converting back among symbol
+kinds works by typing the other symbol at the block start. Fixed while
+wiring: the ⋮⋮ popup was driven by a `block-menu-open` bool only the bench
+scene ever set — a real grip click raised just `block-menu-open-id`, so the
+menu never appeared and had no coordinates. The popup now follows the id
+and the bool is gone; menu geometry anchors beside the handle from
+delegate-reported viewport coordinates (DocumentRow layout-y + handle
+offset), which also fixes the slash menu anchoring every block at the first
+row's offset.
+
 ## ADR-0021 · Drag-reorder rides Slint's built-in `DragArea`/`DropArea`
 Decision: the grip handle wraps its TouchArea in a 1.18 `DragArea`
 (`allow-move`, payload = plain-text `slint-notion/block:<id>` built in the

@@ -14,6 +14,7 @@ export component EditorBlock inherits Rectangle {
     in property <BlockRow> block;
     in property <int> depth;
     in property <int> index;
+    in property <length> row-y; // body top in list-layout coords (scroll handled in Rust)
     in property <length> content-width;
     in property <length> content-x;
 
@@ -98,7 +99,7 @@ export component EditorBlock inherits Rectangle {
             if UIState.block-menu-open-id == block.id {
                 UIState.block-menu-open-id = -1;
             } else {
-                UIState.block-menu-opened(block.id, self.y);
+                UIState.block-menu-opened(block.id, root.row-y + handle.y, root.content-x);
             }
         }
     }
@@ -218,7 +219,7 @@ export component EditorBlock inherits Rectangle {
         selection-foreground-color: Colors.text-primary;
         selection-background-color: Colors.selection;
         edited => {
-            UIState.editing-changed(self.y, self.height, content-x);
+            UIState.editing-changed(root.row-y + self.y, self.height, content-x);
         }
         accepted => {
             UIState.enter-at-caret(self.cursor-position-byte-offset);

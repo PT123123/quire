@@ -86,8 +86,8 @@ export global UIState {
     in-out property <length> slash-x: 300px;
     in-out property <length> slash-y: 200px;
 
-    // block menu (M5): ⋮⋮ handle menu for one block
-    in-out property <bool> block-menu-open: false;
+    // block menu (M5): ⋮⋮ handle menu for one block; visibility follows
+    // block-menu-open-id (>= 0 open) — no separate bool to keep in sync
     in-out property <int> block-menu-open-id: -1;
     in-out property <[MenuRow]> block-menu-rows;
     in-out property <length> block-menu-x: 300px;
@@ -210,7 +210,7 @@ export global UIState {
     callback slash-move(int);
     callback slash-apply-selected();
     callback slash-close();
-    callback block-menu-opened(int, length);
+    callback block-menu-opened(int, length, length); // id, handle viewport-y, content-x
     callback block-menu-action(int);
     callback block-plus(int);
 
