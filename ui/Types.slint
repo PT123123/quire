@@ -30,6 +30,7 @@ export struct BlockRow {
     number: int,
     tail: bool, // last block of the page: the delegate carries the bottom spacer
     runs: [TextRun], // inline marks (M6); empty = render `text` as one run
+    depth: int, // list nesting level (0-1 in M4; drives the indent)
 }
 
 export struct CommandRow {
@@ -164,6 +165,8 @@ export global UIState {
     callback set-dark(bool);
     callback move-block(int);
     callback toggle-mark(int, int, int); // kind(0 bold,1 italic,2 strike,3 code), start, end
+    callback indent-list(int);
+    callback outdent-list(int);
     callback link-apply();
     callback link-remove();
     callback link-cancel();
