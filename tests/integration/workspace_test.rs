@@ -102,6 +102,7 @@ fn duplicated_nested_list_keeps_parents_in_the_copy() {
                 marks: Vec::new(),
         color: quire::core::ColorKind::Default,
         background: quire::core::ColorKind::Default,
+        page_ref: None,
             },
             quire::core::Block {
                 id: child,
@@ -114,6 +115,7 @@ fn duplicated_nested_list_keeps_parents_in_the_copy() {
                 marks: Vec::new(),
         color: quire::core::ColorKind::Default,
         background: quire::core::ColorKind::Default,
+        page_ref: None,
             },
         ],
     );

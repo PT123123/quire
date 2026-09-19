@@ -1550,6 +1550,7 @@ pub fn kind_from_int(kind: i32) -> BlockKind {    match kind {
         8 => BlockKind::Code,
         9 => BlockKind::Divider,
         10 => BlockKind::Callout,
+        11 => BlockKind::Page,
         _ => BlockKind::Paragraph,
     }
 }
@@ -1566,6 +1567,7 @@ const fn kind_to_int(kind: BlockKind) -> i32 {
         BlockKind::Code => 8,
         BlockKind::Divider => 9,
         BlockKind::Callout => 10,
+        BlockKind::Page => 11,
         BlockKind::Paragraph => 0,
     }
 }
@@ -1614,6 +1616,7 @@ fn rows_to_blocks(page: i32, rows: Vec<BlockRow>, doc: &mut Document) -> Vec<Blo
                 marks: Vec::new(),
                 color: ColorKind::Default,
                 background: ColorKind::Default,
+                page_ref: None,
             }
         })
         .collect()
