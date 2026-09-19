@@ -147,6 +147,50 @@ export component SettingsDialog inherits PopupWindow {
             Rectangle { height: 1px; background: Colors.border; }
 
             Text {
+                text: "SHARING";
+                font-size: Typography.size-caption;
+                font-weight: Typography.weight-semibold;
+                color: Colors.text-muted;
+            }
+            HorizontalLayout {
+                spacing: Theme.spacing-sm;
+                Text {
+                    text: "Share read-only on the LAN (port 5877, applies after restart)";
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-ui;
+                    color: Colors.text-secondary;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    wrap: word-wrap;
+                }
+                Rectangle {
+                    width: 40px;
+                    height: 22px;
+                    border-radius: 11px;
+                    background: UIState.lan-sharing ? Colors.accent : Colors.border-strong;
+                    animate background { duration: Theme.duration-fast; }
+                    TouchArea {
+                        mouse-cursor: MouseCursor.pointer;
+                        clicked => {
+                            UIState.lan-sharing = !UIState.lan-sharing;
+                            UIState.toggle-lan-sharing();
+                        }
+                    }
+                    Rectangle {
+                        x: UIState.lan-sharing ? parent.width - self.width - 2px : 2px;
+                        y: 2px;
+                        width: 18px;
+                        height: 18px;
+                        border-radius: 9px;
+                        background: Colors.surface-overlay;
+                        animate x { duration: Theme.duration-fast; }
+                    }
+                }
+            }
+
+            Rectangle { height: 1px; background: Colors.border; }
+
+            Text {
                 text: "SHORTCUTS";
                 font-size: Typography.size-caption;
                 font-weight: Typography.weight-semibold;
