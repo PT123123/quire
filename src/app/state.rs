@@ -730,6 +730,25 @@ impl AppState {
                 id: kind_to_int(*kind),
                 label: (*label).into(),
                 hint: (*hint).into(),
+                disabled: false,
+            })
+            .collect();
+        self.slash.set_vec(rows);
+    }
+
+    /// Fill the "+"-handle insert menu, filtered by `filter` (the block's
+    /// whole line in insert mode). Includes the disabled later-milestone
+    /// placeholders — see INSERT_ITEMS.
+    pub fn open_slash_insert(&self, filter: &str) {
+        let needle = filter.to_lowercase();
+        let rows: Vec<SlashRow> = INSERT_ITEMS
+            .iter()
+            .filter(|(_, label, _)| needle.is_empty() || label.to_lowercase().contains(&needle))
+            .map(|(id, label, hint)| SlashRow {
+                id: *id,
+                label: (*label).into(),
+                hint: (*hint).into(),
+                disabled: *id < 0,
             })
             .collect();
         self.slash.set_vec(rows);
@@ -739,8 +758,37 @@ impl AppState {
         self.slash.row_count() as i32
     }
 
+    /// Arrow-key navigation for the slash/insert popup: clamps like before,
+    /// but skips the not-selectable placeholder rows.
+    pub fn slash_next_focus(&self, current: i32, delta: i32) -> i32 {
+        let count = self.slash.row_count() as i32;
+        if count == 0 {
+            return 0;
+        }
+        let disabled =
+            |i: i32| self.slash.row_data(i as usize).map(|r| r.id < 0).unwrap_or(true);
+        let mut next = (current + delta).clamp(0, count - 1);
+        if delta != 0 {
+            let step = delta.signum();
+            let mut guard = 0;
+            while disabled(next) && guard < count {
+                let candidate = next + step;
+                if candidate < 0 || candidate >= count {
+                    break;
+                }
+                next = candidate;
+                guard += 1;
+            }
+        }
+        next
+    }
+
     pub fn slash_selected_kind(&self, focus: i32) -> Option<BlockKind> {
         let row = self.slash.row_data(focus.max(0) as usize)?;
+        if row.id < 0 {
+            // placeholder row (later-milestone kind): nothing to apply
+            return None;
+        }
         Some(kind_from_int(row.id))
     }
 
@@ -1383,6 +1431,34 @@ const SLASH_ITEMS: &[(BlockKind, &str, &str)] = &[
 /// "Turn into" targets: the same curation as the slash menu.
 const TURN_INTO_ITEMS: &[(BlockKind, &str, &str)] = SLASH_ITEMS;
 
+/// Insert-menu ("+" handle) descriptors: the full Notion-style list, unlike
+/// the curated "/" menu (ADR-0022). Rows whose id is a BlockKind int are
+/// insertable today; id < 0 marks the v1-excluded kinds (PLAN.md "out of
+/// scope": Page, Toggle, database views) as disabled placeholders, so the
+/// menu shape matches Notion and the roadmap stays visible. Keyboard
+/// navigation skips placeholders and applying to one is a no-op.
+const INSERT_ITEMS: &[(i32, &str, &str)] = &[
+    (kind_to_int(BlockKind::Paragraph), "Text", "Plain paragraph"),
+    (-1, "Page", "Child page · later"),
+    (kind_to_int(BlockKind::Todo), "To-do list", "Track tasks with a checkbox"),
+    (kind_to_int(BlockKind::Heading1), "Heading 1", "Big section heading"),
+    (kind_to_int(BlockKind::Heading2), "Heading 2", "Medium section heading"),
+    (kind_to_int(BlockKind::Heading3), "Heading 3", "Small section heading"),
+    (-1, "Table", "Table view · later"),
+    (kind_to_int(BlockKind::Bullet), "Bulleted list", "Simple bulleted list"),
+    (kind_to_int(BlockKind::Numbered), "Numbered list", "Ordered list"),
+    (-1, "Toggle list", "Collapsible section · later"),
+    (kind_to_int(BlockKind::Quote), "Quote", "Capture a quote"),
+    (kind_to_int(BlockKind::Divider), "Divider", "Visual separator"),
+    (kind_to_int(BlockKind::Callout), "Callout", "Highlighted box with an emoji"),
+    (kind_to_int(BlockKind::Code), "Code", "Monospaced block"),
+    (-1, "Board", "Board view · later"),
+    (-1, "Gallery", "Gallery view · later"),
+    (-1, "List view", "Database list · later"),
+    (-1, "Calendar", "Calendar view · later"),
+    (-1, "Timeline", "Timeline view · later"),
+];
+
 fn slash_items(filter: &str) -> Vec<SlashRow> {
     let needle = filter.to_lowercase();
     SLASH_ITEMS
@@ -1392,6 +1468,7 @@ fn slash_items(filter: &str) -> Vec<SlashRow> {
             id: kind_to_int(*kind),
             label: (*label).into(),
             hint: (*hint).into(),
+            disabled: false,
         })
         .collect()
 }
@@ -1427,7 +1504,7 @@ pub fn kind_from_int(kind: i32) -> BlockKind {    match kind {
     }
 }
 
-fn kind_to_int(kind: BlockKind) -> i32 {
+const fn kind_to_int(kind: BlockKind) -> i32 {
     match kind {
         BlockKind::Heading1 => 1,
         BlockKind::Heading2 => 2,

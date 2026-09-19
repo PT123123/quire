@@ -70,7 +70,11 @@ export component AppShell inherits Rectangle {
         }
     }
 
-    // scrim behind overlays: a click dismisses whichever is open
+    // Scrim behind overlays. Menus/palette/search now auto-dismiss via
+    // close-on-click-outside (the engine swallows the outside click while
+    // a popup is open, so this TouchArea never sees it); the scrim remains
+    // as a safety net for a UIState/popup desync: enabled while any
+    // overlay flag is set, it dismisses everything on click.
     Rectangle {
         width: parent.width;
         height: parent.height;

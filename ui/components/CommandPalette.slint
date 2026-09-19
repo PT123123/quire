@@ -11,10 +11,11 @@ import { UIState, CommandRow } from "../Types.slint";
 export component CommandPalette inherits PopupWindow {
     width: 560px;
     height: box.height + Theme.spacing-sm * 2;
-    // Closing is driven entirely by UIState.palette-open (slint-ui/slint#1.18.0
-    // crashes in const-propagation when a popup reads its own `is-open`).
-    // Outside clicks land on the AppShell scrim, which clears the flag.
-    close-policy: PopupClosePolicy.no-auto-close;
+    // Closing is driven by UIState.palette-open; outside clicks / Escape
+    // dismiss via the close-on-click-outside policy, and AppWindow mirrors
+    // the popup's `is-open` back into UIState (a popup must not read its
+    // own `is-open` — slint 1.18 const-prop crash).
+    close-policy: PopupClosePolicy.close-on-click-outside;
 
     // Focus the input each time the palette opens (AppWindow calls show()).
     property <bool> opened: UIState.palette-open;

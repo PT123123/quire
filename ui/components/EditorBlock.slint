@@ -108,7 +108,9 @@ export component EditorBlock inherits Rectangle {
         // handle hidden by that clause stayed clickable in the dark
         visible-flag: ta.has-hover || handle.hovered;
         plus-clicked => {
-            UIState.block-plus(block.id);
+            // anchor the insert menu below this block: bottom edge in list
+            // coords + the text column x
+            UIState.block-plus(block.id, root.row-y + root.height, root.content-x);
         }
         grip-clicked => {
             if UIState.block-menu-open-id == block.id {

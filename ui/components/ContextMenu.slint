@@ -1,8 +1,9 @@
 // Right-click / ⋯ context menu. One instance lives at window level; the
 // controller positions it (UIState.menu-x/y) and fills the rows. Closing is
-// driven entirely by UIState.menu-open (a popup must not read its own
-// `is-open` — slint 1.18 const-prop crash); outside clicks land on the
-// AppShell scrim.
+// driven by UIState.menu-open; outside clicks / Escape dismiss via the
+// close-on-click-outside policy, and AppWindow mirrors the popup's
+// `is-open` back into UIState (a popup must not read its own `is-open` —
+// slint 1.18 const-prop crash).
 
 import { Theme } from "../Theme.slint";
 import { Colors } from "../Colors.slint";
@@ -14,7 +15,7 @@ import { UIState } from "../Types.slint";
 export component ContextMenu inherits PopupWindow {
     width: 184px;
     height: min(UIState.menu-rows.length * 30px + 8px, 320px);
-    close-policy: PopupClosePolicy.no-auto-close;
+    close-policy: PopupClosePolicy.close-on-click-outside;
 
     Rectangle {
         width: parent.width;

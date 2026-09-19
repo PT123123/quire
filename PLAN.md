@@ -248,6 +248,57 @@ custom TSF/IME implementation, image/table/toggle/database blocks.
   (need a child-page column + lifecycle), Table/Toggle (v1 exclusions),
   Comment/Suggest edits/Ask AI (collab/AI stay out of scope)
 
+## Track A round 6 — popup dismissal + the "+" insert menu (2026-09-19, `m8-hardening`)
+
+User-reported: none of the three menus (sidebar page menu, block ⋮⋮ menu,
+slash menu) close when clicking outside, and the "+" handle only inserted
+an empty line instead of offering block choices.
+
+- [x] Root cause: Slint 1.18 dispatches *no event into the window content*
+      while a popup is open — clicks outside a `no-auto-close` popup are
+      swallowed by the engine (i-slint-core `window.rs` dispatch loop), so
+      the AppShell scrim never fired and the old comment about it was
+      wrong. All popups were `no-auto-close`.
+- [x] Menus switch to `close-on-click-outside` (outside click AND Escape):
+      sidebar/TopBar context menu, slash popup, block ⋮⋮ popup, command
+      palette, search panel. Dialogs (link, confirm, settings) keep
+      `no-auto-close` deliberately — they are modals with explicit
+      buttons, and outside clicks stay inert.
+- [x] State resync: the engine flips the popup's `is-open` on auto-dismiss;
+      AppWindow mirrors each popup's `is-open` parent-side (reading a
+      popup's own `is-open` is the 1.18 const-prop crash) and folds it
+      back into UIState (`menu-open`, `slash-open`, `block-menu-open-id`,
+      `palette-open`, `search-open`). Without this the AppShell scrim
+      would stay enabled and the window would look frozen.
+- [x] The closing press consumes the click (engine semantics), so a grip
+      toggle can't re-open; side effect, documented in CHANGELOG: moving
+      directly from one open menu to another costs two clicks.
+- [x] "+" handle = Notion's insert menu: `block-plus(id, row-bottom, x)`
+      inserts the empty paragraph below the clicked block, focuses it, and
+      opens the slash popup in a new insert mode (slash-insert) anchored
+      below that line. INSERT_ITEMS (state.rs) carries the full list; the
+      curated "/" menu is untouched (ADR-0022 holds there).
+- [x] Insert mode: typing filters on the whole line (no "/" prefix), the
+      anchor stays put, applying discards the typed filter text, and every
+      close path clears the mode in one place (`changed slash-open`).
+      Markdown shortcuts still win over the menu, matching the typing flow.
+- [x] Notion-parity placeholders: Page, Toggle list, and the database views
+      (Table, Board, Gallery, List, Calendar, Timeline) render muted with
+      "· later" hints, are skipped by arrow-key navigation, and applying to
+      one is a no-op — v1 exclusions stay visible without pretending to
+      work (PLAN "out of scope" list unchanged).
+- [x] quire-shot grew behavioral probes: `--click x,y` / `--key escape`
+      dispatch real input through the engine and print before/after popup
+      flags; `--probe-blocks` prints the id:kind projection; scene "plus"
+      opens the insert menu headlessly.
+- [x] Probe evidence (software renderer): menu / slash / block-menu /
+      palette / search all open (before) and dismiss on outside click and
+      Escape (after); plus-menu apply converts the new block
+      (Paragraph→H2 observed); clicking the disabled Table row keeps the
+      menu open and the block untouched.
+- deferred (unchanged): real Page / Toggle / database blocks stay out of
+  scope for v1; the placeholder rows only surface the roadmap.
+
 ## M8 hardening · Track B (2026-09-19, branch `m8-hardening`)
 
 Based on `master` at `f2eb855` (after M8 D5–D8 and the merged markdown pair).

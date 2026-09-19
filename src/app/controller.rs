@@ -689,8 +689,14 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                     }
                     // "/" at block start opens the slash menu with the rest of
                     // the line as the filter (SPEC §十五); anchored below the
-                    // editing block
-                    if let Some(filter) = text.strip_prefix('/') {
+                    // editing block. The "+"-handle insert menu filters on
+                    // the whole line instead and keeps its original anchor.
+                    let insert_mode = g.get_slash_insert() && g.get_slash_open();
+                    if insert_mode {
+                        s.open_slash_insert(&text);
+                        g.set_slash_filter(text.into());
+                        g.set_slash_focus(0);
+                    } else if let Some(filter) = text.strip_prefix('/') {
                         s.open_slash(filter);
                         g.set_slash_filter(filter.into());
                         g.set_slash_focus(0);
@@ -826,7 +832,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
             if count == 0 {
                 return;
             }
-            let next = (g.get_slash_focus() + delta).clamp(0, count - 1);
+            let next = s.slash_next_focus(g.get_slash_focus(), delta);
             g.set_slash_focus(next);
         });
     }
@@ -842,10 +848,14 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                 None => return,
             };
             let text = g.get_editing_text().to_string();
-            // strip "/filter" (the menu only triggers on the block's first
-            // token; a space closes the menu before this point)
+            let insert_mode = g.get_slash_insert();
+            // insert mode: the "+" menu discards the typed filter text;
+            // slash mode: strip "/filter" (the menu only triggers on the
+            // block's first token; a space closes the menu before this point)
             let filter_len = g.get_slash_filter().len();
-            let cleaned = if text.len() >= 1 + filter_len && text.is_char_boundary(1 + filter_len) {
+            let cleaned = if insert_mode {
+                String::new()
+            } else if text.len() >= 1 + filter_len && text.is_char_boundary(1 + filter_len) {
                 text[1 + filter_len..].to_string()
             } else {
                 String::new()
@@ -863,6 +873,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                 kind,
             });
             g.set_slash_open(false);
+            g.set_slash_insert(false);
             g.set_editing_text(cleaned.clone().into());
             g.set_pending_caret(cleaned.len() as i32);
             g.set_editing_id(id);
@@ -1003,7 +1014,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
     {
         let gw = gw.clone();
         let s = state.clone();
-        ui.global::<UIState>().on_block_plus(move |id| {
+        ui.global::<UIState>().on_block_plus(move |id, row_bottom, content_x| {
             let g = gw.upgrade().unwrap();
             if id <= 0 {
                 return;
@@ -1015,6 +1026,22 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
             });
             if let Some(nid) = changes.as_deref().and_then(find_inserted_id) {
                 focus_block(&g, &s, nid, 0);
+                // Notion's "+": the new empty line gains the insert menu.
+                // Picking a row types the block; clicking away (or Escape)
+                // keeps the empty paragraph, exactly like Notion.
+                s.open_slash_insert("");
+                let count = g.get_slash_items().row_count() as f32;
+                let menu_h = count * 32.0 + 8.0;
+                let scroll = g.get_editor_scroll_y();
+                let edge = if g.get_sidebar_open() { 260.0 } else { 0.0 };
+                let y = (40.0 + row_bottom as f32 - scroll + 4.0)
+                    .clamp(48.0, (g.get_window_h() - menu_h - 8.0).max(48.0));
+                g.set_slash_x(edge + content_x as f32);
+                g.set_slash_y(y);
+                g.set_slash_filter("".into());
+                g.set_slash_focus(0);
+                g.set_slash_insert(true);
+                g.set_slash_open(true);
             }
         });
     }
@@ -1901,6 +1928,18 @@ pub fn apply_scene_overlay(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
                 g.set_block_menu_x(320.0);
                 g.set_block_menu_y(300.0);
                 g.set_block_menu_open_id(id);
+            }
+        }
+        // the "+"-handle insert menu, anchored below an empty new line
+        "plus" => {
+            let target = {
+                let d = state.doc.borrow();
+                d.page_blocks(core_page_id(state.open_page.get()))
+                    .get(4)
+                    .map(|b| b.id.0 as i32)
+            };
+            if let Some(id) = target {
+                g.invoke_block_plus(id, 280.0, 340.0);
             }
         }
         "move-to" => {

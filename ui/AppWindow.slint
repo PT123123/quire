@@ -21,7 +21,8 @@ import { SettingsDialog } from "components/SettingsDialog.slint";
 component BlockMenuPopup inherits PopupWindow {
     width: 176px;
     height: UIState.block-menu-rows.length * 28px + 8px;
-    close-policy: PopupClosePolicy.no-auto-close;
+    // outside click / Escape dismiss; UIState syncs via the is-open mirror
+    close-policy: PopupClosePolicy.close-on-click-outside;
 
     Rectangle {
         x: 2px; y: 3px;
@@ -106,7 +107,9 @@ component BlockMenuPopup inherits PopupWindow {
 component SlashMenuPopup inherits PopupWindow {
     width: Math.min(280px, 760px);
     height: UIState.slash-items.length * 32px + 8px;
-    close-policy: PopupClosePolicy.no-auto-close;
+    // outside click / Escape dismiss; UIState syncs via the is-open mirror
+    // in AppWindow (a popup must not read its own `is-open`)
+    close-policy: PopupClosePolicy.close-on-click-outside;
 
     Rectangle {
         x: 2px; y: 3px;
@@ -129,7 +132,8 @@ component SlashMenuPopup inherits PopupWindow {
             width: parent.width - 8px;
             height: 32px;
             border-radius: Theme.radius-sm;
-            background: idx == UIState.slash-focus || sl-ta.has-hover
+            // placeholder rows ("later" kinds) render muted and inert
+            background: !item.disabled && (idx == UIState.slash-focus || sl-ta.has-hover)
                 ? Colors.surface-hover : transparent;
             animate background { duration: Theme.duration-instant; }
 
@@ -140,7 +144,8 @@ component SlashMenuPopup inherits PopupWindow {
                     text: item.label;
                     font-family: Typography.ui-font;
                     font-size: Typography.size-ui;
-                    color: idx == UIState.slash-focus ? Colors.text-primary : Colors.text-secondary;
+                    color: item.disabled ? Colors.text-muted
+                        : idx == UIState.slash-focus ? Colors.text-primary : Colors.text-secondary;
                     vertical-alignment: center;
                     horizontal-stretch: 0;
                 }
@@ -155,7 +160,8 @@ component SlashMenuPopup inherits PopupWindow {
                 }
             }
             sl-ta := TouchArea {
-                mouse-cursor: MouseCursor.pointer;
+                enabled: !item.disabled;
+                mouse-cursor: item.disabled ? MouseCursor.default : MouseCursor.pointer;
                 clicked => {
                     UIState.slash-focus = idx;
                     UIState.slash-apply-selected();
@@ -332,6 +338,10 @@ export component AppWindow inherits Window {
             slashMenu.show();
         } else {
             slashMenu.close();
+            // every close path funnels through here (input Escape, space,
+            // markdown convert, popup auto-dismiss) — clear insert mode so
+            // a stale flag can't hijack the next "/" menu
+            UIState.slash-insert = false;
         }
     }
 
@@ -366,6 +376,44 @@ export component AppWindow inherits Window {
             settings.show();
         } else {
             settings.close();
+        }
+    }
+
+    // Popup auto-dismiss (outside click / Escape) is enforced by Slint's
+    // close-on-click-outside policy: the engine flips the popup's `is-open`,
+    // mirrored here so UIState — and through it the Rust layer — follows.
+    // (A popup must not read its own `is-open`: slint 1.18 const-prop
+    // crash; the parent-side reference is the supported pattern.) Without
+    // this sync a dismissed menu would leave UIState open, the AppShell
+    // scrim would stay enabled, and the window would look frozen.
+    property <bool> menu-shown: menu.is-open;
+    changed menu-shown => {
+        if (!menu-shown && UIState.menu-open) {
+            UIState.menu-open = false;
+        }
+    }
+    property <bool> slash-shown: slashMenu.is-open;
+    changed slash-shown => {
+        if (!slash-shown && UIState.slash-open) {
+            UIState.slash-open = false;
+        }
+    }
+    property <bool> block-menu-shown: blockMenu.is-open;
+    changed block-menu-shown => {
+        if (!block-menu-shown && UIState.block-menu-open-id >= 0) {
+            UIState.block-menu-open-id = -1;
+        }
+    }
+    property <bool> palette-shown: palette.is-open;
+    changed palette-shown => {
+        if (!palette-shown && UIState.palette-open) {
+            UIState.palette-open = false;
+        }
+    }
+    property <bool> search-shown: search.is-open;
+    changed search-shown => {
+        if (!search-shown && UIState.search-open) {
+            UIState.search-open = false;
         }
     }
 

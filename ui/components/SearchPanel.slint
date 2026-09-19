@@ -11,7 +11,9 @@ import { UIState } from "../Types.slint";
 export component SearchPanel inherits PopupWindow {
     width: 620px;
     height: box.height + Theme.spacing-sm * 2;
-    close-policy: PopupClosePolicy.no-auto-close;
+    // outside click / Escape dismiss; UIState syncs via the is-open mirror
+    // in AppWindow
+    close-policy: PopupClosePolicy.close-on-click-outside;
 
     property <bool> opened: UIState.search-open;
     changed opened => {

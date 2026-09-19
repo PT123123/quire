@@ -8,13 +8,19 @@
 //
 // Build: cargo build --features software --bin quire-shot
 // Usage: quire-shot --out shot.bmp [--scene menu] [--w 1280] [--h 800]
+//        [--click x,y] [--key escape]
+//
+// --click/--key dispatch a real input event through the window after the
+// first render (and after the scene overlay), then re-render and print a
+// probe line with the open/closed state of every popup. This is what
+// verifies the close-on-click-outside behavior headlessly.
 
 use quire::app::controller;
 use quire::app::state::{AppState, HandleArgs};
-use quire::AppWindow;
+use quire::{AppWindow, UIState};
 use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
-use slint::platform::{Platform, PlatformError, WindowAdapter};
-use slint::{ComponentHandle, PhysicalSize, Rgb8Pixel, SharedPixelBuffer};
+use slint::platform::{Platform, PlatformError, PointerEventButton, WindowAdapter, WindowEvent};
+use slint::{ComponentHandle, LogicalPosition, Model, PhysicalSize, Rgb8Pixel, SharedPixelBuffer, SharedString};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -85,6 +91,39 @@ fn parse(args: &[String], key: &str) -> Option<String> {
         .cloned()
 }
 
+/// Print the open/closed state of every popup (the --click/--key probe).
+fn probe(ui: &AppWindow, label: &str) {
+    let g = ui.global::<UIState>();
+    println!(
+        "{label} menu-open={} slash-open={} slash-insert={} block-menu-id={} palette-open={} search-open={}",
+        g.get_menu_open(),
+        g.get_slash_open(),
+        g.get_slash_insert(),
+        g.get_block_menu_open_id(),
+        g.get_palette_open(),
+        g.get_search_open(),
+    );
+}
+
+/// Deliver a synthetic click (press + release) at logical coordinates —
+/// the same route a real mouse takes through the engine's event dispatch.
+fn dispatch_click(window: &slint::Window, x: f32, y: f32) {
+    let pos = LogicalPosition::new(x, y);
+    window.dispatch_event(WindowEvent::PointerPressed { position: pos, button: PointerEventButton::Left });
+    window.dispatch_event(WindowEvent::PointerReleased { position: pos, button: PointerEventButton::Left });
+}
+
+/// Print the block projection as `id:kind` pairs (the --probe-blocks flag):
+/// lets a scripted run assert what a popup action did to the document.
+fn probe_blocks(ui: &AppWindow) {
+    let g = ui.global::<UIState>();
+    let kinds: Vec<String> = (0..g.get_blocks().row_count())
+        .filter_map(|i| g.get_blocks().row_data(i))
+        .map(|b| format!("{}:{}", b.id, b.kind))
+        .collect();
+    println!("blocks: {}", kinds.join(" "));
+}
+
 fn main() -> Result<(), String> {
     // Same rationale as the GUI binary: Slint's initial binding/layout
     // evaluation is deep; give it headroom (ADR-0009).
@@ -123,6 +162,38 @@ fn run() -> Result<(), String> {
 
     if let Some(scene) = &scene {
         controller::apply_scene_overlay(&ui, &state, scene);
+    }
+
+    // --click/--key: drive a real input event, then re-render so the BMP
+    // shows the post-input state; the probe lines document the popup flags
+    // before and after the input (the "before" one proves the scene really
+    // opened the popup the "after" one claims to have dismissed).
+    let mut interacted = false;
+    if let Some(spec) = parse(&argv, "--click") {
+        let (x, y) = spec
+            .split_once(',')
+            .and_then(|(a, b)| Some((a.trim().parse().ok()?, b.trim().parse().ok()?)))
+            .unwrap_or_else(|| panic!("--click expects x,y, got {spec}"));
+        probe(&ui, "before-input:");
+        dispatch_click(ui.window(), x, y);
+        interacted = true;
+    }
+    if let Some(key) = parse(&argv, "--key") {
+        let text: SharedString = match key.as_str() {
+            "escape" => slint::platform::Key::Escape.into(),
+            "return" => slint::platform::Key::Return.into(),
+            other => other.into(),
+        };
+        probe(&ui, "before-input:");
+        ui.window().dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
+        ui.window().dispatch_event(WindowEvent::KeyReleased { text });
+        interacted = true;
+    }
+    if interacted {
+        probe(&ui, "after-input: ");
+    }
+    if argv.iter().any(|a| a == "--probe-blocks") {
+        probe_blocks(&ui);
     }
     BUFFER.with(|b| *b.borrow_mut() = None);
     WINDOW.with(|slot| {

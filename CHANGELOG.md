@@ -29,6 +29,16 @@ First functional release: a local, single-file-database notes workspace.
   up/down, Copy block, Paste below, Delete. Clicking a quire://block or
   quire://page link jumps inside the app. The slash menu and Turn-into
   list only carry kinds without a symbol shortcut (ADR-0022)
+- "+" handle opens Notion's insert menu: it creates the empty line below
+  and shows the full block list (Text, To-do, Headings, Bulleted /
+  Numbered, Quote, Divider, Callout, Code) — picking a row converts the
+  new line, clicking away or Escape keeps the empty line, typing filters
+  the menu. Page / Toggle list and the database views (Table, Board,
+  Gallery, List, Calendar, Timeline) appear as muted "later" placeholders
+  and cannot be picked yet
+- Every popup (page menus, ⋮⋮ menu, slash menu, command palette, search)
+  dismisses on a click outside it and on Escape; UI state follows so
+  nothing stays blocked behind an already-closed menu
 - Fixed the handle (+/⋮⋮) being clickable while invisible on the block
   being edited: it now shows whenever the row or the buttons are hovered,
   editing or not
@@ -67,6 +77,9 @@ First functional release: a local, single-file-database notes workspace.
   CPU ≈ 0, 10 000-block pages cost single-digit MB
 
 ### Known limitations
+- Switching directly from one open menu to another (e.g. ⋮⋮ on a different
+  block while a menu is open) takes two clicks — the first click only
+  dismisses the open popup (standard Slint popup semantics)
 - Block colors are cosmetic: they do not survive a Markdown export/import
   round trip, and Callout blocks export as quotes
 - Inline-mark paragraphs render runs on one line (no cross-run reflow —

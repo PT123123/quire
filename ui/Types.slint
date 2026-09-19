@@ -51,9 +51,10 @@ export struct SearchRow {
 }
 
 export struct SlashRow {
-    id: int,        // maps to a BlockKind in Rust
+    id: int,        // maps to a BlockKind in Rust; < 0 = placeholder row
     label: string,
     hint: string,
+    disabled: bool, // placeholder for a later-milestone kind: muted, inert
 }
 
 export struct MenuRow {
@@ -83,8 +84,12 @@ export global UIState {
     in-out property <length> editor-scroll-y: 0px; // Editor viewport mirror
 
     // slash menu (M5): "/" in an editing block filters Rust-provided
-    // block-kind descriptors; the dropdown renders inside the delegate
+    // block-kind descriptors; the dropdown renders inside the delegate.
+    // The same popup doubles as the "+"-handle insert menu (Notion-style):
+    // slash-insert distinguishes the two modes — filter the whole line
+    // instead of the text after "/", and discard the text on apply.
     in-out property <bool> slash-open: false;
+    in-out property <bool> slash-insert: false;
     in-out property <string> slash-filter: "";
     in-out property <int> slash-focus: 0;
     in-out property <[SlashRow]> slash-items;
@@ -217,7 +222,9 @@ export global UIState {
     callback slash-close();
     callback block-menu-opened(int, length, length); // id, handle viewport-y, content-x
     callback block-menu-action(int);
-    callback block-plus(int);
+    // "+" handle: id, the clicked block's bottom edge in list coords, and
+    // the text-column x — the popup anchors below the block it inserts
+    callback block-plus(int, length, length);
 
     callback node-clicked(int);
     callback node-expand-toggled(int);
