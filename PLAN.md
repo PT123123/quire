@@ -506,3 +506,21 @@ the app ever constructed it — SPEC §十七's "Move page" never shipped.
 
 
 
+
+## Track B A-package progress (2026-09-20, dispatched via docs/AGENT_BRIEF_M8_TAIL.md)
+
+- [x] A1 · feedback #13 closed (`87ec1dc`): --portable is a real
+      LaunchArgs flag, one resolve per start, OpenReport::migrated_from
+- [x] A3 · release profile audit (`32f6d48`): four profiles compared on
+      scenes A/D/E — all in one noise band; fat LTO and cgu16 rejected on
+      build-time/size, panic=abort rejected on behavior (no unwind = the
+      panic hook never runs, the crash-recovery chain goes blind);
+      profile_bench.ps1 added; the shipped profile wins. Decision pinned
+      as ADR-0024; the audit caught and documented a
+      parallel-build-polluted measurement batch
+- [x] Track A round 11 riding along: settings STORAGE row (data folder +
+      open-folder + back-up-now, hidden for memory-only sessions,
+      `643bd7d`) and the duplicate-page id-range reservation fix closing
+      feedback #2 (`c405a29`)
+- [ ] A2 first-paint measurement, A5 ROADMAP refresh (in flight), A4
+      visual sweep — dispatched next

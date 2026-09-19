@@ -2,6 +2,31 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0024 · The release profile stays as shipped — no fat LTO, no panic = abort
+Decision: `[profile.release]` keeps thin LTO + `codegen-units = 1` +
+`strip = "debuginfo"`. Fat LTO is rejected, `panic = "abort"` is rejected,
+`codegen-units = 16` is rejected.
+Why: SPEC §二十四 only keeps levers that win on runtime memory / CPU /
+startup — exe size ranks last. The 2026-09-20 four-way comparison
+(`docs/PERFORMANCE.md` "M8 · release profile audit", Track B A3) measured
+idle private bytes 88–90 MB, a 10 000-block page at 97–99 MB, idle CPU
+0–0.6 %, typing 24–30 % and warm window-up 85–192 ms across all four
+profiles — one noise band. Fat LTO saves 2.5 MB of exe for a ×2.5 build
+time; `codegen-units = 16` *adds* 2 MB; `panic = "abort"` is the only
+"smaller and faster" option and is vetoed on behavior, not numbers: abort
+does not unwind, so `logging::install`'s panic hook never runs,
+`panic-report.txt` never lands and `last_session_aborted` is blind exactly
+when it matters — the ADR-0018 / SPEC §二十五 crash-recovery chain dies
+with it. `strip = "debuginfo"` is the symbol policy: linker debuginfo
+stripped, the COFF symbol table kept; "debug artifacts separated" is
+`just dist` preserving `target/release` originals, not symbol stripping.
+Consequences: none at runtime — this ADR mainly pins what must NOT change.
+The conclusion expires when a lever moves idle private bytes or typing CPU
+beyond ≈2 MB / ≈3 pp of the measured noise floor; re-run
+`benchmarks/scripts/profile_bench.ps1` per profile before believing any
+single-run delta (the audit caught a parallel-build-polluted batch that
+looked like a 20 % win and was not).
+
 ## ADR-0023 · The ⋮⋮ menu gets Notion's remaining items; block color crosses the persistence contract
 Decision: the block handle menu carries Copy link to block, Move to, and
 Text/Background color (Comment / Suggest edits / Ask AI stay out with the
