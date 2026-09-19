@@ -28,7 +28,7 @@ export component AppShell inherits Rectangle {
     VerticalLayout {
         if UIState.db-notice != "" : Rectangle {
             height: 30px;
-            background: #f6e7b2;
+            background: Theme.dark ? #3d3517 : #f6e7b2;
             HorizontalLayout {
                 padding-left: Theme.spacing-md;
                 padding-right: Theme.spacing-xs;
@@ -37,7 +37,7 @@ export component AppShell inherits Rectangle {
                     text: UIState.db-notice;
                     font-family: Typography.ui-font;
                     font-size: Typography.size-caption;
-                    color: #5a4a17;
+                    color: Theme.dark ? #e8d48a : #5a4a17;
                     vertical-alignment: center;
                     overflow: elide;
                     horizontal-stretch: 1;

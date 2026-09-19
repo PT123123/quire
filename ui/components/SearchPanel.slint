@@ -114,7 +114,8 @@ export component SearchPanel inherits PopupWindow {
             }
 
             list-host := Rectangle {
-                height: UIState.search-rows.length == 0 ? 64px : 312px;
+                height: UIState.search-rows.length == 0 ? 64px
+                    : Math.min(UIState.search-rows.length, 7) * 52px + 8px;
 
                 list := ListView {
                     width: parent.width;
