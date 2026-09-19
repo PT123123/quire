@@ -137,8 +137,13 @@ export component Editor inherits Rectangle {
                     color: Colors.text-primary;
                     single-line: true;
                     text <=> UIState.find-term;
+                    // find-as-you-type: every keystroke rebuilds the session
+                    edited => {
+                        UIState.find-start();
+                    }
                     accepted => {
                         UIState.find-start();
+                        UIState.find-step(1);
                     }
                     key-pressed(event) => {
                         if (event.text == Key.Escape) {
