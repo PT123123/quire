@@ -2,6 +2,46 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0020 · The library moves to `%APPDATA%\Quire`; `--db` and `--portable`
+stay
+Decision: `storage::data_location` is the single answer to "where is the
+library". Opening the pre-D12 default — `appdata/quire.db`, relative to the
+working directory — is redirected to `%APPDATA%\Quire\quire.db`, and the first
+such redirect carries the old library across whole: the main file, the
+`.bak<N>` family, the `-wal`/`-shm`/`.corrupt` sidecars a crashed session left,
+and the `quire.log` family that shares the folder. A caller that names a file
+of its own (including `--db <path>`) is taken at its word and never rerouted;
+`--portable` asks for the old behavior out loud, which is what a stick install
+wants and what the benchmark harness uses to keep out of real notes. Each file
+moves as copy → open-the-copy → one rename → delete the source, staged through
+a `<destination>.migrating-<pid>` name. The idempotence key is the destination:
+once `%APPDATA%\Quire\quire.db` exists there is nothing to migrate, so a restart
+— or a move interrupted after the first file — cannot overwrite a library that
+has since been edited.
+Why: with the installer in place (ADR-0017) the working directory is whatever
+the shortcut's "Start in" happens to say, so launching Quire from two folders
+creates — and seeds — two unrelated libraries, and the user finds out when a
+note is missing. That same relative path is also what forces the per-user
+install; once the data has its own home the premise behind ADR-0017's
+"the install folder must be writable" disappears. The copy is opened before the
+source is retired because a `fs::copy` of a database another session is writing
+can be torn, and a damaged library discovered at the new path has no source left
+to fall back to; refusing the move keeps the old folder — snapshots included —
+exactly where `backup::open_with_recovery` expects it. Falling back to the
+legacy path on any error rather than opening the empty per-user file is the
+difference between "it did not move" and "my notes vanished".
+Consequences: the log follows the database, since `services::logging::data_dir()`
+now asks storage — a `--db` run writes its log beside that file, which also
+keeps the benchmark runs out of the checkout. Three things this track could not
+finish: `main.rs` still creates `appdata/` beside the working directory before
+opening it, `LaunchArgs` has no `portable` field so the two flags are re-read
+from the command line here (`scan`), and `OpenReport` has no field to say a move
+happened, so the user only ever sees one stderr line. All three are in
+`M8_FEEDBACK.md` #13 with the lines to write. `%APPDATA%` roams with the
+domain profile, which is what the milestone asked for and is fine at this
+database size; if a roaming profile ever turns out to be slow for a live SQLite
+file, `roaming_root()` is the one function to change.
+
 ## ADR-0019 · Backup retention is two windows; the periodic snapshot rides the
 flush tick
 Decision: `storage::backup` keeps five generations (ADR-0015 had three) *and*
@@ -103,8 +143,11 @@ exe with `GetFileVersion`. Per-user install (`PrivilegesRequired=lowest`,
 `{localappdata}\Programs\Quire`) is forced by the app itself: its default
 database path is relative to the working directory (`appdata/quire.db`), so a
 Program Files install would start with a non-writable one and fall back to
-memory without saying so. Keeping the whole tree in the user profile also means
-uninstalling leaves the notes alone — Inno removes only directories it emptied.
+memory without saying so. (ADR-0020 moved the library to `%APPDATA%\Quire`, so
+that premise is gone; the per-user install stays, because it is also what keeps
+uninstalling from touching the notes.) Keeping the whole tree in the user
+profile also means uninstalling leaves the notes alone — Inno removes only
+directories it emptied.
 Consequences: the window icon and the `--open <path>` dispatch the `.md`
 association invoke both live in files this track may not edit (`ui/**`,
 `src/app/**`, `src/main.rs`), so they went to Track A in `M8_FEEDBACK.md` with

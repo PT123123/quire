@@ -31,10 +31,10 @@ OutputBaseFilename=Quire-{#AppVersion}-windows-x64-setup
 SetupIconFile=quire.ico
 UninstallDisplayIcon={app}\quire.exe
 UninstallDisplayName=Quire
-; Per-user on purpose: the app opens its database relative to the working
-; directory (appdata/quire.db), so the install folder must be writable. A
-; machine-wide install under Program Files would leave the session running in
-; memory. See docs/DECISIONS.md ADR-0017.
+; Per-user on purpose: the app has lived in the user profile since ADR-0020
+; (its library is %APPDATA%\Quire\quire.db, and the exe's own folder is under
+; {localappdata}), so nothing here ever needs elevation. Staying per-user also
+; means uninstalling leaves the notes alone. See docs/DECISIONS.md ADR-0017.
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible

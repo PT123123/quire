@@ -7,7 +7,9 @@ param(
     [int]$PageSwitch = 0,     # scene G: switch between N bench pages
     [switch]$Typing,          # scene E: run quire-typing against $Exe
     [double]$Rate = 30,       # scene E: keystrokes per second
-    [int]$SearchEvery = 0     # scene E: one full-text query every N strokes
+    [int]$SearchEvery = 0,    # scene E: one full-text query every N strokes
+    # idle scenes pin their own file, so a bench run never touches the library
+    [string]$PinnedDb = ""
 )
 $ErrorActionPreference = "SilentlyContinue"
 
@@ -33,6 +35,9 @@ if ($Typing) {
     if ($Blocks -gt 0) { $childArgs += @("--blocks", "$Blocks") }
     if ($Scroll) { $childArgs += @("--scroll") }
     if ($PageSwitch -gt 0) { $childArgs += @("--page-switch", "$PageSwitch") }
+    # A pinned file keeps the run out of the app's real library, and a pinned
+    # *empty* file is what makes the second pass a load rather than a seed.
+    if ($PinnedDb -ne "") { $childArgs += @("--db", $PinnedDb) }
 }
 
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -65,11 +70,24 @@ $cpuPct = [math]::Round((($cpu1 - $cpu0).TotalMilliseconds / 1000) / $wall * 100
 $ramMB = [math]::Round($p.WorkingSet64 / 1MB, 1)
 $privMB = [math]::Round($p.PrivateMemorySize64 / 1MB, 1)
 
-$p.WaitForExit()
+# A run that never returns is a harness bug, not a measurement; killing it keeps
+# the matrix moving and leaves the row with a nonzero exit code.
+if (-not $p.WaitForExit(60000)) {
+    Write-Warning "$Label did not exit; killing it"
+    $p.Kill()
+    [void]$p.WaitForExit()
+}
 $ec = $p.ExitCode
 $typingReport = "null"
 if ($reportFile -ne "" -and (Test-Path $reportFile)) {
     $line = (Get-Content $reportFile | Where-Object { $_ -like '{*"scene"*' } | Select-Object -Last 1)
     if ($line) { $typingReport = $line.Trim() }
 }
-"{`"label`":`"$Label`",`"exe`":`"$Exe`",`"blocks`":$Blocks,`"startup_ms`":$startupMs,`"idle_cpu_pct`":$cpuPct,`"ram_workingset_mb`":$ramMB,`"ram_private_mb`":$privMB,`"exit_code`":$ec,`"typing`":$typingReport}"
+# a Windows path is not a legal JSON string until its backslashes are doubled,
+# and `$json` has to survive ConvertFrom-Json for bench_matrix.ps1
+$jsonExe = $Exe -replace '\\', '\\'
+$jsonLabel = $Label -replace '\\', '\\'
+$jsonDb = $PinnedDb
+if ($dbFile -ne "") { $jsonDb = $dbFile }
+$jsonDb = $jsonDb -replace '\\', '\\'
+"{`"label`":`"$jsonLabel`",`"exe`":`"$jsonExe`",`"db`":`"$jsonDb`",`"blocks`":$Blocks,`"startup_ms`":$startupMs,`"idle_cpu_pct`":$cpuPct,`"ram_workingset_mb`":$ramMB,`"ram_private_mb`":$privMB,`"exit_code`":$ec,`"typing`":$typingReport}"
