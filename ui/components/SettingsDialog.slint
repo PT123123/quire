@@ -38,6 +38,30 @@ component ThemeOption inherits Rectangle {
     }
 }
 
+component ShortcutRow inherits Rectangle {
+    in property <string> keys;
+    in property <string> label;
+    height: 20px;
+
+    HorizontalLayout {
+        Text {
+            width: 130px;
+            text: root.keys;
+            font-family: Typography.mono-font;
+            font-size: Typography.size-caption;
+            color: Colors.text-secondary;
+            vertical-alignment: center;
+        }
+        Text {
+            text: root.label;
+            font-family: Typography.ui-font;
+            font-size: Typography.size-ui;
+            color: Colors.text-secondary;
+            vertical-alignment: center;
+        }
+    }
+}
+
 export component SettingsDialog inherits PopupWindow {
     width: 400px;
     height: content-col.preferred-height + Theme.spacing-lg * 2;
@@ -117,6 +141,32 @@ export component SettingsDialog inherits PopupWindow {
                     clicked => {
                         UIState.set-dark(true);
                     }
+                }
+            }
+
+            Rectangle { height: 1px; background: Colors.border; }
+
+            Text {
+                text: "SHORTCUTS";
+                font-size: Typography.size-caption;
+                font-weight: Typography.weight-semibold;
+                color: Colors.text-muted;
+            }
+            HorizontalLayout {
+                spacing: Theme.spacing-lg;
+                VerticalLayout {
+                    spacing: Theme.spacing-xs;
+                    ShortcutRow { keys: "Ctrl+K"; label: "Command palette"; }
+                    ShortcutRow { keys: "Ctrl+P"; label: "Search pages"; }
+                    ShortcutRow { keys: "Ctrl+F"; label: "Find in page"; }
+                    ShortcutRow { keys: "Ctrl+N"; label: "New page"; }
+                }
+                VerticalLayout {
+                    spacing: Theme.spacing-xs;
+                    ShortcutRow { keys: "Ctrl+B / I / E"; label: "Bold / italic / code"; }
+                    ShortcutRow { keys: "Tab / Shift+Tab"; label: "Indent / outdent list"; }
+                    ShortcutRow { keys: "Ctrl+D"; label: "Duplicate block"; }
+                    ShortcutRow { keys: "Ctrl+S"; label: "Save now"; }
                 }
             }
 

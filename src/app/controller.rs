@@ -1000,11 +1000,19 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         let s = state.clone();
         ui.global::<UIState>().on_link_apply(move || {
             let g = gw.upgrade().unwrap();
-            let url = g.get_link_url().to_string();
+            let mut url = g.get_link_url().to_string();
             g.set_link_open(false);
             let cur = g.get_editing_id();
             if cur <= 0 {
                 return;
+            }
+            // bare domains get an https scheme so the browser opens them
+            let trimmed = url.trim();
+            if !trimmed.is_empty()
+                && !trimmed.contains("://")
+                && !trimmed.starts_with("mailto:")
+            {
+                url = format!("https://{trimmed}");
             }
             let _ = s.exec_on_open_page(Command::ToggleMark {
                 id: BlockId(cur as u64),

@@ -100,6 +100,9 @@ export global UIState {
 
     // startup notice (e.g. database restored from backup); empty = hidden
     in-out property <string> db-notice: "";
+    // true when the workspace has no pages: the empty state grows a CTA
+    in-out property <bool> workspace-empty: false;
+
     // big page title in-place editing (click the title)
     in-out property <bool> title-editing: false;
     in-out property <string> page-stats: "";
