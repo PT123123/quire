@@ -110,6 +110,12 @@ export component EditorBlock inherits Rectangle {
             spacing: 0px;
             for run in block.runs : Rectangle {
                 height: plain-text.height;
+                if run.link : TouchArea {
+                    mouse-cursor: MouseCursor.pointer;
+                    clicked => {
+                        UIState.open-link(run.url);
+                    }
+                }
                 HorizontalLayout {
                     spacing: 0px;
                     Rectangle {

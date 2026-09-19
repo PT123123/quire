@@ -806,6 +806,26 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         });
     }
 
+    {
+        ui.global::<UIState>().on_open_link(move |url| {
+            let url = url.to_string();
+            if url.is_empty() {
+                return;
+            }
+            // Windows shell open; cfg-gated so other targets simply no-op
+            #[cfg(target_os = "windows")]
+            {
+                let _ = std::process::Command::new("cmd")
+                    .args(["/C", "start", "", &url])
+                    .spawn();
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                eprintln!("quire: open {url} (not supported on this platform yet)");
+            }
+        });
+    }
+
     // ---- link dialog (M6) ----
     {
         let gw = gw.clone();
