@@ -2,6 +2,27 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0021 · Drag-reorder rides Slint's built-in `DragArea`/`DropArea`
+Decision: the grip handle wraps its TouchArea in a 1.18 `DragArea`
+(`allow-move`, payload = plain-text `slint-notion/block:<id>` built in the
+controller); every editor row is a `DropArea` whose `can-drop` validates the
+landing through a read-only `can_move_block_to` check and parks the accent
+drop line in `UIState.drop-line-row`; the drop commits one new
+`Command::MoveBlockTo` (insert-above flat index), so one undo step and one
+persistence entry cover a multi-row move.
+Why: SPEC §1564 says to prefer Slint's built-ins over hand-rolling; the
+in-window drag path lives in core (press-filter → threshold → DragMove/Drop
+routing), so it works with every renderer on Windows without OS DnD, and a
+click below the threshold still reaches the menu TouchArea. Reordering on
+drop (not per-hover swap) sidesteps the ListView delegate-reuse trap, where
+mutating the model mid-drag would swap the data under the dragging delegate.
+Consequences: the landing must not split a subtree (top-level inserts may
+only sit above another top-level block; nested items stay adjacent to their
+sibling run) and nested-swap `MoveBlock` now re-sets the same parent instead
+of flattening children to top level (pre-existing bug found while planning).
+Dragging across a virtualized viewport does not auto-scroll the ListView
+yet; revisit when long-document drag matters.
+
 ## ADR-0020 · The library moves to `%APPDATA%\Quire`; `--db` and `--portable`
 stay
 Decision: `storage::data_location` is the single answer to "where is the

@@ -13,6 +13,9 @@ First functional release: a local, single-file-database notes workspace.
   list on Enter or Backspace
 - List nesting: Tab / Shift+Tab (depth 1), drag-free reordering via the
   block menu or Ctrl+Shift+↑/↓, Ctrl+D duplicates a block
+- Drag the block handle (⋮⋮) to reorder: an accent line marks the landing
+  spot and the drop commits one undo-able move; landings that would split a
+  nested list away from its parent are rejected
 - Inline marks: bold (Ctrl+B), italic (Ctrl+I), inline code (Ctrl+E),
   strikethrough (Ctrl+Shift+X), links (Ctrl+L + dialog; click a link to
   open it)

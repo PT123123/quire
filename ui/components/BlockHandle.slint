@@ -4,9 +4,11 @@
 import { Theme } from "../Theme.slint";
 import { Colors } from "../Colors.slint";
 import { Icon } from "../Icons.slint";
+import { UIState } from "../Types.slint";
 
 export component BlockHandle inherits Rectangle {
     in property <bool> visible-flag: false;
+    in property <int> block-id: -1;
     callback plus-clicked();
     callback grip-clicked();
     // the handle's own TouchAreas sit above the row's and take the hover —
@@ -48,10 +50,19 @@ export component BlockHandle inherits Rectangle {
                 size: 15px;
                 color: Colors.text-muted;
             }
-            ta2 := TouchArea {
-                mouse-cursor: MouseCursor.pointer;
-                clicked => {
-                    root.grip-clicked();
+            // drag past the threshold starts a move-drag; a plain click
+            // never starts one, so the menu TouchArea below stays clickable
+            DragArea {
+                allow-move: true;
+                data: UIState.block-drag-payload(root.block-id);
+                drag-finished => {
+                    UIState.drop-line-row = -1;
+                }
+                ta2 := TouchArea {
+                    mouse-cursor: MouseCursor.pointer;
+                    clicked => {
+                        root.grip-clicked();
+                    }
                 }
             }
         }
