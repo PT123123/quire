@@ -2,6 +2,38 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0017 · Shell identity is a build-time resource; the installer installs
+per-user
+Decision: the exe's icon and version block come from a resource script that
+`build.rs` generates — `IDI_MAIN` pointing at `install/quire.ico` plus a
+`VS_VERSION_INFO` whose numbers it reads from `CARGO_PKG_VERSION` — and hands
+to `rc.exe` through the `embed-resource` build-dependency. `install/make_icon.ps1`
+renders that `.ico` with GDI+ (rounded gradient tile, ring + tail for the Q,
+seven PNG-compressed frames from 16 to 256 px), so no image tool enters the
+repo. `install/quire.iss` (Inno Setup 6), driven by
+`install/build-installer.ps1`, produces `dist/Quire-<version>-windows-x64-setup.exe`
+with a Start-menu entry, an optional desktop shortcut, an uninstaller, and an
+unchecked task that adds Quire to the "Open with" list for `.md` — never a
+default handler.
+Why: two crates can embed a resource; `winres` wants a resource compiler
+already on `PATH`, while `embed-resource` locates `rc.exe` through `vswhom`
+and reports `NotAttempted` on a machine without the SDK instead of failing the
+build — a clone that cannot package still compiles. The version stays written
+once: `build.rs` reads `Cargo.toml`, and the `.iss` reads it back off the built
+exe with `GetFileVersion`. Per-user install (`PrivilegesRequired=lowest`,
+`{localappdata}\Programs\Quire`) is forced by the app itself: its default
+database path is relative to the working directory (`appdata/quire.db`), so a
+Program Files install would start with a non-writable one and fall back to
+memory without saying so. Keeping the whole tree in the user profile also means
+uninstalling leaves the notes alone — Inno removes only directories it emptied.
+Consequences: the window icon and the `--open <path>` dispatch the `.md`
+association invoke both live in files this track may not edit (`ui/**`,
+`src/app/**`, `src/main.rs`), so they went to Track A in `M8_FEEDBACK.md` with
+the exact lines; until they land, the association only launches the app. An
+`rc.exe` rejection now fails the build rather than shipping a plain exe.
+`make_icon.ps1` is a manual step: change the palette and the `.ico` does not
+follow until it runs again.
+
 ## ADR-0016 · Inline marks are the Markdown interchange format, spans in and
 spans out
 Decision: `import_service::parse_markdown` reads `**bold**`, `*italic*`,
@@ -314,5 +346,9 @@ inherited from a browser engine; this is accepted deliberately.
 
 ## Dependency policy
 Every crate must answer: why needed / can std do it / runtime memory cost /
-extra threads / build complexity. Current set: slint + slint-build only.
-Anything else waits for a milestone that cannot be built without it.
+extra threads / build complexity. Current set: slint + slint-build (M1),
+rusqlite with the bundled SQLite (M3 — persistence has no std answer), rfd
+(M8 dialogs — native file pickers, no UI toolkit dependency), and
+embed-resource as a *build* dependency only (M8 installer — it runs rc.exe and
+adds nothing to the binary). Anything else waits for a milestone that cannot be
+built without it.
