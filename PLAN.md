@@ -190,6 +190,26 @@ that wiring decision, not the storage layer.
       rationale, 2 partially resolved pending Track B's D5-D6 landing
       (now landed and merged)
 
+### D11 · M7 performance matrix ✅ (Track B, 2026-09-19)
+- [x] full matrix recorded (benchmarks/results/*.jsonl): femtovg + skia,
+      scenes A–G incl. typing at 1k/10k; bench.ps1 gained -PinnedDb
+      (idle scenes pinned to a temp DB) and legal JSON output; new
+      bench_matrix.ps1 driver
+- [x] conclusions page in docs/PERFORMANCE.md (per-scene comparison +
+      SPEC §六 checklist + ranked M7 follow-ups)
+
+### D12 · Data location migration ✅ (Track B + Track A wiring, 2026-09-19)
+- [x] storage/data_location.rs: Placement (Fixed / Portable / Roaming),
+      argv scan, per-user migration carrying db + snapshots + log family
+- [x] open_with_report resolves through it (idempotent); logging::data_dir
+      follows the database
+- [x] Track A wiring: #12 periodic snapshots powered
+      (with_database_snapshots on the flush tick, 10-min floor); #13
+      main.rs create_dir_all removed (storage owns its dirs); startup
+      notice bar reports the library move and backup restores
+- [x] verified: full suite green post-merge; LAN smoke re-run on the
+      merged tree
+
 ## Next: M4 · Block editor MVP (remaining)
 - block-type switching menu (BlockHandle affordance), cross-block
   clipboard, 1000-block editing responsiveness check, Chinese IME
