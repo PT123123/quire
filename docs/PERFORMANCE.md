@@ -251,3 +251,66 @@ use.
    based navigation ships meanwhile.
 4. Nothing else: every SPEC §六 target is met with headroom on the
    default renderer.
+
+## M8 · release profile audit (SPEC §二十四)
+
+Measured 2026-09-20, `master` at `fa6a654`, femtovg default, release build
+of `quire.exe` + `quire-typing.exe` per configuration. Driver:
+`benchmarks/scripts/profile_bench.ps1` (a slim `bench_matrix.ps1`: scene A,
+scene D idle at 10 000 blocks with a pinned temp DB, scene E typing at
+10 000 blocks / 30 strokes/s / one search per 100 strokes, plus the exe
+size); raw rows in `benchmarks/results/2026-09-20-release-profile-*.jsonl`.
+
+| `[profile.release]` | exe MB | build | A warm startup / idle CPU / priv MB | D10000 startup / priv | E CPU / handler med·p95 µs |
+|---------------------|-------:|------:|------------------------------------:|----------------------:|---------------------------:|
+| `thin` + `cgu1` + `strip=debuginfo` (**current**) | 19.77 | 3m 10s (1m 52s warm) | 85–192 ms / 0–0.58 % / 88.3–89.7 | 135–442 ms / 97.3–99.0 | 24–30 % / 85–121 · 171–266 |
+| `lto = true` (fat) + `cgu1` | 17.25 | 7m 51s | 298 ms / 0.39 % / 87.8 | 442 ms / 98.3 | 44 % / 119 · 266 |
+| `thin` + `cgu1` + `panic = "abort"` | 16.14 | 4m 55s | 209 ms / 0.58 % / 88.4 | 224 ms / 97.9 | 26–30 % / 96–97 · 171–173 |
+| `thin` + `codegen-units = 16` | 21.79 | 1m 45s | 146 ms / 0 % / 89.3 | 168 ms / 97.7 | 24 % / 85 · 202 |
+
+Reading — **the profile stays exactly as it is**:
+
+- **Runtime memory does not move.** Idle private bytes are 88–90 MB and the
+  10 000-block page 97–99 MB in every configuration: a ±1.5 MB spread, which
+  is this harness's noise, not a codegen effect. The memory cost of the app is
+  Slint's item tree and SQLite's page cache, neither of which LTO or `codegen-
+  units` touches.
+- **Runtime CPU does not move.** Idle stays 0–0.6 % of one core and typing
+  24–30 % in all four — repaint-bound, as the scene E reading above says.
+  No configuration bought a measurable frame-budget win.
+- **Startup does not move either**, and it is the noisiest of the three (see
+  the caveat below): the current profile's warm window-up is 85–192 ms, and
+  nothing else was outside that band.
+- The only consistent differences are in exe size (fat LTO −2.5 MB,
+  `panic = "abort"` −3.6 MB, `codegen-units = 16` +2 MB) and build time
+  (fat LTO 2.5×). SPEC §二十四 ranks size last and forbids trading runtime or
+  maintainability for it, so those deltas are not reasons to move a knob.
+- **`panic = "abort"` is rejected on behaviour, not on numbers.** It is the
+  only configuration that could have been tempting (smaller *and* quicker to
+  build), but `abort` unwinds nothing: the panic hook `logging::install`
+  registers never runs, so `panic-report.txt` is never written and
+  `last_session_aborted` — the crash-recovery evidence of SPEC §二十五 and
+  ADR-0018 — goes blind exactly when it is needed. `catch_unwind` (used by the
+  hook's own test) cannot function either. Runtime costs nothing to keep
+  `unwind`, so recoverability wins outright.
+- `strip = "debuginfo"` stays as the symbol strategy: it removes the
+  debuginfo the linker embeds while keeping the COFF symbol table, and
+  `just dist` records the exe separately from the debug artifacts
+  (§二十四's "debug artifacts 分离" is handled by keeping `target/release`
+  intact next to the zip, not by stripping symbols).
+
+**Method caveat, stated because it is the real limit of this audit:** warm
+window-up startup and scene E's CPU/latency swing by ±100 ms and ±5 µs when
+anything else is compiling on the machine (the parallel track's builds were
+live during the first rounds — scene E's *startup* read 2 787 ms there against
+409 ms on an idle machine). Scene E's `startup_ms` is not an app number at all:
+the harness builds its 10 000-block page before the window appears, so that
+field measures the tree plus the pinned-DB write, which is why it is quoted as
+a range and why only A and D carry startup conclusions. Comparisons inside one
+quiet round (rb1 vs rb2 vs cgu16) agree to within 30 ms and 10 µs, which is
+the resolution this harness can honestly claim.
+
+**What would change this conclusion:** a lever that moves idle private bytes
+or typing CPU by more than the ≈2 MB / ≈3 pp noise floor. None of the four
+§二十四 knobs does, so the audit's answer is "already right", recorded as a
+measured outcome rather than an assumption.
