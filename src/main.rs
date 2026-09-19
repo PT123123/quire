@@ -104,8 +104,11 @@ fn real_main() -> Result<(), String> {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        match quire::storage::SqliteRepository::open(&path) {
-            Ok(r) => Some(std::sync::Arc::new(r)),
+        match quire::storage::SqliteRepository::open_with_report(&path) {
+            Ok((r, report)) => {
+                report.log();
+                Some(std::sync::Arc::new(r))
+            }
             Err(e) => {
                 eprintln!("quire: database unavailable ({}); running in memory", e);
                 None
