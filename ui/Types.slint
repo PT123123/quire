@@ -19,6 +19,7 @@ export struct TextRun {
     strike: bool,
     code: bool,
     link: bool,
+    url: string,
 }
 
 export struct BlockRow {
@@ -149,6 +150,7 @@ export global UIState {
     callback link-apply();
     callback link-remove();
     callback link-cancel();
+    callback open-link(string);
     callback palette-query-changed();
     callback palette-open-requested();
     callback command-invoked();
