@@ -528,6 +528,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                 }
                 CMD_EXPORT_PAGE => export_current_page(&g, &s),
                 CMD_IMPORT_MD => import_markdown_dialog(&g, &s),
+                CMD_COPY_MD => copy_current_page_markdown(&g, &s),
                 other if other >= CMD_PAGE_BASE => {
                     open(&g, &s, other - CMD_PAGE_BASE);
                 }
@@ -1694,6 +1695,25 @@ pub fn import_lan_pages(
 }
 
 /// Export the open page's blocks to a .md file via the native save dialog.
+/// "Copy Page as Markdown" (palette): the page through the exporter onto
+/// the clipboard. The FFI write path is mandatory here — a markdown page
+/// routinely carries CJK, which clip.exe's OEM stdin garbles (ADR-0025).
+fn copy_current_page_markdown(g: &UIState<'_>, s: &Rc<AppState>) {
+    let page = s.open_page.get();
+    let md = {
+        let d = s.doc.borrow();
+        crate::services::export_service::export_page(d.page_blocks(core_page_id(page)))
+    };
+    let notice = if md.trim().is_empty() {
+        "This page has nothing to copy yet.".to_string()
+    } else if crate::platform::copy_to_clipboard(&md) {
+        "Page copied as Markdown.".to_string()
+    } else {
+        "Could not reach the clipboard.".to_string()
+    };
+    g.set_db_notice(notice.into());
+}
+
 fn export_current_page(g: &UIState<'_>, state: &Rc<AppState>) {
     let page = state.open_page.get();
     let title = state

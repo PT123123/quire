@@ -2481,6 +2481,8 @@ pub const CMD_DUPLICATE_PAGE: i32 = 7;
 pub const CMD_DELETE_PAGE: i32 = 8;
 pub const CMD_EXPORT_PAGE: i32 = 9;
 pub const CMD_IMPORT_MD: i32 = 10;
+/// Copy the open page's markdown onto the clipboard (FFI write, ADR-0025).
+pub const CMD_COPY_MD: i32 = 11;
 /// Jump-to-page commands are 10 000 + page id.
 pub const CMD_PAGE_BASE: i32 = 10_000;
 
@@ -2523,6 +2525,13 @@ fn mock_commands(ws: &Workspace) -> Vec<CommandRow> {
         "export",
     );
     cmd(CMD_IMPORT_MD, "Import Markdown…", "", "Page", "import");
+    cmd(
+        CMD_COPY_MD,
+        "Copy Page as Markdown",
+        "",
+        "Page",
+        "copy",
+    );
     for id in ws.dfs_order() {
         if id >= BENCH_ID_BASE {
             continue;

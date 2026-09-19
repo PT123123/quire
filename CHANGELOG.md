@@ -90,6 +90,8 @@ First functional release: a local, single-file-database notes workspace.
 - Settings: appearance, LAN sharing, the database folder (open it in
   Explorer, take a backup on demand)
 - Markdown export/import (page level, inline marks round-trip)
+- "Copy Page as Markdown" (command palette): the page through the
+  exporter onto the clipboard, CJK-safe (Win32 FFI write path)
 - Installer (Inno Setup): per-user, Start menu + desktop shortcuts,
   optional `.md` "Open with" association; `--open <path>` dispatch
 - GPU rendering (FemtoVG default; Skia / wgpu builds selectable); idle

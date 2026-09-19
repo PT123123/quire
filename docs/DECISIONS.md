@@ -53,6 +53,13 @@ writing non-ASCII *from the app* would garble through `clip.exe` — the day
 a feature needs that ("copy page as markdown"), switch the write path to
 the same FFI (`SetClipboardData`) rather than adding a crate.
 
+Update (2026-09-20, same day): the day came with "Copy Page as Markdown" —
+the write path now runs through `SetClipboardData`/`GMEM_MOVEABLE` FFI too
+(`copy_to_clipboard` swapped its clip.exe internals for the FFI; callers
+unchanged, no crate). `clip.exe` is fully retired from the codebase; the
+round-trip test (`clipboard_write_and_read_round_trip_unicode`) pins CJK
+through write → read.
+
 ## ADR-0024 · The release profile stays as shipped — no fat LTO, no panic = abort
 Decision: `[profile.release]` keeps thin LTO + `codegen-units = 1` +
 `strip = "debuginfo"`. Fat LTO is rejected, `panic = "abort"` is rejected,

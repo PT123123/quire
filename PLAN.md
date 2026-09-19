@@ -518,6 +518,17 @@ top-level return; default scene render unchanged (`13a011a`).
 
 
 
+## Track A round 13 — Copy Page as Markdown (2026-09-20, on `master`)
+
+While Track B reviews the A4 sweep (Track A holds ui/**; this round is
+ui-free), ADR-0025's promised write-path upgrade shipped: palette command
+"Copy Page as Markdown" (CMD_COPY_MD) runs the open page through
+export_page and puts it on the clipboard — `copy_to_clipboard` swapped its
+clip.exe internals for `SetClipboardData`/`GMEM_MOVEABLE` FFI (callers
+unchanged, no crate, clip.exe retired entirely). Round-trip test pins CJK
+through write → read (`clipboard_write_and_read_round_trip_unicode`);
+notice-bar feedback for empty pages and clipboard failures.
+
 ## Track B A-package progress (2026-09-20, dispatched via docs/AGENT_BRIEF_M8_TAIL.md)
 
 - [x] A1 · feedback #13 closed (`87ec1dc`): --portable is a real

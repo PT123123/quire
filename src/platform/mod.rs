@@ -1,30 +1,72 @@
 // Platform adapters — only where Slint/Windows forces us to (M8).
 // Policy (ADR-0002): never implement TSF/IME ourselves.
 
-/// Copy `text` to the system clipboard. Windows routes through the always
-/// present `clip.exe` — the URLs this app copies (`quire://block/<id>`) are
-/// ASCII, which is all clip's OEM-codepage stdin handles correctly, so no
-/// clipboard crate is pulled in (dependency policy in DECISIONS). Other
-/// targets report failure instead of pretending.
+/// Copy `text` to the system clipboard, as CF_UNICODETEXT via the same FFI
+/// `read_clipboard` uses (ADR-0025's write half: `clip.exe`'s OEM-codepage
+/// stdin garbles non-ASCII, and "Copy page as Markdown" must carry CJK).
+/// No clipboard crate — user32/kernel32 are already linked for winit.
+/// Other targets report failure instead of pretending.
 pub fn copy_to_clipboard(text: &str) -> bool {
     #[cfg(target_os = "windows")]
     {
-        use std::io::Write;
-        use std::process::{Command, Stdio};
-        let Ok(mut child) = Command::new("clip")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        else {
-            return false;
-        };
-        // dropping stdin closes the pipe and lets clip finish
-        child
-            .stdin
-            .take()
-            .and_then(|mut s| s.write_all(text.as_bytes()).ok())
-            .is_some()
+        const CF_UNICODETEXT: u32 = 13;
+        const GMEM_MOVEABLE: u32 = 0x0002;
+
+        #[link(name = "user32")]
+        extern "system" {
+            fn OpenClipboard(hwnd: isize) -> i32;
+            fn CloseClipboard() -> i32;
+            fn EmptyClipboard() -> i32;
+            fn SetClipboardData(format: u32, hmem: isize) -> isize;
+        }
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GlobalAlloc(flags: u32, bytes: usize) -> isize;
+            fn GlobalLock(hmem: isize) -> *mut u16;
+            fn GlobalUnlock(hmem: isize) -> i32;
+            fn GlobalFree(hmem: isize) -> isize;
+        }
+
+        // UTF-16 units plus the terminating nul; the allocator wants bytes
+        let mut units: Vec<u16> = text.encode_utf16().collect();
+        units.push(0);
+        let bytes = units.len() * std::mem::size_of::<u16>();
+
+        unsafe {
+            // another process may hold the clipboard open: a short retry
+            // beats failing a copy over a transient lock
+            let mut opened = false;
+            for _ in 0..5 {
+                if OpenClipboard(0) != 0 {
+                    opened = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            if !opened {
+                return false;
+            }
+            let ok = (|| {
+                if EmptyClipboard() == 0 {
+                    return false;
+                }
+                let handle = GlobalAlloc(GMEM_MOVEABLE, bytes);
+                if handle == 0 {
+                    return false;
+                }
+                let ptr = GlobalLock(handle);
+                if ptr.is_null() {
+                    GlobalFree(handle);
+                    return false;
+                }
+                std::ptr::copy_nonoverlapping(units.as_ptr(), ptr, units.len());
+                GlobalUnlock(handle);
+                // success transfers ownership: the clipboard frees the block
+                SetClipboardData(CF_UNICODETEXT, handle) != 0
+            })();
+            CloseClipboard();
+            ok
+        }
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -122,5 +164,19 @@ pub fn read_clipboard() -> Option<String> {
     #[cfg(not(target_os = "windows"))]
     {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clipboard_write_and_read_round_trip_unicode() {
+        // the write path is FFI now (ADR-0025's second half): CJK survives
+        let sample = "中文标题\n\n- item **bold**\nquire://page/7";
+        assert!(copy_to_clipboard(sample), "the FFI write must succeed");
+        let read = read_clipboard().expect("the FFI read must succeed");
+        assert_eq!(read, sample, "the UTF-16 round trip preserves the text");
     }
 }
