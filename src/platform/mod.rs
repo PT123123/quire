@@ -33,6 +33,24 @@ pub fn copy_to_clipboard(text: &str) -> bool {
     }
 }
 
+/// Open a folder in the system file manager (Windows: `explorer.exe <dir>`)
+/// — the settings storage row's "Open folder" affordance. Only the launch
+/// is checked; explorer returns odd exit codes by design.
+pub fn open_folder(path: &str) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(path)
+            .spawn()
+            .is_ok()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = path;
+        false
+    }
+}
+
 /// Read the system clipboard as text (the rich-paste path, SPEC §二十七).
 /// Direct Win32 FFI: a `Get-Clipboard` subprocess was measured at 7-10 s on
 /// the dev desktop (PowerShell startup under AV), which no paste can wait

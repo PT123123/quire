@@ -191,6 +191,51 @@ export component SettingsDialog inherits PopupWindow {
             Rectangle { height: 1px; background: Colors.border; }
 
             Text {
+                text: "STORAGE";
+                font-size: Typography.size-caption;
+                font-weight: Typography.weight-semibold;
+                color: Colors.text-muted;
+            }
+            HorizontalLayout {
+                spacing: Theme.spacing-sm;
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    spacing: 2px;
+                    Text {
+                        text: "Data folder";
+                        font-family: Typography.ui-font;
+                        font-size: Typography.size-ui;
+                        color: Colors.text-secondary;
+                    }
+                    Text {
+                        text: UIState.storage-available ? UIState.data-dir
+                            : "Running in memory — no database attached";
+                        font-family: Typography.mono-font;
+                        font-size: Typography.size-caption;
+                        color: UIState.storage-available ? Colors.text-primary : Colors.text-muted;
+                        wrap: no-wrap;
+                        overflow: elide;
+                    }
+                }
+                Button {
+                    text: "Folder";
+                    visible: UIState.storage-available;
+                    clicked => {
+                        UIState.open-data-folder();
+                    }
+                }
+                Button {
+                    text: "Back up";
+                    visible: UIState.storage-available;
+                    clicked => {
+                        UIState.backup-now();
+                    }
+                }
+            }
+
+            Rectangle { height: 1px; background: Colors.border; }
+
+            Text {
                 text: "SHORTCUTS";
                 font-size: Typography.size-caption;
                 font-weight: Typography.weight-semibold;

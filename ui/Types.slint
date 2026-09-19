@@ -216,6 +216,11 @@ export global UIState {
     // rich paste (SPEC §二十七): true = the clipboard landed as blocks (the
     // key is consumed); false = fall through to the native plain paste
     callback rich-paste(int) -> bool;
+    // storage row in the settings dialog (M8): the database folder + backup
+    in-out property <string> data-dir: "";
+    in-out property <bool> storage-available: false;
+    callback open-data-folder();
+    callback backup-now();
     callback editing-changed(length, length, length);
     callback enter-at-caret(int);
     callback backspace-at-start();

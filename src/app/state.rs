@@ -40,6 +40,9 @@ pub struct AppState {
     pub history: RefCell<History>,
     /// Debounced persistence pipeline (M3). `None` = headless/test mode.
     pub persistence: Option<Arc<PersistenceService>>,
+    /// The database this session runs on (`None` = headless or memory-only).
+    /// The settings dialog's storage row and "Back up now" ride it.
+    pub repo: Option<Arc<crate::storage::SqliteRepository>>,
     /// FTS-backed search (M7). `None` falls back to the in-memory scan.
     pub search_service: Option<Arc<SearchService>>,
     /// In-flight async search with its generation; superseded queries drop
@@ -251,6 +254,7 @@ impl AppState {
             }
         }
 
+        let repo_for_state = repo.clone();
         let search_service = repo.map(crate::services::search_service::SearchService::new_arc);
 
         // fresh database: record the whole session once so a restart
@@ -308,6 +312,7 @@ impl AppState {
             doc: RefCell::new(doc),
             history: RefCell::new(History::default()),
             persistence,
+            repo: repo_for_state,
             search_service,
             pending_search: RefCell::new(None),
             search_generation: Cell::new(0),
@@ -1107,6 +1112,29 @@ impl AppState {
             text: c.text,
         })
         .is_some()
+    }
+
+    /// The directory the database lives in (settings storage row). `None`
+    /// for a memory-only session.
+    pub fn data_dir(&self) -> Option<String> {
+        self.repo.as_ref().and_then(|r| {
+            r.path()
+                .and_then(|p| p.parent())
+                .map(|p| p.display().to_string())
+        })
+    }
+
+    /// Take a snapshot right now (settings "Back up now"). `Ok(message)` is
+    /// user-visible confirmation; a memory-only session is a no-op that
+    /// still reports success (there is nothing on disk to protect).
+    pub fn backup_now(&self) -> Result<String, String> {
+        match self.repo.as_ref().filter(|r| r.path().is_some()) {
+            Some(r) => match r.snapshot() {
+                Ok(()) => Ok("a fresh backup was created".into()),
+                Err(e) => Err(e.to_string()),
+            },
+            None => Ok("running in memory — nothing to back up".into()),
+        }
     }
 
     /// Plan+apply several commands as ONE undo step, refresh the rows.

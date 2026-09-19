@@ -105,6 +105,10 @@ pub fn bind(ui: &AppWindow, state: &Rc<AppState>) {
     g.set_dark(state.dark_setting());
     g.set_lan_sharing(state.setting_flag("lan.share"));
     g.set_sidebar_open(!state.setting_flag("sidebar.closed"));
+    // settings storage row (M8): the database folder, hidden for a
+    // memory-only session
+    g.set_data_dir(state.data_dir().unwrap_or_default().into());
+    g.set_storage_available(state.data_dir().is_some());
     state.update_page_stats();
     if let Some(notice) = state.take_db_notice() {
         g.set_db_notice(notice.into());
@@ -721,6 +725,28 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         let s = state.clone();
         ui.global::<UIState>().on_save_requested(move || {
             s.persistence_force_flush();
+        });
+    }
+
+    // settings storage row (M8): open the database folder / snapshot now
+    {
+        let s = state.clone();
+        ui.global::<UIState>().on_open_data_folder(move || {
+            if let Some(dir) = s.data_dir() {
+                crate::platform::open_folder(&dir);
+            }
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_backup_now(move || {
+            let g = gw.upgrade().unwrap();
+            let text = match s.backup_now() {
+                Ok(msg) => msg,
+                Err(e) => format!("Backup failed: {e}"),
+            };
+            g.set_db_notice(text.into());
         });
     }
 
