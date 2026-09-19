@@ -601,6 +601,32 @@ impl AppState {
         }]);
     }
 
+    /// Persisted window size (physical px), if a previous session saved one.
+    pub fn window_size_setting(&self) -> Option<(f64, f64)> {
+        let map = self.settings.borrow();
+        let (Some(w), Some(h)) = (map.get("window.w"), map.get("window.h")) else {
+            return None;
+        };
+        match (w.parse::<f64>(), h.parse::<f64>()) {
+            (Ok(w), Ok(h)) if w >= 400.0 && h >= 300.0 => Some((w, h)),
+            _ => None,
+        }
+    }
+
+    /// Record the window size as settings changes (flushed with the batch).
+    pub fn record_window_size(&self, w: f64, h: f64) {
+        self.settings
+            .borrow_mut()
+            .insert("window.w".into(), format!("{w}"));
+        self.settings
+            .borrow_mut()
+            .insert("window.h".into(), format!("{h}"));
+        self.record(vec![
+            Change::SettingSet { key: "window.w".into(), value: format!("{w}") },
+            Change::SettingSet { key: "window.h".into(), value: format!("{h}") },
+        ]);
+    }
+
     pub fn dark_setting(&self) -> bool {
         self.settings
             .borrow()

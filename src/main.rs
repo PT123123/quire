@@ -150,6 +150,12 @@ fn real_main() -> Result<(), String> {
             from.display()
         ));
     }
+    // restore the remembered window size after the state is built (slint
+    // still counts it as pre-first-paint)
+    if let Some((w, h)) = state.window_size_setting() {
+        ui.window()
+            .set_size(slint::PhysicalSize::new(w as u32, h as u32));
+    }
     controller::bind(&ui, &state);
     controller::wire(&ui, &state);
 
@@ -263,7 +269,9 @@ fn real_main() -> Result<(), String> {
     }
 
     ui.run().map_err(|e| e.to_string())?;
-    // final flush on window close (SPEC §十九: shutdown flushes dirty state)
+    // remember the window size, then flush dirty state on close (SPEC §十九)
+    let size = ui.window().size();
+    state.record_window_size(size.width as f64, size.height as f64);
     state.persistence_force_flush();
     Ok(())
 }
