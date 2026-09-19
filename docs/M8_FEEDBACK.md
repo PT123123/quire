@@ -200,3 +200,28 @@ remove the choice instead of repeating it.
     gap measured from the previous snapshot, not a wall-clock cadence. If an exact
     cadence is ever wanted the change is `TimerMode::Repeated` in
     `install_flush_hook`, app-side, with no storage or service edit.
+13. **D12 had to resolve the path from inside `storage`, so three app-side lines
+    are now stale.** `src/main.rs` is off-limits this round, so the placement
+    rules (`%APPDATA%\Quire`, `--db`, `--portable`) live in
+    `storage::data_location` and `SqliteRepository::open_with_report` asks it
+    before opening. What that leaves behind:
+
+    - `main.rs`'s `if let Some(parent) = path.parent() { create_dir_all(parent) }`
+      runs on the *requested* path, so every default run still creates an empty
+      `appdata/` beside the working directory it no longer uses. `effective_path`
+      creates the directory it actually opens, so those three lines can go.
+    - `LaunchArgs` has no `portable` field, so `--portable` is re-read from
+      `std::env::args()` by `data_location::scan`. Adding the field is not enough
+      to remove that: the flag has to reach storage through the path argument,
+      i.e. `main` resolves first —
+      `launch.db.unwrap_or_else(|| data_location::effective_path(&data_location::legacy_db()))`
+      — and `open_with_report` then receives a finished path. Until someone wants
+      that, the re-scan is load-bearing, and it is why an *unknown* flag is
+      harmless today: `parse_launch_args` ignores `--portable` and storage acts
+      on it.
+    - Nothing tells the user the library moved. `eprintln!` is invisible in a
+      `windows_subsystem = "windows"` build, so the notice needs the same route
+      the recovery one already takes: an `OpenReport::migrated_from:
+      Option<PathBuf>` beside `recovered_from`, and one more `set_db_notice` call
+      next to `main.rs`'s existing `if let Some(from) = &recovered`. ADR-0020
+      lists it as the unfinished part of the move.

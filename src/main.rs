@@ -111,15 +111,19 @@ fn real_main() -> Result<(), String> {
     // means the session runs in memory only — never fall back to writing
     // over a database we could not read.
     let mut recovered: Option<std::path::PathBuf> = None;
+    let mut library_moved = false;
     let repo: Option<std::sync::Arc<quire::storage::SqliteRepository>> = {
-        let path = launch
+        // D12: storage resolves the real location itself (default → per-user
+        // library, legacy appdata carried over on first run) and creates the
+        // directories it needs. Resolving here a second time is idempotent
+        // and only tells us whether the library moved (for the notice bar).
+        let requested = launch
             .db
             .clone()
             .unwrap_or_else(|| std::path::PathBuf::from("appdata/quire.db"));
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        match quire::storage::SqliteRepository::open_with_report(&path) {
+        let effective = quire::storage::data_location::effective_path(&requested);
+        library_moved = effective != requested;
+        match quire::storage::SqliteRepository::open_with_report(&requested) {
             Ok((r, report)) => {
                 if let Some(from) = &report.recovered_from {
                     recovered = Some(from.clone());
@@ -144,11 +148,19 @@ fn real_main() -> Result<(), String> {
     // and the frameless window shows no title bar — nothing user-visible is
     // missing. Revisit on Slint upgrade.
     let state = AppState::new(&args, repo);
+    // startup notices (restore-from-backup and/or the D12 library move)
+    let mut notices: Vec<String> = Vec::new();
     if let Some(from) = &recovered {
-        state.set_db_notice(format!(
-            "The database was damaged — this session was restored from a backup ({}). The damaged file was kept beside it.",
+        notices.push(format!(
+            "the database was damaged — restored from a backup ({})",
             from.display()
         ));
+    }
+    if library_moved {
+        notices.push("the library moved to your user profile".into());
+    }
+    if !notices.is_empty() {
+        state.set_db_notice(format!("{}.", notices.join("; ")));
     }
     // restore the remembered window size after the state is built (slint
     // still counts it as pre-first-paint)

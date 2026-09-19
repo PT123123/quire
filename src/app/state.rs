@@ -206,9 +206,14 @@ impl AppState {
             let _ = title;
         }
 
-        let persistence = repo
-            .clone()
-            .map(|r| Arc::new(PersistenceService::with_default_clock(r)));
+        // with_database_snapshots powers the periodic snapshots (M8, D10):
+        // they ride the flush tick with a 10-minute minimum interval
+        let persistence = repo.clone().map(|r| {
+            Arc::new(
+                PersistenceService::with_default_clock(r.clone())
+                    .with_database_snapshots(&r),
+            )
+        });
         let search_service = repo.map(crate::services::search_service::SearchService::new_arc);
 
         // fresh database: record the whole session once so a restart
