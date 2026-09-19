@@ -83,10 +83,12 @@ export component EditorBlock inherits Rectangle {
         animate background { duration: Theme.duration-instant; }
     }
 
-    BlockHandle {
+    handle := BlockHandle {
         x: root.content-x - 48px;
         y: top-margin;
-        visible-flag: ta.has-hover && !editing;
+        // visible while the cursor is on the row OR on the handle itself —
+        // without the second term the handle vanishes as the cursor reaches it
+        visible-flag: (ta.has-hover || handle.hovered) && !editing;
         plus-clicked => {
             UIState.block-plus(block.id);
         }
