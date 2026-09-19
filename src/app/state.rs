@@ -1101,6 +1101,90 @@ impl AppState {
         Some(changes)
     }
 
+    /// Rich paste (SPEC §二十七): land parsed markdown blocks into the
+    /// document. An empty current row (the fresh "+" line, or a brand-new
+    /// paragraph) is converted into the first parsed block in place;
+    /// otherwise every parsed block inserts after it. Blocks go through the
+    /// command system, and marks replay as one `ToggleMark` per span (the
+    /// command plans against the pre-state, so a batch of them would
+    /// overwrite each other) — an N-block paste is therefore several undo
+    /// steps, accepted for v1 and noted in PLAN.
+    pub fn paste_block_structure(
+        &self,
+        id: i32,
+        parsed: &[crate::services::import_service::ParsedBlock],
+    ) -> bool {
+        if parsed.is_empty() {
+            return false;
+        }
+        let page = core_page_id(self.open_page.get());
+        let block_id = BlockId(id as u64);
+        let current_empty = {
+            let doc = self.doc.borrow();
+            match doc.page_blocks(page).iter().find(|b| b.id == block_id) {
+                Some(b) => b.kind == BlockKind::Paragraph && b.text.is_empty(),
+                None => return false,
+            }
+        };
+        let mut anchor = id;
+        for (i, p) in parsed.iter().enumerate() {
+            let target = if i == 0 && current_empty {
+                let _ = self.exec_all_on_open_page(vec![
+                    Command::ReplaceText {
+                        id: block_id,
+                        text: p.text.clone(),
+                    },
+                    Command::SetBlockType {
+                        id: block_id,
+                        kind: p.kind,
+                    },
+                ]);
+                if p.checked {
+                    let _ = self.exec_on_open_page(Command::ToggleTodoChecked {
+                        id: block_id,
+                    });
+                }
+                self.apply_marks(block_id, &p.marks);
+                block_id
+            } else {
+                let Some(changes) = self.exec_on_open_page(Command::InsertBlockAfter {
+                    id: BlockId(anchor as u64),
+                    kind: p.kind,
+                    text: p.text.clone(),
+                }) else {
+                    return false;
+                };
+                let Some(nid) = changes.iter().find_map(|c| match c {
+                    Change::BlockInserted(b) => Some(b.id),
+                    _ => None,
+                }) else {
+                    return false;
+                };
+                if p.checked {
+                    let _ = self.exec_on_open_page(Command::ToggleTodoChecked { id: nid });
+                }
+                self.apply_marks(nid, &p.marks);
+                anchor = nid.as_u64() as i32;
+                nid
+            };
+            let _ = target;
+        }
+        true
+    }
+
+    /// Replay parsed inline-mark spans as sequential ToggleMark commands.
+    fn apply_marks(&self, id: BlockId, marks: &[crate::core::types::Mark]) {
+        for m in marks {
+            let _ = self.exec_on_open_page(Command::ToggleMark {
+                id,
+                start: m.start,
+                end: m.end,
+                kind: m.kind,
+                url: m.url.clone(),
+            });
+        }
+    }
+
     pub fn undo_open_page(&self) -> Option<Vec<Change>> {
         let page = core_page_id(self.open_page.get());
         let applied = crate::core::undo(

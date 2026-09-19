@@ -213,6 +213,9 @@ export global UIState {
     callback palette-move(int);
     callback todo-toggled(int);
     callback block-activate(int);
+    // rich paste (SPEC §二十七): true = the clipboard landed as blocks (the
+    // key is consumed); false = fall through to the native plain paste
+    callback rich-paste(int) -> bool;
     callback editing-changed(length, length, length);
     callback enter-at-caret(int);
     callback backspace-at-start();

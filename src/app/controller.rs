@@ -629,6 +629,38 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         });
     }
 
+    // rich paste (SPEC §二十七): the clipboard's markdown structure lands
+    // as blocks. The clipboard read is a blocking PowerShell subprocess
+    // (~100-300 ms) on the UI thread — accepted for v1, noted in PLAN; a
+    // false return lets the key fall through to the native plain paste.
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_rich_paste(move |id| -> bool {
+            let g = gw.upgrade().unwrap();
+            if id <= 0 {
+                return false;
+            }
+            flush_pending_edit(&g, &s);
+            let Some(text) = crate::platform::read_clipboard() else {
+                return false;
+            };
+            let Some(parsed) =
+                crate::services::import_service::parse_if_block_structure(&text)
+            else {
+                return false;
+            };
+            if s.paste_block_structure(id, &parsed) {
+                // the row's content changed under the input; end editing so
+                // the rendered row (and its marks) take over
+                g.set_editing_id(-1);
+                true
+            } else {
+                false
+            }
+        });
+    }
+
     // persistence: arm the flush timer hook; every recorded batch restarts
     // it, so the write lands once the user has been quiet for 600 ms
     {

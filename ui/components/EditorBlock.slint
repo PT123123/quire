@@ -319,6 +319,14 @@ export component EditorBlock inherits Rectangle {
                 UIState.link-url = "";
                 UIState.link-open = true;
                 accept
+            } else if (event.modifiers.control && event.text == Key.V) {
+                // rich paste first (clipboard markdown → blocks); a false
+                // return falls through to the native plain paste
+                if (UIState.rich-paste(block.id)) {
+                    accept
+                } else {
+                    reject
+                }
             } else if (event.text == Key.Backspace
                 && self.cursor-position-byte-offset == 0
                 && self.anchor-position-byte-offset == 0) {
