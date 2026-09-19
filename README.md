@@ -3,6 +3,15 @@
 A local, GPU-accelerated, Notion-like document workspace.
 Rust + Slint. Single process. No Electron, no WebView, no web stack.
 
+![Quire in light mode](docs/screenshots/light-getting-started.png)
+
+| | |
+|---|---|
+| ![Dark](docs/screenshots/dark.png) | ![Slash menu](docs/screenshots/slash-menu.png) |
+| ![Inline marks](docs/screenshots/inline-marks.png) | ![Find bar](docs/screenshots/find-bar.png) |
+
+More shots in [docs/screenshots](docs/screenshots).
+
 ```
 just build                    # cargo build --release (default FemtoVG renderer)
 just run                      # cargo run (debug)
