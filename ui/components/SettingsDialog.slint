@@ -45,12 +45,13 @@ component ShortcutRow inherits Rectangle {
 
     HorizontalLayout {
         Text {
-            width: 130px;
+            width: 108px;
             text: root.keys;
             font-family: Typography.mono-font;
             font-size: Typography.size-caption;
             color: Colors.text-secondary;
             vertical-alignment: center;
+            overflow: elide;
         }
         Text {
             text: root.label;
@@ -58,6 +59,7 @@ component ShortcutRow inherits Rectangle {
             font-size: Typography.size-ui;
             color: Colors.text-secondary;
             vertical-alignment: center;
+            overflow: elide;
         }
     }
 }
@@ -241,22 +243,18 @@ export component SettingsDialog inherits PopupWindow {
                 font-weight: Typography.weight-semibold;
                 color: Colors.text-muted;
             }
-            HorizontalLayout {
-                spacing: Theme.spacing-lg;
-                VerticalLayout {
-                    spacing: Theme.spacing-xs;
-                    ShortcutRow { keys: "Ctrl+K"; label: "Command palette"; }
-                    ShortcutRow { keys: "Ctrl+P"; label: "Search pages"; }
-                    ShortcutRow { keys: "Ctrl+F"; label: "Find in page"; }
-                    ShortcutRow { keys: "Ctrl+N"; label: "New page"; }
-                }
-                VerticalLayout {
-                    spacing: Theme.spacing-xs;
-                    ShortcutRow { keys: "Ctrl+B / I / E"; label: "Bold / italic / code"; }
-                    ShortcutRow { keys: "Tab / Shift+Tab"; label: "Indent / outdent list"; }
-                    ShortcutRow { keys: "Ctrl+D"; label: "Duplicate block"; }
-                    ShortcutRow { keys: "Ctrl+S"; label: "Save now"; }
-                }
+            VerticalLayout {
+                // single column: the two-column grid's right column used to
+                // escape the card entirely (A4 sweep D2)
+                spacing: Theme.spacing-xs;
+                ShortcutRow { keys: "Ctrl+K"; label: "Command palette"; }
+                ShortcutRow { keys: "Ctrl+P"; label: "Search pages"; }
+                ShortcutRow { keys: "Ctrl+F"; label: "Find in page"; }
+                ShortcutRow { keys: "Ctrl+N"; label: "New page"; }
+                ShortcutRow { keys: "Ctrl+B / I / E"; label: "Bold / italic / code"; }
+                ShortcutRow { keys: "Tab / Shift+Tab"; label: "Indent / outdent"; }
+                ShortcutRow { keys: "Ctrl+D"; label: "Duplicate block"; }
+                ShortcutRow { keys: "Ctrl+S"; label: "Save now"; }
             }
 
             Rectangle { height: 1px; background: Colors.border; }

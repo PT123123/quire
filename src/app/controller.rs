@@ -2025,7 +2025,9 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
         }
         "marks" => {
             // seed inline marks on the first paragraph (visual test only,
-            // applied directly like an editor toggle would)
+            // applied directly like an editor toggle would). Offsets are
+            // derived from the words themselves — the A4 sweep caught the
+            // old hardcoded bytes drifting off the words they demoed.
             let page = core_page_id(state.open_page.get());
             let target = {
                 let d = state.doc.borrow();
@@ -2035,38 +2037,25 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
                     .map(|b| (b.id, b.text.clone()))
             };
             if let Some((id, text)) = target {
-                let end = text.len().min(26);
+                let span = |needle: &str, kind: crate::core::MarkKind| crate::core::Mark {
+                    start: text.find(needle).unwrap_or(0),
+                    end: text
+                        .find(needle)
+                        .map(|s| s + needle.len())
+                        .unwrap_or(0),
+                    kind,
+                    url: if kind == crate::core::MarkKind::Link {
+                        "https://example.com".into()
+                    } else {
+                        String::new()
+                    },
+                };
                 let marks = vec![
-                    crate::core::Mark {
-                        start: 0,
-                        end,
-                        kind: crate::core::MarkKind::Bold,
-                        url: String::new(),
-                    },
-                    crate::core::Mark {
-                        start: 2,
-                        end: 7,
-                        kind: crate::core::MarkKind::Italic,
-                        url: String::new(),
-                    },
-                    crate::core::Mark {
-                        start: 8,
-                        end: 12,
-                        kind: crate::core::MarkKind::Code,
-                        url: String::new(),
-                    },
-                    crate::core::Mark {
-                        start: 45,
-                        end: 55,
-                        kind: crate::core::MarkKind::Strike,
-                        url: String::new(),
-                    },
-                    crate::core::Mark {
-                        start: 60,
-                        end: 72,
-                        kind: crate::core::MarkKind::Link,
-                        url: "https://example.com".into(),
-                    },
+                    span("home", crate::core::MarkKind::Bold),
+                    span("for thinking.", crate::core::MarkKind::Bold),
+                    span("collects notes", crate::core::MarkKind::Strike),
+                    span("Quire itself", crate::core::MarkKind::Code),
+                    span("plans, and references", crate::core::MarkKind::Link),
                 ];
                 state
                     .doc

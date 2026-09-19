@@ -159,8 +159,12 @@ export component EditorBlock inherits Rectangle {
             spacing: 0px;
             for run in block.runs : Rectangle {
                 // natural run size: decorations anchor to the text line
-                // (Slint Text has no font-style — italic via family name)
-                width: run-text.preferred-width;
+                // (Slint Text has no font-style — italic via family name).
+                // min-width (instead of width — Slint rejects both) pins the
+                // layout: a long paragraph's natural run widths overflow the
+                // container, and without the floor the layout compressed the
+                // runs into each other (A4 sweep D1's overprint)
+                min-width: run-text.preferred-width;
                 height: run-text.preferred-height;
                 vertical-stretch: 0;
                 horizontal-stretch: 0;
