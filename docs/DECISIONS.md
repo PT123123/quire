@@ -2,6 +2,49 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0019 · Backup retention is two windows; the periodic snapshot rides the
+flush tick
+Decision: `storage::backup` keeps five generations (ADR-0015 had three) *and*
+drops any generation whose modified time is older than `MAX_AGE` = 7 days. Both
+are applied by one `prune(path, now)` that `snapshot()` calls after a successful
+copy and whose return value is discarded: cleanup is housekeeping, and a locked
+or vanished old file must not turn a good snapshot into a reported failure.
+`prune` scans `KEEP + 2` slots so a family left behind by a larger `KEEP` cannot
+survive unboundedly (`recover` only walks `1..=KEEP`, so anything past it is
+unreadable weight). Mid-session insurance is `PersistenceService`'s: a snapshot
+hook attached with `with_snapshotter(interval_ms, hook)` — or the app's one-liner
+`with_database_snapshots(&repo)` — runs from the flush path that is already
+ticking (`flush_if_due`, `force_flush`), gated on two facts: the period
+(default `DEFAULT_SNAPSHOT_INTERVAL_MS`, ten minutes) elapsed since the last
+snapshot, *and* something was written since then. `SqliteRepository` now records
+the path it opened and exposes `snapshot()`, so the hook is a method call on the
+`Arc` the app already holds; a failure is stored for the UI to take
+(`take_snapshot_error`) and logged, never returned as the flush's error.
+Why: the milestone forbids a second resident thread, and the app already arms a
+timer per recorded burst — a snapshot that rides that tick costs no new
+scheduling and, because of the `pending` gate, no work at all in a session that
+changed nothing. Count-only retention keeps a five-week-old `.bak5` alive for a
+user who opens Quire once a week; age-only keeps five copies of a scene-D
+workspace forever, which is the memory ADR-0015 accepted at three generations
+and should not silently triple. Age comes from the file's own `modified()`
+because the snapshot's whole life is that one write, and `now` is a parameter for
+the same reason the debounce window takes a clock: a test ages a file with
+`File::set_times` rather than waiting a week. Gating on the write rather than
+running on the wall clock is what keeps a 2.3 MB `VACUUM INTO` from repeating
+while the user reads.
+Consequences: ADR-0015's "deliberate omission" (a long session had no insurance
+until the next open) is closed — the loss window is now "since the last tick",
+but only for a session that keeps editing, because the app's timer is
+single-shot: an idle window takes no snapshots, and ten minutes is a minimum gap
+rather than a cadence. Making it exact is an app-side `TimerMode::Repeated`
+(M8_FEEDBACK #12 records the wiring line and this reading). A monthly user can
+end up holding one generation instead of five — age wins, which is the point of
+the second window. `services/persistence.rs` now names `SqliteRepository`
+concretely, the same trade ADR-0014 made for `search`, and `snapshot()` takes the
+connection mutex, so a snapshot serialises against writes by construction rather
+than by a new lock. Retention covers `.bak<N>` only: the `.corrupt` corpse and
+D9's log family still have their own rules.
+
 ## ADR-0018 · Logging is one rotating file plus a panic report the next start
 reads back
 Decision: `services::logging` owns the app's only log file, `quire.log` beside
@@ -141,13 +184,17 @@ integrity check when recovery tries it, and the next open rewrites it) while
 `VACUUM INTO` only reads the main database — measured at 2.3 MB: ≈23–49 ms
 relaxed vs ≈45–256 ms at `FULL`, same process alternating rounds.
 Consequences: startup pays ≈40 ms per 2.3 MB of workspace (PERFORMANCE.md,
-M8 addendum) and the folder holds up to 3 extra copies of the database — both
-are the price of never opening a blank app after one bad write. The loss
+M8 addendum) and the folder holds up to 3 extra copies of the database (5 since
+ADR-0019) — both are the price of never opening a blank app after one bad
+write. The loss
 window is by design: `.bak1` is the database *as of the last successful open*,
 so a corruption that arrives mid-session costs the edits made since startup;
 closing that would mean rewriting the whole file every flush, which §三十三
 rules out in spirit — Track A can call `backup::snapshot` from a "save a copy"
-menu item if a real case appears. Recovery only answers *structural* damage: an
+menu item if a real case appears. (ADR-0019 later closed this from the inside:
+the family is five generations deep and `PersistenceService` snapshots on the
+flush tick, so the window is "since the last snapshot", not "since startup".)
+Recovery only answers *structural* damage: an
 unknown `blocks.kind` still surfaces as `Corrupt` from `load()` (ADR-0013)
 after a clean open, and that path is the app's to handle (M8_FEEDBACK.md). A
 snapshot failure is logged and ignored — a read-only or full directory must

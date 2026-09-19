@@ -168,4 +168,35 @@ remove the choice instead of repeating it.
     entries), so D9–D12 tests are unit tests inside their modules — the same place
     `services::persistence` and `services::settings_store` keep theirs. Adding a
     `logging_test` / `data_location_test` target is two lines in `[[test]]` when
-    someone may edit `Cargo.toml`.
+    someone may edit `Cargo.toml`. D10 worked around it by extending the two
+    already-registered suites (`backup`, `persistence`); a module with no suite of
+    its own still has nowhere to go.
+12. **The periodic snapshot needs one app-side line to be live.** The entry
+    point is opt-in (`PersistenceService::with_snapshotter`, plus the
+    `with_database_snapshots(&repo)` shortcut), and `app/state.rs` builds the
+    service with `with_default_clock(r)` — which stays snapshot-free so a test
+    double behaves exactly as before. The wiring is inside that same expression:
+
+    ```rust
+    let persistence = repo.clone().map(|r| {
+        Arc::new(
+            PersistenceService::with_default_clock(r.clone())
+                .with_database_snapshots(&r),
+        )
+    });
+    ```
+
+    `with_database_snapshots` takes `&Arc<SqliteRepository>` because `Repository`
+    has no snapshot method — #3's consequence, and the reason the concrete `Arc`
+    has to be in hand at this point (it already is: `search_service` one line
+    below takes it).
+
+    Everything else is already reachable from that line: the app's flush timer is
+    a `SingleShot` re-armed per recorded burst (`controller.rs`), so
+    `persistence_force_flush` runs the snapshot check on a tick it already makes.
+    Two readings of "every ten minutes" follow from that and are worth confirming
+    before wiring: an idle session takes no snapshot (deliberate — nothing new to
+    protect, and no resident thread this round), and ten minutes is the *minimum*
+    gap measured from the previous snapshot, not a wall-clock cadence. If an exact
+    cadence is ever wanted the change is `TimerMode::Repeated` in
+    `install_flush_hook`, app-side, with no storage or service edit.

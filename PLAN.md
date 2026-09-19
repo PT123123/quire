@@ -232,3 +232,39 @@ M7 performance matrix, D12 the data-location move.
   `appdata/quire.log` and exits 0.
 - Known limit (ADR-0018): a kill or a native crash leaves no report, so
   `last_session_aborted` means "panicked", not "ended badly".
+
+### D10 · backup retention + periodic snapshot ✅
+- `storage/backup.rs`: `KEEP` 3 → 5 and a second window, `MAX_AGE` = 7 days.
+  New `prune(path, now)` applies both (plus two slots past `KEEP`, so a family
+  left by a larger setting cannot linger) and `snapshot()` runs it after a
+  successful copy, ignoring its error — cleanup never turns a good snapshot into
+  a reported failure. `recover` now walks five generations.
+- `services/persistence.rs`: `with_snapshotter(interval_ms, hook)` and the app's
+  shortcut `with_database_snapshots(&repo)`, default
+  `DEFAULT_SNAPSHOT_INTERVAL_MS` = 10 min. The check runs at the end of
+  `flush_if_due` / `force_flush`, so no thread and no second timer; it fires only
+  when the period elapsed *and* something was written since the last snapshot.
+  A failing snapshot goes to `take_snapshot_error()` + `logging::warn`, never into
+  the flush's `Result`, and the period restarts either way (a dead disk is not
+  retried per tick).
+- `storage/repository.rs`: `SqliteRepository` remembers the path it opened
+  (`path()`) and gained `snapshot()`, which takes the same connection mutex every
+  write takes.
+- Tests: 6 new in `services::persistence` (fake clock — period *and* write gate,
+  period restarts from the snapshot not the write, `force_flush` carries it, an
+  idle session takes none, a failing hook leaves the data write intact, no hook =
+  old behavior); 3 new + 1 generalised in `tests/integration/backup_test.rs`
+  (rotation to five generations, age window via `File::set_times`, oversized
+  family, retention from inside a real open); 1 new in `persistence_test.rs`
+  against a real SQLite file, asserting `.bak1` holds the mid-session edit and
+  the startup copy moved to `.bak2`.
+- Landed as two commits, because the parallel track's `git add` swept
+  `src/storage/backup.rs` into `67b23f1` while D10 was unfinished; the retention
+  half is there and the snapshot half is here.
+- Wiring owed (M8_FEEDBACK #12): one line in `app/state.rs` where
+  `PersistenceService::with_default_clock` is built. Until then the periodic
+  snapshot is tested but not armed, exactly like the startup one was before.
+- Known reading (ADR-0019): ten minutes is a *minimum* gap on a timer the app
+  re-arms per burst, so an idle window takes no snapshot — deliberate, since
+  there is nothing new to protect.
+
