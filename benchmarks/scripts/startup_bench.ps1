@@ -31,6 +31,7 @@ if (Test-Path $outFile) { Remove-Item $outFile }
 
 $jsonExe = ($Exe -replace '\\', '\\') -replace '"', '\"'
 $rows = @()
+$phaseRuns = @()
 $renderer = ""
 $method = ""
 for ($i = 1; $i -le $Runs; $i++) {
@@ -58,7 +59,10 @@ for ($i = 1; $i -le $Runs; $i++) {
     # catches a hung harness run; it is never a measurement ceiling.
     $line = $null
     while (-not $line -and $sw.Elapsed.TotalSeconds -lt 15) {
-        $line = (Get-Content $errFile | Where-Object { $_ -like '{"event":"first_paint"*' } | Select-Object -Last 1)
+        # A partial read is possible: the process appends the line while we
+        # poll, and the phases array is the tail of it. Wait for the brace.
+        $cand = (Get-Content $errFile | Where-Object { $_ -like '{"event":"first_paint"*' } | Select-Object -Last 1)
+        if ($cand -and $cand.EndsWith("}")) { $line = $cand }
         if (-not $line) { Start-Sleep -Milliseconds 20 }
     }
     $stderrPaintMs = [math]::Round($sw.Elapsed.TotalMilliseconds)
@@ -76,12 +80,28 @@ for ($i = 1; $i -le $Runs; $i++) {
     $o = $line | ConvertFrom-Json
     $renderer = $o.renderer
     $method = $o.method
+    # --measure-startup also stamps each step of real_main; keep the raw array
+    # for the run row and a name->ms map for the cross-run medians. The
+    # residual (first paint minus the last stamp) is the part inside ui.run():
+    # event loop up, window show, GL context + shader build, first frame.
+    $phasesJson = ""
+    if ($line -match '"phases":(\[.*\])') { $phasesJson = $Matches[1] }
+    $row = @{}
+    foreach ($ph in @($o.phases)) {
+        if ($ph -and $ph.phase) {
+            $row[[string]$ph.phase] = @{ ms = [double]$ph.ms; at = [double]$ph.at_ms }
+        }
+    }
+    $phaseRuns += ,$row
+    $atLoop = if ($row.ContainsKey("pre_event_loop")) { $row["pre_event_loop"].at } else { 0 }
     $rows += [pscustomobject]@{
         paint  = [double]$o.first_paint_ms
         window = $windowUpMs
         stderr = $stderrPaintMs
+        loop   = [double]$o.first_paint_ms - $atLoop
     }
-    "{`"label`":`"$Label`",`"run`":$i,`"exe`":`"$jsonExe`",`"blocks`":$Blocks,`"renderer`":`"$renderer`",`"method`":`"$method`",`"first_paint_ms`":$($o.first_paint_ms),`"window_up_ms`":$windowUpMs,`"stderr_paint_ms`":$stderrPaintMs,`"exit_code`":$($p.ExitCode)}" | Add-Content $outFile
+    $phaseFrag = if ($phasesJson) { ",`"phases_raw`":$phasesJson" } else { "" }
+    "{`"label`":`"$Label`",`"run`":$i,`"exe`":`"$jsonExe`",`"blocks`":$Blocks,`"renderer`":`"$renderer`",`"method`":`"$method`",`"first_paint_ms`":$($o.first_paint_ms),`"window_up_ms`":$windowUpMs,`"stderr_paint_ms`":$stderrPaintMs,`"exit_code`":$($p.ExitCode)$phaseFrag}" | Add-Content $outFile
 }
 
 if ($rows.Count -eq 0) {
@@ -97,7 +117,18 @@ function Get-Stat([array]$values) {
     }
 }
 $pS = Get-Stat @($rows.paint); $wS = Get-Stat @($rows.window); $eS = Get-Stat @($rows.stderr)
-$summary = "{`"label`":`"$Label`",`"exe`":`"$jsonExe`",`"runs`":$($rows.Count),`"blocks`":$Blocks,`"renderer`":`"$renderer`",`"method`":`"$method`",`"first_paint_ms_min`":$($pS.min),`"first_paint_ms_median`":$($pS.median),`"first_paint_ms_max`":$($pS.max),`"window_up_ms_min`":$($wS.min),`"window_up_ms_median`":$($wS.median),`"window_up_ms_max`":$($wS.max),`"stderr_paint_ms_min`":$($eS.min),`"stderr_paint_ms_median`":$($eS.median),`"stderr_paint_ms_max`":$($eS.max)}"
+$lS = Get-Stat @($rows.loop)
+# one median per stamped phase, in stamp order, plus the run()-internal residual
+$phaseNames = @($phaseRuns | ForEach-Object { $_.Keys } | Select-Object -Unique)
+$order = @("args_parsed", "logging_init", "data_location", "repo_open", "appwindow_new",
+    "state_new", "bind_wire", "import_open", "lan_setup", "pre_event_loop")
+$ordered = @($order | Where-Object { $phaseNames -contains $_ }) + @($phaseNames | Where-Object { $order -notcontains $_ })
+$phaseBits = foreach ($name in $ordered) {
+    $vals = @($phaseRuns | ForEach-Object { if ($_.ContainsKey($name)) { $_[$name].ms } })
+    if ($vals.Count) { "`"$name`":$([math]::Round((Get-Stat $vals).median))" }
+}
+$phaseBits = $phaseBits -join ","
+$summary = "{`"label`":`"$Label`",`"exe`":`"$jsonExe`",`"runs`":$($rows.Count),`"blocks`":$Blocks,`"renderer`":`"$renderer`",`"method`":`"$method`",`"first_paint_ms_min`":$($pS.min),`"first_paint_ms_median`":$($pS.median),`"first_paint_ms_max`":$($pS.max),`"window_up_ms_min`":$($wS.min),`"window_up_ms_median`":$($wS.median),`"window_up_ms_max`":$($wS.max),`"stderr_paint_ms_min`":$($eS.min),`"stderr_paint_ms_median`":$($eS.median),`"stderr_paint_ms_max`":$($eS.max),`"in_run_loop_ms_median`":$($lS.median),`"phase_medians_ms`":{$phaseBits}}"
 $summary | Add-Content $outFile
 Write-Host $summary
 Write-Host "raw runs: $outFile"

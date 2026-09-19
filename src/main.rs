@@ -170,6 +170,50 @@ fn renderer_name() -> &'static str {
     return "unknown";
 }
 
+/// A2 follow-up · phase stamps (--measure-startup only).
+///
+/// `first_paint_ms` says how long the start took, not where. This records the
+/// wall time of each step of `real_main` so the window-up → first-paint gap
+/// gets decomposed instead of guessed at. One `Instant::now()` per mark, and
+/// normal runs pass `None` and never build it.
+#[derive(Clone)]
+struct PhaseLog {
+    start: std::time::Instant,
+    last: std::rc::Rc<std::cell::RefCell<std::time::Instant>>,
+    rows: std::rc::Rc<std::cell::RefCell<Vec<(&'static str, f64, f64)>>>,
+}
+
+impl PhaseLog {
+    fn new(start: std::time::Instant) -> Self {
+        Self {
+            start,
+            last: std::rc::Rc::new(std::cell::RefCell::new(start)),
+            rows: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+        }
+    }
+
+    fn mark(&self, name: &'static str) {
+        let now = std::time::Instant::now();
+        let delta = {
+            let mut last = self.last.borrow_mut();
+            let d = now.duration_since(*last).as_secs_f64() * 1000.0;
+            *last = now;
+            d
+        };
+        let at = now.duration_since(self.start).as_secs_f64() * 1000.0;
+        self.rows.borrow_mut().push((name, delta, at));
+    }
+
+    fn json(&self) -> String {
+        let rows = self.rows.borrow();
+        let parts: Vec<String> = rows
+            .iter()
+            .map(|(n, d, t)| format!("{{\"phase\":\"{n}\",\"ms\":{d:.1},\"at_ms\":{t:.1}}}"))
+            .collect();
+        format!("[{}]", parts.join(","))
+    }
+}
+
 /// A2 · first-paint measurement (--measure-startup).
 ///
 /// Slint 1.18 exposes `Window::set_rendering_notifier`; femtovg and skia
@@ -184,16 +228,31 @@ fn renderer_name() -> &'static str {
 ///
 /// The window is still hidden at install time, so no frame can be missed.
 /// Normal runs never call this — no timer, no thread, no extra frame.
-fn install_startup_measurement(ui: &AppWindow, start: std::time::Instant) {
+fn install_startup_measurement(
+    ui: &AppWindow,
+    start: std::time::Instant,
+    phases: Option<PhaseLog>,
+) {
+    // The stamps after this point are still written by `real_main`, which keeps
+    // running until `ui.run()` — PhaseLog is Rc inside, so the read here sees
+    // every mark made before the first frame.
+    let paint_json = |phases: &Option<PhaseLog>| {
+        phases
+            .as_ref()
+            .map(|p| format!(",\"phases\":{}", p.json()))
+            .unwrap_or_default()
+    };
     let reported = std::rc::Rc::new(std::cell::Cell::new(false));
     let reported2 = reported.clone();
+    let phases2 = phases.clone();
     let result = ui.window().set_rendering_notifier(move |s, _api| {
         if matches!(s, slint::RenderingState::AfterRendering) && !reported2.get() {
             reported2.set(true);
             eprintln!(
-                "{{\"event\":\"first_paint\",\"renderer\":\"{}\",\"first_paint_ms\":{:.1},\"method\":\"AfterRendering\"}}",
+                "{{\"event\":\"first_paint\",\"renderer\":\"{}\",\"first_paint_ms\":{:.1},\"method\":\"AfterRendering\"{}}}",
                 renderer_name(),
-                start.elapsed().as_secs_f64() * 1000.0
+                start.elapsed().as_secs_f64() * 1000.0,
+                paint_json(&phases2)
             );
         }
     });
@@ -202,6 +261,7 @@ fn install_startup_measurement(ui: &AppWindow, start: std::time::Instant) {
         // No notifier on this backend: the 1 ms single-shot runs as the first
         // event-loop callback, before any drawn frame exists.
         let t = Timer::default();
+        let phases3 = phases.clone();
         t.start(
             slint::TimerMode::SingleShot,
             std::time::Duration::from_millis(1),
@@ -209,9 +269,10 @@ fn install_startup_measurement(ui: &AppWindow, start: std::time::Instant) {
                 if !reported.get() {
                     reported.set(true);
                     eprintln!(
-                        "{{\"event\":\"first_paint\",\"renderer\":\"{}\",\"first_paint_ms\":{:.1},\"method\":\"event_loop_proxy\",\"confidence\":\"low\"}}",
+                        "{{\"event\":\"first_paint\",\"renderer\":\"{}\",\"first_paint_ms\":{:.1},\"method\":\"event_loop_proxy\",\"confidence\":\"low\"{}}}",
                         renderer_name(),
-                        start.elapsed().as_secs_f64() * 1000.0
+                        start.elapsed().as_secs_f64() * 1000.0,
+                        paint_json(&phases3)
                     );
                 }
             },
@@ -226,11 +287,24 @@ fn real_main(start: std::time::Instant) -> Result<(), String> {
     // hook as its first act, and needs the flags to know which directory the
     // log belongs in (M8_FEEDBACK #13).
     let launch = parse_launch_args();
+    let phases = launch
+        .measure_startup
+        .then(|| PhaseLog::new(start));
+    let mark = {
+        let phases = phases.clone();
+        move |name: &'static str| {
+            if let Some(p) = &phases {
+                p.mark(name);
+            }
+        }
+    };
+    mark("args_parsed");
     let location = quire::storage::data_location::LaunchOptions {
         db_override: launch.db.clone(),
         portable: launch.portable,
     };
     quire::services::logging::init(&location); // the rotating log + panic hook (SPEC §二十五, M8 D9)
+    mark("logging_init");
 
     // Persistence (M3): open (or create) the database. A failure to open
     // means the session runs in memory only — never fall back to writing
@@ -252,6 +326,7 @@ fn real_main(start: std::time::Instant) -> Result<(), String> {
             &requested,
             quire::storage::data_location::roaming_root().as_deref(),
         );
+        mark("data_location");
         match quire::storage::SqliteRepository::open_at(&moved.path, moved.from) {
             Ok((r, report)) => {
                 if let Some(from) = &report.recovered_from {
@@ -267,14 +342,16 @@ fn real_main(start: std::time::Instant) -> Result<(), String> {
             }
         }
     };
+    mark("repo_open");
     let args = HandleArgs {
         blocks: launch.blocks,
         auto_exit_secs: launch.auto_exit_secs,
         bench_pages: launch.bench_pages,
     };
     let ui = AppWindow::new().map_err(|e| e.to_string())?;
+    mark("appwindow_new");
     if launch.measure_startup {
-        install_startup_measurement(&ui, start);
+        install_startup_measurement(&ui, start, phases);
     }
     // Window::set_icon does not exist in Slint 1.18 (M8_FEEDBACK #4/#5 note):
     // the taskbar/explorer icon comes from the exe's embedded resource (D8),
@@ -282,6 +359,7 @@ fn real_main(start: std::time::Instant) -> Result<(), String> {
     // missing. Revisit on Slint upgrade.
     let repo_for_lan = repo.clone();
     let state = AppState::new(&args, repo);
+    mark("state_new");
     // startup notices (restore-from-backup, the D12 library move, and the
     // previous session's abort record — `db_notice` is a queue, #9)
     let mut notices: Vec<String> = Vec::new();
@@ -305,12 +383,14 @@ fn real_main(start: std::time::Instant) -> Result<(), String> {
     }
     controller::bind(&ui, &state);
     controller::wire(&ui, &state);
+    mark("bind_wire");
 
     // .md file association: double-clicking a markdown file lands here
     if let Some(path) = launch.open.clone() {
         let g = ui.global::<quire::UIState>();
         controller::import_from_path(&g, &state, &path);
     }
+    mark("import_open");
 
     // LAN share: serve the committed workspace read-only on its own thread.
     // Enabled via --share or the persisted settings toggle (lan.share).
@@ -346,6 +426,7 @@ fn real_main(start: std::time::Instant) -> Result<(), String> {
             Err(e) => eprintln!("quire: pull failed: {e}"),
         }
     }
+    mark("lan_setup");
 
     if launch.dump_state {
         let pages = state.workspace.borrow().page_count();
@@ -450,6 +531,7 @@ fn real_main(start: std::time::Instant) -> Result<(), String> {
         leak_timer(t);
     }
 
+    mark("pre_event_loop");
     ui.run().map_err(|e| e.to_string())?;
     // remember the window size, then flush dirty state on close (SPEC §十九)
     let size = ui.window().size();

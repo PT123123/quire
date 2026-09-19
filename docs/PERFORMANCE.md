@@ -386,3 +386,66 @@ first-frame setup, so a follow-up worth its cost would stamp the phases inside
 comparison is deliberately not claimed here: it needs its own release build,
 and A3's lesson about measuring while a parallel track compiles applies. Left
 as a follow-up (`--features skia` + the same script).
+
+## M8 · where the pre-paint time actually goes (A2 follow-up, 2026-09-20)
+
+The follow-up in conclusion (2) above, landed. `--measure-startup` now also
+stamps each step of `real_main` (`src/main.rs`, `PhaseLog`) and appends them to
+the same JSON line as `"phases":[{"phase":…,"ms":…,"at_ms":…}]` — `ms` is the
+step's own cost, `at_ms` its end relative to the start of `main()`. One
+`Instant::now()` per stamp, and only when the flag is set. `startup_bench.ps1`
+carries the array into each run row (`phases_raw`) and reports per-phase
+medians plus `in_run_loop_ms_median` — first paint minus the last stamp, i.e.
+everything that happens *after* our own setup returns.
+
+**Numbers** (Release, femtovg, 100% scale, warm, 7 runs each, medians; the two
+scenes are the same A/D pair as the section above):
+
+| phase | A empty shell | D 10 000 blocks |
+|-------|--------------:|----------------:|
+| `logging_init` | 2 ms | 2 ms |
+| `data_location` (resolve + one-off move) | 0 ms | 0 ms |
+| **`repo_open`** (SQLite open + integrity + rotate) | **57 ms** | **56 ms** |
+| `appwindow_new` (Slint window build) | 20 ms | 21 ms |
+| **`state_new`** (tree + document rebuild) | 5 ms | **148 ms** |
+| `bind_wire` / `import_open` / `lan_setup` / `pre_event_loop` | 0 ms | 1 ms |
+| — subtotal inside `real_main` | ≈84 ms | ≈233 ms |
+| **inside `ui.run()` up to the first frame** | **≈419 ms** | **≈413 ms** |
+| first paint | **501 ms** | **651 ms** |
+| window-up (old proxy) | 155 ms | 142 ms |
+
+**Reading.** The gap is not one mystery, it is two, and they are nothing alike:
+
+1. **A fixed ≈410–420 ms floor inside `ui.run()` before the first frame**, and
+   it is *flat*: 419 ms for an empty shell, 413 ms for 10 000 blocks (per-run
+   range 391–447 ms across both scenes). Nothing we do in `real_main` moves it.
+   That window is Slint starting its event loop, showing the window, and the
+   renderer's first-frame setup — GL context, glyph atlas, shader/program
+   build. It is 84 % of scene A's startup and 63 % of scene D's, so it is the
+   only large, document-independent lever left in the start path.
+2. **A size-dependent term that is exactly one phase**: `state_new`, 5 ms →
+   148 ms. That is the workspace-tree and document rebuild, and it is the whole
+   difference between the two scenes (233 − 84 = 149 ms). It confirms the
+   virtualization story from above — 10 000 blocks cost model rebuild time, not
+   frame time.
+
+**Corrections to the section above.** (a) `repo_open` measured 51–64 ms in
+every run of both scenes (one 126 ms outlier, run 7 of D, whose paint was still
+in band), so the ADR-0015 probe's 46–116 ms band holds at its *low* end and the
+storage layer is confirmed to be ~11 % of scene A and ~9 % of scene D — not
+"≤25 %". (b) The earlier medians (549 / 693 ms) were 5 + 4 runs; this batch of
+7 runs each is tighter (A 480–534, D 602–727) and lower. Treat the two batches
+as the same measurement at different precision, not a regression or an
+optimisation. (c) The "invisible gap" of the previous section ≈ the
+`in_run_loop` column plus `state_new`; the guess that it was "rebuild plus
+first-frame setup" was right, and the split is now measured: setup 419 ms,
+rebuild 148 ms, storage 57 ms.
+
+**Conclusions.** (1) Startup work now has an owner per phase; anything that
+promises "faster startup" should say which column it moves. (2) The only lever
+big enough to matter for the empty-shell case is the ~410 ms renderer/window
+floor, which is upstream — the practical mitigations are showing *something*
+sooner (paint the frame before the GL/shader warm-up completes, or a splash
+that is honest about it), not shaving our own ~84 ms. (3) `state_new` is the
+term that scales, so it is the one to watch if the model rebuild grows; a
+5 000-block point would tell us whether 148 ms is linear or a cliff.
