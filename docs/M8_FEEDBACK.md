@@ -127,6 +127,15 @@ remove the choice instead of repeating it.
 
 ## Track A resolutions (post-merge)
 
+- **#2 resolution (2026-09-20, round 10):** `Document` was already the single
+  allocator (`alloc_block_id`) and paste/import/split route through it — but
+  `duplicate_page` minted its copy range from `next_id_value()` *without
+  reserving it*, so the next allocation collided with the copy's first id (a
+  storage primary-key violation; and in memory `Document::block` searches
+  globally, so a stale id could resolve to another page's block). The fix is
+  `Document::reserve_block_ids(n) -> u64` — the bulk-copy counterpart of
+  `alloc_block_id` — and `duplicate_page` reserves up front. Regression test:
+  `duplicate_reserves_its_id_range`.
 - **#4 addendum (Window::icon):** `Window::set_icon` does not exist in
   Slint 1.18 — implemented in a later release. The user-visible icon is
   already covered by the exe's embedded resource (D8): taskbar, explorer,

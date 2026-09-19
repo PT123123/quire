@@ -1299,13 +1299,15 @@ impl AppState {
         let new_id = self.workspace.borrow_mut().duplicate(id);
         if let Some(nid) = new_id {
             // copy the source page's blocks with fresh ids, remapping
-            // parent pointers through the same map (nested lists survive)
+            // parent pointers through the same map (nested lists survive).
+            // The id range is RESERVED on the document — ids minted without
+            // reserving collided with the next allocation (M8_FEEDBACK #2).
             let src = core_page_id(id);
             let dst = core_page_id(nid);
             let (copies, _id_map) = {
-                let doc = self.doc.borrow();
-                let start = doc.next_id_value();
-                let src_blocks = doc.page_blocks(src);
+                let mut doc = self.doc.borrow_mut();
+                let src_blocks = doc.page_blocks(src).to_vec();
+                let start = doc.reserve_block_ids(src_blocks.len() as u64);
                 let mut map = HashMap::new();
                 let copies: Vec<Block> = src_blocks
                     .iter()

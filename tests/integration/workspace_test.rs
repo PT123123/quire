@@ -1,7 +1,7 @@
 // Integration tests: exercise the workspace model and the state projection
 // through the public crate API, the way a future `core/` consumer would.
 
-use quire::app::state::{AppState, HandleArgs, PAGE_GETTING_STARTED};
+use quire::app::state::{core_page_id, AppState, HandleArgs, PAGE_GETTING_STARTED};
 use quire::app::workspace::Workspace;
 use slint::Model;
 
@@ -188,4 +188,31 @@ fn move_page_reparents_refuses_cycles_and_swaps_siblings() {
     // move back to the top level: the page is a root again
     assert!(state.move_page(PAGE_ATLAS, None));
     assert!(state.workspace.borrow().children_of(None).contains(&PAGE_ATLAS));
+}
+
+#[test]
+fn duplicate_reserves_its_id_range() {
+    let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0 };
+    let state = AppState::new(&args, None);
+    let copy = state
+        .duplicate_page(PAGE_GETTING_STARTED)
+        .expect("the sample page duplicates");
+    let copied_ids: Vec<u64> = {
+        let doc = state.doc.borrow();
+        doc.page_blocks(core_page_id(copy))
+            .iter()
+            .map(|b| b.id.as_u64())
+            .collect()
+    };
+    assert!(!copied_ids.is_empty(), "the sample page carries blocks");
+    // the whole copied range sits strictly below the next allocation — ids
+    // minted without reserving collided with it (M8_FEEDBACK #2)
+    let next = state.doc.borrow().next_id_value();
+    assert!(
+        copied_ids.iter().all(|&id| id < next),
+        "next allocation {} would collide with a copied id",
+        next
+    );
+    let fresh = state.doc.borrow_mut().alloc_block_id();
+    assert!(!copied_ids.contains(&fresh.as_u64()));
 }
