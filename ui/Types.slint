@@ -89,8 +89,11 @@ export global UIState {
     // The same popup doubles as the "+"-handle insert menu (Notion-style):
     // slash-insert distinguishes the two modes — filter the whole line
     // instead of the text after "/", and discard the text on apply.
+    // slash-pick-page is the third mode: the rows are workspace pages and
+    // applying one converts the line into a Link-to-page block.
     in-out property <bool> slash-open: false;
     in-out property <bool> slash-insert: false;
+    in-out property <bool> slash-pick-page: false;
     in-out property <string> slash-filter: "";
     in-out property <int> slash-focus: 0;
     in-out property <[SlashRow]> slash-items;

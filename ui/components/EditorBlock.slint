@@ -23,7 +23,10 @@ export component EditorBlock inherits Rectangle {
     property <bool> is-heading: block.kind == 1 || block.kind == 2 || block.kind == 3;
     property <bool> is-plain: block.kind <= 6;
     property <bool> is-page: block.kind == 11;
-    property <bool> editing: UIState.editing-id == block.id && block.kind != 9 && block.kind != 11;
+    property <bool> is-link: block.kind == 12;
+    property <bool> is-page-ish: is-page || is-link;
+    property <bool> editing: UIState.editing-id == block.id
+        && block.kind != 9 && block.kind != 11 && block.kind != 12;
 
     // block color pair (⋮⋮ Text color / Background color; ADR-0023)
     property <color> block-text-color: Colors.block-text(block.color);
@@ -69,7 +72,7 @@ export component EditorBlock inherits Rectangle {
         : block.kind == 8 ? code-text.height + 2 * Theme.spacing-md
         : block.kind == 10 ? callout-text.height + 2 * Theme.spacing-sm
         : block.kind == 9 ? 20px
-        : block.kind == 11 ? page-text.height
+        : is-page-ish ? page-text.height
         : plain-text.height;
 
     height: top-margin + body-height + (block.kind == 0 ? Theme.spacing-xs : Theme.spacing-sm);
@@ -79,7 +82,7 @@ export component EditorBlock inherits Rectangle {
         height: parent.height;
         // stays enabled while editing so hover (and the handle) keep working;
         // only the click is suppressed — the live input sits on top for text
-        mouse-cursor: is-page ? MouseCursor.pointer : MouseCursor.text;
+        mouse-cursor: is-page-ish ? MouseCursor.pointer : MouseCursor.text;
         clicked => {
             if (!editing) {
                 UIState.block-activate(block.id);
@@ -497,14 +500,15 @@ export component EditorBlock inherits Rectangle {
         wrap: word-wrap;
     }
 
-    // page block (kind 11): a page icon and the child page's live title.
-    // Open-only (never editable); the controller turns activation into a
-    // page open. A dangling reference reads muted.
+    // page (kind 11) and link-to-page (kind 12) blocks: an icon and the
+    // target page's live title. Open-only (never editable); the controller
+    // turns activation into a page open. A dangling reference reads muted;
+    // a link block's icon is the anchor-style affordance.
     Icon {
         x: content-x;
         y: top-margin + 2px;
-        visible: is-page;
-        name: "page";
+        visible: is-page-ish;
+        name: is-link ? "link" : "page";
         size: 17px;
         stroke-width: 1.6px;
         color: block.page-ref >= 0 ? Colors.text-secondary : Colors.text-muted;
@@ -513,7 +517,7 @@ export component EditorBlock inherits Rectangle {
         x: content-x + 26px;
         y: top-margin;
         width: content-width - 26px;
-        visible: is-page;
+        visible: is-page-ish;
         text: block.text;
         font-family: Typography.ui-font;
         font-size: body-font-size;

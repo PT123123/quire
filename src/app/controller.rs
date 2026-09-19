@@ -696,9 +696,15 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                     // "/" at block start opens the slash menu with the rest of
                     // the line as the filter (SPEC §十五); anchored below the
                     // editing block. The "+"-handle insert menu filters on
-                    // the whole line instead and keeps its original anchor.
+                    // the whole line instead and keeps its original anchor;
+                    // the page picker (Link to page) filters the same way.
+                    let pick_mode = g.get_slash_pick_page() && g.get_slash_open();
                     let insert_mode = g.get_slash_insert() && g.get_slash_open();
-                    if insert_mode {
+                    if pick_mode {
+                        s.open_slash_pick(&text);
+                        g.set_slash_filter(text.into());
+                        g.set_slash_focus(0);
+                    } else if insert_mode {
                         s.open_slash_insert(&text);
                         g.set_slash_filter(text.into());
                         g.set_slash_focus(0);
@@ -849,6 +855,20 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         ui.global::<UIState>().on_slash_apply_selected(move || {
             let g = gw.upgrade().unwrap();
             let focus = g.get_slash_focus();
+            // page-picker mode: the focused row IS a page — convert the empty
+            // line into a Link-to-page block pointing at it
+            if g.get_slash_pick_page() {
+                let id = g.get_editing_id();
+                if let Some(page) = s.slash_selected_page(focus) {
+                    if id > 0 {
+                        s.create_page_link_block(id, page);
+                    }
+                }
+                g.set_slash_open(false);
+                g.set_slash_pick_page(false);
+                g.set_editing_id(-1);
+                return;
+            }
             let kind = match s.slash_selected_kind(focus) {
                 Some(k) => k,
                 None => return,
@@ -876,6 +896,22 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                 s.create_page_block(id);
                 g.set_slash_open(false);
                 g.set_slash_insert(false);
+                return;
+            }
+            // Link to page switches the popup to the page picker: the typed
+            // filter is discarded, the anchor stays, and the next pick
+            // converts the line
+            if kind == crate::core::BlockKind::Link {
+                let _ = s.exec_on_open_page(Command::ReplaceText {
+                    id: BlockId(id as u64),
+                    text: String::new(),
+                });
+                g.set_editing_text("".into());
+                g.set_pending_caret(0);
+                s.open_slash_pick("");
+                g.set_slash_filter("".into());
+                g.set_slash_focus(0);
+                g.set_slash_pick_page(true);
                 return;
             }
             let _ = s.exec_on_open_page(Command::ReplaceText {
@@ -1014,13 +1050,17 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                     s.paste_below(id);
                 }
                 6 => {
-                    // deleting a Page block takes its child page with it
+                    // deleting a Page block takes its child page with it; a
+                    // Link block's target is unowned and survives
+                    let kind = s.block_kind_of(id);
                     let page_ref = s.block_page_ref(id);
                     let _ = s.exec_on_open_page(Command::DeleteBlock {
                         id: BlockId(id as u64),
                     });
-                    if let Some(child) = page_ref {
-                        s.delete_page(child);
+                    if kind == Some(crate::core::BlockKind::Page) {
+                        if let Some(child) = page_ref {
+                            s.delete_page(child);
+                        }
                     }
                     if g.get_editing_id() == id {
                         g.set_editing_id(-1);
@@ -1773,6 +1813,34 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
                 if let Some(child) = state.create_page_block(nid) {
                     state.rename_page(child, "Project Atlas");
                 }
+            }
+        }
+
+        "link-block" => {
+            // seed a Link-to-page block pointing at an existing page: the
+            // unowned reference renders like a page block with a link icon
+            let first = {
+                let d = state.doc.borrow();
+                d.page_blocks(core_page_id(state.open_page.get()))
+                    .first()
+                    .map(|b| b.id.0 as i32)
+            };
+            let target = state
+                .workspace
+                .borrow()
+                .dfs_order()
+                .into_iter()
+                .find(|id| *id != state.open_page.get());
+            let (Some(first), Some(target)) = (first, target) else {
+                return;
+            };
+            let changes = state.exec_on_open_page(Command::InsertBlockAfter {
+                id: BlockId(first as u64),
+                kind: crate::core::BlockKind::Paragraph,
+                text: String::new(),
+            });
+            if let Some(nid) = changes.as_deref().and_then(find_inserted_id) {
+                state.create_page_link_block(nid, target);
             }
         }
 

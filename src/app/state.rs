@@ -477,10 +477,13 @@ impl AppState {
             let doc = self.doc.borrow();
             project_blocks(doc.page_blocks(core_page_id(page)))
         };
-        // a Page block shows the child page's live title, not stale text;
-        // a reference whose page is gone reads as deleted
+        // a Page or Link block shows the target page's live title, not stale
+        // text; a reference whose page is gone reads as deleted
         let ws = self.workspace.borrow();
-        for row in rows.iter_mut().filter(|r| r.kind == BLOCK_PAGE) {
+        for row in rows
+            .iter_mut()
+            .filter(|r| r.kind == BLOCK_PAGE || r.kind == BLOCK_LINK)
+        {
             row.text = ws.title_of(row.page_ref).unwrap_or("(deleted page)").into();
         }
         self.blocks.set_vec(rows);
@@ -1041,24 +1044,47 @@ impl AppState {
 
     pub fn paste_below(&self, id: i32) -> bool {
         let clip = self.clipboard.borrow().clone();
-        match clip {
-            Some(c) => {
-                // pasting a Page block would share the source's child page;
-                // land the title as plain text instead
-                let (kind, text) = if c.kind == BlockKind::Page {
-                    (BlockKind::Paragraph, c.text)
-                } else {
-                    (c.kind, c.text)
-                };
-                self.exec_on_open_page(Command::InsertBlockAfter {
-                    id: BlockId(id as u64),
-                    kind,
-                    text,
-                })
-                .is_some()
-            }
-            None => false,
+        let Some(c) = clip else { return false };
+        // pasting a Page block would share the source's owned child page;
+        // land the title as plain text instead. A Link block's target is
+        // unowned, so the paste keeps the reference.
+        if c.kind == BlockKind::Page {
+            return self.exec_on_open_page(Command::InsertBlockAfter {
+                id: BlockId(id as u64),
+                kind: BlockKind::Paragraph,
+                text: c.text,
+            })
+            .is_some();
         }
+        if c.kind == BlockKind::Link {
+            let Some(changes) = self.exec_on_open_page(Command::InsertBlockAfter {
+                id: BlockId(id as u64),
+                kind: BlockKind::Link,
+                text: c.text,
+            }) else {
+                return false;
+            };
+            let Some(new_id) = changes.iter().find_map(|ch| match ch {
+                Change::BlockInserted(b) => Some(b.id),
+                _ => None,
+            }) else {
+                return false;
+            };
+            let change = Change::BlockRefSet {
+                id: new_id,
+                page: c.page_ref,
+            };
+            self.doc.borrow_mut().apply(std::slice::from_ref(&change));
+            self.record(vec![change]);
+            self.reproject_blocks();
+            return true;
+        }
+        self.exec_on_open_page(Command::InsertBlockAfter {
+            id: BlockId(id as u64),
+            kind: c.kind,
+            text: c.text,
+        })
+        .is_some()
     }
 
     /// Plan+apply several commands as ONE undo step, refresh the rows.
@@ -1272,6 +1298,82 @@ impl AppState {
             .map(|p| p.as_u64() as i32)
     }
 
+    /// The kind of one block, for the controller's per-kind decisions.
+    pub fn block_kind_of(&self, id: i32) -> Option<BlockKind> {
+        let doc = self.doc.borrow();
+        doc.block(BlockId(id as u64)).map(|b| b.kind)
+    }
+
+    /// Fill the slash popup with the page picker: every page in tree order,
+    /// label = title, hint = breadcrumb. Typing filters by title.
+    pub fn open_slash_pick(&self, filter: &str) {
+        let needle = filter.to_lowercase();
+        let ws = self.workspace.borrow();
+        let rows: Vec<SlashRow> = ws
+            .dfs_order()
+            .into_iter()
+            .filter_map(|id| {
+                let title = ws.title_of(id)?;
+                if !needle.is_empty() && !title.to_lowercase().contains(&needle) {
+                    return None;
+                }
+                Some(SlashRow {
+                    id,
+                    label: title.into(),
+                    hint: ws.breadcrumb(id).into(),
+                    disabled: false,
+                })
+            })
+            .collect();
+        self.slash.set_vec(rows);
+    }
+
+    /// The page id behind the focused picker row.
+    pub fn slash_selected_page(&self, focus: i32) -> Option<i32> {
+        let row = self.slash.row_data(focus.max(0) as usize)?;
+        if row.disabled {
+            return None;
+        }
+        Some(row.id)
+    }
+
+    /// Convert the empty paragraph `id` (the "+" handle's fresh line) into a
+    /// Link-to-page block pointing at `target`. The target is NOT owned:
+    /// deleting the block leaves the page alone, so duplicates and pastes may
+    /// share it freely. One recorded batch.
+    pub fn create_page_link_block(&self, id: i32, target: i32) -> bool {
+        let block_id = BlockId(id as u64);
+        let page = self.open_page.get();
+        {
+            let doc = self.doc.borrow();
+            let b = doc
+                .page_blocks(core_page_id(page))
+                .iter()
+                .find(|b| b.id == block_id);
+            let Some(b) = b else { return false };
+            if b.kind != BlockKind::Paragraph || !b.text.is_empty() {
+                return false;
+            }
+        }
+        if !self.workspace.borrow().contains(target) {
+            return false;
+        }
+        let changes = vec![
+            Change::BlockRefSet {
+                id: block_id,
+                page: Some(PageId(target as u32 as u64)),
+            },
+            Change::BlockKindSet {
+                id: block_id,
+                kind: BlockKind::Link,
+            },
+        ];
+        self.doc.borrow_mut().apply(&changes);
+        self.record(changes);
+        self.reproject_blocks();
+        true
+    }
+
     /// Turn the empty paragraph `after_id` (the "+" handle's fresh line, or a
     /// row the insert menu is applying to) into a Page block: one child page
     /// is created under the current page and the block points at it. One
@@ -1333,8 +1435,13 @@ impl AppState {
 
     /// Duplicate a Page block: the child page is deep-copied (sidebar
     /// semantics) and the fresh block points at the copy, so two blocks never
-    /// share a target — deleting one would not orphan the other.
+    /// share a target — deleting one would not orphan the other. A Link block
+    /// does NOT take this path: its target is unowned, so the plain duplicate
+    /// (which clones the ref) is safe.
     pub fn duplicate_page_block(&self, id: i32) -> Option<i32> {
+        if self.block_kind_of(id) != Some(BlockKind::Page) {
+            return None;
+        }
         let page_ref = self.block_page_ref(id)?;
         let copy_page = self.duplicate_page(page_ref)?;
         let changes = self.exec_on_open_page(Command::DuplicateBlock {
@@ -1596,6 +1703,7 @@ const TURN_INTO_ITEMS: &[(BlockKind, &str, &str)] = SLASH_ITEMS;
 const INSERT_ITEMS: &[(i32, &str, &str)] = &[
     (kind_to_int(BlockKind::Paragraph), "Text", "Plain paragraph"),
     (kind_to_int(BlockKind::Page), "Page", "Embed a child page"),
+    (kind_to_int(BlockKind::Link), "Link to page", "Point at an existing page"),
     (kind_to_int(BlockKind::Todo), "To-do list", "Track tasks with a checkbox"),
     (kind_to_int(BlockKind::Heading1), "Heading 1", "Big section heading"),
     (kind_to_int(BlockKind::Heading2), "Heading 2", "Medium section heading"),
@@ -1657,6 +1765,7 @@ pub fn kind_from_int(kind: i32) -> BlockKind {    match kind {
         9 => BlockKind::Divider,
         10 => BlockKind::Callout,
         11 => BlockKind::Page,
+        12 => BlockKind::Link,
         _ => BlockKind::Paragraph,
     }
 }
@@ -1674,6 +1783,7 @@ const fn kind_to_int(kind: BlockKind) -> i32 {
         BlockKind::Divider => 9,
         BlockKind::Callout => 10,
         BlockKind::Page => 11,
+        BlockKind::Link => 12,
         BlockKind::Paragraph => 0,
     }
 }
@@ -1821,6 +1931,7 @@ pub const BLOCK_CODE: i32 = 8;
 pub const BLOCK_DIVIDER: i32 = 9;
 pub const BLOCK_CALLOUT: i32 = 10;
 pub const BLOCK_PAGE: i32 = 11;
+pub const BLOCK_LINK: i32 = 12;
 
 fn block(kind: i32, text: &str) -> BlockRow {
     BlockRow {

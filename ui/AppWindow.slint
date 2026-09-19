@@ -339,9 +339,10 @@ export component AppWindow inherits Window {
         } else {
             slashMenu.close();
             // every close path funnels through here (input Escape, space,
-            // markdown convert, popup auto-dismiss) — clear insert mode so
-            // a stale flag can't hijack the next "/" menu
+            // markdown convert, popup auto-dismiss) — clear the mode flags
+            // so a stale one can't hijack the next "/" menu
             UIState.slash-insert = false;
+            UIState.slash-pick-page = false;
         }
     }
 
