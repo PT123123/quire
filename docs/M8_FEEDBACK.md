@@ -87,3 +87,16 @@ remove the choice instead of repeating it.
   built by the importer and read by tests; nothing in the app constructs one).
   Export writes spans back, including the two shapes CommonMark cannot hold,
   which are resolved as recorded in ADR-0016.
+
+- **In-page find now has a data layer (D7): `find_service::FindSession`, fed
+  the page's blocks rather than `query_in_page`.** The reason is in the
+  contract:
+  `SearchService` aggregates to *one* `Hit` per page (ranking is a
+  whole-workspace concern) and its `snippet` is character-elided with `…`, so
+  it cannot answer "which occurrence is this" or give a byte range. A session
+  therefore takes `(&term, &[Block])` in display order — the slice the editor
+  already holds — and answers `total() / position() / current() / next() /
+  prev()`, where each `FindHit` carries `block` plus `start`/`end` byte offsets
+  on char boundaries (the same convention `Mark` uses, so the same selection
+  model highlights it). No IO, so a debounced rebuild costs one linear scan of
+  the page; `query_in_page` stays what it is for the cross-page panel.
