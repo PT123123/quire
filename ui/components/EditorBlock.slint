@@ -24,6 +24,10 @@ export component EditorBlock inherits Rectangle {
     property <bool> is-plain: block.kind <= 6;
     property <bool> editing: UIState.editing-id == block.id && block.kind != 9;
 
+    // block color pair (⋮⋮ Text color / Background color; ADR-0023)
+    property <color> block-text-color: Colors.block-text(block.color);
+    property <color> block-bg-color: Colors.block-bg(block.bg);
+
     // font metrics shared by the static Text and the live input
     property <length> body-font-size: block.kind == 1 ? Typography.size-h1
         : block.kind == 2 ? Typography.size-h2
@@ -39,15 +43,17 @@ export component EditorBlock inherits Rectangle {
     property <length> top-margin:
         block.kind == 1 ? Theme.spacing-xl
         : block.kind == 2 ? Theme.spacing-lg + Theme.spacing-xs
-        : block.kind == 3 || block.kind == 9 ? Theme.spacing-md
+        : block.kind == 3 || block.kind == 9 || block.kind == 10 ? Theme.spacing-md
         : 0px;
 
     property <length> input-x: content-x
         + (is-list ? 26px : 0px)
-        + (block.kind == 7 ? Theme.spacing-md : 0px);
+        + (block.kind == 7 ? Theme.spacing-md : 0px)
+        + (block.kind == 10 ? 40px : 0px);
     property <length> input-width: content-width
         - (is-list ? 26px : 0px)
         - (block.kind == 7 ? Theme.spacing-md : 0px)
+        - (block.kind == 10 ? 40px : 0px)
         - (block.kind == 8 ? 2 * Theme.spacing-md : 0px);
 
     // Text with an explicit width + wrap sizes itself (height-for-width);
@@ -55,9 +61,12 @@ export component EditorBlock inherits Rectangle {
     property <length> body-height:
         editing ? (block.kind == 8
                 ? edit-input.height + 2 * Theme.spacing-md
+                : block.kind == 10
+                ? edit-input.height + 2 * Theme.spacing-sm
                 : edit-input.height + (block.kind == 7 ? Theme.spacing-xs : 0px))
         : block.kind == 7 ? quote-text.height + Theme.spacing-xs
         : block.kind == 8 ? code-text.height + 2 * Theme.spacing-md
+        : block.kind == 10 ? callout-text.height + 2 * Theme.spacing-sm
         : block.kind == 9 ? 20px
         : plain-text.height;
 
@@ -82,7 +91,9 @@ export component EditorBlock inherits Rectangle {
         y: top-margin;
         height: body-height;
         border-radius: Theme.radius-sm;
-        background: ta.has-hover && !editing ? Colors.hover-fill
+        // a colored block keeps its tint; hover only paints on uncolored rows
+        background: block.bg > 0 ? block-bg-color
+            : ta.has-hover && !editing ? Colors.hover-fill
             : editing ? Colors.hover-fill
             : transparent;
         animate background { duration: Theme.duration-instant; }
@@ -169,7 +180,7 @@ export component EditorBlock inherits Rectangle {
                     font-size: run.code ? Typography.size-code : body-font-size;
                     font-weight: run.bold ? Typography.weight-bold
                         : (is-heading ? Typography.weight-semibold : Typography.weight-regular);
-                    color: run.link ? Colors.accent-text : Colors.text-primary;
+                    color: run.link ? Colors.accent-text : block-text-color;
                     line-height-factor: body-line-factor;
                 }
                 if run.strike : Rectangle {
@@ -197,7 +208,7 @@ export component EditorBlock inherits Rectangle {
         font-family: Typography.ui-font;
         font-size: body-font-size;
         font-weight: is-heading ? Typography.weight-semibold : Typography.weight-regular;
-        color: block.checked && block.kind == 6 ? Colors.text-muted : Colors.text-primary;
+        color: block.checked && block.kind == 6 ? Colors.text-muted : block-text-color;
         line-height-factor: body-line-factor;
         wrap: word-wrap;
     }
@@ -211,11 +222,12 @@ export component EditorBlock inherits Rectangle {
         // explicit preferred height: an implicit height would derive from
         // the row, which derives its height from this input (loop)
         height: self.preferred-height;
-        y: top-margin + (block.kind == 8 ? Theme.spacing-md : 0px);
+        y: top-margin + (block.kind == 8 ? Theme.spacing-md : 0px)
+            + (block.kind == 10 ? Theme.spacing-sm : 0px);
         font-family: block.kind == 8 ? Typography.mono-font : Typography.ui-font;
         font-size: body-font-size;
         font-weight: is-heading ? Typography.weight-semibold : Typography.weight-regular;
-        color: block.checked && block.kind == 6 ? Colors.text-muted : Colors.text-primary;
+        color: block.checked && block.kind == 6 ? Colors.text-muted : block-text-color;
         line-height-factor: body-line-factor;
         wrap: word-wrap;
         single-line: block.kind != 8;
@@ -351,7 +363,7 @@ export component EditorBlock inherits Rectangle {
         height: 6px;
         border-radius: 3px;
         visible: block.kind == 4;
-        background: Colors.text-primary;
+        background: block-text-color;
     }
 
     Text {
@@ -362,7 +374,7 @@ export component EditorBlock inherits Rectangle {
         text: "\{block.number}.";
         font-family: Typography.ui-font;
         font-size: Typography.size-body;
-        color: Colors.text-primary;
+        color: block-text-color;
         line-height-factor: Typography.line-body;
     }
 
@@ -400,7 +412,7 @@ export component EditorBlock inherits Rectangle {
         height: quote-text.height - 2px;
         visible: block.kind == 7 && !editing;
         border-radius: 2px;
-        background: Colors.text-primary;
+        background: block-text-color;
     }
     quote-text := Text {
         x: content-x + Theme.spacing-md;
@@ -410,7 +422,7 @@ export component EditorBlock inherits Rectangle {
         text: block.text;
         font-family: Typography.ui-font;
         font-size: Typography.size-body;
-        color: Colors.text-primary;
+        color: block-text-color;
         line-height-factor: Typography.line-body;
         wrap: word-wrap;
     }
@@ -422,7 +434,7 @@ export component EditorBlock inherits Rectangle {
         height: root.body-height;
         visible: block.kind == 8;
         border-radius: Theme.radius-md;
-        background: Colors.code-background;
+        background: block.bg > 0 ? block-bg-color : Colors.code-background;
         border-width: 1px;
         border-color: Colors.border;
     }
@@ -434,7 +446,7 @@ export component EditorBlock inherits Rectangle {
         text: block.text;
         font-family: Typography.mono-font;
         font-size: Typography.size-code;
-        color: Colors.text-primary;
+        color: block-text-color;
         line-height-factor: Typography.line-code;
         wrap: word-wrap;
     }
@@ -446,6 +458,39 @@ export component EditorBlock inherits Rectangle {
         height: 1px;
         visible: block.kind == 9;
         background: Colors.divider;
+    }
+
+    // callout (kind 10): tinted box, an emoji, and the text. The background
+    // color picker overrides the default tint.
+    Rectangle {
+        x: content-x;
+        y: top-margin;
+        width: content-width;
+        height: root.body-height;
+        visible: block.kind == 10;
+        border-radius: Theme.radius-md;
+        background: block.bg > 0 ? block-bg-color : Colors.callout-background;
+    }
+    Text {
+        x: content-x + Theme.spacing-sm;
+        y: top-margin + Theme.spacing-sm + 2px;
+        width: 26px;
+        visible: block.kind == 10;
+        text: "💡";
+        font-size: Typography.size-body;
+        vertical-alignment: center;
+    }
+    callout-text := Text {
+        x: content-x + 40px;
+        y: top-margin + Theme.spacing-sm;
+        width: content-width - 40px - Theme.spacing-sm;
+        visible: block.kind == 10 && !editing;
+        text: block.text;
+        font-family: Typography.ui-font;
+        font-size: Typography.size-body;
+        color: block-text-color;
+        line-height-factor: Typography.line-body;
+        wrap: word-wrap;
     }
 
     // drag-reorder drop indicator: accent line where the block would land.

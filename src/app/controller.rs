@@ -886,11 +886,14 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                 let g = gw.upgrade().unwrap();
                 s.fill_block_menu();
                 // anchor beside the handle: window y = top bar + list-layout
-                // y (pre-scroll) - scroll; x aligns with the text column
+                // y (pre-scroll) - scroll; x aligns with the text column.
+                // The height follows the row count so the tall root menu
+                // (and its submenus) never anchor below the window.
                 let scroll = g.get_editor_scroll_y();
                 let edge = if g.get_sidebar_open() { 260.0 } else { 0.0 };
+                let menu_h = g.get_block_menu_rows().row_count() as f32 * 28.0 + 16.0;
                 let y = (40.0 + handle_y as f32 - scroll + 2.0)
-                    .clamp(48.0, (g.get_window_h() - 208.0).max(48.0));
+                    .clamp(48.0, (g.get_window_h() - menu_h).max(48.0));
                 g.set_block_menu_x(edge + content_x as f32 + 2.0);
                 g.set_block_menu_y(y);
                 g.set_block_menu_open_id(id);
@@ -915,7 +918,47 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                 s.fill_block_menu();
                 return;
             }
-            g.set_block_menu_open_id(-1);
+            if action == 10 {
+                s.fill_block_menu_move_to();
+                return;
+            }
+            if action == 11 {
+                s.fill_block_menu_colors(id, false);
+                return;
+            }
+            if action == 12 {
+                s.fill_block_menu_colors(id, true);
+                return;
+            }
+            // color picks stay open (Notion-style live preview); everything
+            // else closes first
+            let color_pick = (AppState::COLOR_TEXT_BASE..AppState::COLOR_BG_BASE + 100)
+                .contains(&action);
+            if !color_pick {
+                g.set_block_menu_open_id(-1);
+            }
+            if action == 9 {
+                crate::platform::copy_to_clipboard(&s.block_link(id));
+                return;
+            }
+            if (AppState::MOVE_TO_BASE..AppState::COLOR_TEXT_BASE).contains(&action) {
+                let page = action - AppState::MOVE_TO_BASE;
+                if s.move_block_to_page(id, page) && g.get_editing_id() == id {
+                    g.set_editing_id(-1);
+                }
+                return;
+            }
+            if (AppState::COLOR_TEXT_BASE..AppState::COLOR_BG_BASE).contains(&action) {
+                s.set_block_color_slot(id, false, action - AppState::COLOR_TEXT_BASE);
+                // refill so the current-pick check follows the pick
+                s.fill_block_menu_colors(id, false);
+                return;
+            }
+            if (AppState::COLOR_BG_BASE..AppState::COLOR_BG_BASE + 100).contains(&action) {
+                s.set_block_color_slot(id, true, action - AppState::COLOR_BG_BASE);
+                s.fill_block_menu_colors(id, true);
+                return;
+            }
             match action {
                 1 => {
                     let _ = s.exec_on_open_page(Command::MoveBlock {
@@ -1007,9 +1050,39 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
     }
 
     {
+        let gw = gw.clone();
+        let s = state.clone();
         ui.global::<UIState>().on_open_link(move |url| {
+            let g = gw.upgrade().unwrap();
             let url = url.to_string();
             if url.is_empty() {
+                return;
+            }
+            // internal anchors first: a block link jumps to the block (its
+            // page opens when it isn't the current one); a page link opens
+            // the page. Unknown quire URLs are swallowed, not shelled out.
+            if let Some(rest) = url.strip_prefix("quire://block/") {
+                if let Ok(bid) = rest.parse::<u64>() {
+                    let (bpage, text_len) = {
+                        let d = s.doc.borrow();
+                        d.block(BlockId(bid))
+                            .map(|b| (b.page.0 as i32, b.text.len() as i32))
+                            .unwrap_or((0, 0))
+                    };
+                    if bpage > 0 && s.workspace.borrow().contains(bpage) {
+                        flush_pending_edit(&g, &s);
+                        open(&g, &s, bpage);
+                        // -1 first: recreate the delegate so the input takes over
+                        g.set_editing_id(-1);
+                        focus_block(&g, &s, bid as u32 as i32, text_len);
+                    }
+                }
+                return;
+            }
+            if let Some(rest) = url.strip_prefix("quire://page/") {
+                if let Ok(pid) = rest.parse::<i32>() {
+                    open(&g, &s, pid);
+                }
                 return;
             }
             // Windows shell open; cfg-gated so other targets simply no-op
@@ -1609,6 +1682,10 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             g.set_dark(true);
             apply_scene_overlay(ui, state, "block-menu");
         }
+        "dark-block-colors" => {
+            g.set_dark(true);
+            apply_scene(ui, state, "block-colors");
+        }
         "dark-title-edit" => {
             g.set_dark(true);
             apply_scene(ui, state, "title-edit");
@@ -1716,6 +1793,58 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
                 g.set_editing_id(id);
             }
         }
+        "block-colors" => {
+            // color a few blocks + add a callout near the top (visual test
+            // only; applied directly like the menu would)
+            let page = core_page_id(state.open_page.get());
+            let mut colors: Vec<(BlockId, crate::core::ColorKind, crate::core::ColorKind)> =
+                {
+                    let d = state.doc.borrow();
+                    let blocks = d.page_blocks(page);
+                    let mut v = Vec::new();
+                    if let Some(h) = blocks
+                        .iter()
+                        .find(|b| matches!(b.kind, crate::core::BlockKind::Heading1 | crate::core::BlockKind::Heading2 | crate::core::BlockKind::Heading3))
+                    {
+                        v.push((h.id, crate::core::ColorKind::Blue, crate::core::ColorKind::Default));
+                    }
+                    if let Some(p) = blocks
+                        .iter()
+                        .find(|b| b.kind == crate::core::BlockKind::Paragraph && !b.text.is_empty())
+                    {
+                        v.push((p.id, crate::core::ColorKind::Red, crate::core::ColorKind::Default));
+                    }
+                    if let Some(q) = blocks.iter().find(|b| b.kind == crate::core::BlockKind::Quote) {
+                        v.push((q.id, crate::core::ColorKind::Green, crate::core::ColorKind::Yellow));
+                    }
+                    if let Some(t) = blocks.iter().find(|b| b.kind == crate::core::BlockKind::Todo) {
+                        v.push((t.id, crate::core::ColorKind::Default, crate::core::ColorKind::Blue));
+                    }
+                    v
+                };
+            let doc_changes: Vec<crate::core::Change> = colors
+                .drain(..)
+                .map(|(id, c, bg)| crate::core::Change::BlockColorSet { id, color: c, background: bg })
+                .collect();
+            state.doc.borrow_mut().apply(&doc_changes);
+            // the callout goes right under the first paragraph so it is on
+            // screen in a headless capture
+            let anchor = {
+                let d = state.doc.borrow();
+                d.page_blocks(page)
+                    .iter()
+                    .find(|b| b.kind == crate::core::BlockKind::Paragraph && !b.text.is_empty())
+                    .map(|b| b.id)
+                    .or_else(|| d.page_blocks(page).last().map(|b| b.id))
+                    .unwrap_or(BlockId(1))
+            };
+            let _ = state.exec_on_open_page(Command::InsertBlockAfter {
+                id: anchor,
+                kind: crate::core::BlockKind::Callout,
+                text: "Callouts stand out — an emoji, a tinted box, and text.".into(),
+            });
+            state.reproject_blocks();
+        }
         _ => {}
     }
 }
@@ -1771,6 +1900,48 @@ pub fn apply_scene_overlay(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
                 state.fill_block_menu();
                 g.set_block_menu_x(320.0);
                 g.set_block_menu_y(300.0);
+                g.set_block_menu_open_id(id);
+            }
+        }
+        "move-to" => {
+            let target = {
+                let d = state.doc.borrow();
+                d.page_blocks(core_page_id(state.open_page.get()))
+                    .get(4)
+                    .map(|b| b.id.0 as i32)
+            };
+            if let Some(id) = target {
+                state.fill_block_menu_move_to();
+                g.set_block_menu_x(320.0);
+                g.set_block_menu_y(120.0);
+                g.set_block_menu_open_id(id);
+            }
+        }
+        "text-color" => {
+            let target = {
+                let d = state.doc.borrow();
+                d.page_blocks(core_page_id(state.open_page.get()))
+                    .get(4)
+                    .map(|b| b.id.0 as i32)
+            };
+            if let Some(id) = target {
+                state.fill_block_menu_colors(id, false);
+                g.set_block_menu_x(320.0);
+                g.set_block_menu_y(200.0);
+                g.set_block_menu_open_id(id);
+            }
+        }
+        "bg-color" => {
+            let target = {
+                let d = state.doc.borrow();
+                d.page_blocks(core_page_id(state.open_page.get()))
+                    .get(4)
+                    .map(|b| b.id.0 as i32)
+            };
+            if let Some(id) = target {
+                state.fill_block_menu_colors(id, true);
+                g.set_block_menu_x(320.0);
+                g.set_block_menu_y(120.0);
                 g.set_block_menu_open_id(id);
             }
         }

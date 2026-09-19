@@ -2,6 +2,38 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0023 · The ⋮⋮ menu gets Notion's remaining items; block color crosses the persistence contract
+Decision: the block handle menu carries Copy link to block, Move to, and
+Text/Background color (Comment / Suggest edits / Ask AI stay out with the
+rest of collab+AI). "Copy link to block" puts `quire://block/<id>` on the
+system clipboard via `clip.exe` (ASCII-only payload, so no clipboard crate
+— dependency policy holds); `open-link` now resolves `quire://block/` and
+`quire://page/` in-app first (jump to the page, focus the block) and only
+shells out for foreign URLs, which also makes Ctrl+L links to internal
+anchors clickable. "Move to" lists every other page depth-indented and
+commits `Command::MoveBlockToPage`: the root lands appended to the target
+page's top level, the subtree travels as one `Change::BlockMovedToPage`
+per block (children keep their parent pointers and orders), one undo step
+end to end. Color is a block-level pair (`ColorKind` text + background,
+10 slots, Default = theme), one `SetBlockColor` command, one
+`BlockColorSet` change, and schema v4 (two TEXT columns on `blocks`,
+'' = default; the ALTER runs conditionally in code because SQLite has no
+`ADD COLUMN IF NOT EXISTS` and the migration test legitimately re-runs v4
+on a hand-downgraded file). A Callout block joins the kind set — the last
+Basic kind that neither a symbol shortcut nor the v1 exclusions cover;
+it renders a tinted rounded box with an emoji and exports as a quote.
+Why: the user asked for the ⋮⋮ menu to match Notion's, minus what typing
+symbols already reaches (ADR-0022 curation unchanged and now spanning the
+new kinds).
+Consequences: colors are cosmetic by design — no Markdown representation,
+so export/import round trips drop them (callouts degrade to quotes);
+`clip.exe` means copy-link is a Windows-only nicety until a clipboard
+crate earns its place; menu popups size their anchor clamp from the live
+row count, so the tall root menu and the 11-row color palettes stay
+on-screen; the "current color" check is drawn as an icon because the
+software renderer has no font fallback (a ✓ glyph rendered as nothing in
+headless captures).
+
 ## ADR-0022 · Markdown line-shortcuts; the menus list only what symbols can't reach
 Decision: typing a trigger at the block start converts the block live —
 `# `/`## `/`### ` → Heading 1/2/3, `- `/`* ` → Bullet, `12. ` → Numbered,

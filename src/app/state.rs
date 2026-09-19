@@ -8,7 +8,9 @@
 
 use crate::app::workspace::{SearchHit, Workspace, BENCH_ID_BASE, MAX_RECENTS};
 use crate::core::persistence::{Change, Repository};
-use crate::core::{Block, BlockId, BlockKind, Command, Document, History, OrderKey, PageId};
+use crate::core::{
+    Block, BlockId, BlockKind, ColorKind, Command, Document, History, OrderKey, PageId,
+};
 use crate::services::find_service::FindSession;
 use crate::services::persistence::PersistenceService;
 use crate::services::search_service::SearchService;
@@ -744,55 +746,37 @@ impl AppState {
 
     // ---- block menu ----
 
-    /// Fill the handle menu for one block. Paste appears only when the
-    /// internal clipboard holds a block.
+    /// Action-id ranges of the ⋮⋮ menu (see `fill_block_menu`).
+    pub const MOVE_TO_BASE: i32 = 100_000;
+    pub const COLOR_TEXT_BASE: i32 = 200_000;
+    pub const COLOR_BG_BASE: i32 = 300_000;
+
+
+    /// Fill the handle menu for one block — Notion's ⋮⋮ set, minus the
+    /// collab/AI items that are v1 out of scope, plus the move/copy
+    /// affordances earlier milestones added. Paste appears only when the
+    /// internal clipboard holds a block. Submenus swap the rows and keep
+    /// the popup open; the controller routes action ids:
+    ///   1..8    root actions + Turn into (7) + Back (8)
+    ///   9..12   copy link / Move to / Text color / Background color opens
+    ///   100+k   Turn-into target kinds
+    ///   MOVE_TO_BASE+pid / COLOR_TEXT_BASE+slot / COLOR_BG_BASE+slot
     pub fn fill_block_menu(&self) {
         let mut rows = vec![
-            MenuRow {
-                id: 1,
-                label: "Move up".into(),
-                icon: "chevron-up".into(),
-                danger: false,
-            },
-            MenuRow {
-                id: 2,
-                label: "Move down".into(),
-                icon: "chevron-down".into(),
-                danger: false,
-            },
-            MenuRow {
-                id: 7,
-                label: "Turn into".into(),
-                icon: "chevron-right".into(),
-                danger: false,
-            },
-            MenuRow {
-                id: 3,
-                label: "Duplicate".into(),
-                icon: "copy".into(),
-                danger: false,
-            },
-            MenuRow {
-                id: 4,
-                label: "Copy block".into(),
-                icon: "copy".into(),
-                danger: false,
-            },
+            row(7, "Turn into", "chevron-right", false, -1, false),
+            row(3, "Duplicate", "copy", false, -1, false),
+            row(9, "Copy link to block", "link", false, -1, false),
+            row(10, "Move to", "arrow-right", false, -1, false),
+            row(11, "Text color", "palette", false, -1, false),
+            row(12, "Background color", "palette", false, -1, false),
+            row(1, "Move up", "chevron-up", false, -1, false),
+            row(2, "Move down", "chevron-down", false, -1, false),
+            row(4, "Copy block", "copy", false, -1, false),
         ];
         if self.clipboard.borrow().is_some() {
-            rows.push(MenuRow {
-                id: 5,
-                label: "Paste below".into(),
-                icon: "import".into(),
-                danger: false,
-            });
+            rows.push(row(5, "Paste below", "import", false, -1, false));
         }
-        rows.push(MenuRow {
-            id: 6,
-            label: "Delete".into(),
-            icon: "trash".into(),
-            danger: true,
-        });
+        rows.push(row(6, "Delete", "trash", true, -1, false));
         self.block_menu.set_vec(rows);
     }
 
@@ -800,28 +784,143 @@ impl AppState {
     /// the block's own. Action ids encode the target kind as 100 + kind int.
     pub fn fill_block_menu_turn_into(&self, id: i32) {
         let current = self.block_kind(id);
-        let mut rows = vec![MenuRow {
-            id: 8,
-            label: "Back".into(),
-            icon: "chevron-left".into(),
-            danger: false,
-        }];
+        let mut rows = vec![row(8, "Back", "chevron-left", false, -1, false)];
         for (kind, label, _) in TURN_INTO_ITEMS {
             if Some(*kind) != current {
-                rows.push(MenuRow {
-                    id: 100 + kind_to_int(*kind),
-                    label: (*label).into(),
-                    icon: match kind {
-                        BlockKind::Paragraph => "pencil",
-                        BlockKind::Code => "page",
-                        _ => "minimize",
-                    }
-                    .into(),
-                    danger: false,
-                });
+                let icon = match kind {
+                    BlockKind::Paragraph => "pencil",
+                    BlockKind::Callout | BlockKind::Code => "page",
+                    _ => "minimize",
+                };
+                rows.push(row(
+                    100 + kind_to_int(*kind),
+                    label,
+                    icon,
+                    false,
+                    -1,
+                    false,
+                ));
             }
         }
         self.block_menu.set_vec(rows);
+    }
+
+    /// "Move to" submenu: every page except the one the block lives on,
+    /// depth-indented with em spaces. Targets are MOVE_TO_BASE + page id.
+    pub fn fill_block_menu_move_to(&self) {
+        let current = self.open_page.get();
+        let mut rows = vec![row(8, "Back", "chevron-left", false, -1, false)];
+        let ws = self.workspace.borrow();
+        fn walk(
+            ws: &Workspace,
+            parent: Option<i32>,
+            depth: usize,
+            skip: i32,
+            out: &mut Vec<MenuRow>,
+        ) {
+            for id in ws.children_of(parent) {
+                if id != skip {
+                    let indent = "\u{2003}".repeat(depth);
+                    let title = ws.title_of(id).unwrap_or("Untitled");
+                    out.push(row(
+                        AppState::MOVE_TO_BASE + id,
+                        format!("{indent}{title}"),
+                        "page",
+                        false,
+                        -1,
+                        false,
+                    ));
+                    walk(ws, Some(id), depth + 1, skip, out);
+                }
+            }
+        }
+        walk(&ws, None, 0, current, &mut rows);
+        drop(ws);
+        if rows.len() == 1 {
+            // inert row (id -1 is swallowed by the controller's id guard)
+            rows.push(row(-1, "No other page", "page", false, -1, false));
+        }
+        self.block_menu.set_vec(rows);
+    }
+
+    /// Color submenu: the palette as swatch rows. `background` selects the
+    /// row-background palette; otherwise the text palette. Picks are
+    /// COLOR_TEXT_BASE / COLOR_BG_BASE + palette slot; the current pick
+    /// carries a check mark.
+    pub fn fill_block_menu_colors(&self, id: i32, background: bool) {
+        let current = self
+            .doc
+            .borrow()
+            .block(BlockId(id.max(0) as u64))
+            .map(|b| if background { b.background } else { b.color });
+        let mut rows = vec![row(8, "Back", "chevron-left", false, -1, false)];
+        for (i, kind) in ColorKind::ALL.iter().enumerate() {
+            let base = if background { AppState::COLOR_BG_BASE } else { AppState::COLOR_TEXT_BASE };
+            let label = match kind {
+                ColorKind::Default => "Default",
+                ColorKind::Gray => "Gray",
+                ColorKind::Brown => "Brown",
+                ColorKind::Orange => "Orange",
+                ColorKind::Yellow => "Yellow",
+                ColorKind::Green => "Green",
+                ColorKind::Blue => "Blue",
+                ColorKind::Purple => "Purple",
+                ColorKind::Pink => "Pink",
+                ColorKind::Red => "Red",
+            };
+            // the check renders as an icon (MenuRow.check): the software
+            // renderer has no font fallback, so glyph marks are unreliable
+            let mut menu_row = row(
+                base + i as i32,
+                label,
+                "",
+                false,
+                i as i32,
+                background,
+            );
+            menu_row.check = Some(*kind) == current;
+            rows.push(menu_row);
+        }
+        self.block_menu.set_vec(rows);
+    }
+
+    /// The text that "Copy link to block" puts on the clipboard (the block
+    /// anchor doubles as a link-mark URL; clicking one jumps in-app, see
+    /// the controller's open-link wiring).
+    pub fn block_link(&self, id: i32) -> String {
+        format!("quire://block/{}", id)
+    }
+
+    /// Cross-page move (⋮⋮ "Move to"): one undo step for the whole subtree.
+    pub fn move_block_to_page(&self, id: i32, page: i32) -> bool {
+        if page == self.open_page.get() {
+            return false;
+        }
+        self.exec_on_open_page(Command::MoveBlockToPage {
+            id: BlockId(id as u64),
+            page: PageId(page as u32 as u64),
+        })
+        .is_some()
+    }
+
+    /// One side of the block color pair, from a submenu pick.
+    pub fn set_block_color_slot(&self, id: i32, background: bool, slot: i32) {
+        let Some(color) = ColorKind::from_slot(slot) else {
+            return;
+        };
+        let bid = BlockId(id as u64);
+        let (c, b) = {
+            let doc = self.doc.borrow();
+            match doc.block(bid) {
+                Some(b) => (b.color, b.background),
+                None => return,
+            }
+        };
+        let _ = self.exec_on_open_page(Command::SetBlockColor {
+            id: bid,
+            color: if background { c } else { color },
+            background: if background { color } else { b },
+        });
     }
 
     /// Kind of one block (editing-flow decisions: markdown shortcuts,
@@ -1164,30 +1263,45 @@ impl AppState {
                 label: "New subpage".into(),
                 icon: "plus".into(),
                 danger: false,
+                swatch: -1,
+                swatch_bg: false,
+                check: false,
             },
             MenuRow {
                 id: MENU_RENAME,
                 label: "Rename".into(),
                 icon: "pencil".into(),
                 danger: false,
+                swatch: -1,
+                swatch_bg: false,
+                check: false,
             },
             MenuRow {
                 id: MENU_DUPLICATE,
                 label: "Duplicate".into(),
                 icon: "copy".into(),
                 danger: false,
+                swatch: -1,
+                swatch_bg: false,
+                check: false,
             },
             MenuRow {
                 id: MENU_FAVORITE,
                 label: fav_label.into(),
                 icon: "star".into(),
                 danger: false,
+                swatch: -1,
+                swatch_bg: false,
+                check: false,
             },
             MenuRow {
                 id: MENU_DELETE,
                 label: "Delete".into(),
                 icon: "trash".into(),
                 danger: true,
+                swatch: -1,
+                swatch_bg: false,
+                check: false,
             },
         ];
         self.menu.set_vec(rows);
@@ -1261,6 +1375,7 @@ pub fn core_page_id(id: i32) -> PageId {
 /// the symbol converts, so the menu only lists the rest (ADR-0022).
 const SLASH_ITEMS: &[(BlockKind, &str, &str)] = &[
     (BlockKind::Paragraph, "Text", "Plain paragraph"),
+    (BlockKind::Callout, "Callout", "Highlighted box with an emoji"),
     (BlockKind::Code, "Code", "Monospaced block — or type ```"),
     (BlockKind::Divider, "Divider", "Visual separator — or type ---"),
 ];
@@ -1281,6 +1396,20 @@ fn slash_items(filter: &str) -> Vec<SlashRow> {
         .collect()
 }
 
+/// MenuRow constructor for the ⋮⋮ menu fillers (`swatch < 0` = no swatch).
+#[allow(clippy::too_many_arguments)]
+fn row(id: i32, label: impl AsRef<str>, icon: &str, danger: bool, swatch: i32, swatch_bg: bool) -> MenuRow {
+    MenuRow {
+        id,
+        label: label.as_ref().into(),
+        icon: icon.into(),
+        danger,
+        swatch,
+        swatch_bg,
+        check: false,
+    }
+}
+
 /// BlockKind int (UI menu ids) -> kind. Public: the controller resolves
 /// Turn-into menu actions with it.
 pub fn kind_from_int(kind: i32) -> BlockKind {    match kind {
@@ -1293,6 +1422,7 @@ pub fn kind_from_int(kind: i32) -> BlockKind {    match kind {
         7 => BlockKind::Quote,
         8 => BlockKind::Code,
         9 => BlockKind::Divider,
+        10 => BlockKind::Callout,
         _ => BlockKind::Paragraph,
     }
 }
@@ -1308,6 +1438,7 @@ fn kind_to_int(kind: BlockKind) -> i32 {
         BlockKind::Quote => 7,
         BlockKind::Code => 8,
         BlockKind::Divider => 9,
+        BlockKind::Callout => 10,
         BlockKind::Paragraph => 0,
     }
 }
@@ -1354,6 +1485,8 @@ fn rows_to_blocks(page: i32, rows: Vec<BlockRow>, doc: &mut Document) -> Vec<Blo
                 text: row.text.to_string(),
                 checked: row.checked,
                 marks: Vec::new(),
+                color: ColorKind::Default,
+                background: ColorKind::Default,
             }
         })
         .collect()
@@ -1422,6 +1555,8 @@ pub fn project_blocks(blocks: &[Block]) -> Vec<BlockRow> {
             tail: false,
             runs: runs_to_model(b),
             depth: block_depth(blocks, b),
+            color: b.color.slot(),
+            bg: b.background.slot(),
         })
         .collect();
     let mut n = 0;
@@ -1447,6 +1582,7 @@ pub const BLOCK_TODO: i32 = 6;
 pub const BLOCK_QUOTE: i32 = 7;
 pub const BLOCK_CODE: i32 = 8;
 pub const BLOCK_DIVIDER: i32 = 9;
+pub const BLOCK_CALLOUT: i32 = 10;
 
 fn block(kind: i32, text: &str) -> BlockRow {
     BlockRow {
@@ -1458,6 +1594,8 @@ fn block(kind: i32, text: &str) -> BlockRow {
         tail: false,
         runs: ModelRc::from(Rc::new(VecModel::from(Vec::new()))),
         depth: 0,
+        color: 0,
+        bg: 0,
     }
 }
 

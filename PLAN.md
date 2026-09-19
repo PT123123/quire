@@ -225,6 +225,29 @@ M8 Windows RC (packaging, crash recovery, import/export) → M9 Android
 Sync, collaboration, cloud, plugin market, AI, multi-process IPC,
 custom TSF/IME implementation, image/table/toggle/database blocks.
 
+## Track A round 5 — ⋮⋮ menu completion + Callout (2026-09-19, `m8-hardening`)
+- [x] block menu = Notion's set minus collab/AI: Copy link to block
+      (`quire://block/<id>` via clip.exe), Move to (cross-page subtree
+      move, one undo step), Text/Background color (swatch palettes with a
+      live current-pick check); quire://block & quire://page links resolve
+      in-app (page jump + block focus)
+- [x] Callout block (kind 10): tinted box + emoji + text; slash menu /
+      Turn-into gain it; exports as a quote
+- [x] block color in the contract: ColorKind pair on Block, SetBlockColor
+      command, BlockColorSet change, schema v4 (conditional column add),
+      theme-aware palette in Colors.slint, rendering across text kinds +
+      the editing input
+- [x] menu popup anchor clamp now follows the live row count; MenuRow
+      gained swatch/check fields; link + arrow-right + palette icons
+- [x] tests: move-to-page subtree/undo, color undo, colors+moves storage
+      round-trip; suite green; scenes block-menu / move-to / text-color /
+      bg-color / block-colors / dark-block-colors rendered and reviewed
+- [x] markdown-shortcut curation (ADR-0022) re-verified: H1-3 / bullet /
+      numbered / to-do / quote stay out of both menus
+- deferred (user-visible gaps, next rounds): Page & Link-to-page blocks
+  (need a child-page column + lifecycle), Table/Toggle (v1 exclusions),
+  Comment/Suggest edits/Ask AI (collab/AI stay out of scope)
+
 ## M8 hardening · Track B (2026-09-19, branch `m8-hardening`)
 
 Based on `master` at `f2eb855` (after M8 D5–D8 and the merged markdown pair).

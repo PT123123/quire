@@ -41,4 +41,39 @@ export global Colors {
     // ---- shadows (used sparingly: popups & palette only) ----
     out property <color> shadow: Theme.dark ? #000000a0 : #00000026;
     out property <color> scrim: #00000059;
+
+    // ---- callout block ----
+    out property <color> callout-background: Theme.dark ? #2a2945 : #eeeeff;
+
+    // ---- block color palette (Notion-style; ADR-0023) ----
+    // Slot 0 is the theme default; 1..9 are gray..red. Values approximate
+    // Notion's light/dark swatches so exported text stays readable.
+
+    // text colors: pure function, resolved per row
+    public pure function block-text(slot: int) -> color {
+        if (slot <= 0) { return Theme.dark ? #e7e7ea : #1f2328; }
+        if (slot == 1) { return Theme.dark ? #9b9a97 : #787774; }
+        if (slot == 2) { return Theme.dark ? #c3996b : #9f6b53; }
+        if (slot == 3) { return Theme.dark ? #e28d50 : #d9730d; }
+        if (slot == 4) { return Theme.dark ? #dcae3f : #cb912f; }
+        if (slot == 5) { return Theme.dark ? #6ba584 : #448361; }
+        if (slot == 6) { return Theme.dark ? #5b9bc4 : #337ea9; }
+        if (slot == 7) { return Theme.dark ? #ad7fb8 : #9065b0; }
+        if (slot == 8) { return Theme.dark ? #d3709f : #c14c8a; }
+        return Theme.dark ? #e06d66 : #d44c47;
+    }
+
+    // row background tints
+    public pure function block-bg(slot: int) -> color {
+        if (slot <= 0) { return transparent; }
+        if (slot == 1) { return Theme.dark ? #2f2f2f : #f1f1ef; }
+        if (slot == 2) { return Theme.dark ? #2e2420 : #f4eeee; }
+        if (slot == 3) { return Theme.dark ? #38291c : #faebdd; }
+        if (slot == 4) { return Theme.dark ? #372c14 : #fbf3db; }
+        if (slot == 5) { return Theme.dark ? #1e2c21 : #edf3ec; }
+        if (slot == 6) { return Theme.dark ? #1d272e : #e7f3f8; }
+        if (slot == 7) { return Theme.dark ? #2a2233 : #f6f3f9; }
+        if (slot == 8) { return Theme.dark ? #322028 : #faf1f5; }
+        return Theme.dark ? #37201f : #fdebec;
+    }
 }
