@@ -1427,7 +1427,7 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             g.set_title_editing(true);
         }
         "recovered" => {
-            state.set_db_notice(
+            g.set_db_notice(
                 "The database was damaged — this session was restored from a backup (appdata/quire.db.bak1). The damaged file was kept beside it.".into(),
             );
         }
