@@ -225,3 +225,37 @@ remove the choice instead of repeating it.
       Option<PathBuf>` beside `recovered_from`, and one more `set_db_notice` call
       next to `main.rs`'s existing `if let Some(from) = &recovered`. ADR-0020
       lists it as the unfinished part of the move.
+
+## Resolutions round (2026-09-20, branch `m8-hardening`)
+
+- **#1 — resolved.** The contract gained `SettingDelete { key }` and
+  `MetaDelete { key }`; `repository.rs` applies each as a one-statement
+  `DELETE` inside the change transaction (deleting an absent key is a no-op,
+  so a consumer can drain without a prior read). `settings_store` emits real
+  deletes from `diff` and no longer writes `TOMBSTONE` — the constant stays
+  only as the read-side filter for rows written by older databases, and the
+  next save vacuums one of those. Tests: storage round-trip
+  (`meta_and_setting_deletes_remove_their_rows`), the settings diff
+  (`removing_a_key_deletes_the_row_and_it_reads_back_absent`), and the
+  backup-suite settings round-trip updated to expect a gone row.
+- **#9 — resolved.** `AppState::new` is the "first place that holds both
+  sides": it copies `logger.meta_entries()` into the `metadata` table as
+  `MetaSet`s in one transaction, then consumes them with `MetaDelete`s —
+  session.meta is a handoff note to exactly the next session. A
+  `last_session_aborted` summary also becomes the startup notice bar's first
+  line (`db_notice` is a small queue now, so it composes with the
+  restore/library-move notices `main.rs` pushes after it).
+- **#10 — resolved (D13).** `main.rs` notes `logging::END_RECORD` after the
+  final flush on the normal exit path; `Logger::start()` reads its absence —
+  with no panic report — as "did not shut down cleanly (killed, crashed
+  natively, or lost power)" and reports it like a panic. The tail check
+  follows the rotation family, an empty family is a first run, panic reports
+  take precedence, and a torn last line aborts. ADR-0018 carries the update.
+  Residual false positives (two instances, an externally killed bench run)
+  are accepted and recorded there.
+- **#13 (partial).** `main.rs`'s dead `library_moved` initializer is gone.
+  Still open: the `--portable` re-scan stays load-bearing, and the
+  `OpenReport::migrated_from` field — `main.rs` resolves the library move
+  itself with a second `effective_path` call, which works and shows the
+  notice; the field would only remove the duplicate resolve.
+

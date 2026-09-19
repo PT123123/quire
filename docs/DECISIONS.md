@@ -198,6 +198,21 @@ database, which also means a portable run keeps its log beside its own database.
 The `Logger` is constructed per directory and every write opens the file, so
 tests rotate against a 200-byte limit instead of a megabyte.
 
+Update (2026-09-20, D13): the exit-path call landed — `main` notes
+`END_RECORD` ("session ended") after the final flush, and `start()` reads its
+absence, with no panic report, as an unclean end. The gap this ADR originally
+recorded is closed: `last_session_aborted` now means "the session did not end
+cleanly", with panic summaries still verbatim ("panicked at …") and the new
+shape worded apart ("did not shut down cleanly (killed, crashed natively, or
+lost power)"). The tail check follows the rotation family, so an end-record
+that shifted into `.1` still reads as clean, and an empty family is a first
+run, not a kill. Two residual false-positive sources are accepted: a second
+instance reading a live session's tail (no single-instance guard), and any
+external kill of a bench/scene run — both *were* unclean ends, the banner
+just cannot say who did the killing. The app consumes the session.meta entry
+on the next start (M8_FEEDBACK #9 wiring): it lands in the `metadata` table
+and in the notice bar, then is deleted so it cannot re-report forever.
+
 ## ADR-0017 · Shell identity is a build-time resource; the installer installs
 per-user
 Decision: the exe's icon and version block come from a resource script that

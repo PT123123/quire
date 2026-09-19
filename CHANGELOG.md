@@ -66,6 +66,9 @@ First functional release: a local, single-file-database notes workspace.
 - Rotating snapshots on every open (5 generations), restore-at-open when
   the main file is damaged, damaged file quarantined (`.corrupt`)
 - Startup integrity checks; schema migrations (v1–v4)
+- An unclean end (panic, kill, native crash, power loss) is recognized on
+  the next start: the notice bar says so and the fact is queryable in the
+  metadata table (a panic additionally keeps its report)
 
 ### Desktop integration
 - Frameless window with custom title bar, light + dark themes (persisted)

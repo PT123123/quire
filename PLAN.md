@@ -362,3 +362,46 @@ M7 performance matrix, D12 the data-location move.
   re-arms per burst, so an idle window takes no snapshot — deliberate, since
   there is nothing new to protect.
 
+## Track A round 7 (2026-09-20, `m8-hardening`)
+
+- [x] round 6 (popup dismissal + "+" insert menu) committed as `3f56148`
+      after the full suite went green
+- [x] M8_FEEDBACK #1 closed: the contract gains `SettingDelete`/`MetaDelete`;
+      `repository.rs` applies them as plain DELETEs inside the change
+      transaction; `settings_store` retires the empty-value tombstone (the
+      read-side filter stays for legacy rows and the next save vacuums one);
+      storage round-trip + settings-diff tests added, the backup suite's
+      tombstone expectation updated to the new contract
+- [x] M8_FEEDBACK #9 wired in `AppState::new`: session.meta entries are
+      copied into the `metadata` table in one transaction and consumed with
+      `MetaDelete`s; an abort summary becomes the notice bar's first line
+      (`db_notice` is a queue now, so it composes with the restore and
+      library-move notices from `main.rs`)
+- [x] last-open page restore fixed: `current-page` was parsed at startup but
+      never used, so every restart landed on Getting Started; the recorded
+      page now wins unless it was deleted
+- [x] `lan_server.rs` test-only imports moved into `mod tests` (last lib
+      warning); `main.rs`'s dead `library_moved` initializer dropped
+
+### D13 · clean-exit marker ✅ (Track B agent + Track A wiring, 2026-09-20)
+
+- [x] `main.rs` notes `logging::END_RECORD` after the final flush (normal
+      exit path only); `Logger::start()` reads its absence — with no panic
+      report — as "did not shut down cleanly (killed, crashed natively, or
+      lost power)" and reports it exactly like a panic. The tail check
+      follows the rotation family (an end-record shifted into `.1` still
+      reads clean), an empty family is a first run, panic reports take
+      precedence, a torn last line aborts
+- [x] five in-module logging tests (end-record clean, kill incl.
+      start-line-only and rotated variants, panic precedence, empty log) —
+      lib suite at 102; verified end to end on a scratch database: clean
+      `--auto-exit` leaves the record, deleting it or hard-killing the
+      process makes the next start log the Warn + meta entry
+- [x] the abort summary reaches the user through #9's consumer: notice bar
+      first line + a queryable `metadata` row; ADR-0018 carries the update,
+      including the accepted false-positive sources (second instance,
+      externally killed bench run)
+- [x] full suite green on the merged tree (197 pass / 4 ignored by design);
+      M8 hardening feedback #1/#9/#10 all resolved — branch merged to
+      `master`
+
