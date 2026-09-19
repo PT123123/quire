@@ -109,45 +109,47 @@ export component EditorBlock inherits Rectangle {
         HorizontalLayout {
             spacing: 0px;
             for run in block.runs : Rectangle {
-                height: plain-text.height;
+                // natural run size: decorations anchor to the text line
+                // (Slint Text has no font-style — italic via family name)
+                width: run-text.preferred-width;
+                height: run-text.preferred-height;
+                vertical-stretch: 0;
+                horizontal-stretch: 0;
                 if run.link : TouchArea {
                     mouse-cursor: MouseCursor.pointer;
                     clicked => {
                         UIState.open-link(run.url);
                     }
                 }
-                HorizontalLayout {
-                    spacing: 0px;
-                    Rectangle {
-                        visible: run.code;
-                        border-radius: Theme.radius-xs;
-                        background: Colors.code-background;
-                        border-width: 1px;
-                        border-color: Colors.border;
-                        Text {
-                            x: 4px;
-                            text: run.text;
-                            font-family: Typography.mono-font;
-                            font-size: Typography.size-code;
-                            color: run.bold ? Colors.text-primary : Colors.accent-text;
-                            vertical-alignment: center;
-                        }
-                    }
-                    if !run.code : Text {
-                        text: run.text;
-                        // Slint Text has no font-style: italic comes from the
-                        // family name (Windows ships the italic faces)
-                        font-family: run.italic ? "Segoe UI Italic" : Typography.ui-font;
-                        font-size: body-font-size;
-                        font-weight: run.bold ? Typography.weight-bold : (is-heading ? Typography.weight-semibold : Typography.weight-regular);
-                        color: Colors.text-primary;
-                        line-height-factor: body-line-factor;
-                    }
-                    if run.strike : Rectangle {
-                        y: (parent.height - 1px) / 2;
-                        height: 1.2px;
-                        background: Colors.text-secondary;
-                    }
+                run-text := Text {
+                    x: 0; y: 0;
+                    wrap: no-wrap;
+                    text: run.text;
+                    font-family: run.code ? Typography.mono-font
+                        : run.italic ? "Segoe UI Italic" : Typography.ui-font;
+                    font-size: run.code ? Typography.size-code : body-font-size;
+                    font-weight: run.bold ? Typography.weight-bold
+                        : (is-heading ? Typography.weight-semibold : Typography.weight-regular);
+                    color: run.link ? Colors.accent-text : Colors.text-primary;
+                    line-height-factor: body-line-factor;
+                }
+                if run.code : Rectangle {
+                    border-radius: Theme.radius-xs;
+                    background: Colors.code-background;
+                    border-width: 1px;
+                    border-color: Colors.border;
+                }
+                if run.strike : Rectangle {
+                    y: (parent.height - 1.2px) / 2;
+                    width: parent.width;
+                    height: 1.2px;
+                    background: Colors.text-secondary;
+                }
+                if run.link : Rectangle {
+                    y: parent.height - 2px;
+                    width: parent.width;
+                    height: 1px;
+                    background: Colors.accent-text;
                 }
             }
         }
