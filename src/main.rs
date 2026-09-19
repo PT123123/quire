@@ -22,6 +22,9 @@ pub struct LaunchArgs {
     pub scene: Option<String>,
     /// Database file (--db <path>; default appdata/quire.db).
     pub db: Option<std::path::PathBuf>,
+    /// Keep the library beside the working directory (--portable) instead of
+    /// in the per-user profile (--db still wins, see storage::data_location).
+    pub portable: bool,
     /// Markdown file to import and open at startup (--open <path>; also the
     /// bare positional, which is what the .md file association passes).
     pub open: Option<std::path::PathBuf>,
@@ -44,6 +47,7 @@ fn parse_launch_args() -> LaunchArgs {
         scroll: false,
         scene: None,
         db: None,
+        portable: false,
         dump_state: false,
         open: None,
         share: None,
@@ -74,6 +78,9 @@ fn parse_launch_args() -> LaunchArgs {
             ("--db", Some(v)) => {
                 a.db = Some(std::path::PathBuf::from(v));
                 i += 1;
+            }
+            ("--portable", _) => {
+                a.portable = true;
             }
             ("--dump-state", _) => {
                 a.dump_state = true;
@@ -126,30 +133,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn real_main() -> Result<(), String> {
-    quire::services::logging::init(); // the rotating log + panic hook (SPEC §二十五, M8 D9)
+    // The argument parser reads only strings — no I/O to fail — so running it
+    // before logging costs no coverage: `logging::init` installs the panic
+    // hook as its first act, and needs the flags to know which directory the
+    // log belongs in (M8_FEEDBACK #13).
     let launch = parse_launch_args();
+    let location = quire::storage::data_location::LaunchOptions {
+        db_override: launch.db.clone(),
+        portable: launch.portable,
+    };
+    quire::services::logging::init(&location); // the rotating log + panic hook (SPEC §二十五, M8 D9)
 
     // Persistence (M3): open (or create) the database. A failure to open
     // means the session runs in memory only — never fall back to writing
     // over a database we could not read.
     let mut recovered: Option<std::path::PathBuf> = None;
-    let library_moved;
+    let mut moved_from: Option<std::path::PathBuf> = None;
     let repo: Option<std::sync::Arc<quire::storage::SqliteRepository>> = {
-        // D12: storage resolves the real location itself (default → per-user
-        // library, legacy appdata carried over on first run) and creates the
-        // directories it needs. Resolving here a second time is idempotent
-        // and only tells us whether the library moved (for the notice bar).
+        // D12: this is the start's one resolve of the placement rules (M8
+        // FEEDBACK #13) — it also carries a legacy `appdata/` library across.
+        // What comes back is the file to open plus, once per install, the
+        // folder it was moved out of, which the open reports back so the
+        // notice bar can say it.
         let requested = launch
             .db
             .clone()
             .unwrap_or_else(|| std::path::PathBuf::from("appdata/quire.db"));
-        let effective = quire::storage::data_location::effective_path(&requested);
-        library_moved = effective != requested;
-        match quire::storage::SqliteRepository::open_with_report(&requested) {
+        let moved = quire::storage::data_location::migration(
+            &location,
+            &requested,
+            quire::storage::data_location::roaming_root().as_deref(),
+        );
+        match quire::storage::SqliteRepository::open_at(&moved.path, moved.from) {
             Ok((r, report)) => {
                 if let Some(from) = &report.recovered_from {
                     recovered = Some(from.clone());
                 }
+                moved_from = report.migrated_from.clone();
                 report.log();
                 Some(std::sync::Arc::new(r))
             }
@@ -171,7 +191,8 @@ fn real_main() -> Result<(), String> {
     // missing. Revisit on Slint upgrade.
     let repo_for_lan = repo.clone();
     let state = AppState::new(&args, repo);
-    // startup notices (restore-from-backup and/or the D12 library move)
+    // startup notices (restore-from-backup, the D12 library move, and the
+    // previous session's abort record — `db_notice` is a queue, #9)
     let mut notices: Vec<String> = Vec::new();
     if let Some(from) = &recovered {
         notices.push(format!(
@@ -179,7 +200,7 @@ fn real_main() -> Result<(), String> {
             from.display()
         ));
     }
-    if library_moved {
+    if moved_from.is_some() {
         notices.push("the library moved to your user profile".into());
     }
     if !notices.is_empty() {
