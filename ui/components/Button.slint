@@ -10,6 +10,7 @@ export component Button inherits Rectangle {
     in property <string> text;
     in property <string> icon-name: "";
     in property <bool> primary: false;
+    in property <bool> danger: false;
     in property <bool> enabled: true;
     callback clicked();
 
@@ -18,10 +19,12 @@ export component Button inherits Rectangle {
     // preferred width (no explicit min-layout-width here)
     border-radius: Theme.radius-sm;
     opacity: root.enabled ? 1 : 0.45;
-    background: root.primary
+    background: root.danger && root.enabled && ta.has-hover ? Colors.danger
+        : root.danger ? Colors.danger
+        : root.primary
         ? (ta.has-hover && root.enabled ? Colors.accent-text : Colors.accent)
         : (ta.has-hover && root.enabled ? Colors.surface-hover : transparent);
-    border-width: root.primary ? 0px : 1px;
+    border-width: root.primary || root.danger ? 0px : 1px;
     border-color: Colors.border-strong;
     animate background { duration: Theme.duration-fast; }
 
@@ -33,7 +36,7 @@ export component Button inherits Rectangle {
         if root.icon-name != "" : Icon {
             name: root.icon-name;
             size: 15px;
-            color: root.primary ? Colors.text-on-accent : Colors.text-secondary;
+            color: root.primary || root.danger ? Colors.text-on-accent : Colors.text-secondary;
         }
         Text {
             horizontal-alignment: center;
@@ -41,7 +44,7 @@ export component Button inherits Rectangle {
             font-family: Typography.ui-font;
             font-size: Typography.size-ui;
             font-weight: Typography.weight-medium;
-            color: root.primary ? Colors.text-on-accent : Colors.text-primary;
+            color: root.primary || root.danger ? Colors.text-on-accent : Colors.text-primary;
         }
     }
 

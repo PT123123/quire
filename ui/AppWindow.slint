@@ -133,12 +133,16 @@ component SlashMenuPopup inherits PopupWindow {
             height: 32px;
             border-radius: Theme.radius-sm;
             // placeholder rows ("later" kinds) render muted and inert
+            opacity: item.disabled ? 0.55 : 1.0;
             background: !item.disabled && (idx == UIState.slash-focus || sl-ta.has-hover)
                 ? Colors.surface-hover : transparent;
             animate background { duration: Theme.duration-instant; }
 
             HorizontalLayout {
                 x: 8px;
+                // bounded inside the row: the hint's elide needs a real
+                // width, or the description clips at the popup border (D4)
+                width: parent.width - 16px;
                 spacing: Theme.spacing-sm;
                 Text {
                     text: item.label;

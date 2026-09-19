@@ -2414,7 +2414,7 @@ fn mock_blocks_generic(_title: &str) -> Vec<BlockRow> {
     let mut b = vec![
         block(
             BLOCK_PARAGRAPH,
-            "This is a mock page for the navigation milestone: the tree, search, and menus are live; the text is placeholder until the block editor arrives.",
+            "This page is empty. Start typing, or use the + handle beside any block to insert one — the slash menu offers every kind Quire knows.",
         ),
         block(BLOCK_DIVIDER, ""),
         block(

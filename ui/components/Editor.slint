@@ -58,7 +58,9 @@ component DocumentRow inherits Rectangle {
             width: root.content-width;
             visible: root.first && UIState.title-editing;
             enabled: root.first && UIState.title-editing;
-            height: self.preferred-height;
+            // the preferred height is the font size alone: descenders (g, y)
+            // collide with the line box (A4 sweep, title-edit scene)
+            height: max(self.preferred-height, Typography.size-page-title * 1.4);
             text <=> UIState.page-title;
             font-family: Typography.ui-font;
             font-weight: Typography.weight-bold;

@@ -62,7 +62,10 @@ export component ConfirmDialog inherits PopupWindow {
                 }
                 confirm-btn := Button {
                     text: UIState.dialog-confirm-label;
-                    primary: true;
+                    // the dialog's only use is destructive (delete page /
+                    // destructive block ops): the confirm action is danger-
+                    // styled, not primary-accent (A4 sweep LOW finding)
+                    danger: true;
                     clicked => {
                         UIState.dialog-confirmed();
                     }

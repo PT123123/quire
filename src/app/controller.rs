@@ -123,6 +123,25 @@ pub fn bind(ui: &AppWindow, state: &Rc<AppState>) {
     }
 }
 
+/// Select a find hit: route through the hit block's editing input, which
+/// recreates the delegate with a pending range selection.
+fn apply_find_hit(g: &UIState<'_>, s: &Rc<AppState>, bid: i32, start: usize, end: usize) {
+    let text = {
+        let d = s.doc.borrow();
+        d.block(BlockId(bid as u64))
+            .map(|b| b.text.clone())
+            .unwrap_or_default()
+    };
+    g.set_editing_text(text.into());
+    g.set_pending_sel_start(start as i32);
+    g.set_pending_sel_end(end as i32);
+    g.set_editing_id(-1);
+    g.set_editing_id(bid);
+    g.set_find_target_block(bid);
+    let gen = g.get_find_sel_gen() + 1;
+    g.set_find_sel_gen(gen);
+}
+
 fn renderer_name() -> &'static str {
     if cfg!(feature = "femtovg") {
         "FemtoVG · GL"
@@ -1343,6 +1362,15 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
             let term = g.get_find_term().to_string();
             s.find_start(&term);
             g.set_find_label(s.find_label().into());
+            // jump to the first hit right away: a "0 / N" position selects
+            // nothing, which read as a broken find in the A4 sweep
+            if s.find_label().starts_with("0 / ") {
+                flush_pending_edit(&g, &s);
+                if let Some((bid, start, end)) = s.find_step(true) {
+                    apply_find_hit(&g, &s, bid, start, end);
+                }
+                g.set_find_label(s.find_label().into());
+            }
         });
     }
 
@@ -1356,22 +1384,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
             }
             flush_pending_edit(&g, &s);
             if let Some((bid, start, end)) = s.find_step(delta < 0) {
-                let text = {
-                    let d = s.doc.borrow();
-                    d.block(BlockId(bid as u64))
-                        .map(|b| b.text.clone())
-                        .unwrap_or_default()
-                };
-                // route through the hit block's editing input: recreate the
-                // delegate with a pending range selection
-                g.set_editing_text(text.into());
-                g.set_pending_sel_start(start as i32);
-                g.set_pending_sel_end(end as i32);
-                g.set_editing_id(-1);
-                g.set_editing_id(bid);
-                g.set_find_target_block(bid);
-                let gen = g.get_find_sel_gen() + 1;
-                g.set_find_sel_gen(gen);
+                apply_find_hit(&g, &s, bid, start, end);
             } else {
                 g.set_find_label(s.find_label().into());
             }
@@ -2022,6 +2035,12 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             g.set_find_term("the".into());
             state.find_start("the");
             g.set_find_label(state.find_label().into());
+            // jump to the first hit like the live path does, so the scene
+            // shows a selection, not a bare "0 / N"
+            if let Some((bid, start, end)) = state.find_step(true) {
+                apply_find_hit(&g, state, bid, start, end);
+                g.set_find_label(state.find_label().into());
+            }
         }
         "marks" => {
             // seed inline marks on the first paragraph (visual test only,
