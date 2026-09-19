@@ -13,7 +13,7 @@ low RAM > low CPU > GPU rendering > maintainability > feature count.
 | M3 Local documents | `core/` document model, SQLite storage (workspaces/pages/blocks/metadata), debounced batched persistence, transactions, load-on-restart, settings persistence | next |
 | M4 Block editor MVP | Command system + undo/redo, single-TextInput editing, Enter/Backspace/merge/split, arrows, clipboard, 9 block kinds, Chinese IME acceptance pass | core+UI ✅ (IME pass pending user) |
 | M5 Notion interactions | Slash menu (command descriptors from Rust), palette wiring on the real command registry, block drag/reorder, block menu | slash/menu/clipboard ✅ (mouse drag = M7 polish) |
-| M6 Rich text | Inline spans (bold/italic/code/link/strike), mark persistence, format-safe save/load | model+persistence+shortcuts ✅ (run rendering has a wrap limitation; link UI pending) |
+| M6 Rich text | Inline spans (bold/italic/code/link/strike), mark persistence, format-safe save/load | ✅ (link UI + import/export marks in; run rendering has a documented wrap limitation) |
 | M7 Performance | Virtualization depth, lazy loading, background search (FTS), long-document suite at 1k/5k/10k blocks | |
 | M8 Windows RC | Crash recovery, migrations, packaging/installer, Markdown import/export, settings UI, keyboard shortcut pass | |
 | M9 Android | Shared core model + schema, adapted navigation/IME test plan (starts only after Windows is stable) | |

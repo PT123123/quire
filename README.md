@@ -53,7 +53,7 @@ UI 不直接碰数据库或磁盘 IO。Renderer 需实测对比 FemtoVG·wgpu �
 | M3 | 本地文档：SQLite、自动保存、重启恢复 | ✅ |
 | M4 | Block Editor MVP（Enter/Backspace/合并/拆分/Undo…） | ✅ 核心完成，IME 验收待用户 |
 | M5 | Notion 交互：Slash 菜单、Command Palette、块拖拽 | ✅ Slash/块菜单/剪贴板完成，拖拽=M7 |
-| M6 | 富文本 inline marks（bold/italic/code/link…） | ✅ 模型+持久化+快捷键（渲染有折行限制） |
+| M6 | 富文本 inline marks（bold/italic/code/link…） | ✅（含导入导出与链接 UI；行内折行渲染有平台限制） |
 | M7 | 性能：虚拟化、懒加载、后台搜索（1000/5000/10000 blocks） | 待办 |
 | M8 | Windows RC：crash recovery、打包、导入导出 | 待办 |
 | M9 | Android（共享核心模型，UI 重新设计） | 待办 |
