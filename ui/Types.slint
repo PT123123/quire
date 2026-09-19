@@ -96,6 +96,9 @@ export global UIState {
     in-out property <string> link-url: "";
     in-out property <int> link-start: 0;
     in-out property <int> link-end: 0;
+
+    // startup notice (e.g. database restored from backup); empty = hidden
+    in-out property <string> db-notice: "";
     /// Internal clipboard for cross-block copy/paste (menu-driven).
     in-out property <bool> has-copied-block: false;
 
@@ -150,6 +153,7 @@ export global UIState {
     callback link-apply();
     callback link-remove();
     callback link-cancel();
+    callback close-db-notice();
     callback open-link(string);
     callback palette-query-changed();
     callback palette-open-requested();
