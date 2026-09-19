@@ -882,7 +882,7 @@ impl AppState {
             // parent pointers through the same map (nested lists survive)
             let src = core_page_id(id);
             let dst = core_page_id(nid);
-            let (copies, id_map) = {
+            let (copies, _id_map) = {
                 let doc = self.doc.borrow();
                 let start = doc.next_id_value();
                 let src_blocks = doc.page_blocks(src);
