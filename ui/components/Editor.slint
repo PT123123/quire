@@ -10,6 +10,7 @@ import { Typography } from "../Typography.slint";
 import { Icon } from "../Icons.slint";
 import { EditorBlock } from "./EditorBlock.slint";
 import { IconButton } from "./IconButton.slint";
+import { Button } from "./Button.slint";
 import { BlockRow, UIState } from "../Types.slint";
 
 component DocumentRow inherits Rectangle {
@@ -266,6 +267,13 @@ export component Editor inherits Rectangle {
                 font-size: Typography.size-ui;
                 color: Colors.text-muted;
                 horizontal-alignment: center;
+            }
+            if UIState.workspace-empty : Button {
+                text: "Create your first page";
+                primary: true;
+                clicked => {
+                    UIState.page-create-requested();
+                }
             }
         }
     }

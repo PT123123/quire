@@ -46,9 +46,7 @@ pub struct AppState {
     /// Ctrl+F in-page find session (Track B's FindSession).
     find_session: RefCell<Option<FindSession>>,
     find_label: RefCell<String>,
-    /// Page to open instead of the default landing page (persisted
-    /// "current-page" meta).
-    restore_current: Cell<Option<i32>>,
+
     search_generation: Cell<u64>,
     /// Persisted sibling order of every page (drives PageCreated/Moved).
     page_order: RefCell<HashMap<i32, OrderKey>>,
@@ -258,7 +256,6 @@ impl AppState {
             clipboard: RefCell::new(None),
             settings: RefCell::new(restored_settings),
             recents_restored: Cell::new(restored_recents),
-            restore_current: Cell::new(restored_current),
             ui: RefCell::new(None),
             db_notice: RefCell::new(None),
             all_commands,
@@ -319,6 +316,10 @@ impl AppState {
     /// pixel offset inside the tree area (used to anchor the context menu).
     pub fn rebuild_sidebar(&self) {
         self.sidebar.set_vec(self.build_sidebar_rows());
+        let empty = self.workspace.borrow().page_count() == 0;
+        if let Some(ui) = self.ui.borrow().clone() {
+            ui.upgrade().unwrap().set_workspace_empty(empty);
+        }
     }
 
     pub fn build_sidebar_rows(&self) -> Vec<SidebarNode> {
