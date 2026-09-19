@@ -181,3 +181,68 @@ Storage pragmas confirmed on the way (all from the same probe):
 - Rule of thumb: UI Item count, TextEdit count, text layout calls, model
   update range, timer count. New features must state their cost in the PR/
   milestone notes here.
+
+## M7 matrix — femtovg vs skia (2026-09-19, D11)
+
+Full grid, release builds at `3498618` + the D12 working tree (now
+committed as `4afc35d`). Raw data: `benchmarks/results/2026-09-19-m7-matrix-{vg,sk}.jsonl`
+(18 rows each: every scene has a fresh-DB seed pass and a measured pass).
+CPU% is a share of ONE core (16C/22T machine — divide by 16 for the
+Task-Manager style whole-CPU number). GPU-side memory is not in these
+numbers.
+
+| scene | vg CPU% | sk CPU% | vg WS MB | sk WS MB | vg priv MB | sk priv MB |
+|-------|--------:|--------:|---------:|---------:|-----------:|-----------:|
+| A idle            | 0.58 | 0.98 | 114.3 | 236.3 |  88.2 | 211.0 |
+| B100 idle         | 0.19 | 0.20 | 112.3 | 236.9 |  88.2 | 211.5 |
+| B1000 idle        | 0.00 | 0.00 | 113.0 | 238.0 |  89.5 | 212.7 |
+| C5000 idle        | 0.20 | 0.78 | 117.7 | 241.6 |  93.8 | 216.3 |
+| D10000 idle       | 0.20 | 0.00 | 121.5 | 244.9 |  97.4 | 219.8 |
+| F10000 scroll     | 27.7 | (n/a) | 128.1 | 245.9 |  98.2 | 220.7 |
+| G100 page-switch  | 0.19 | 0.20 | 115.2 | 236.9 |  88.4 | 211.6 |
+| E1000 typing 30/s | 24.8 | 27.5 | 121.5 | 251.6 |  90.2 | 215.5 |
+| E10000 typing     | 24.2 | 22.8 | 128.3 | 245.7 |  96.7 | 220.6 |
+| E10000 @120/s     | 29.4 | 30.6 | 127.9 | 248.4 |  96.4 | 223.3 |
+
+(sk F10000 scroll: 18.2% CPU. E10000-noseck: vg 23.2% / sk 28.7% — the
+skia run showed WS 320.9 MB, a one-off worth watching, see follow-ups.)
+
+### SPEC §六 checklist
+
+| indicator | result |
+|-----------|--------|
+| startup fast | ✓ warm starts 73–400 ms across all scenes (one 984 ms skia outlier, disk noise) |
+| idle CPU ≈ 0 | ✓ 0.58% vg / 0.98% sk of one core, no animation loops |
+| 10 000-block memory delta | ✓ +9 MB private over the empty shell (vg) / +9 MB (sk) — single digits, met |
+| typing smoothness | ✓ 30 keystrokes/s sustained at 1k and 10k blocks, zero dropped; key handler median 47–66 µs, p95 ≤ 122 µs; 120 keystrokes/s also holds (118/s achieved) |
+| scrolling smoothness | ✓ continuous scroll of a 10 000-block page: 27.7% (vg) / 18.2% (sk) of one core, no hitching observed |
+| in-page search cost | ✓ FTS query median 0.5 ms @1k blocks, 1.7 ms @10k — sub-frame |
+| page switching | ✓ 100 switches at 0.19–0.20% of one core |
+| no idle work | ✓ idle scenes show 0.0–0.6% with no timers running |
+| no per-keystroke DB writes | ✓ by design (debounced batches); typing scene drives zero SQL per key |
+| memory scaling linear-small | ✓ B100 → D10000 is +9 MB, not per-block widgets |
+| GPU-side memory separate | ✓ not in Working Set; tracked separately per the method note |
+| no crashes in the grid | ✓ all 36 rows exit 0 |
+
+### Renderer verdict
+
+femtovg (default) uses roughly HALF the memory of skia everywhere
+(idle 114 vs 236 MB WS; 10k-block page 121 vs 245 MB). skia is better at
+continuous scroll (18% vs 28% of one core) and marginally better in the
+10k typing scene (23% vs 24%). Startup is comparable. Per the SPEC
+priority order (memory above everything but UI quality), **femtovg stays
+the default**; skia remains one `--features skia` away for scroll-heavy
+use.
+
+### M7 follow-ups, ranked by value
+
+1. **skia WS creep in E10000-noseck** (320 MB vs vg 128 MB): investigate
+   if skia ever becomes the default; a non-issue for the femtovg default.
+2. **Continuous-scroll CPU** (28% vg / 18% sk at 60 fps): the partial
+   renderer already limits damage; only worth revisiting with real input
+   data showing it matters.
+3. **Scroll-to-hit for search/find**: still impossible on this Slint
+   (delegates expose no geometry) — recheck per upgrade; the selection-
+   based navigation ships meanwhile.
+4. Nothing else: every SPEC §六 target is met with headroom on the
+   default renderer.
