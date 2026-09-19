@@ -52,6 +52,24 @@ UI 不直接碰数据库或磁盘 IO。Renderer 需实测对比 FemtoVG·wgpu �
 
 **明确不做（第一版）**：云同步、协作、AI、插件市场、Electron/WebView/任何 Web 栈。
 
+## 功能亮点（v0.1 RC）
+
+- **块编辑器**：段落、三级标题、列表（含待办勾选）、引用、代码块、分割线、
+  Callout 标注块；Enter/Backspace 合并拆分、Tab 列表嵌套、Ctrl+D 复制块
+- **Notion 式交互**：`/` 斜杠菜单；`# ` `- ` `1. ` `[] ` `> ` `---` ` ``` ` 等
+  Markdown 行内快捷方式；块手柄（＋/⋮⋮）拖拽排序，橙色落点线提示
+- **⋮⋮ 块菜单**：Turn into / Duplicate / Copy link to block（复制
+  `quire://block/<id>` 锚点到剪贴板）/ Move to（整棵子树跨页移动，单步撤销）/
+  Text & Background color（10 色色板，亮暗两套）/ Delete
+- **链接**：Ctrl+L 为选中文字加链接；`quire://block/…`、`quire://page/…`
+  内部锚点点击即在应用内跳转，外部 URL 交给系统浏览器
+- **富文本**：粗体 Ctrl+B、斜体 Ctrl+I、删除线 Ctrl+Shift+X、行内代码 Ctrl+E
+- **工作区**：页面树 / 收藏 / 最近 / 全文搜索（FTS5 + 中文分词）/
+  命令面板 Ctrl+K / 页内查找 Ctrl+F
+- **可靠存储**：SQLite 单文件库、防抖批量写入（Ctrl+S 立即落盘）、
+  滚动快照备份 + 损坏自恢复、滚动日志与崩溃报告
+- **桌面集成**：亮/暗主题、无边框自绘窗口、Markdown 导入导出、Inno Setup 安装包
+
 ## Milestones
 
 | | 内容 | 状态 |
@@ -61,11 +79,12 @@ UI 不直接碰数据库或磁盘 IO。Renderer 需实测对比 FemtoVG·wgpu �
 | M2 | App Shell：Sidebar / Page Tree / 编辑区 / 搜索 / 设置 | ✅ |
 | M3 | 本地文档：SQLite、自动保存、重启恢复 | ✅ |
 | M4 | Block Editor MVP（Enter/Backspace/合并/拆分/Undo…） | ✅ 核心完成，IME 验收待用户 |
-| M5 | Notion 交互：Slash 菜单、Command Palette、块拖拽 | ✅ Slash/块菜单/剪贴板完成，拖拽=M7 |
+| M5 | Notion 交互：Slash 菜单、Markdown 快捷方式、块拖拽、⋮⋮ 菜单（含 Copy link / Move to / 块颜色） | ✅ |
 | M6 | 富文本 inline marks（bold/italic/code/link…） | ✅（含导入导出与链接 UI；行内折行渲染有平台限制） |
-| M7 | 性能：虚拟化、懒加载、后台搜索（1000/5000/10000 blocks） | 待办 |
-| M8 | Windows RC：crash recovery、打包、导入导出 | 待办 |
+| M7 | 性能：虚拟化、后台搜索、基准矩阵（1000/10000 blocks 实测） | ✅ 矩阵实测完成（femtovg/skia 对比） |
+| M8 | Windows RC：crash recovery、打包、导入导出 | 🔄 RC 硬化中（安装包/日志/快照/数据迁移/LAN 分享已落地） |
 | M9 | Android（共享核心模型，UI 重新设计） | 待办 |
 
-First release (Windows): block editor, local SQLite storage, command
-palette, Chinese input via the OS IME — nothing cloud, nothing sync, yet.
+First release (Windows): block editor (with callouts, block colors, and
+cross-page moves), local SQLite storage, command palette, Chinese input
+via the OS IME — nothing cloud, nothing sync, yet.
