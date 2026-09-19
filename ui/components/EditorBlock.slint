@@ -123,6 +123,14 @@ export component EditorBlock inherits Rectangle {
                         UIState.open-link(run.url);
                     }
                 }
+                // paint order matters: the code background must be declared
+                // BEFORE the text or it covers the glyphs
+                if run.code : Rectangle {
+                    border-radius: Theme.radius-xs;
+                    background: Colors.code-background;
+                    border-width: 1px;
+                    border-color: Colors.border;
+                }
                 run-text := Text {
                     x: 0; y: 0;
                     wrap: no-wrap;
@@ -134,12 +142,6 @@ export component EditorBlock inherits Rectangle {
                         : (is-heading ? Typography.weight-semibold : Typography.weight-regular);
                     color: run.link ? Colors.accent-text : Colors.text-primary;
                     line-height-factor: body-line-factor;
-                }
-                if run.code : Rectangle {
-                    border-radius: Theme.radius-xs;
-                    background: Colors.code-background;
-                    border-width: 1px;
-                    border-color: Colors.border;
                 }
                 if run.strike : Rectangle {
                     y: (parent.height - 1.2px) / 2;
