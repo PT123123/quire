@@ -3,6 +3,8 @@ name = "quire"
 version = "0.1.0"
 edition = "2021"
 description = "A local, GPU-accelerated, Notion-like document app built with Rust + Slint"
+# three binaries exist (quire / quire-shot / quire-typing); this is the app
+default-run = "quire"
 
 [dependencies]
 rfd = "0.17.2"
