@@ -24,6 +24,13 @@ component BlockMenuPopup inherits PopupWindow {
     close-policy: PopupClosePolicy.no-auto-close;
 
     Rectangle {
+        x: 2px; y: 3px;
+        width: parent.width - 4px;
+        height: parent.height - 5px;
+        border-radius: Theme.radius-md + 2px;
+        background: Colors.shadow;
+    }
+    Rectangle {
         width: parent.width;
         height: parent.height;
         border-radius: Theme.radius-md;
@@ -76,6 +83,13 @@ component SlashMenuPopup inherits PopupWindow {
     height: UIState.slash-items.length * 32px + 8px;
     close-policy: PopupClosePolicy.no-auto-close;
 
+    Rectangle {
+        x: 2px; y: 3px;
+        width: parent.width - 4px;
+        height: parent.height - 5px;
+        border-radius: Theme.radius-md + 2px;
+        background: Colors.shadow;
+    }
     Rectangle {
         width: parent.width;
         height: parent.height;

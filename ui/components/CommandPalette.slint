@@ -123,7 +123,7 @@ export component CommandPalette inherits PopupWindow {
 
             list := ListView {
                 content-width: parent.width;
-                height: 320px;
+                height: Math.min(UIState.commands.length, 8) * 36px + 40px;
 
                 for cmd[idx] in UIState.commands : Rectangle {
                     width: list.content-width;
