@@ -81,6 +81,55 @@ fn create_then_open_page_lands_empty() {
 }
 
 #[test]
+fn duplicated_nested_list_keeps_parents_in_the_copy() {
+    // page with a bullet + a nested child (parent pointer inside the page)
+    let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0 };
+    let state = AppState::new(&args, None);
+    let page = state.create_page(None);
+    let root = quire::core::BlockId(9_000_000_001);
+    let child = quire::core::BlockId(9_000_000_002);
+    state.doc.borrow_mut().set_page_blocks(
+        quire::core::PageId(page as u32 as u64),
+        vec![
+            quire::core::Block {
+                id: root,
+                page: quire::core::PageId(page as u32 as u64),
+                parent: None,
+                order: quire::core::OrderKey(10),
+                kind: quire::core::BlockKind::Bullet,
+                text: "parent item".into(),
+                checked: false,
+                marks: Vec::new(),
+            },
+            quire::core::Block {
+                id: child,
+                page: quire::core::PageId(page as u32 as u64),
+                parent: Some(root),
+                order: quire::core::OrderKey(11),
+                kind: quire::core::BlockKind::Bullet,
+                text: "child item".into(),
+                checked: false,
+                marks: Vec::new(),
+            },
+        ],
+    );
+
+    let copy = state.duplicate_page(page).expect("duplicate");
+    let cpid = quire::core::PageId(copy as u32 as u64);
+    let blocks = state.doc.borrow().page_blocks(cpid).to_vec();
+    assert_eq!(blocks.len(), 2, "copy carries both blocks");
+    // the child in the COPY points at the copied root, not the original
+    let copied_child = blocks.iter().find(|b| b.text == "child item").unwrap();
+    let copied_root = blocks.iter().find(|b| b.text == "parent item").unwrap();
+    assert_ne!(copied_child.parent, Some(root), "stale parent pointer");
+    assert_eq!(copied_child.parent, Some(copied_root.id));
+    // depth projection agrees (both render, child indented)
+    let rows = quire::app::state::project_blocks(&blocks);
+    assert_eq!(rows[0].depth, 0);
+    assert_eq!(rows[1].depth, 1);
+}
+
+#[test]
 fn delete_open_page_resets_selection() {
     let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0 };
     let state = AppState::new(&args, None);

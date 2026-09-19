@@ -878,22 +878,38 @@ impl AppState {
     pub fn duplicate_page(&self, id: i32) -> Option<i32> {
         let new_id = self.workspace.borrow_mut().duplicate(id);
         if let Some(nid) = new_id {
-            // copy the source page's blocks with fresh ids
+            // copy the source page's blocks with fresh ids, remapping
+            // parent pointers through the same map (nested lists survive)
             let src = core_page_id(id);
             let dst = core_page_id(nid);
-            let copies: Vec<Block> = {
+            let (copies, id_map) = {
                 let doc = self.doc.borrow();
                 let start = doc.next_id_value();
-                doc.page_blocks(src)
+                let src_blocks = doc.page_blocks(src);
+                let mut map = HashMap::new();
+                let copies: Vec<Block> = src_blocks
                     .iter()
                     .enumerate()
                     .map(|(i, b)| {
+                        let new_id = BlockId(start + i as u64);
+                        map.insert(b.id, new_id);
                         let mut c = b.clone();
-                        c.id = BlockId(start + i as u64);
+                        c.id = new_id;
                         c.page = dst;
                         c
                     })
-                    .collect()
+                    .collect();
+                // second pass: parents point at the copies now
+                let copies: Vec<Block> = copies
+                    .into_iter()
+                    .map(|mut c| {
+                        if let Some(pid) = c.parent {
+                            c.parent = map.get(&pid).copied();
+                        }
+                        c
+                    })
+                    .collect();
+                (copies, map)
             };
             let title = self.workspace.borrow().title_of(nid).unwrap().to_string();
             let blob = block_search_blob(&title, &project_blocks(&copies));
@@ -1418,7 +1434,16 @@ fn mock_blocks_sample() -> Vec<BlockRow> {
         block(BLOCK_NUMBERED, "Scroll a 10 000-block page without hitching"),
         block(BLOCK_NUMBERED, "Close the lid, reopen, and everything is there"),
         block(BLOCK_TODO, "Block editor MVP"),
-        block(BLOCK_TODO, "Slash menu (type \"/\" anywhere)"),
+        block(BLOCK_TODO, "Slash menu — type \"/\" at the start of a line"),
+        block(BLOCK_H2, "Try the interactions"),
+        block(
+            BLOCK_PARAGRAPH,
+            "Everything below already works: select text and press Ctrl+B / Ctrl+I / Ctrl+E for bold, italic, and inline code; Ctrl+L links it; Tab indents a list item and Shift+Tab promotes it back.",
+        ),
+        block(BLOCK_BULLET, "Ctrl+P searches every page — titles and content"),
+        block(BLOCK_BULLET, "Ctrl+K opens the command palette"),
+        block(BLOCK_BULLET, "Right-click a page in the sidebar for its menu"),
+        block(BLOCK_BULLET, "Click this page's big title to rename it in place"),
         block(BLOCK_H2, "运行与中文"),
         block(
             BLOCK_PARAGRAPH,
