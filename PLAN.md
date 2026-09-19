@@ -163,6 +163,21 @@ that wiring decision, not the storage layer.
       focused block
 - [x] judge review of slash / block-menu / marks / link scenes: 4/4 pass
 
+## Track A round 3 (2026-09-19)
+- [x] async FTS search in the GUI: query goes to the worker thread, the
+      controller polls on a re-arming 30 ms timer, generation counter drops
+      superseded results; headless scenes use a blocking sync path
+- [x] link runs open in the browser (shell open, cfg-gated)
+- [x] restore notice banner (OpenReport consumption, M8 feedback #4) +
+      load-corrupt notice path (feedback #5 UI half)
+- [x] mouse-drag reorder evaluated and dropped (PointerEvent carries no
+      position; TouchArea coords move with the swapped block) — menu +
+      Ctrl+Shift+arrows are the reorder UX
+- [x] IME manual checklist (docs/IME_CHECKLIST.md) — USER PASS PENDING
+- [x] judge: 14-scene regression sweep 14/14 pass
+- [ ] final build/test/render verification rides on Track B's in-flight
+      D6 export/import mark parsing (services/export_service.rs WIP)
+
 ## Next: M4 · Block editor MVP (remaining)
 - block-type switching menu (BlockHandle affordance), cross-block
   clipboard, 1000-block editing responsiveness check, Chinese IME
