@@ -7,6 +7,7 @@
 
 use quire::app::controller;
 use quire::app::state::{AppState, HandleArgs};
+use quire::services::logging;
 use quire::AppWindow;
 use slint::{ComponentHandle, Timer};
 
@@ -132,7 +133,7 @@ fn real_main() -> Result<(), String> {
     // means the session runs in memory only — never fall back to writing
     // over a database we could not read.
     let mut recovered: Option<std::path::PathBuf> = None;
-    let mut library_moved = false;
+    let library_moved;
     let repo: Option<std::sync::Arc<quire::storage::SqliteRepository>> = {
         // D12: storage resolves the real location itself (default → per-user
         // library, legacy appdata carried over on first run) and creates the
@@ -342,6 +343,11 @@ fn real_main() -> Result<(), String> {
     let size = ui.window().size();
     state.record_window_size(size.width as f64, size.height as f64);
     state.persistence_force_flush();
+    // The clean-exit record (M8_FEEDBACK #10, ADR-0018): the next start reads
+    // its absence — with no panic report — as "killed, crashed natively, or
+    // lost power". Normal exit path only, after the final flush, so a session
+    // that dies any other way still counts as unclean.
+    logging::note(logging::END_RECORD);
     Ok(())
 }
 

@@ -588,7 +588,7 @@ impl AppState {
     /// (the previous session aborted, a backup was restored, the library
     /// moved); they read better joined than overwriting each other.
     pub fn take_db_notice(&self) -> Option<String> {
-        let mut queue = self.db_notice.borrow_mut();
+        let queue = self.db_notice.borrow_mut();
         if queue.is_empty() {
             return None;
         }
