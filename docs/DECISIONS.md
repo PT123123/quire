@@ -58,6 +58,17 @@ rebuild; and because `Settings` treats an empty value as absent (the contract
 has no `SettingDelete`), a stored-but-empty setting is indistinguishable from a
 removed one.
 
+Addendum (M8, branch `m8-rc`): that recovery is now *reportable*.
+`backup::open_with_recovery` returns `(Database, OpenReport)` with
+`recovered_from: Option<PathBuf>` (the snapshot that was moved into the main
+path) and `backup_failed: bool` (this session has no snapshot behind it),
+reached through the new `SqliteRepository::open_with_report`; `open()` keeps
+its old signature and discards the report, so every existing caller and test
+stays as it was. `OpenReport::log()` prints the two facts in the `eprintln!`
+convention startup already uses, which is what `main.rs` calls now — a UI
+warning can be built from the same fields without touching storage again
+(closes M8_FEEDBACK #4's "no way to tell the user").
+
 ## ADR-0014 · Full-text search: FTS5 mirror inside the apply transaction,
 CJK indexed by hand-built segmentation
 Decision: search (SPEC §二十) uses two FTS5 virtual tables added by schema

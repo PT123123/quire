@@ -68,3 +68,12 @@ remove the choice instead of repeating it.
    already compiled into the bundled SQLite (no Cargo feature to remember),
    and `bench.ps1`'s CPU% is a share of **one** core — the script now says so
    inline, and the Method section in PERFORMANCE.md was corrected to match.
+
+## Resolved on `m8-rc` (Track B, M8 release candidate)
+
+- **#4 — resolved in storage.** `SqliteRepository::open_with_report` hands the
+  app an `OpenReport { recovered_from: Option<PathBuf>, backup_failed: bool }`
+  (`open()` is unchanged, so no existing call site moved). `main.rs` now calls
+  the new entry point and `report.log()` prints both facts to stderr; the UI
+  warning is still Track A's to build, from those two fields plus
+  `OpenReport::is_clean()` — no storage change needed for it.
