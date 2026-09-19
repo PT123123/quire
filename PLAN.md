@@ -533,5 +533,28 @@ top-level return; default scene render unchanged (`13a011a`).
       open-folder + back-up-now, hidden for memory-only sessions,
       `643bd7d`) and the duplicate-page id-range reservation fix closing
       feedback #2 (`c405a29`)
-- [ ] A2 first-paint measurement, A5 ROADMAP refresh (in flight), A4
-      visual sweep — dispatched next
+- [x] A5 · ROADMAP refresh (`2ba401c`): status column current through
+      Track A round 11; menu-overflow listed as an explicit M8 remainder
+      (kept there — CHANGELOG Known limitations mirrors it; no ADR needed
+      for a polish item)
+- [x] A2 · first-paint measurement: startup_ms (window-up) and
+      first_paint_ms (first frame) are separate measures now, documented
+      side by side in PERFORMANCE.md (≈3.9×/5.6× apart) — the M0-era
+      "startup_ms is not first paint" gap is closed; terminology note
+      recorded so CHANGELOG/PLAN never blend the two. Follow-ups (real_main
+      stage timing, skia comparison) live in PERFORMANCE.md
+- [x] A6 · installer end-to-end (`2fd633b`, verify-installer.ps1): silent
+      install with the .md association task → installed exe launches and
+      exits 0 on a scratch db → extracted icon pixel-matches quire.ico,
+      version resources correct → Quire.Markdown registered without taking
+      the default handler, and the verb's --open path proven live (pages
+      14→15) → silent uninstall leaves zero residue (progid, .md candidate,
+      shortcuts, Add/Remove); the real per-user library untouched
+      (timestamps checked)
+- [x] A6 finding folded: install/quire.png ships for nobody — Slint 1.18
+      has no Window::set_icon, nothing references the file, and shell
+      identity comes from build.rs's embedded IDI_MAIN resource. Track A
+      decision: drop the 7.4 KB asset from the installer (the M8_FEEDBACK
+      #4 @image-url plan stays retired)
+- [ ] A4 · visual sweep: RUNNING (34 scenes, sweep.ps1; Track A holding
+      ui/** until the snapshot lands)
