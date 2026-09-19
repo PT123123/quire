@@ -135,3 +135,37 @@ remove the choice instead of repeating it.
   session to memory (state.rs) while D4's restore-at-open covers physical
   damage; a full "quarantine file + reopen from snapshot + banner" chain
   lands with the OpenReport consumption in app/state.rs.
+
+## M8 hardening round (D9–D12) — new notes
+
+9. **The panic metadata needs one app-side line to reach the database.**
+   `services::logging` runs before any repository exists (`main.rs` allows exactly
+   one init call, and `src/app/**` is off-limits here), so `last_session_aborted`
+   lands in `<data dir>/session.meta` rather than the `metadata` table. The
+   follow-up is one statement where `AppState` has its `Arc<SqliteRepository>`
+   (state.rs, next to the `PersistenceService::with_default_clock` call):
+
+   ```rust
+   if let Some(logger) = quire::services::logging::current() {
+       let changes: Vec<Change> = logger.meta_entries().into_iter()
+           .map(|(key, value)| Change::MetaSet { key, value }).collect();
+       if !changes.is_empty() { let _ = repo.apply(&changes); }
+   }
+   ```
+
+   Until then the fact is on disk and in the log, but not queryable, and no
+   banner shows it. A `MetaDelete` (see #1) would let the app consume the entry
+   after writing it.
+10. **A panic is the only unclean end the logger can see.** The hook is the whole
+    mechanism, so a kill, an access violation or a power loss leaves no report and
+    the next start says nothing. Closing that needs either a second `main.rs` line
+    on the exit path (`logging::note("session ended")` after the final flush, so a
+    missing end-record is the abort signal) or a `Drop` guard the app layer owns.
+    ADR-0018 records the trade-off; this round kept the one-line budget.
+11. **`Cargo.toml` is outside the allowed set, so new integration-test files
+    cannot be registered.** `tests/` here is not cargo-auto-discovered (the
+    existing suites live in `tests/integration/` behind explicit `[[test]]`
+    entries), so D9–D12 tests are unit tests inside their modules — the same place
+    `services::persistence` and `services::settings_store` keep theirs. Adding a
+    `logging_test` / `data_location_test` target is two lines in `[[test]]` when
+    someone may edit `Cargo.toml`.
