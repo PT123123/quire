@@ -66,10 +66,13 @@ export component EditorBlock inherits Rectangle {
     ta := TouchArea {
         width: parent.width;
         height: parent.height;
-        enabled: !editing;
+        // stays enabled while editing so hover (and the handle) keep working;
+        // only the click is suppressed — the live input sits on top for text
         mouse-cursor: MouseCursor.text;
         clicked => {
-            UIState.block-activate(block.id);
+            if (!editing) {
+                UIState.block-activate(block.id);
+            }
         }
     }
 
@@ -89,9 +92,10 @@ export component EditorBlock inherits Rectangle {
         x: root.content-x - 48px;
         y: top-margin;
         block-id: block.id;
-        // visible while the cursor is on the row OR on the handle itself —
-        // without the second term the handle vanishes as the cursor reaches it
-        visible-flag: (ta.has-hover || handle.hovered) && !editing;
+        // hover on the row OR on the buttons themselves — never gated on
+        // !editing: opacity 0 does not stop hit-testing, so an editing-row
+        // handle hidden by that clause stayed clickable in the dark
+        visible-flag: ta.has-hover || handle.hovered;
         plus-clicked => {
             UIState.block-plus(block.id);
         }
