@@ -20,11 +20,25 @@ component DocumentRow inherits Rectangle {
     head := Rectangle {
         width: parent.width;
         height: root.first ? Theme.spacing-hero + title.height + Theme.spacing-lg : 0px;
+
+        // click the big title to rename in place (Notion-style)
+        title-ta := TouchArea {
+            x: root.content-x;
+            y: Theme.spacing-hero;
+            width: root.content-width;
+            height: root.first ? title.height : 0px;
+            enabled: root.first && !UIState.title-editing;
+            visible: root.first;
+            mouse-cursor: MouseCursor.text;
+            clicked => {
+                UIState.title-editing = true;
+            }
+        }
         title := Text {
             x: root.content-x;
             y: Theme.spacing-hero;
             width: root.content-width;
-            visible: root.first;
+            visible: root.first && !UIState.title-editing;
             text: UIState.page-title;
             font-family: Typography.ui-font;
             font-weight: Typography.weight-bold;
@@ -33,6 +47,38 @@ component DocumentRow inherits Rectangle {
             // only, and descenders (g, y) collide with the first block
             line-height-factor: 1.28;
             color: Colors.text-primary;
+        }
+        title-input := TextInput {
+            x: root.content-x;
+            y: Theme.spacing-hero;
+            width: root.content-width;
+            visible: root.first && UIState.title-editing;
+            enabled: root.first && UIState.title-editing;
+            height: self.preferred-height;
+            text <=> UIState.page-title;
+            font-family: Typography.ui-font;
+            font-weight: Typography.weight-bold;
+            font-size: Typography.size-page-title;
+            line-height-factor: 1.28;
+            color: Colors.text-primary;
+            single-line: true;
+            selection-foreground-color: Colors.text-primary;
+            selection-background-color: Colors.selection;
+            accepted => {
+                UIState.title-commit(self.text);
+            }
+            key-pressed(event) => {
+                if (event.text == Key.Escape) {
+                    UIState.title-cancel();
+                    accept
+                } else {
+                    reject
+                }
+            }
+            init => {
+                title-input.focus();
+                title-input.select-all();
+            }
         }
     }
 
@@ -55,6 +101,16 @@ export component Editor inherits Rectangle {
         (root.width - Theme.editor-max-width) / 2);
 
     background: Colors.background;
+
+    // footer: page stats, bottom-right, out of the content's way
+    Text {
+        x: parent.width - self.width - Theme.spacing-md;
+        y: parent.height - self.height - 6px;
+        text: UIState.page-stats;
+        font-family: Typography.ui-font;
+        font-size: Typography.size-caption;
+        color: Colors.text-muted;
+    }
 
     // The scroll position mirror lets the bench harness drive the same
     // viewport a mouse wheel would (scene F); normal wheel use still works

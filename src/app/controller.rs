@@ -21,6 +21,7 @@ pub const TREE_TOP_PX: f32 = 140.0;
 
 pub fn bind(ui: &AppWindow, state: &Rc<AppState>) {
     let g = ui.global::<UIState>();
+    state.set_ui(ui.global::<UIState>().as_weak());
     g.set_sidebar_rows(state.sidebar_model());
     g.set_blocks(state.blocks_model());
     g.set_commands(state.commands_model());
@@ -33,6 +34,7 @@ pub fn bind(ui: &AppWindow, state: &Rc<AppState>) {
     g.set_page_breadcrumb(crumb.into());
     g.set_renderer_name(renderer_name().into());
     g.set_dark(state.dark_setting());
+    state.update_page_stats();
     if let Some(notice) = state.take_db_notice() {
         g.set_db_notice(notice.into());
     }
@@ -59,6 +61,7 @@ fn renderer_name() -> &'static str {
 
 pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
     let gw = ui.global::<UIState>().as_weak();
+    state.set_ui(gw.clone());
 
     // ---- shell ----
     {
@@ -99,7 +102,10 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
             if cur <= 0 {
                 return;
             }
-            s.exec_on_open_page(Command::MoveBlock { id: BlockId(cur as u64), delta });
+            s.exec_on_open_page(Command::MoveBlock {
+                id: BlockId(cur as u64),
+                delta,
+            });
             refresh_focused_text(&g, &s);
         });
     }
@@ -441,7 +447,9 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                 &mut s.doc.borrow_mut(),
                 &mut s.history.borrow_mut(),
                 core_page_id(s.open_page.get()),
-                Command::ToggleTodoChecked { id: BlockId(id as u64) },
+                Command::ToggleTodoChecked {
+                    id: BlockId(id as u64),
+                },
             );
             if changes.is_some() {
                 let checked = s
@@ -517,39 +525,40 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         let gw = gw.clone();
         let s = state.clone();
         let t: &'static slint::Timer = Box::leak(Box::new(slint::Timer::default()));
-        ui.global::<UIState>().on_editing_changed(move |row_y, row_h, content_x| {
-            let gw = gw.clone();
-            let s = s.clone();
-            if let Some(g) = gw.upgrade() {
-                // "/" at block start opens the slash menu with the rest of
-                // the line as the filter (SPEC §十五); anchored below the
-                // editing block
-                let text = g.get_editing_text().to_string();
-                if let Some(filter) = text.strip_prefix('/') {
-                    s.open_slash(filter);
-                    g.set_slash_filter(filter.into());
-                    g.set_slash_focus(0);
-                    let scroll = g.get_editor_scroll_y();
-                    let edge = if g.get_sidebar_open() { 260.0 } else { 0.0 };
-                    let y = (40.0 + (row_y as f32) - scroll + (row_h as f32) + 4.0)
-                        .clamp(48.0, g.get_window_h() - 350.0);
-                    g.set_slash_x(edge + (content_x as f32));
-                    g.set_slash_y(y);
-                    g.set_slash_open(true);
-                } else {
-                    g.set_slash_open(false);
-                }
-            }
-            t.start(
-                slint::TimerMode::SingleShot,
-                std::time::Duration::from_millis(300),
-                move || {
-                    if let Some(g) = gw.upgrade() {
-                        flush_pending_edit(&g, &s);
+        ui.global::<UIState>()
+            .on_editing_changed(move |row_y, row_h, content_x| {
+                let gw = gw.clone();
+                let s = s.clone();
+                if let Some(g) = gw.upgrade() {
+                    // "/" at block start opens the slash menu with the rest of
+                    // the line as the filter (SPEC §十五); anchored below the
+                    // editing block
+                    let text = g.get_editing_text().to_string();
+                    if let Some(filter) = text.strip_prefix('/') {
+                        s.open_slash(filter);
+                        g.set_slash_filter(filter.into());
+                        g.set_slash_focus(0);
+                        let scroll = g.get_editor_scroll_y();
+                        let edge = if g.get_sidebar_open() { 260.0 } else { 0.0 };
+                        let y = (40.0 + (row_y as f32) - scroll + (row_h as f32) + 4.0)
+                            .clamp(48.0, g.get_window_h() - 350.0);
+                        g.set_slash_x(edge + (content_x as f32));
+                        g.set_slash_y(y);
+                        g.set_slash_open(true);
+                    } else {
+                        g.set_slash_open(false);
                     }
-                },
-            );
-        });
+                }
+                t.start(
+                    slint::TimerMode::SingleShot,
+                    std::time::Duration::from_millis(300),
+                    move || {
+                        if let Some(g) = gw.upgrade() {
+                            flush_pending_edit(&g, &s);
+                        }
+                    },
+                );
+            });
     }
 
     {
@@ -595,7 +604,9 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                     .and_then(|i| blocks.get(i))
                     .map(|b| (b.id.0 as i32, b.text.len() as i32))
             };
-            let changes = s.exec_on_open_page(Command::MergeBackward { id: BlockId(cur as u64) });
+            let changes = s.exec_on_open_page(Command::MergeBackward {
+                id: BlockId(cur as u64),
+            });
             if changes.is_some() {
                 match prev {
                     Some((pid, plen)) => focus_block(&g, &s, pid, plen),
@@ -627,9 +638,9 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                         if t < 0 {
                             None
                         } else {
-                            blocks.get(t as usize).map(|b| {
-                                (b.id.0 as i32, b.text.len() as i32, delta < 0)
-                            })
+                            blocks
+                                .get(t as usize)
+                                .map(|b| (b.id.0 as i32, b.text.len() as i32, delta < 0))
                         }
                     })
             };
@@ -678,9 +689,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
             // strip "/filter" (the menu only triggers on the block's first
             // token; a space closes the menu before this point)
             let filter_len = g.get_slash_filter().len();
-            let cleaned = if text.len() >= 1 + filter_len
-                && text.is_char_boundary(1 + filter_len)
-            {
+            let cleaned = if text.len() >= 1 + filter_len && text.is_char_boundary(1 + filter_len) {
                 text[1 + filter_len..].to_string()
             } else {
                 String::new()
@@ -716,12 +725,13 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
     {
         let gw = gw.clone();
         let s = state.clone();
-        ui.global::<UIState>().on_block_menu_opened(move |id, row_y| {
-            let g = gw.upgrade().unwrap();
-            eprintln!("debug: block-menu row_y={:.1}", (row_y as f32));
-            s.fill_block_menu();
-            g.set_block_menu_open_id(id);
-        });
+        ui.global::<UIState>()
+            .on_block_menu_opened(move |id, row_y| {
+                let g = gw.upgrade().unwrap();
+                eprintln!("debug: block-menu row_y={:.1}", (row_y as f32));
+                s.fill_block_menu();
+                g.set_block_menu_open_id(id);
+            });
     }
 
     {
@@ -748,14 +758,18 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                     });
                 }
                 3 => {
-                    let _ = s.exec_on_open_page(Command::DuplicateBlock { id: BlockId(id as u64) });
+                    let _ = s.exec_on_open_page(Command::DuplicateBlock {
+                        id: BlockId(id as u64),
+                    });
                 }
                 4 => s.copy_block(id),
                 5 => {
                     s.paste_below(id);
                 }
                 6 => {
-                    let _ = s.exec_on_open_page(Command::DeleteBlock { id: BlockId(id as u64) });
+                    let _ = s.exec_on_open_page(Command::DeleteBlock {
+                        id: BlockId(id as u64),
+                    });
                     if g.get_editing_id() == id {
                         g.set_editing_id(-1);
                     }
@@ -787,30 +801,31 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
     {
         let gw = gw.clone();
         let s = state.clone();
-        ui.global::<UIState>().on_toggle_mark(move |kind, start, end| {
-            let g = gw.upgrade().unwrap();
-            flush_pending_edit(&g, &s);
-            let cur = g.get_editing_id();
-            if cur <= 0 {
-                return;
-            }
-            let kind = match kind {
-                0 => Some(crate::core::MarkKind::Bold),
-                1 => Some(crate::core::MarkKind::Italic),
-                2 => Some(crate::core::MarkKind::Strike),
-                3 => Some(crate::core::MarkKind::Code),
-                _ => None,
-            };
-            if let Some(kind) = kind {
-                let _ = s.exec_on_open_page(Command::ToggleMark {
-                    id: BlockId(cur as u64),
-                    start: start.min(end).max(0) as usize,
-                    end: end.max(start).max(0) as usize,
-                    kind,
-                    url: String::new(),
-                });
-            }
-        });
+        ui.global::<UIState>()
+            .on_toggle_mark(move |kind, start, end| {
+                let g = gw.upgrade().unwrap();
+                flush_pending_edit(&g, &s);
+                let cur = g.get_editing_id();
+                if cur <= 0 {
+                    return;
+                }
+                let kind = match kind {
+                    0 => Some(crate::core::MarkKind::Bold),
+                    1 => Some(crate::core::MarkKind::Italic),
+                    2 => Some(crate::core::MarkKind::Strike),
+                    3 => Some(crate::core::MarkKind::Code),
+                    _ => None,
+                };
+                if let Some(kind) = kind {
+                    let _ = s.exec_on_open_page(Command::ToggleMark {
+                        id: BlockId(cur as u64),
+                        start: start.min(end).max(0) as usize,
+                        end: end.max(start).max(0) as usize,
+                        kind,
+                        url: String::new(),
+                    });
+                }
+            });
     }
 
     {
@@ -838,6 +853,41 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         ui.global::<UIState>().on_close_db_notice(move || {
             let g = gw.upgrade().unwrap();
             g.set_db_notice("".into());
+        });
+    }
+
+    // ---- page title in-place editing ----
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_title_commit(move |text| {
+            let g = gw.upgrade().unwrap();
+            let title = text.trim().to_string();
+            let cur = s.open_page.get();
+            g.set_title_editing(false);
+            if cur <= 0 {
+                return;
+            }
+            if title.is_empty() {
+                // empty title reverts to the stored one
+                let t = s.workspace.borrow().title_of(cur).unwrap_or("").to_string();
+                g.set_page_title(t.into());
+                return;
+            }
+            s.rename_page(cur, &title);
+            g.set_page_title(title.into());
+        });
+    }
+
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_title_cancel(move || {
+            let g = gw.upgrade().unwrap();
+            g.set_title_editing(false);
+            let cur = s.open_page.get();
+            let t = s.workspace.borrow().title_of(cur).unwrap_or("").to_string();
+            g.set_page_title(t.into());
         });
     }
 
@@ -951,7 +1001,10 @@ fn flush_pending_edit(g: &UIState<'_>, state: &Rc<AppState>) {
     }
     let id = BlockId(editing as u64);
     let text = g.get_editing_text().to_string();
-    let applied = state.exec_editor(Command::ReplaceText { id, text: text.clone() });
+    let applied = state.exec_editor(Command::ReplaceText {
+        id,
+        text: text.clone(),
+    });
     if applied.is_some() {
         // targeted row sync; no delegate rebuild
         let mut i = 0;
@@ -1001,7 +1054,12 @@ fn refresh_focused_text(g: &UIState<'_>, state: &Rc<AppState>) {
 /// Export the open page's blocks to a .md file via the native save dialog.
 fn export_current_page(g: &UIState<'_>, state: &Rc<AppState>) {
     let page = state.open_page.get();
-    let title = state.workspace.borrow().title_of(page).unwrap_or("page").to_string();
+    let title = state
+        .workspace
+        .borrow()
+        .title_of(page)
+        .unwrap_or("page")
+        .to_string();
     let md = {
         let d = state.doc.borrow();
         crate::services::export_service::export_page(d.page_blocks(core_page_id(page)))
@@ -1093,7 +1151,12 @@ fn search_target(g: &UIState<'_>, state: &Rc<AppState>) -> i32 {
 }
 
 /// Benchmark scene G: switch to the next bench page (called from a timer).
-pub fn bench_switch_next(ui: &AppWindow, state: &Rc<AppState>, bench_ids: &[i32], cursor: &mut usize) {
+pub fn bench_switch_next(
+    ui: &AppWindow,
+    state: &Rc<AppState>,
+    bench_ids: &[i32],
+    cursor: &mut usize,
+) {
     if bench_ids.is_empty() {
         return;
     }
@@ -1128,6 +1191,10 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
         }
         "block-menu" => {}
         "link" => apply_scene_overlay(ui, state, "link-dlg"),
+        "title-edit" => {
+            g.set_page_title("Renaming in place…".into());
+            g.set_title_editing(true);
+        }
         "recovered" => {
             state.set_db_notice(
                 "The database was damaged — this session was restored from a backup (appdata/quire.db.bak1). The damaged file was kept beside it.".into(),
@@ -1153,9 +1220,36 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             if let Some((id, text)) = target {
                 let end = text.len().min(26);
                 let marks = vec![
-                    crate::core::Mark { start: 0, end, kind: crate::core::MarkKind::Bold, url: String::new() },
-                    crate::core::Mark { start: 2, end: 7, kind: crate::core::MarkKind::Italic, url: String::new() },
-                    crate::core::Mark { start: 8, end: 12, kind: crate::core::MarkKind::Code, url: String::new() },
+                    crate::core::Mark {
+                        start: 0,
+                        end,
+                        kind: crate::core::MarkKind::Bold,
+                        url: String::new(),
+                    },
+                    crate::core::Mark {
+                        start: 2,
+                        end: 7,
+                        kind: crate::core::MarkKind::Italic,
+                        url: String::new(),
+                    },
+                    crate::core::Mark {
+                        start: 8,
+                        end: 12,
+                        kind: crate::core::MarkKind::Code,
+                        url: String::new(),
+                    },
+                    crate::core::Mark {
+                        start: 45,
+                        end: 55,
+                        kind: crate::core::MarkKind::Strike,
+                        url: String::new(),
+                    },
+                    crate::core::Mark {
+                        start: 60,
+                        end: 72,
+                        kind: crate::core::MarkKind::Link,
+                        url: "https://example.com".into(),
+                    },
                 ];
                 state
                     .doc

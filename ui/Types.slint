@@ -99,6 +99,9 @@ export global UIState {
 
     // startup notice (e.g. database restored from backup); empty = hidden
     in-out property <string> db-notice: "";
+    // big page title in-place editing (click the title)
+    in-out property <bool> title-editing: false;
+    in-out property <string> page-stats: "";
     /// Internal clipboard for cross-block copy/paste (menu-driven).
     in-out property <bool> has-copied-block: false;
 
@@ -154,6 +157,8 @@ export global UIState {
     callback link-remove();
     callback link-cancel();
     callback close-db-notice();
+    callback title-commit(string);
+    callback title-cancel();
     callback open-link(string);
     callback palette-query-changed();
     callback palette-open-requested();
