@@ -460,7 +460,12 @@ with N = 0 / 1 000 / 5 000 / 10 000, labels `scale-a`, `scale-1k`, `scale-5k`,
 `scale-10k`; each run gets its own scratch database. The exe is the release
 build of `6c115b5` (the newest Rust/UI commit — everything after it in this
 session touched docs and scripts only). Raw rows:
-`benchmarks/results/2026-09-20-first-paint-scale-*.jsonl`.
+`benchmarks/results/2026-09-20-first-paint-scale-*.jsonl`. Every number in the
+table above is regenerable with `benchmarks/scripts/audit_results.ps1`: it
+recomputes each stored summary row from the runs beside it and exits 1 if they
+disagree, prints the per-phase medians, and ends with a cross-batch view of the
+first-paint batches grouped by document size — which is where the drift
+paragraph below comes from.
 
 **Numbers** (medians, ms):
 
