@@ -216,3 +216,69 @@ fn duplicate_reserves_its_id_range() {
     let fresh = state.doc.borrow_mut().alloc_block_id();
     assert!(!copied_ids.contains(&fresh.as_u64()));
 }
+
+#[test]
+fn the_page_picker_lists_pages_and_the_link_conversion_guards_its_inputs() {
+    use quire::app::state::PAGE_ATLAS;
+    use slint::Model;
+
+    let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0 };
+    let state = AppState::new(&args, None);
+
+    // the picker lists every page in tree order; typing filters by title
+    state.open_slash_pick("");
+    let all = state.slash_model().row_count();
+    assert!(all >= 5, "the sample workspace carries pages");
+    state.open_slash_pick("getting");
+    assert_eq!(state.slash_model().row_count(), 1);
+    let picked = state.slash_selected_page(0).expect("a filtered row is a page");
+    assert_eq!(
+        state.workspace.borrow().title_of(picked),
+        Some("Getting Started")
+    );
+
+    // the link conversion guards: only an EMPTY PARAGRAPH converts, and the
+    // target must exist. The first block of Getting Started is text → refuse
+    let first = {
+        let doc = state.doc.borrow();
+        doc.page_blocks(quire::app::state::core_page_id(PAGE_GETTING_STARTED))[0].id.0 as i32
+    };
+    assert!(!state.create_page_link_block(first, PAGE_ATLAS));
+
+    // the real flow: the "+" handle first inserts the empty line, the
+    // picker then converts it. An empty paragraph converts; the row reads
+    // the target's live title on reproject
+    state.open_page(PAGE_ATLAS);
+    let tail = {
+        let doc = state.doc.borrow();
+        doc.page_blocks(quire::app::state::core_page_id(PAGE_ATLAS))
+            .last()
+            .unwrap()
+            .id
+            .0 as i32
+    };
+    let changes = state.exec_on_open_page(quire::core::Command::InsertBlockAfter {
+        id: quire::core::BlockId(tail as u64),
+        kind: quire::core::BlockKind::Paragraph,
+        text: String::new(),
+    });
+    let fresh = changes
+        .as_deref()
+        .and_then(|cs| {
+            cs.iter().find_map(|c| match c {
+                quire::core::Change::BlockInserted(b) => Some(b.id.0 as i32),
+                _ => None,
+            })
+        })
+        .expect("the insert lands");
+    assert!(state.create_page_link_block(fresh, PAGE_GETTING_STARTED));
+    let doc = state.doc.borrow();
+    let b = doc
+        .block(quire::core::BlockId(fresh as u64))
+        .expect("the converted block exists");
+    assert_eq!(b.kind, quire::core::BlockKind::Link);
+    assert_eq!(
+        b.page_ref,
+        Some(quire::core::PageId(PAGE_GETTING_STARTED as u64))
+    );
+}
