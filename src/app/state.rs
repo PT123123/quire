@@ -9,6 +9,7 @@
 use crate::app::workspace::{SearchHit, Workspace, BENCH_ID_BASE, MAX_RECENTS};
 use crate::core::persistence::{Change, Repository};
 use crate::core::{Block, BlockId, BlockKind, Command, Document, History, OrderKey, PageId};
+use crate::services::find_service::FindSession;
 use crate::services::persistence::PersistenceService;
 use crate::services::search_service::SearchService;
 use crate::storage::search_index::SearchRequest;
@@ -42,6 +43,12 @@ pub struct AppState {
     /// In-flight async search with its generation; superseded queries drop
     /// their result instead of overwriting newer ones.
     pending_search: RefCell<Option<(u64, crate::services::search_service::PendingSearch)>>,
+    /// Ctrl+F in-page find session (Track B's FindSession).
+    find_session: RefCell<Option<FindSession>>,
+    find_label: RefCell<String>,
+    /// Page to open instead of the default landing page (persisted
+    /// "current-page" meta).
+    restore_current: Cell<Option<i32>>,
     search_generation: Cell<u64>,
     /// Persisted sibling order of every page (drives PageCreated/Moved).
     page_order: RefCell<HashMap<i32, OrderKey>>,
@@ -154,6 +161,7 @@ impl AppState {
         let persisted = loaded.filter(|s| !s.pages.is_empty());
         let mut restored_settings: HashMap<String, String> = HashMap::new();
         let mut restored_recents: Vec<i32> = Vec::new();
+        let mut restored_current: Option<i32> = None;
         if let Some(state0) = &persisted {
             restored_settings = state0
                 .settings
@@ -165,6 +173,10 @@ impl AppState {
                 .get("recents")
                 .map(|v| v.split(',').filter_map(|x| x.parse::<i32>().ok()).collect())
                 .unwrap_or_default();
+            restored_current = state0
+                .meta
+                .get("current-page")
+                .and_then(|v| v.parse::<i32>().ok());
         }
 
         let (workspace, mut doc, page_order, seed) = match &persisted {
@@ -246,6 +258,7 @@ impl AppState {
             clipboard: RefCell::new(None),
             settings: RefCell::new(restored_settings),
             recents_restored: Cell::new(restored_recents),
+            restore_current: Cell::new(restored_current),
             ui: RefCell::new(None),
             db_notice: RefCell::new(None),
             all_commands,
@@ -255,6 +268,8 @@ impl AppState {
             search_service,
             pending_search: RefCell::new(None),
             search_generation: Cell::new(0),
+            find_session: RefCell::new(None),
+            find_label: RefCell::new(String::new()),
             page_order: RefCell::new(page_order),
             flush_hook: RefCell::new(None),
             open_page: Cell::new(0),
@@ -381,7 +396,11 @@ impl AppState {
             ws.mark_opened(id);
             ws.expand_ancestors(id);
         }
-        // persist the recent list
+        // persist the recent list + last-opened page
+        self.record(vec![Change::MetaSet {
+            key: "current-page".into(),
+            value: id.to_string(),
+        }]);
         let recents = self.workspace.borrow().recents_ids();
         self.record(vec![Change::MetaSet {
             key: "recents".into(),
@@ -588,6 +607,44 @@ impl AppState {
             .get("theme")
             .map(|v| v == "dark")
             .unwrap_or(false)
+    }
+
+    // ---- in-page find (Ctrl+F; data layer = Track B's FindSession) ----
+
+    /// (Re)build the session for `term` over the open page's blocks.
+    pub fn find_start(&self, term: &str) {
+        let page = core_page_id(self.open_page.get());
+        let blocks = self.doc.borrow().page_blocks(page).to_vec();
+        let session = FindSession::new(term, &blocks);
+        let label = if session.is_empty() {
+            "no matches".to_string()
+        } else {
+            format!("0 / {}", session.total())
+        };
+        *self.find_label.borrow_mut() = label;
+        *self.find_session.borrow_mut() = Some(session);
+    }
+
+    /// Step to the next/previous hit. Returns (block id as i32, start, end)
+    /// for the UI to select, plus refreshes the position label.
+    pub fn find_step(&self, next: bool) -> Option<(i32, usize, usize)> {
+        let mut slot = self.find_session.borrow_mut();
+        let session = slot.as_mut()?;
+        let hit = if next { session.next() } else { session.prev() }?;
+        let position = session.position()?;
+        let total = session.total();
+        drop(slot);
+        *self.find_label.borrow_mut() = format!("{}/{}", position + 1, total);
+        Some((hit.block.0 as i32, hit.start, hit.end))
+    }
+
+    pub fn find_label(&self) -> String {
+        self.find_label.borrow().clone()
+    }
+
+    pub fn find_close(&self) {
+        *self.find_session.borrow_mut() = None;
+        *self.find_label.borrow_mut() = String::new();
     }
 
     // ---- slash menu (descriptors owned by Rust, per SPEC §十五) ----

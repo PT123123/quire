@@ -102,6 +102,17 @@ export global UIState {
     // big page title in-place editing (click the title)
     in-out property <bool> title-editing: false;
     in-out property <string> page-stats: "";
+
+    // in-page find (Ctrl+F)
+    in-out property <bool> find-open: false;
+    in-out property <string> find-term: "";
+    in-out property <string> find-label: "";
+    // the hit the bar navigated to: the editing input selects this range
+    // when it (re)creates, driven by find-sel-gen
+    in-out property <int> find-target-block: -1;
+    in-out property <int> pending-sel-start: -1;
+    in-out property <int> pending-sel-end: -1;
+    in-out property <int> find-sel-gen: 0;
     /// Internal clipboard for cross-block copy/paste (menu-driven).
     in-out property <bool> has-copied-block: false;
 
@@ -157,6 +168,9 @@ export global UIState {
     callback link-remove();
     callback link-cancel();
     callback close-db-notice();
+    callback find-start();
+    callback find-step(int);
+    callback find-close();
     callback title-commit(string);
     callback title-cancel();
     callback open-link(string);

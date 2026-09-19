@@ -9,6 +9,7 @@ import { Colors } from "../Colors.slint";
 import { Typography } from "../Typography.slint";
 import { Icon } from "../Icons.slint";
 import { EditorBlock } from "./EditorBlock.slint";
+import { IconButton } from "./IconButton.slint";
 import { BlockRow, UIState } from "../Types.slint";
 
 component DocumentRow inherits Rectangle {
@@ -101,6 +102,102 @@ export component Editor inherits Rectangle {
         (root.width - Theme.editor-max-width) / 2);
 
     background: Colors.background;
+
+    // in-page find bar (Ctrl+F)
+    if UIState.find-open : Rectangle {
+        x: parent.width - self.width - Theme.spacing-md;
+        y: Theme.spacing-md;
+        width: 340px;
+        height: 36px;
+        border-radius: Theme.radius-md;
+        background: Colors.surface-overlay;
+        border-width: 1px;
+        border-color: Colors.border;
+
+        HorizontalLayout {
+            x: 6px;
+            y: 4px;
+            width: parent.width - 12px;
+            spacing: Theme.spacing-sm;
+
+            Rectangle {
+                width: 130px;
+                height: 26px;
+                border-radius: Theme.radius-sm;
+                background: Colors.background;
+                clip: true;
+                find-input := TextInput {
+                    x: 6px;
+                    width: parent.width - 12px;
+                    y: (parent.height - self.preferred-height) / 2;
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-ui;
+                    color: Colors.text-primary;
+                    single-line: true;
+                    text <=> UIState.find-term;
+                    accepted => {
+                        UIState.find-start();
+                    }
+                    key-pressed(event) => {
+                        if (event.text == Key.Escape) {
+                            UIState.find-close();
+                            accept
+                        } else {
+                            reject
+                        }
+                    }
+                    init => {
+                        find-input.focus();
+                    }
+                }
+                if UIState.find-term == "" : Text {
+                    x: 6px;
+                    text: "Find";
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-ui;
+                    color: Colors.text-muted;
+                    vertical-alignment: center;
+                }
+            }
+            Text {
+                text: UIState.find-label;
+                font-family: Typography.ui-font;
+                font-size: Typography.size-caption;
+                color: Colors.text-muted;
+                vertical-alignment: center;
+                width: 64px;
+                overflow: elide;
+            }
+            IconButton {
+                vertical-stretch: 0;
+                cross-axis-self-alignment: center;
+                icon-name: "chevron-up";
+                size: 24px;
+                clicked => {
+                    UIState.find-step(-1);
+                }
+            }
+            IconButton {
+                vertical-stretch: 0;
+                cross-axis-self-alignment: center;
+                icon-name: "chevron-down";
+                size: 24px;
+                clicked => {
+                    UIState.find-step(1);
+                }
+            }
+            IconButton {
+                vertical-stretch: 0;
+                cross-axis-self-alignment: center;
+                icon-name: "x";
+                size: 24px;
+                clicked => {
+                    UIState.find-close();
+                    UIState.find-open = false;
+                }
+            }
+        }
+    }
 
     // footer: page stats, bottom-right, out of the content's way
     Text {

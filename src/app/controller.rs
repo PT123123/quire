@@ -856,6 +856,57 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         });
     }
 
+    // ---- in-page find (Ctrl+F) ----
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_find_start(move || {
+            let g = gw.upgrade().unwrap();
+            let term = g.get_find_term().to_string();
+            s.find_start(&term);
+            g.set_find_label(s.find_label().into());
+        });
+    }
+
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_find_step(move |delta| {
+            let g = gw.upgrade().unwrap();
+            if !g.get_find_open() {
+                return;
+            }
+            flush_pending_edit(&g, &s);
+            if let Some((bid, start, end)) = s.find_step(delta < 0) {
+                let text = {
+                    let d = s.doc.borrow();
+                    d.block(BlockId(bid as u64))
+                        .map(|b| b.text.clone())
+                        .unwrap_or_default()
+                };
+                // route through the hit block's editing input: recreate the
+                // delegate with a pending range selection
+                g.set_editing_text(text.into());
+                g.set_pending_sel_start(start as i32);
+                g.set_pending_sel_end(end as i32);
+                g.set_editing_id(-1);
+                g.set_editing_id(bid);
+                g.set_find_target_block(bid);
+                let gen = g.get_find_sel_gen() + 1;
+                g.set_find_sel_gen(gen);
+            } else {
+                g.set_find_label(s.find_label().into());
+            }
+        });
+    }
+
+    {
+        let s = state.clone();
+        ui.global::<UIState>().on_find_close(move || {
+            s.find_close();
+        });
+    }
+
     // ---- page title in-place editing ----
     {
         let gw = gw.clone();
@@ -1211,6 +1262,12 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
         }
 
         "empty" => open(&g, state, 113),
+        "find" => {
+            g.set_find_open(true);
+            g.set_find_term("the".into());
+            state.find_start("the");
+            g.set_find_label(state.find_label().into());
+        }
         "marks" => {
             // seed inline marks on the first paragraph (visual test only,
             // applied directly like an editor toggle would)
