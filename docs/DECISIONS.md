@@ -2,6 +2,38 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0016 · Inline marks are the Markdown interchange format, spans in and
+spans out
+Decision: `import_service::parse_markdown` reads `**bold**`, `*italic*`,
+`` `code` ``, `~~strike~~` and `[text](url)` into `core::types::Mark` spans
+(byte offsets on char boundaries, the same sorted shape `Command::ToggleMark`
+maintains), and `export_service::export_page` writes those spans back as
+markers. Neither side builds an AST: the importer recurses into the span it
+just matched, the exporter walks the mark *boundaries* and opens/closes markers
+there, so nesting is expressed by the ranges — which is the shape the renderer
+already consumes. Two shapes have no CommonMark spelling, because its inline
+tree is strictly nested: marks of different kinds that only partially overlap,
+and styling inside a code span (whose content is literal). The exporter cuts
+the first at the crossing — every character keeps its text and each piece
+keeps its kind — and drops the second. A literal marker in text is written as
+an escape (`\*`), and a code span whose content starts or ends with a backtick,
+or is itself padded with spaces, takes the space wrapper that CommonMark
+strips back off.
+Why: the document model is a flat span list, so anything that parsed a real
+CommonMark tree would have to flatten it straight away; keeping the flat list
+on both sides makes the pair testable by round trip (`export ∘ import` and
+`import ∘ export` land on the same blocks) instead of by a conformance suite
+this app cannot afford. Degrading an unrepresentable span into pieces, rather
+than dropping it silently, keeps the text byte-exact — the property users
+notice when they re-import their own notes.
+Consequences: the round trip is a fixpoint from the second pass, not
+byte-identical on the first for the crossing case (it comes back as two bold
+and two italic pieces). Block-level ambiguity is out of scope and stays
+literal: the exporter escapes inline markers but not a line-initial `#`, `-`,
+`>` or `1.`, so a paragraph that *starts* with list syntax does not survive
+re-import as a paragraph. Tables, images, setext headings and footnotes are
+imported as text for the same reason.
+
 ## ADR-0015 · Crash recovery: rotating `VACUUM INTO` snapshots, restore at
 open; settings and metadata as a diffed key/value layer
 Decision: the durability story from M3 stands and is now on the record as

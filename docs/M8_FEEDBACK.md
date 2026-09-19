@@ -77,3 +77,13 @@ remove the choice instead of repeating it.
   the new entry point and `report.log()` prints both facts to stderr; the UI
   warning is still Track A's to build, from those two fields plus
   `OpenReport::is_clean()` — no storage change needed for it.
+
+- **Markdown import now fills `Block::marks` (D6, M6 tail).** `parse_markdown`
+  reads `**bold**`, `*italic*`, `` `code` ``, `~~strike~~` and `[text](url)`
+  into the same span shape `Command::ToggleMark` maintains, and
+  `import_markdown` puts them on the `BlockInserted` changes it emits — so an
+  imported page shows styled text without any UI change, because the renderer
+  already walks `Block::marks`. `ParsedBlock` gained a `marks` field (it is
+  built by the importer and read by tests; nothing in the app constructs one).
+  Export writes spans back, including the two shapes CommonMark cannot hold,
+  which are resolved as recorded in ADR-0016.
