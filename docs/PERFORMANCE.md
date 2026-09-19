@@ -189,7 +189,12 @@ committed as `4afc35d`). Raw data: `benchmarks/results/2026-09-19-m7-matrix-{vg,
 (18 rows each: every scene has a fresh-DB seed pass and a measured pass).
 CPU% is a share of ONE core (16C/22T machine — divide by 16 for the
 Task-Manager style whole-CPU number). GPU-side memory is not in these
-numbers.
+numbers. Matrix methodology: idle scenes pin an independent `--db` under
+%TEMP% (quire-matrix/<label>.db) so runs never share state, and every
+scene runs TWICE — a fresh-DB seed pass, then the measured pass; only the
+measured pass is a loaded-state number. Earlier skia rows reporting
+exit_code -1 were a bench-driver bug (wrong binary + overlapping rounds),
+not an app defect; they were discarded and the scene re-run.
 
 | scene | vg CPU% | sk CPU% | vg WS MB | sk WS MB | vg priv MB | sk priv MB |
 |-------|--------:|--------:|---------:|---------:|-----------:|-----------:|
