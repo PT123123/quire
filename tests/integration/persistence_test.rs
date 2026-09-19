@@ -43,6 +43,8 @@ fn seeded(path: &Path) -> Arc<SqliteRepository> {
             text: String::new(),
             checked: false,
                 marks: Vec::new(),
+        color: quire::core::ColorKind::Default,
+        background: quire::core::ColorKind::Default,
         }),
     ])
     .unwrap();
@@ -95,6 +97,8 @@ fn shutdown_flush_then_next_session_loads_it() {
             text: "未保存的中文草稿".into(),
             checked: true,
                 marks: Vec::new(),
+        color: quire::core::ColorKind::Default,
+        background: quire::core::ColorKind::Default,
         })]);
         clock.set(10); // nowhere near due — this is the Ctrl+S/quit path
         svc.force_flush().unwrap();

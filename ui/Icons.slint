@@ -399,6 +399,58 @@ component IcChevronUp {
 }
 
 // Name dispatcher used by sidebar rows and palette rows.
+component IcLink {
+    in property <brush> color: Colors.text-secondary;
+    in property <length> size: 16px;
+    width: size; height: size;
+    Path {
+        width: parent.width; height: parent.height;
+        viewbox-x: 0; viewbox-y: 0; viewbox-width: 24; viewbox-height: 24;
+        stroke: color; stroke-width: 1.8px;
+        stroke-line-cap: round; stroke-line-join: round;
+        fill: transparent;
+        MoveTo { x: 9; y: 17; } LineTo { x: 6; y: 17; }
+        ArcTo { radius-x: 5; radius-y: 5; x: 6; y: 7; }
+        LineTo { x: 9; y: 7; }
+        MoveTo { x: 15; y: 7; } LineTo { x: 18; y: 7; }
+        ArcTo { radius-x: 5; radius-y: 5; x: 18; y: 17; }
+        LineTo { x: 15; y: 17; }
+        MoveTo { x: 8; y: 12; } LineTo { x: 16; y: 12; }
+    }
+}
+
+component IcArrowRight {
+    in property <brush> color: Colors.text-secondary;
+    in property <length> size: 16px;
+    width: size; height: size;
+    Path {
+        width: parent.width; height: parent.height;
+        viewbox-x: 0; viewbox-y: 0; viewbox-width: 24; viewbox-height: 24;
+        stroke: color; stroke-width: 1.8px;
+        stroke-line-cap: round; stroke-line-join: round;
+        fill: transparent;
+        MoveTo { x: 5; y: 12; } LineTo { x: 19; y: 12; }
+        MoveTo { x: 13; y: 6; } LineTo { x: 19; y: 12; } LineTo { x: 13; y: 18; }
+    }
+}
+
+component IcPalette {
+    in property <brush> color: Colors.text-secondary;
+    in property <length> size: 16px;
+    width: size; height: size;
+    Path {
+        width: parent.width; height: parent.height;
+        viewbox-x: 0; viewbox-y: 0; viewbox-width: 24; viewbox-height: 24;
+        stroke: color; stroke-width: 1.8px;
+        stroke-line-cap: round; stroke-line-join: round;
+        fill: transparent;
+        MoveTo { x: 12; y: 3.5; }
+        CubicTo { control-1-x: 9.5; control-1-y: 8; control-2-x: 5.5; control-2-y: 11; x: 5.5; y: 15; }
+        ArcTo { radius-x: 6.5; radius-y: 6.5; x: 18.5; y: 15; }
+        CubicTo { control-1-x: 18.5; control-1-y: 11; control-2-x: 14.5; control-2-y: 8; x: 12; y: 3.5; }
+    }
+}
+
 export component Icon {
     in property <string> name;
     in property <length> size: 16px;
@@ -432,4 +484,7 @@ export component Icon {
     IcTodoCheck { visible: root.name == "todo-check"; size: root.size; color: root.color; }
     IcExport { visible: root.name == "export"; size: root.size; color: root.color; }
     IcImport { visible: root.name == "import"; size: root.size; color: root.color; }
+    IcLink { visible: root.name == "link"; size: root.size; color: root.color; }
+    IcArrowRight { visible: root.name == "arrow-right"; size: root.size; color: root.color; }
+    IcPalette { visible: root.name == "palette"; size: root.size; color: root.color; }
 }

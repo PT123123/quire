@@ -24,13 +24,15 @@ export struct TextRun {
 
 export struct BlockRow {
     id: int,
-    kind: int, // 0 para, 1 h1, 2 h2, 3 h3, 4 bullet, 5 numbered, 6 todo, 7 quote, 8 code, 9 divider
+    kind: int, // 0 para, 1 h1, 2 h2, 3 h3, 4 bullet, 5 numbered, 6 todo, 7 quote, 8 code, 9 divider, 10 callout
     text: string,
     checked: bool,
     number: int,
     tail: bool, // last block of the page: the delegate carries the bottom spacer
     runs: [TextRun], // inline marks (M6); empty = render `text` as one run
     depth: int, // list nesting level (0-1 in M4; drives the indent)
+    color: int, // text palette slot (0 = theme default, 1.. = gray..red)
+    bg: int,    // row background palette slot (0 = transparent)
 }
 
 export struct CommandRow {
@@ -59,6 +61,9 @@ export struct MenuRow {
     label: string,
     icon: string,
     danger: bool,
+    swatch: int,     // palette slot for color rows; -1 = plain icon row
+    swatch-bg: bool, // true: swatch resolves through the background palette
+    check: bool,     // renders the "current pick" check at the row's right
 }
 
 // The one place transient UI state lives. Components read/write it directly;

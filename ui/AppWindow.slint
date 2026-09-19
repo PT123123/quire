@@ -49,9 +49,23 @@ component BlockMenuPopup inherits PopupWindow {
 
             HorizontalLayout {
                 x: 6px;
+                padding-right: Theme.spacing-sm;
                 spacing: Theme.spacing-sm;
-                Icon {
-                    y: (parent.height - 14px) / 2;
+                // color rows carry a swatch dot instead of an icon
+                if item.swatch >= 0 : Rectangle {
+                    width: 14px;
+                    height: 14px;
+                    vertical-stretch: 0;
+                    cross-axis-self-alignment: center;
+                    border-radius: 7px;
+                    background: item.swatch-bg ? Colors.block-bg(item.swatch)
+                        : Colors.block-text(item.swatch);
+                    border-width: item.swatch == 0 && item.swatch-bg ? 1px : 0px;
+                    border-color: Colors.border-strong;
+                }
+                if item.swatch < 0 : Icon {
+                    vertical-stretch: 0;
+                    cross-axis-self-alignment: center;
                     width: 14px;
                     height: 14px;
                     size: 14px;
@@ -66,6 +80,17 @@ component BlockMenuPopup inherits PopupWindow {
                     color: item.danger ? Colors.danger
                         : (bm-ta.has-hover ? Colors.text-primary : Colors.text-secondary);
                     vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+                if item.check : Icon {
+                    vertical-stretch: 0;
+                    cross-axis-self-alignment: center;
+                    width: 13px;
+                    height: 13px;
+                    size: 13px;
+                    name: "todo-check";
+                    stroke-width: 2.6px;
+                    color: Colors.accent;
                 }
             }
             bm-ta := TouchArea {

@@ -19,16 +19,22 @@ First functional release: a local, single-file-database notes workspace.
 - Markdown line-shortcuts: type "# ", "## ", "### ", "- ", "* ", "1. ",
   "[] ", "[x] ", "> ", "---" or "```" at a block start to convert it as you
   type (one undo step)
-- Block menu (⋮⋮): Turn into submenu (Text / Code / Divider); the slash
-  menu and Turn-into list only kinds without a symbol shortcut; fixed the
-  menu popup never showing from a real handle click (it only ever rendered
-  in the visual-test scene) and anchored it beside the handle
+- Callout block: a tinted rounded box with an emoji and text (slash menu
+  "Callout"; turns into Text/Code/Divider like the other kinds)
+- Block menu (⋮⋮) — Notion's set, minus the collab/AI items that stay out
+  of v1: Turn into (Text / Callout / Code / Divider), Duplicate, Copy link
+  to block (puts a quire://block anchor on the system clipboard), Move to
+  (every other page; the whole subtree crosses in one undo step), Text
+  color and Background color (live-picking palette with swatches), Move
+  up/down, Copy block, Paste below, Delete. Clicking a quire://block or
+  quire://page link jumps inside the app. The slash menu and Turn-into
+  list only carry kinds without a symbol shortcut (ADR-0022)
 - Fixed the handle (+/⋮⋮) being clickable while invisible on the block
   being edited: it now shows whenever the row or the buttons are hovered,
   editing or not
 - Inline marks: bold (Ctrl+B), italic (Ctrl+I), inline code (Ctrl+E),
   strikethrough (Ctrl+Shift+X), links (Ctrl+L + dialog; click a link to
-  open it)
+  open it — internal quire:// links navigate in-app)
 - Per-page find bar (Ctrl+F) with hit counter and selection navigation
 - Undo/redo (Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z) — per page, command-based
 
@@ -44,11 +50,12 @@ First functional release: a local, single-file-database notes workspace.
 - Context menus on pages and blocks
 
 ### Persistence & reliability
-- SQLite (bundled, no server): pages, blocks, marks, settings, metadata
+- SQLite (bundled, no server): pages, blocks, marks, colors, settings,
+  metadata (schema v1–v4)
 - Debounced batched writes; Ctrl+S forces a save; close saves too
 - Rotating snapshots on every open (5 generations), restore-at-open when
   the main file is damaged, damaged file quarantined (`.corrupt`)
-- Startup integrity checks; schema migrations (v1–v3)
+- Startup integrity checks; schema migrations (v1–v4)
 
 ### Desktop integration
 - Frameless window with custom title bar, light + dark themes (persisted)
@@ -60,8 +67,9 @@ First functional release: a local, single-file-database notes workspace.
   CPU ≈ 0, 10 000-block pages cost single-digit MB
 
 ### Known limitations
+- Block colors are cosmetic: they do not survive a Markdown export/import
+  round trip, and Callout blocks export as quotes
 - Inline-mark paragraphs render runs on one line (no cross-run reflow —
   Slint `Text` has no inline formatting yet)
-- Mouse-drag block reordering is not available (menu and keyboard are)
 - Chinese IME behavior documented in docs/IME_CHECKLIST.md — acceptance
   pass pending
