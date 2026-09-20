@@ -1633,6 +1633,32 @@ impl AppState {
         self.run_attachment_command(cmd, attachment)
     }
 
+    /// A picture off the clipboard (SPEC §三十七 批次 A's last open item). The
+    /// bytes are stored exactly like a picked file, and the block follows the
+    /// caret: a block with nothing in it *becomes* the picture, a written one
+    /// gets the picture below it, so a paste never leaves a stray empty line.
+    /// `png` is what `platform::read_clipboard_image` already decoded and
+    /// re-encoded; a false return means the page refused it, not the clipboard.
+    pub fn paste_image(&self, id: i32, png: &[u8]) -> bool {
+        let Ok(att) = self
+            .store
+            .import_bytes(self.claim_attachment_id(), "Pasted image", png)
+        else {
+            return false;
+        };
+        let empty = self
+            .doc
+            .borrow()
+            .block(BlockId(id.max(0) as u64))
+            .map(|b| b.text.is_empty())
+            .unwrap_or(false);
+        if empty {
+            self.set_block_attachment(id, att, BlockKind::Image)
+        } else {
+            self.insert_attachment(id, att, BlockKind::Image)
+        }
+    }
+
     /// Both attachment edits put the `attachments` row into the database as
     /// part of the command's own batch, so persistence and undo stay
     /// single-tracked. The in-memory copy is the lookup `image_for` and
@@ -3956,5 +3982,87 @@ mod tests {
         let rows = super::project_blocks(&blocks);
         assert!(rows.iter().all(|r| r.kind != super::BLOCK_TABLE_CELL));
         assert_eq!(super::visible_block_indices(&blocks), vec![0, 1, 8]);
+    }
+
+    /// PNG bytes the way the clipboard hands them over: already encoded, never
+    /// a file on disk.
+    fn png_bytes(w: u32, h: u32) -> Vec<u8> {
+        let img = image::RgbaImage::from_pixel(w, h, image::Rgba([9, 99, 199, 255]));
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut out, image::ImageFormat::Png)
+            .unwrap();
+        out.into_inner()
+    }
+
+    #[test]
+    fn a_pasted_picture_becomes_an_empty_block_and_lands_below_a_written_one() {
+        use super::{AppState, HandleArgs, BLOCK_IMAGE, BLOCK_PARAGRAPH};
+        use crate::app::state::Change;
+        use crate::core::{BlockId, Command};
+        use crate::testing::ScratchDir;
+        use slint::Model;
+
+        let dir = ScratchDir::new("paste");
+        // A real library in the scratch folder, so the attachment bytes this
+        // test stores are the folder's to lose. With no database the store
+        // falls back to a shared %TEMP% directory and the paste would litter
+        // it.
+        let repo = std::sync::Arc::new(
+            crate::storage::SqliteRepository::open(&dir.path().join("library.db")).unwrap(),
+        );
+        let state =
+            AppState::new(&HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0 }, Some(repo));
+
+        state.create_page(None);
+        let empty = state.start_page().expect("an empty page takes a paragraph");
+        let png = png_bytes(24, 18);
+
+        assert!(state.paste_image(empty, &png), "the paste must land");
+        let row = state.blocks.row_data(0).unwrap();
+        assert_eq!(row.kind, BLOCK_IMAGE, "the empty block *is* the picture");
+        assert_eq!(row.id, empty, "and not a new row");
+        let att_id = state
+            .doc
+            .borrow()
+            .block(BlockId(empty as u64))
+            .and_then(|b| b.attachment)
+            .expect("the block carries the attachment");
+        let (stored, name, mime, size) = {
+            let book = state.attachments.borrow();
+            let att = book.get(&(att_id.as_u64() as i64)).expect("the attachment is known");
+            (att.file.clone(), att.name.clone(), att.mime.clone(), att.bytes)
+        };
+        assert_eq!(name, "Pasted image");
+        assert_eq!((size, mime.as_str()), (png.len() as i64, "image/png"));
+        let on_disk = dir.path().join("attachments").join(&stored);
+        assert!(on_disk.exists(), "the bytes went beside the library, not into it");
+
+        // a block with words in it keeps them and gets the picture below
+        let changes = state
+            .exec_on_open_page(Command::InsertBlockAfter {
+                id: BlockId(empty as u64),
+                kind: crate::core::BlockKind::Paragraph,
+                text: "written first".into(),
+            })
+            .expect("a paragraph below the picture");
+        let written = changes
+            .iter()
+            .find_map(|c| match c {
+                Change::BlockInserted(b) => Some(b.id.0 as i32),
+                _ => None,
+            })
+            .unwrap();
+        assert!(state.paste_image(written, &png));
+        assert_eq!(state.blocks.row_count(), 3);
+        assert_eq!(state.blocks.row_data(1).unwrap().kind, BLOCK_PARAGRAPH);
+        assert_eq!(state.blocks.row_data(1).unwrap().text, "written first");
+        assert_eq!(state.blocks.row_data(2).unwrap().kind, BLOCK_IMAGE);
+
+        // one paste is one undo step, and it drops the reference only
+        state.undo_open_page();
+        assert_eq!(state.blocks.row_count(), 2);
+        assert_eq!(state.blocks.row_data(0).unwrap().kind, BLOCK_IMAGE);
+        assert!(on_disk.exists(), "undo never deletes bytes another block may still point at");
     }
 }

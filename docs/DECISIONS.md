@@ -2,6 +2,74 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0035 · A screenshot decodes in a file that has never seen the clipboard
+
+Decision: 批次 A's last open code item — paste a picture from the clipboard with
+Ctrl+V (SPEC §三十七, §二十七's "clipboard rich content") — is split into three
+parts that can each be tested without the others. `platform::read_clipboard_image()`
+touches Win32 only: it picks `CF_DIBV5` over `CF_DIB` with
+`IsClipboardFormatAvailable`, retries `OpenClipboard` five times like the text
+reader does, and copies `GlobalSize` bytes out. `platform/dib.rs` turns those
+bytes into PNG and contains no Win32 at all. `AppState::paste_image()` decides
+which block receives the picture. In `on_rich_paste` **text outranks image**: the
+picture branch runs only when `read_clipboard()` returned nothing. No clipboard
+crate, no new `image` feature — the PNG encoder the paste needs was already
+compiled in for the store.
+
+Why: ADR-0025 settled that clipboard access is hand-declared FFI, and this is
+that decision's second half rather than a revision of it. The split is what makes
+the risky half testable: a DIB is a header plus a bottom-up pixel array whose
+masks, palette, row padding and bit widths are all chosen by whatever process
+wrote the clipboard, and every one of those is a decoder bug — while none of it
+needs a clipboard, so eight asserting tests build DIBs by hand and run on any
+machine without touching the user's real one (the standing rule here is no
+scripted desktop UI: no synthetic key events, no foreground stealing).
+`CF_DIBV5` is
+tried first because it is the only one of the two that can carry a real alpha
+channel; `CF_DIB` is what everything actually writes.
+
+Consequences:
+- **The zeroed-alpha trap.** A 32-bit `BI_RGB` screenshot has no alpha, so its
+  fourth byte is whatever the source had — usually all zero — and PNG *keeps*
+  transparency: pasted through unchanged it renders an invisible picture, which
+  the user reads as a failed paste. `decode` therefore paints the raster opaque
+  when an alpha mask is declared and *every* alpha byte is zero, and leaves a
+  picture with one non-zero alpha byte alone. Two tests pin both sides.
+- **A hostile header stops being our problem.** `parse` accepts header sizes
+  40/56/108/124, bit counts 1/4/8/16/24/32, and only `BI_RGB`/`BI_BITFIELDS`;
+  it refuses `width > 16 384`, `height > 16 384` or `width × height > 64 M`, and
+  checks the pixel array is actually there before allocating it. Without those,
+  one buggy or malicious clipboard write — a header claiming 30 000×30 000 —
+  would be an out-of-memory exit on the paste path, i.e. §二十二's low-RAM
+  promise broken by a Ctrl+V.
+- **Text wins because pasting a paragraph as a picture of itself loses the
+  paragraph.** A "Copy" from a rich app puts both formats on the clipboard, so
+  the order is a behaviour decision, not an accident of implementation.
+- The paste reuses `AttachmentStore::import_bytes`, which is how a picked file is
+  stored, so a screenshot gets the same `MAX_EDGE = 1280` downscaled display
+  copy, the same content-sniffed extension and MIME (always `.png` here), and the
+  same undo contract (ADR-0029: undo drops the reference, never the bytes). It
+  stores under the name "Pasted image". The cost of the reuse is two decodes for
+  one picture — DIB→RGBA→PNG, then the store's PNG decode — timed in
+  `docs/PERFORMANCE.md` rather than assumed: 19 ms / 74 ms for the first leg at
+  1080p / 4K, and 59 ms / 196 ms for the store leg at the same sizes with
+  deliberately incompressible pixels. Both ends of that range are labelled as a
+  floor and a ceiling rather than passed off as the real number.
+- Where the picture lands follows the caret, so a paste never leaves a stray
+  empty line: an empty block *becomes* the image, a block with text gets the
+  image below it — the same shape the "/" and "+" doors have.
+- Windows-only, like `read_clipboard`: other targets return `None`.
+- Evidence: 8 decoder tests on hand-built DIBs (bottom-up flip, row padding,
+  zeroed and real alpha, 5-6-5 vs 5-5-5 masks, palette with 2 and with 256
+  entries, 1-bit MSB-first unpacking, truncated and RLE payloads refused), one
+  state test with a real SQLite library in a scratch folder (block kind,
+  attachment name/MIME/size, bytes on disk under `attachments/`, text preserved
+  below, one paste = one undo step, undo keeps the bytes), and one `#[ignore]`d
+  test that reads the *user's* clipboard — the only proof the FFI sees bytes
+  another process wrote; on this machine it printed `clipboard picture: 1280x800
+  from 134168 PNG bytes`. A green sweep proves none of this: the slice changes
+  zero pixels (`.scratch/sweep15` vs `.scratch/sweep14`: 0 of 44 moved).
+
 ## ADR-0033 · An empty page writes its own first block
 
 Decision: the M8 A4 item filed as "the empty state still says the block editor

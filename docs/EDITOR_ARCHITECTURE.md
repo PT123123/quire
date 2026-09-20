@@ -124,6 +124,12 @@ ColumnsAddBlock { id }
   from the empty-state panel's click and from committing a title on an empty page
   (ADR-0033). Do not generalize it into "insert at position" — the anchored
   commands stay the only path that knows where a block goes.
+- Ctrl+V is one callback with three outcomes in a fixed order (ADR-0035):
+  clipboard text with block structure → rich paste; clipboard text alone → the
+  native plain paste at the caret; no text at all but a bitmap → an Image block.
+  Words outrank a picture of the same words, and a pasted picture never overwrites
+  what is written: an empty anchor block *becomes* the image, any other block gets
+  it inserted below.
 
 ## Editing surface: one TextEdit, rest are Text
 

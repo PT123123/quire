@@ -1,6 +1,8 @@
 // Platform adapters — only where Slint/Windows forces us to (M8).
 // Policy (ADR-0002): never implement TSF/IME ourselves.
 
+pub mod dib;
+
 use std::path::Path;
 
 /// Copy `text` to the system clipboard, as CF_UNICODETEXT via the same FFI
@@ -218,6 +220,72 @@ pub fn read_clipboard() -> Option<String> {
     }
 }
 
+/// Read the clipboard as a picture, returning PNG bytes (SPEC §三十七 批次 A's
+/// last open item: paste a screenshot). CF_DIBV5 first because it is the format
+/// that carries a real alpha channel, CF_DIB as the fallback every app writes.
+/// Same rule as `read_clipboard`: hand-declared FFI, no clipboard crate, and the
+/// decode itself lives in `dib` so it can be tested without a clipboard.
+pub fn read_clipboard_image() -> Option<Vec<u8>> {
+    #[cfg(target_os = "windows")]
+    {
+        const CF_DIB: u32 = 8;
+        const CF_DIBV5: u32 = 17;
+
+        #[link(name = "user32")]
+        extern "system" {
+            fn IsClipboardFormatAvailable(format: u32) -> i32;
+            fn OpenClipboard(hwnd: isize) -> i32;
+            fn CloseClipboard() -> i32;
+            fn GetClipboardData(format: u32) -> isize;
+        }
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GlobalSize(hmem: isize) -> usize;
+            // the same declaration `read_clipboard` makes — one symbol declared
+            // twice with different types is a warning, so the cast happens here
+            fn GlobalLock(hmem: isize) -> *mut u16;
+            fn GlobalUnlock(hmem: isize) -> i32;
+        }
+
+        let format = [CF_DIBV5, CF_DIB]
+            .into_iter()
+            .find(|f| unsafe { IsClipboardFormatAvailable(*f) != 0 })?;
+        unsafe {
+            let mut opened = false;
+            for _ in 0..5 {
+                if OpenClipboard(0) != 0 {
+                    opened = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            if !opened {
+                return None;
+            }
+            let raw = (|| {
+                let handle = GetClipboardData(format);
+                if handle == 0 {
+                    return None;
+                }
+                let size = GlobalSize(handle);
+                let ptr = GlobalLock(handle).cast::<u8>();
+                if ptr.is_null() || size == 0 {
+                    return None;
+                }
+                let bytes = std::slice::from_raw_parts(ptr, size).to_vec();
+                GlobalUnlock(handle);
+                Some(bytes)
+            })();
+            CloseClipboard();
+            dib::dib_to_png(&raw?)
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,5 +297,24 @@ mod tests {
         assert!(copy_to_clipboard(sample), "the FFI write must succeed");
         let read = read_clipboard().expect("the FFI read must succeed");
         assert_eq!(read, sample, "the UTF-16 round trip preserves the text");
+    }
+
+    /// The one check the decoder cannot make on its own: that the FFI reads a
+    /// picture some *other* process put on the clipboard. Ignored because it
+    /// reads the user's real clipboard rather than a fixture -- run it by hand
+    /// after loading a PNG (`Set-Clipboard` cannot do this; `[Windows.Forms.Clipboard]::SetImage`
+    /// can, from an STA session).
+    #[test]
+    #[ignore = "reads the user's real clipboard"]
+    fn a_picture_another_process_put_on_the_clipboard_decodes() {
+        let png = read_clipboard_image().expect("the clipboard holds no CF_DIB / CF_DIBV5");
+        let img = image::load_from_memory(&png).expect("the bytes must be a PNG");
+        println!(
+            "clipboard picture: {}x{} from {} PNG bytes",
+            img.width(),
+            img.height(),
+            png.len()
+        );
+        assert!(img.width() > 0 && img.height() > 0);
     }
 }

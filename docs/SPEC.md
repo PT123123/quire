@@ -1565,7 +1565,7 @@ Windows MVP 稳定之后再增加：
 * global-ish shortcut 中可行的部分
 * startup options
 * drag/drop files
-* clipboard rich content
+* clipboard rich content —— 文字部分已由 ADR-0025 的富文本粘贴交付，位图部分 2026-09-21 交付（ADR-0035，见 §三十七 批次 A）；HTML/RTF 等其它富格式仍未做
 
 Slint 1.17 已经加入 drag and drop、system tray、tooltips、model row two-way bindings，可以优先利用这些现成能力，而不是自行造轮子。
 
@@ -2229,8 +2229,10 @@ toggle（批次 B 第一项，ADR-0028：折叠子树零 realized row，row→mo
 `visible_block_indices`）
 
 image（批次 A 第一项，ADR-0029：附件目录 + `attachments` 表、`MAX_EDGE` 降采样
-缓存、25/50/100 宽度档位、点击预览。本 kind 唯一未做的仍是**从剪贴板粘贴**，
-需要 `platform/` 里的位图读取，见 §三十七 批次 A 的 follow-up）
+缓存、25/50/100 宽度档位、点击预览；ADR-0035：从剪贴板粘贴已接——Ctrl+V 读
+`CF_DIBV5`/`CF_DIB` 并在 `platform/dib.rs` 里解成 PNG，空块直接变成图片、有字的块
+在下方得到图片，剪贴板同时有文字与位图时文字优先。本 kind 剩下的未做项只有
+「一页图片被滚动时的实测」，那条欠账记在 `docs/PERFORMANCE.md` 的 M10 一节）
 
 file（批次 A 第二项，ADR-0030：不加 schema，复用 v7 的 `attachments` 行与
 `blocks.attachment` 列；`fs::copy` 流式落盘、全程不解码不设上限，所以 2 GB 附件
@@ -2260,7 +2262,10 @@ columns（批次 B 第三项，ADR-0032：不新增迁移，`columns` 块的 `bl
 
 image：
 
-* 从剪贴板粘贴、从本地文件插入（rfd 已在依赖里）
+* 从剪贴板粘贴、从本地文件插入（rfd 已在依赖里）——2026-09-21 两条都做了：剪贴板
+  走 `platform::read_clipboard_image` + `platform/dib.rs`（ADR-0035），文件走 `rfd`
+  选择器；只认位图格式 `CF_DIBV5`/`CF_DIB`，不读 `CF_HTML`/`CF_RTF`，也不读应用
+  自注册的私有图片格式或资源管理器复制文件时的 `FileGroupDescriptorW`
 * 可选格式就是 `image` crate 特性里显式声明的那四种：png / jpeg / bmp / gif。
   gif 是静图——解码器交回首帧，编辑器里没有动画时钟，也不打算有；其余解码器
   能读的格式（webp / tiff 等）不进选择器，因为它们的行扩展名只能落到 `.img`

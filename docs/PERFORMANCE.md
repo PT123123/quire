@@ -794,3 +794,44 @@ count and the `column_projection` walk are unmeasured at scale — and
 `can_fold` still scans the whole page for every row, which is a pre-existing
 quadratic the table batch named and this batch neither fixed nor made worse. The
 scrolled-media scene owed above now has a fourth shape to cover.
+
+## M10 批次 A · what one Ctrl+V of a screenshot costs (2026-09-21, ADR-0035)
+
+Pasting a picture from the clipboard adds no block kind, no schema column and no
+per-row state — it produces an ordinary `image` block through the store path a
+picked file already uses — so no RAM arm is owed for it and none was run (the
+sweep confirms it: 0 of 44 scenes moved). What a paste does own is a **latency**:
+it runs synchronously on the key press, so the question is how long the user
+waits, not how much they keep.
+
+Two legs, both measured in release-profile lib tests that print instead of
+asserting (a timing assert would fail on a loaded machine and prove nothing):
+
+```
+cargo test --release --lib screenshot -- --ignored --nocapture
+```
+
+| leg | input | release ms | note |
+|-----|-------|-----------:|------|
+| DIB → RGBA (`dib::decode`) | 1920×1080 32-bit, 8.29 MB | 19 | ≈100 Mpixel/s through a per-pixel Rust loop |
+| | 3840×2160, 33.18 MB | 74 | scales with pixels, as it must |
+| RGBA → PNG (`dib_to_png`) | the same two rasters | 1 / 6 | **floor, not estimate**: the fixtures are one flat colour, so the entropy coder has nothing to do |
+| store (`import_bytes`: PNG decode + `MAX_EDGE` downscale + cache encode + two writes) | 1080p PNG, 6.22 MB | 59 | **ceiling, not estimate**: the fixtures are random pixels, which no screen is; a real snip stores for less |
+| | 4K PNG, 24.79 MB | 196 | |
+
+**Reading.** A full-screen paste is tens of milliseconds of decode plus tens more
+in the store — call it ≈80…250 ms at the top of this table, and clearly less for a
+real snip. That is a key press, not a frame: nothing here runs in a projection or
+a paint, `AttachmentStore`'s header rule is that import is only ever called from a
+user action, and the picture cache is reached the same way by a pasted row as by a
+picked one (through `image-for`), so the paste adds no second cache. §三十七's
+ceilings hold where they were: `parse` refuses an edge over 16 384 or 64 M pixels
+before it allocates, and both fixtures above are inside that.
+
+**What this batch does not measure.** The clipboard read itself (`GlobalLock` plus
+one `Vec` copy — no number taken), the PNG encode of real screen content (the 1 /
+6 ms row is a flat-colour floor), and the thing the last four batches have each
+named: **a page of pictures being scrolled**. The store leg above is one picture at
+one moment; the ceiling that protects a scroll is
+`MAX_ATTACHMENT_CACHE_BYTES = 32 MiB`, still a construction bound plus a unit test
+rather than a reading.

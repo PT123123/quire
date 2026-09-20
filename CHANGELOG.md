@@ -44,7 +44,8 @@ First functional release: a local, single-file-database notes workspace.
   Turning a Toggle into another kind re-opens it rather than stranding its
   children; Markdown export degrades a toggle to a quote line
 - Image block: pick a file from the insert menu, the slash menu or Turn
-  into, and the picture lands in the page. The bytes go to an
+  into — or press Ctrl+V with a screenshot on the clipboard — and the
+  picture lands in the page. The bytes go to an
   `attachments` folder beside the database (the app keeps only a
   reference), oversized pictures get a downscaled display copy while the
   original stays untouched, and the ⋮⋮ menu's "Image width" sets the row
@@ -101,6 +102,12 @@ First functional release: a local, single-file-database notes workspace.
 - Rich paste: pasting markdown with block structure (headings, lists,
   to-dos, quotes, code) splits it into real blocks with inline marks;
   plain text still pastes natively at the caret
+- Ctrl+V pastes a screenshot: when the clipboard carries no text but holds a
+  bitmap (`CF_DIBV5`/`CF_DIB` — what Snip-and-Sketch and PrintScreen write),
+  it becomes an Image block stored like any other attachment. An empty block
+  *becomes* the picture; a block with words in it gets the picture below, so a
+  paste never leaves a stray empty line. One undo step. When a copy carries
+  both text and a picture, the words win
 - Every popup (page menus, ⋮⋮ menu, slash menu, command palette, search)
   dismisses on a click outside it and on Escape; UI state follows so
   nothing stays blocked behind an already-closed menu
@@ -211,11 +218,11 @@ First functional release: a local, single-file-database notes workspace.
   round trip, and Callout blocks export as quotes
 - Inline-mark paragraphs render runs on one line (no cross-run reflow —
   Slint `Text` has no inline formatting yet)
-- Pictures: pasting an image from the clipboard is not wired yet (insert
-  from a file is), replacing a stored file on disk in place needs a
+- Pictures: replacing a stored file on disk in place needs a
   restart to show up, and a page of pictures is not yet measured in the
   benchmark scenes — the decode cache is capped by construction, not by
-  a reading
+  a reading. A clipboard picture other than a bitmap (a `file://` HTML image,
+  an SVG) is not read — only `CF_DIB`/`CF_DIBV5`
 - Attachments are never garbage-collected: deleting the last block that
   points at a stored file leaves the bytes in the `attachments` folder.
   Same for pictures and files, and it is deliberate for now — undo has to

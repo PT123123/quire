@@ -827,8 +827,24 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                 return false;
             }
             flush_pending_edit(&g, &s);
-            let Some(text) = crate::platform::read_clipboard() else {
-                return false;
+            let clip = crate::platform::read_clipboard();
+            let Some(text) = clip else {
+                // No text on the clipboard at all, so the other thing worth
+                // pasting gets its turn: a screenshot. When a copy carries
+                // both, the words win — a rich app's text must not be turned
+                // into a picture of itself.
+                return match crate::platform::read_clipboard_image() {
+                    None => false,
+                    Some(png) => {
+                        if s.paste_image(id, &png) {
+                            g.set_editing_id(-1);
+                            true
+                        } else {
+                            g.set_db_notice("That clipboard picture could not be stored.".into());
+                            false
+                        }
+                    }
+                };
             };
             let Some(parsed) =
                 crate::services::import_service::parse_if_block_structure(&text)
