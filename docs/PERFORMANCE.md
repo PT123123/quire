@@ -522,4 +522,9 @@ there should be incremental (the `quire` crate alone) rather than the ≈10 min
 full rebuild it was estimated at — unmeasured, so treat it as the optimistic
 case. What it really needs is a settled tree: the comparison is only honest if
 both binaries come from the same source state, and the femtovg batch above came
-from a committed one. Deferred on those grounds, not on cost.
+from a committed one. Deferred on those grounds, not on cost. (4) It stopped
+being optional on 2026-09-20: the M9 evaluation measured that Slint 1.18
+compiles FemtoVG out for Android (`cfg(not(target_os = "android"))`) and
+renders there through **skia on GLES**, so any on-device number will only be
+interpretable against this desktop skia baseline (evidence in
+`.scratch/m9/report.md`).
