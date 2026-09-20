@@ -33,29 +33,43 @@ TSF/IME implementation, image/table/toggle/database blocks.
 5. `PLAN.md` report written; `DECISIONS.md` updated for any non-obvious
    choice.
 
-## M8 verification snapshot (2026-09-20, at `6c115b5`)
+## M8 verification snapshot (2026-09-20, at `03e0427`)
 
 There is no CI on purpose, so this is the manual "definition of done" evidence
 for the current head, all of it re-runnable from the repo:
 
 | gate | command | result |
 |------|---------|--------|
-| tests | `cargo test --all-targets` | green: 209 passed, 0 failed, 4 ignored across 10 binaries |
-| release build | `cargo build --release` | clean (4 lib warnings, listed below) |
-| visual | `benchmarks/scripts/sweep.ps1` (+ `-Baseline` diff) | 34/34 render; 19 scenes still fail, see `.scratch/sweep2/report.md` |
-| performance | `benchmarks/scripts/audit_results.ps1` | every stored summary agrees with its raw runs |
-| packaging | `install/verify-installer.ps1` | 4/4 green, zero residue after uninstall |
+| tests | `cargo test --all-targets` | green: 211 passed, 0 failed, 4 ignored across 10 binaries |
+| release build | `cargo build --release` | clean, **zero warnings** (the four below are gone) |
+| visual | `benchmarks/scripts/sweep.ps1 -OutDir .scratch/sweep4 -Baseline .scratch/sweep3` | 34/34 render; **0 of 34 PNGs changed** against `81a2937`, so every verdict carries over: the open list is still 1 HIGH + 2 MEDIUM + 3 LOW + 1 known limitation (`.scratch/sweep3/report.md`) |
+| performance | `benchmarks/scripts/audit_results.ps1` | `audit ok`: 12 first-paint + 6 bench batches, every stored summary agrees with its raw runs |
+| packaging | `install/verify-installer.ps1` | 4/4 green at this head: 7.94 MB setup, installed exe exits 0, embedded icon still pixel-matches `quire.ico` (384 px sample), `--open` imported pages 14→15, uninstall left zero residue |
 | data placement | `install/verify-portable.ps1` | 24/24 green, real per-user library untouched |
 
-The four build warnings are one defect, and it is functional rather than
-cosmetic: `src/app/controller.rs:550` matches on `CMD_COPY_MD`, a constant that
-`src/app/state.rs:2502` exports but the `use` list at `controller.rs:9` does not
-import, so the arm is a catch-all *binding*. rustc says so twice
-(`unused variable: CMD_COPY_MD`, plus `unreachable pattern` at both `:551` and
-`:554`). Consequence: every palette command with an id ≥ 9 — Export page as
-Markdown, Import Markdown, Copy page as Markdown, and every "Jump to page" row
-(`CMD_PAGE_BASE + id`) — runs `copy_current_page_markdown` instead of its own
-action, and no page can be opened from the palette. The suite is green precisely
-because nothing tests the palette dispatch, so `just check` cannot catch this
-class of breakage. Adding the name to the import list is a one-word fix; a test
-that walks the command registry is the durable one.
+### What the previous snapshot was warning about, and what its fix taught
+
+The four build warnings (`unused variable: CMD_COPY_MD` plus two
+`unreachable pattern`) were one defect and a functional one: a constant used
+in a `match` arm without being imported makes that arm a catch-all *binding*,
+so every palette command with an id ≥ 9 — the three Markdown actions and every
+"Jump to page" row — ran `copy_current_page_markdown` instead of its own
+action, and no page could be opened from the palette. It is fixed (`aaa3763`,
+one name added to the import list at `src/app/controller.rs:9`) and the
+release build is now silent.
+
+Two things that fix demonstrated about this checklist are worth keeping,
+because both are still true. (1) The test suite was green *because* nothing
+walks the palette dispatch, so `just check` cannot catch this class of
+breakage — the durable repair is a test over the command registry, not the
+one-word import, and it is still not written. (2) Neither can the visual
+sweep: the CRITICAL dispatch fix changed **zero pixels in 34 scenes**,
+including the `palette` scene, because a shot captures the popup's layout and
+the bug was in what happens when a row is chosen. A green visual gate is
+evidence about drawing, not about behaviour.
+
+One warning does remain, and it is specific to the shot build rather than the
+release build: with `--features software`, `render()` in
+`src/bin/quire_shot.rs:75` takes a `ui` parameter its software path never
+reads (`unused variable: ui`). Harmless — but it is the reason the shot
+binary's build is not silent even when the app's is.
