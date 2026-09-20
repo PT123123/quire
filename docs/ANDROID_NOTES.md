@@ -82,9 +82,14 @@ never mentions.**
    (Ganesh)**, and `skia-bindings` fetches a prebuilt binary from GitHub rather
    than compiling Skia (so the first build of a given revision needs network).
    Two consequences: our `[features]` renderer matrix means something different
-   on Android, and the desktop skia comparison still open in
-   `docs/PERFORMANCE.md` stops being optional — Android numbers are only
-   interpretable against a skia desktop baseline.
+   on Android, and the desktop skia comparison it made mandatory is now
+   measured in `docs/PERFORMANCE.md` (A2 follow-up #3) — Android numbers will
+   be read against the **skia-on-OpenGL** desktop arm, since the default
+   desktop skia build delivers no rendering-notifier events at all and has no
+   first-paint number. Same instrument, same caveat on device: the notifier
+   only fires on surfaces whose `Surface::with_graphics_api` is real, so a
+   silent `--measure-startup` run on a phone means "this surface does not
+   notify", never "no frame was drawn".
 4. **Hardware, added 2026-09-20.** This is the critical path, not code: `adb
    devices` is empty and the local SDK has no `system-images/`, so there is no
    device and no AVD to make one. `cargo-apk` is not installed either

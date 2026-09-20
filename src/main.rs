@@ -192,7 +192,11 @@ impl PhaseLog {
 /// firing is the first painted frame (its exact boundary: after the scene is
 /// rendered and the GPU commands submitted, immediately before presentation —
 /// see `i-slint-renderer-femtovg` draw(); a sub-millisecond underestimate of
-/// true on-screen time). The software renderer has no notifier; there the
+/// true on-screen time). Measured caveat, 2026-09-20: skia only notifies on a
+/// surface whose `with_graphics_api` is real, so `--features skia-opengl` does
+/// fire and the default `--features skia` build (wgpu/softbuffer candidates)
+/// stays silent while still returning `Ok(())` — never read a silent skia run
+/// as "no frame was drawn". The software renderer has no notifier; there the
 /// proxy is the first timer to run inside the event loop, which lands before
 /// any frame is drawn (so it under-reports paint, over-reports readiness —
 /// flagged `"confidence":"low"` and documented in PERFORMANCE.md).

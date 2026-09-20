@@ -237,10 +237,13 @@ skia run showed WS 320.9 MB, a one-off worth watching, see follow-ups.)
 femtovg (default) uses roughly HALF the memory of skia everywhere
 (idle 114 vs 236 MB WS; 10k-block page 121 vs 245 MB). skia is better at
 continuous scroll (18% vs 28% of one core) and marginally better in the
-10k typing scene (23% vs 24%). Startup is comparable. Per the SPEC
-priority order (memory above everything but UI quality), **femtovg stays
-the default**; skia remains one `--features skia` away for scroll-heavy
-use.
+10k typing scene (23% vs 24%). Startup is comparable — and M8 later measured
+that word to mean skia ≈44 ms faster on an empty shell and a tie on a 10 000
+block page, in one batch (see *the skia first-paint baseline* below). Per the
+SPEC priority order (memory above everything but UI quality), **femtovg stays
+the default**; skia remains one `--no-default-features --features skia` away
+for scroll-heavy use — plain `--features skia` leaves the femtovg default
+compiled in too, and then it renders with femtovg.
 
 ### M7 follow-ups, ranked by value
 
@@ -527,4 +530,72 @@ being optional on 2026-09-20: the M9 evaluation measured that Slint 1.18
 compiles FemtoVG out for Android (`cfg(not(target_os = "android"))`) and
 renders there through **skia on GLES**, so any on-device number will only be
 interpretable against this desktop skia baseline (evidence in
-`.scratch/m9/report.md`).
+`.scratch/m9/report.md`). It is measured two sections down; the costing in (3)
+turned out to be the least interesting part of the exercise.
+
+## M8 · the skia first-paint baseline (A2 follow-up #3, 2026-09-20)
+
+Conclusion (3) of the section above, closed the same day — after the
+instrument itself had to be repaired.
+
+**Two traps, both worth recording because neither is visible in the docs.**
+
+1. `--features skia` does **not** disable the package default, so it builds a
+   binary with *both* `femtovg` and `skia` compiled in, and Slint picks
+   femtovg. The build that looked like the skia arm was a second femtovg arm;
+   `renderer_id()` said so (`"femtovg"`), which is the only reason it was
+   caught. A skia-only binary needs `--no-default-features --features skia…`.
+2. The default `renderer-skia` build is **mute** to the A2 instrument on this
+   machine: `set_rendering_notifier` returns `Ok(())` and no `RenderingState`
+   is ever delivered — while the window does paint (working set 251 MB vs the
+   femtovg arm's 120 MB, so real GPU work is happening). Upstream cause: all
+   three notify sites are inside `Surface::with_graphics_api(..)`, whose trait
+   default is an empty function (`i-slint-renderer-skia-1.18.0/lib.rs:1052`),
+   so a surface that does not override it stores the callback and never calls
+   it. The OpenGL surface does override it, and `--no-default-features
+   --features skia-opengl` immediately produced
+   `RenderingSetup / BeforeRendering / AfterRendering`. The rule for anyone
+   re-running this: **a silent skia run is not a negative result** — check the
+   surface before concluding anything about the frame.
+
+**Method.** One batch, both arms from the identical working tree (rebuilt
+within 60 s of each other), 5 runs per arm per scene, femtovg in `target/`,
+skia-opengl in `target-skia/`. Driver `.scratch/a9/run_ab.ps1`, which refuses
+to start the batch unless each arm reports the renderer it claims to be.
+Raw rows: `benchmarks/results/2026-09-20-first-paint-ab-*.jsonl`, all four
+recomputed clean by `audit_results.ps1` (12 first-paint + 6 bench batches,
+"audit ok").
+
+**Numbers** (Release, 100 % scale, warm, medians, min–max in parentheses):
+
+| scene | arm | first paint | inside `ui.run()` | window-up | stderr-observed paint |
+|-------|-----|------------:|------------------:|----------:|----------------------:|
+| A empty shell | femtovg | 484 (473–534) | 406 (387–448) | 143 (124–173) | 567 (557–611) |
+| A empty shell | **skia/GL** | **440** (437–482) | 359 (356–398) | 139 (126–167) | 525 (518–593) |
+| D 10 000 blocks | femtovg | 619 (602–683) | 396 (389–450) | 131 (120–164) | 705 (700–757) |
+| D 10 000 blocks | **skia/GL** | 609 (573–687) | 381 (361–437) | 168 (126–186) | 702 (663–771) |
+
+The arms' own setup phases match to within noise — `repo_open` 52 vs 51 ms,
+`appwindow_new` 21 vs 20, `state_new` 8 vs 8 on scene A, 143 vs 144 on scene D
+— which is the control that lets the difference be read as a renderer
+difference at all.
+
+**Reading.** (1) The whole delta is in the `ui.run()` floor, as it must be:
+nothing in `real_main` differs between the arms, and indeed −47 ms of the
+−44 ms scene-A gap lands in that column. (2) It is a *small* win, not a
+threshold crossing: −9 % on the empty shell, and on the 10 000-block page the
+two ranges overlap (skia 573–687 vs femtovg 602–683), so scene D is a tie.
+(3) The old proxy would have told the opposite story: `window_up_ms` says skia
+is 37 ms *slower* on scene D (168 vs 131) where first paint says equal.
+Fourth independent demonstration that handle-up is not startup.
+
+**Conclusions.** (1) skia is not a startup lever worth its price — ≤ 44 ms,
+only on the empty shell, against the ≈2× working-set cost M7 measured (idle
+236 vs 114 MB). `femtovg` stays the default; nothing here reopens that.
+(2) The baseline M9 asked for now exists, and it exists specifically for the
+`skia-opengl` surface, which is the right family for Android's skia-on-GLES
+renderer — but this is desktop GL on an Intel iGPU, so it is a floor for
+device numbers, not a prediction of them. (3) The desktop `skia` (wgpu /
+softbuffer candidates) arm has **no** first-paint number, and cannot have one
+with the current method; if it ever needs one, measure it from outside the
+process, not through the notifier.
