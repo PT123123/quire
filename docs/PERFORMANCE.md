@@ -682,3 +682,115 @@ rather than document-proportional — but that is an argument plus the unit test
 not a reading, and it is the same shape of gap the picture batch flagged above.
 The scrolled-media scene owed there is now owed twice, and it should measure
 pictures and files on one page.
+
+## M10 · the table kind, and the one number that was not the table's (2026-09-20, ADR-0031)
+
+`table` is the third kind under the §三十七 gate, and it is the first one whose
+cost is per *row* rather than per *block with a payload*: a grid is child
+blocks, so a page with a table on it holds more blocks but no more megabytes of
+anything — there is no raster, no file, no cache.
+
+Release `quire.exe`, `benchmarks/scripts/bench.ps1`, same method as the two
+batches above (pinned `%TEMP%` database, one seed pass then measured passes).
+Raw rows: `benchmarks/results/2026-09-20-m10-table-ram.jsonl`, which holds both
+arms of the A/B described at the end.
+
+| scene | passes | WS MB | private MB | idle CPU % | M7 matrix | ratio |
+|-------|--------|------:|-----------:|-----------:|-----------|-------:|
+| A empty shell   | 3 (1 seed + 2 measured) | 124.8 – 125.3 | 96.7 – 98.3 | 0.00 – 0.39 | 114.3 / 88.2 | 1.10× |
+| D 10 000 blocks | 3 (1 seed + 2 measured) | 130.8 – 131.0 | 104.5 – 105.7 | 0.00 – 0.39 | 121.5 / 97.4 | 1.08× |
+
+**Reading.** The gate holds, at 1.08× on the number it is written against, and
+D − A is +5.5…6.2 MB WS / +6.2…9.0 private where the M7 matrix recorded +7.2 /
++9.2 for ten thousand blocks — the per-block cost of a page did not change,
+which is what "cells are just blocks" is supposed to buy.
+
+**Against the previous batch, both arms moved together, so neither movement is
+the table's.** The `file` batch recorded A 119.2 – 120.7 and D 126.5 – 126.6;
+this one records A 124.8 – 125.3 and D 130.8 – 131.0, i.e. **+4.1…6.1 on the
+empty shell and +4.2…4.5 on the 10 000-block page**. A carries no table and no
+attachment, so the shift cannot be this slice's per-row cost — and the fact that
+the two arms shifted by nearly the same amount is the shape of a session that got
+dearer, not of code that got bigger. This is the third batch in a row to record a
++3…5 MB drift on A (116.5 → 119.9 → 125.1) with nothing in the diff to attribute
+it to. It is reported as drift, and the ratio that matters is taken against the
+M7 matrix, which is the contract the gate is written on.
+
+**The A/B that *is* attributable.** The first cut of the projection built every
+row's `table_cells` model by scanning the page for that row's cells — for every
+row, table or not — which is both a quadratic scan on a 10 000-block page and
+one empty `VecModel` (with its `ModelNotify`) allocated per row. Guarding the
+field on `kind == Table` was measured against the unguarded build in the same
+session, same machine, same script:
+
+| arm | unguarded WS / private | guarded WS / private |
+|-----|------------------------|----------------------|
+| A empty shell (3 passes)  | 124.9 – 125.2 / 96.1 – 98.1 | 124.8 – 125.3 / 96.7 – 98.3 |
+| D 10 000 blocks (3 passes) | 132.2 – 133.1 / 106.8 – 108.4 | 130.8 – 131.0 / 104.5 – 105.7 |
+
+A is flat to within its own spread — the right control, because the empty shell
+is the seeded demo page and projects 24 rows, so it pays the per-row cost 24
+times either way — while D drops
+≈2 MB WS and ≈2.5 MB private, i.e. ≈200–250 bytes per row, which is what an
+empty model costs. Startup did **not** move (475–525 ms unguarded vs 498–552 ms
+guarded), and that is a limit of the method rather than a verdict on the scan:
+`startup_ms` stops at the window handle, and the projection demonstrably happens
+somewhere past that point, so the quadratic work is real but outside what this
+instrument sees. The guard stays because of the memory reading plus the
+asymptotics, not because a number moved.
+
+**What this batch does not measure.** A page with a *big* table on it: the scene
+seeds 10 000 ordinary paragraphs, so the grid's own projection, its delegate
+heights and the per-cell `Text` measurement are unmeasured at scale, and
+`grid_blocks` sorts a table's cells on every projection. The scrolled-media
+scene owed twice above now has a third shape to cover.
+
+## M10 · the layout kind, and the drift that finally had a number on it (2026-09-20, ADR-0032)
+
+`columns` is the fourth kind under the §三十七 gate, and like the grid it costs
+rows rather than payloads: a layout is child blocks all the way down, so the
+page holds more blocks and no more bytes of anything. What is new for the gate is
+that the layout's content rides on the layout's own row as **two extra model
+fields** (`column-items`, `column-boxes`), which is exactly the shape ADR-0031
+caught costing ≈2 MB on the bench page when it was left unguarded.
+
+Release `quire.exe`, `benchmarks/scripts/bench.ps1`, same method as the three
+batches above (pinned `%TEMP%` database, one seed pass then measured passes).
+Raw rows: `benchmarks/results/2026-09-20-m10-columns-ram.jsonl`.
+
+| scene | passes | WS MB | private MB | idle CPU % | M7 matrix | ratio |
+|-------|--------|------:|-----------:|-----------:|-----------|-------:|
+| A empty shell   | 3 (1 seed + 2 measured) | 126.5 – 127.0 | 98.4 – 99.6 | 0.00 – 0.20 | 114.3 / 88.2 | 1.11× |
+| D 10 000 blocks | 3 (1 seed + 2 measured) | 135.5 – 137.0 | 109.9 – 110.7 | 0.00 – 0.78 | 121.5 / 97.4 | 1.13× |
+
+**Reading.** The gate holds, at 1.13× — the widest the gate has been from, and
+still inside it. Both arms moved again against the table batch (A +1.2…1.7,
+D +4.5…6.0), so the drift the last three batches reported is now four batches
+long and running the same direction.
+
+**Why this slice is not the cause, and what it does cost.** The projection builds
+the two models only for a `kind == Columns` row; every other row gets
+`ModelRc::default()`, which in Slint 1.18 is `ModelRc(None)` — checked in
+`i-slint-core-1.18.0/model.rs:891`, and it allocates nothing. So the only
+per-row cost the layout adds on a page that holds no layout at all is two
+8-byte pointers widened into `BlockRow`: ≈160 KB across the bench page's 10 000
+rows, not the ≈3.5 MB that D − A grew by. The arithmetic does not reach the
+reading, so the reading is reported as drift and not attributed.
+
+**The gate's method is now the finding.** Four batches of the same script on the
+same machine have moved A by +10.7 MB (116.5 → 127.0) with nothing in any of
+those diffs that could paint an empty shell. A ratio taken against a matrix
+recorded in a different session is therefore measuring the session as much as
+the code, and at 1.11× there is one batch of drift left before a slice that
+changes nothing at all fails a ≤1.2× gate. The fix is not a wider threshold: it
+is a **same-session control** — build the commit before the slice into its own
+target dir and measure both arms in one sitting, the way ADR-0031's projection
+guard was settled. That control has not been run yet and is owed here; the
+number it would produce is the one the next kind should be compared against.
+
+**What this batch does not measure.** A page full of layouts. The bench scene
+seeds 10 000 ordinary paragraphs, so the flexbox tiling, the per-box delegate
+count and the `column_projection` walk are unmeasured at scale — and
+`can_fold` still scans the whole page for every row, which is a pre-existing
+quadratic the table batch named and this batch neither fixed nor made worse. The
+scrolled-media scene owed above now has a fourth shape to cover.

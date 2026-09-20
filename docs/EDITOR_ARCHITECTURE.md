@@ -50,10 +50,16 @@ Document (M3: one row per page in SQLite)
             order       fractional ranking key (insert between neighbors)
             kind        paragraph | heading_1..3 | bullet | numbered | todo
                         | quote | code | divider      (M4 set)
-                        | callout | page | link_to_page | toggle (M9/M10)
+                        | callout | page | link_to_page | toggle
+                        | image | file | table | table_cell   (M10)
+                        | columns | column                   (M10)
             text        plain UTF-8 (M4) / inline span refs (M6)
             checked     todo only
             folded      toggle only: its subtree gets no editor rows
+            attachment  image / file only: id into the `attachments` table
+            columns     table only: M of an N×M grid; cells are its children,
+                        row-major, so rows = cells / columns is derived.
+                        columns layout only: the box count, same integer
 ```
 
 - The **in-memory truth** is `core::Document` owning a page's blocks in a
@@ -62,6 +68,12 @@ Document (M3: one row per page in SQLite)
 - Nesting (bullet/numbered children) is modeled with `parent_id`, but M4
   renders one indent level at most; deep trees wait for M7 virtualization
   work.
+- Three kinds have children that must **not** become editor rows: a folded
+  toggle's subtree (ADR-0028), a table's cells (ADR-0031) and a layout's boxes
+  *and every line inside those boxes* (ADR-0032). `project_blocks`
+  deletes them from the `Vec` rather than marking them invisible, and
+  `visible_block_indices` is the single row→model translation seam — anything
+  that turns a delegate index into a block index goes through it.
 
 ## Command system
 
@@ -73,12 +85,35 @@ SplitBlock { id, pos }            MergeBlock { id, with_prev }
 SetBlockType { id, kind }         MoveBlock { id, before_of }
 InsertBlock { after, kind }       DeleteBlock { id }
 ToggleTodo { id }                 ApplyMark { id, range, mark }   (M6)
+TableAddRow { id, row }           TableAddColumn { id, col }      (M10)
+TableDeleteRow { id, row }        TableDeleteColumn { id, col }
+ColumnsAddColumn { id }           ColumnsDeleteColumn { id }      (M10)
+ColumnsAddBlock { id }
 ```
 
 - Commands apply to the in-memory document and push an inverse onto the
   undo stack. Undo/Redo never reads the database (SPEC §十四).
 - The controller translates UI callbacks into commands; the editor
   produces *no* direct model mutation from `.slint` code.
+- A table command is not "edit a grid" — it is the batch of cell
+  `BlockInserted`/`BlockDeleted` changes plus one `BlockColumnsSet` that a grid
+  edit decomposes into, so the Tab that grows a table past its last cell is one
+  undo step. `plan()` refuses (returns `None`, pushes nothing) for a ragged
+  grid, a cell as a Turn-into endpoint, and any delete that would take the
+  table below 1×1.
+- A layout is the same argument one level deeper: `ColumnsAddColumn` is one
+  `BlockColumnsSet` plus a `Column` block plus the paragraph that keeps the new
+  box non-empty, and `ColumnsDeleteColumn` re-keys the deleted box's lines onto
+  the box before it — so a box's words are never on the clipboard of an undo.
+  `plan()` refuses a third box on a three-box layout, a delete below two, and
+  any of the three on a block that is not the right kind.
+- `InsertBlockAfter` reads its anchor's *kind* (ADR-0032): after a container
+  (`Table`, `Columns`) the new block lands after the container's whole subtree,
+  and after a slot (`TableCell`, `Column`) the command refuses, because such a
+  block has no row of its own to sit next to. Anywhere else it inherits the
+  anchor's parent — it used to force `None` — so a "Paste below" or a "+" on a
+  nested list item stays inside that list instead of promoting the new block to
+  the page.
 
 ## Editing surface: one TextEdit, rest are Text
 
@@ -102,6 +137,19 @@ selection.
 
 - `EditorBlock` stays the static renderer (all kinds, `visible` toggles).
 - A block being edited swaps to `BlockEditor` (TextInput + block chrome).
+- A `table` is the first exception to "one delegate, one block": `EditorBlock`
+  hands the whole grid to `TableBlock`, which draws every cell and hosts the one
+  live `TextInput` when `UIState.editing-id` names one of them. Tab / Shift-Tab
+  route to `UIState.table-cell-move`, which asks Rust for the next cell and grows
+  the table when the step runs off the end.
+- A `columns` layout is that exception twice over, because Slint has no recursive
+  components and a box therefore cannot host an `EditorBlock`: `ColumnsBlock`
+  draws the boxes *and* every line inside them (`ColumnItemRow`, the smaller
+  sibling of `TableBlock`'s cell editor), and the layout's row stays the only one
+  the ListView sees. Tab / Shift-Tab route to `UIState.column-item-move`, which
+  stops at either end of the layout instead of walking out of it; an empty box
+  routes its click to `UIState.column-fill`, because a layout is the only thing
+  on the page a pointer can hit and a caret cannot.
 - The ListView keeps virtualizing; `tail` flag logic stays in Rust.
 - Typed text flows: `TextInput` edit → controller debounces (≈300 ms) →
   `InsertText` command → document update → **targeted** model row update

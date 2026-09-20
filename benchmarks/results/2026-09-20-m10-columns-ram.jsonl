@@ -1,0 +1,6 @@
+{"label":"A-columns-1","exe":"target\\release\\quire.exe","db":"<temp>/quire-columns-a.db","blocks":0,"startup_ms":1240,"idle_cpu_pct":0.2,"ram_workingset_mb":126.8,"ram_private_mb":98.4,"exit_code":0,"typing":null}
+{"label":"A-columns-2","exe":"target\\release\\quire.exe","db":"<temp>/quire-columns-a.db","blocks":0,"startup_ms":566,"idle_cpu_pct":0.19,"ram_workingset_mb":127,"ram_private_mb":99.6,"exit_code":0,"typing":null}
+{"label":"A-columns-3","exe":"target\\release\\quire.exe","db":"<temp>/quire-columns-a.db","blocks":0,"startup_ms":523,"idle_cpu_pct":0,"ram_workingset_mb":126.5,"ram_private_mb":99.4,"exit_code":0,"typing":null}
+{"label":"D-columns-1","exe":"target\\release\\quire.exe","db":"<temp>/quire-columns-d.db","blocks":10000,"startup_ms":503,"idle_cpu_pct":0,"ram_workingset_mb":135.5,"ram_private_mb":109.9,"exit_code":0,"typing":null}
+{"label":"D-columns-2","exe":"target\\release\\quire.exe","db":"<temp>/quire-columns-d.db","blocks":10000,"startup_ms":512,"idle_cpu_pct":0,"ram_workingset_mb":137,"ram_private_mb":110.6,"exit_code":0,"typing":null}
+{"label":"D-columns-3","exe":"target\\release\\quire.exe","db":"<temp>/quire-columns-d.db","blocks":10000,"startup_ms":552,"idle_cpu_pct":0.78,"ram_workingset_mb":135.9,"ram_private_mb":110.7,"exit_code":0,"typing":null}

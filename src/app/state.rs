@@ -17,7 +17,7 @@ use crate::services::persistence::PersistenceService;
 use crate::services::search_service::SearchService;
 use crate::storage::search_index::SearchRequest;
 use crate::storage::SqliteRepository;
-use crate::{BlockRow, CommandRow, MenuRow, SearchRow, SidebarNode, SlashRow, TextRun};
+use crate::{BlockRow, ColumnBox, ColumnItem, TableCell, CommandRow, MenuRow, SearchRow, SidebarNode, SlashRow, TextRun};
 use slint::{Model, ModelRc, VecModel};
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
@@ -1107,6 +1107,7 @@ impl AppState {
                     BlockKind::Toggle => "chevron-right",
                     BlockKind::Image => "image",
                     BlockKind::File => "page",
+                    BlockKind::Table => "minimize",
                     _ => "minimize",
                 };
                 rows.push(row(
@@ -1266,6 +1267,246 @@ impl AppState {
     /// Turn-into filtering).
     pub fn block_kind(&self, id: i32) -> Option<BlockKind> {
         self.doc.borrow().block(BlockId(id as u64)).map(|b| b.kind)
+    }
+
+    /// Where one cell sits in the grid: its table's id, then its row and
+    /// column. `None` for anything that is not a cell of a live grid.
+    pub fn table_cell_place(&self, cell: i32) -> Option<(i32, usize, usize)> {
+        let (grid, at) = self.grid_of_cell(cell)?;
+        Some((grid.table, at / grid.cols, at % grid.cols))
+    }
+
+    /// The grid a cell belongs to, and the cell's row-major index in it.
+    fn grid_of_cell(&self, cell: i32) -> Option<(LiveGrid, usize)> {
+        let parent = {
+            let d = self.doc.borrow();
+            let b = d.block(BlockId(cell.max(0) as u64))?;
+            if b.kind != BlockKind::TableCell {
+                return None;
+            }
+            b.parent?
+        };
+        let grid = self.live_grid(parent.as_u64() as i32)?;
+        let at = grid.cells.iter().position(|c| *c == BlockId(cell as u64))?;
+        Some((grid, at))
+    }
+
+    /// A block as a grid, when it is a table with columns (a table with none
+    /// has no shape to edit, and the commands refuse it the same way).
+    fn live_grid(&self, table: i32) -> Option<LiveGrid> {
+        LiveGrid::of(&self.doc.borrow(), BlockId(table.max(0) as u64))
+    }
+
+    /// Tab / Shift-Tab through a grid. Stepping past the last cell appends a
+    /// row first — a table grows as far as the typing goes, which is how
+    /// Notion's Tab reads (SPEC §三十七 批次 B) — and stepping off the front
+    /// stays put. Returns the cell to focus.
+    pub fn table_step(&self, cell: i32, delta: i32) -> Option<i32> {
+        let (grid, at) = self.grid_of_cell(cell)?;
+        let target = at as i64 + delta as i64;
+        if target < 0 {
+            return None;
+        }
+        if target as usize >= grid.cells.len() {
+            let changes = self.exec_on_open_page(Command::TableAddRow {
+                id: BlockId(grid.table as u64),
+                row: grid.rows(),
+            })?;
+            return changes.iter().find_map(|ch| match ch {
+                Change::BlockInserted(b) if b.kind == BlockKind::TableCell => {
+                    Some(b.id.as_u64() as i32)
+                }
+                _ => None,
+            });
+        }
+        grid.cells.get(target as usize).map(|c| c.as_u64() as i32)
+    }
+
+    /// Where the grid's toolbar lands: the focused cell's row and column when
+    /// the focus is a cell of this table, else its last row and column.
+    fn table_anchor(&self, grid: &LiveGrid, focus: i32) -> (usize, usize) {
+        match self.table_cell_place(focus) {
+            Some((owner, row, col)) if owner == grid.table => (row, col),
+            _ => (grid.rows().saturating_sub(1), grid.cols.saturating_sub(1)),
+        }
+    }
+
+    /// The four pills on the grid's toolbar. Adding goes *after* the anchor so
+    /// the row under the caret keeps its place; deleting takes the anchor, and
+    /// the plan refuses a table's final row or column.
+    pub fn table_add_row(&self, table: i32, focus: i32) -> bool {
+        let Some(grid) = self.live_grid(table) else { return false };
+        let (row, _) = self.table_anchor(&grid, focus);
+        self.exec_on_open_page(Command::TableAddRow {
+            id: BlockId(table as u64),
+            row: (row + 1).min(grid.rows()),
+        })
+        .is_some()
+    }
+
+    pub fn table_add_column(&self, table: i32, focus: i32) -> bool {
+        let Some(grid) = self.live_grid(table) else { return false };
+        let (_, col) = self.table_anchor(&grid, focus);
+        self.exec_on_open_page(Command::TableAddColumn {
+            id: BlockId(table as u64),
+            col: (col + 1).min(grid.cols),
+        })
+        .is_some()
+    }
+
+    pub fn table_delete_row(&self, table: i32, focus: i32) -> bool {
+        let Some(grid) = self.live_grid(table) else { return false };
+        let (row, _) = self.table_anchor(&grid, focus);
+        self.exec_on_open_page(Command::TableDeleteRow {
+            id: BlockId(table as u64),
+            row,
+        })
+        .is_some()
+    }
+
+    pub fn table_delete_column(&self, table: i32, focus: i32) -> bool {
+        let Some(grid) = self.live_grid(table) else { return false };
+        let (_, col) = self.table_anchor(&grid, focus);
+        self.exec_on_open_page(Command::TableDeleteColumn {
+            id: BlockId(table as u64),
+            col,
+        })
+        .is_some()
+    }
+
+    /// The cell's row-major slot in its grid. The coordinate a delete can
+    /// reuse to hand the caret back where it was.
+    pub fn table_cell_index(&self, cell: i32) -> Option<usize> {
+        Some(self.grid_of_cell(cell)?.1)
+    }
+
+    /// The grid's cell at row-major slot `at`, clamped into whatever the grid
+    /// is now — where focus lands after a delete took the cell under it.
+    pub fn table_cell_at(&self, table: i32, at: usize) -> Option<i32> {
+        let grid = self.live_grid(table)?;
+        let at = at.min(grid.cells.len().saturating_sub(1));
+        grid.cells.get(at).map(|c| c.as_u64() as i32)
+    }
+
+    /// True when `id` is a table cell — the row the editor must not turn,
+    /// split, merge or paste block structure into (SPEC §三十七 批次 B).
+    pub fn is_table_cell(&self, id: i32) -> bool {
+        self.block_kind(id) == Some(BlockKind::TableCell)
+    }
+
+    /// Patch one committed cell's text into the row that carries it. A cell
+    /// has no row of its own — its text lives in its table's `table-cells` —
+    /// so the targeted row sync the typing flush does for every other block
+    /// finds nothing here, and the grid would keep showing the old word the
+    /// moment the caret left.
+    pub fn sync_cell_text(&self, cell: i32, text: &str) {
+        let Some((grid, at)) = self.grid_of_cell(cell) else { return };
+        let mut i = 0;
+        while let Some(mut row) = self.blocks.row_data(i) {
+            if row.id == grid.table {
+                let mut cells: Vec<TableCell> = (0..row.table_cells.row_count())
+                    .filter_map(|c| row.table_cells.row_data(c))
+                    .collect();
+                if let Some(c) = cells.get_mut(at) {
+                    c.text = text.into();
+                    row.table_cells = ModelRc::from(Rc::new(VecModel::from(cells)));
+                    self.blocks.set_row_data(i, row);
+                }
+                return;
+            }
+            i += 1;
+        }
+    }
+
+    // ---- columns layout (SPEC §三十七 批次 B) ----
+
+    /// A layout as the editor sees it: its blocks in reading order, the very
+    /// list the layout's own row carries as `column-items`. Tab and the text
+    /// flush walk that list, so focus and the model can never disagree.
+    fn live_layout(&self, layout: i32) -> Option<LiveLayout> {
+        LiveLayout::of(&self.doc.borrow(), BlockId(layout.max(0) as u64))
+    }
+
+    /// The layout a block belongs to, and the block's slot in it.
+    fn layout_of_item(&self, item: i32) -> Option<(LiveLayout, usize)> {
+        let owner = {
+            let d = self.doc.borrow();
+            let mut cur = d.block(BlockId(item.max(0) as u64))?.parent?;
+            loop {
+                let b = d.block(cur)?;
+                if b.kind == BlockKind::Columns {
+                    break cur;
+                }
+                cur = b.parent?;
+            }
+        };
+        let layout = self.live_layout(owner.as_u64() as i32)?;
+        let at = layout.items.iter().position(|x| *x == BlockId(item as u64))?;
+        Some((layout, at))
+    }
+
+    /// Tab / Shift-Tab through a layout. Either end stops rather than leaving
+    /// the layout: a box is exited by clicking out, and growing a box on Tab
+    /// would invent a shape the reader did not ask for.
+    pub fn column_step(&self, item: i32, delta: i32) -> Option<i32> {
+        let (layout, at) = self.layout_of_item(item)?;
+        let target = at as i64 + delta as i64;
+        if target < 0 {
+            return None;
+        }
+        layout.items.get(target as usize).map(|i| i.as_u64() as i32)
+    }
+
+    pub fn column_add(&self, layout: i32) -> bool {
+        self.exec_on_open_page(Command::ColumnsAddColumn { id: BlockId(layout as u64) })
+            .is_some()
+    }
+
+    pub fn column_remove(&self, layout: i32) -> bool {
+        self.exec_on_open_page(Command::ColumnsDeleteColumn { id: BlockId(layout as u64) })
+            .is_some()
+    }
+
+    /// Give one of the layout's boxes its first line, and report the block the
+    /// caret should land on. A box is the only thing on the page a click cannot
+    /// put a caret in, so this is that click's whole job.
+    pub fn column_fill(&self, column: i32) -> Option<i32> {
+        let changes =
+            self.exec_on_open_page(Command::ColumnsAddBlock { id: BlockId(column as u64) })?;
+        changes.iter().find_map(|c| match c {
+            Change::BlockInserted(b) if b.kind == BlockKind::Paragraph => {
+                Some(b.id.as_u64() as i32)
+            }
+            _ => None,
+        })
+    }
+
+    /// True when `id` is drawn by a layout's delegate instead of by a row of
+    /// its own: it has no row for the targeted sync, the menus or the search
+    /// focus to work on (SPEC §三十七 批次 B).
+    pub fn is_column_item(&self, id: i32) -> bool {
+        self.layout_of_item(id).is_some()
+    }
+
+    /// Patch one committed item's text into the layout row that carries it —
+    /// the same job `sync_cell_text` does for a grid.
+    pub fn sync_column_text(&self, item: i32, text: &str) {
+        let Some((layout, at)) = self.layout_of_item(item) else { return };
+        let mut i = 0;
+        while let Some(mut row) = self.blocks.row_data(i) {
+            if row.id == layout.layout {
+                let mut items: Vec<ColumnItem> = (0..row.column_items.row_count())
+                    .filter_map(|c| row.column_items.row_data(c))
+                    .collect();
+                if let Some(it) = items.get_mut(at) {
+                    it.text = text.into();
+                    row.column_items = ModelRc::from(Rc::new(VecModel::from(items)));
+                    self.blocks.set_row_data(i, row);
+                }
+                return;
+            }
+            i += 1;
+        }
     }
 
     pub fn copy_block(&self, id: i32) {
@@ -2403,6 +2644,8 @@ const SLASH_ITEMS: &[(BlockKind, &str, &str)] = &[
     (BlockKind::Toggle, "Toggle list", "Collapsible section"),
     (BlockKind::Image, "Image", "Embed a picture from a file"),
     (BlockKind::File, "File", "Attach a file of any type"),
+    (BlockKind::Table, "Table", "Simple grid of cells"),
+    (BlockKind::Columns, "Columns", "Two columns of blocks, side by side"),
     (BlockKind::Callout, "Callout", "Highlighted box with an emoji"),
     (BlockKind::Code, "Code", "Monospaced block — or type ```"),
     (BlockKind::Divider, "Divider", "Visual separator — or type ---"),
@@ -2427,7 +2670,8 @@ const INSERT_ITEMS: &[(i32, &str, &str)] = &[
     (kind_to_int(BlockKind::Heading1), "Heading 1", "Big section heading"),
     (kind_to_int(BlockKind::Heading2), "Heading 2", "Medium section heading"),
     (kind_to_int(BlockKind::Heading3), "Heading 3", "Small section heading"),
-    (-1, "Table", "Table view · later"),
+    (kind_to_int(BlockKind::Table), "Table", "Simple grid of cells"),
+    (kind_to_int(BlockKind::Columns), "Columns", "Side-by-side columns"),
     (kind_to_int(BlockKind::Bullet), "Bulleted list", "Simple bulleted list"),
     (kind_to_int(BlockKind::Numbered), "Numbered list", "Ordered list"),
     (kind_to_int(BlockKind::Toggle), "Toggle list", "Collapsible section"),
@@ -2435,6 +2679,7 @@ const INSERT_ITEMS: &[(i32, &str, &str)] = &[
     (kind_to_int(BlockKind::Divider), "Divider", "Visual separator"),
     (kind_to_int(BlockKind::Callout), "Callout", "Highlighted box with an emoji"),
     (kind_to_int(BlockKind::Code), "Code", "Monospaced block"),
+    (-1, "Table view", "Database table · later"),
     (-1, "Board", "Board view · later"),
     (-1, "Gallery", "Gallery view · later"),
     (-1, "List view", "Database list · later"),
@@ -2489,6 +2734,10 @@ pub fn kind_from_int(kind: i32) -> BlockKind {
         13 => BlockKind::Toggle,
         14 => BlockKind::Image,
         15 => BlockKind::File,
+        16 => BlockKind::Table,
+        17 => BlockKind::TableCell,
+        18 => BlockKind::Columns,
+        19 => BlockKind::Column,
         _ => BlockKind::Paragraph,
     }
 }
@@ -2510,6 +2759,10 @@ const fn kind_to_int(kind: BlockKind) -> i32 {
         BlockKind::Toggle => 13,
         BlockKind::Image => 14,
         BlockKind::File => 15,
+        BlockKind::Table => 16,
+        BlockKind::TableCell => 17,
+        BlockKind::Columns => 18,
+        BlockKind::Column => 19,
         BlockKind::Paragraph => 0,
     }
 }
@@ -2562,6 +2815,7 @@ fn rows_to_blocks(page: i32, rows: Vec<BlockRow>, doc: &mut Document) -> Vec<Blo
                 folded: false,
                 attachment: None,
                 img_percent: 100,
+                columns: 0,
             }
         })
         .collect()
@@ -2616,17 +2870,23 @@ fn build_runs(text: &str, marks: &[crate::core::Mark]) -> Vec<TextRun> {
         .collect()
 }
 
-/// True when a folded block sits anywhere above `b` in the same page: `b`
-/// then has no editor row. The page's blocks are pre-order, so an ancestor
-/// walk is enough (no set to maintain).
-fn has_folded_ancestor(blocks: &[Block], b: &Block) -> bool {
+/// True when `b` gets no editor row at all. Two things hide a subtree
+/// (SPEC §三十七, ADR-0028): a folded block anywhere above it, and a container
+/// whose delegate draws its children itself — a table's grid, a columns
+/// layout's boxes — so they must not also cost a row each. The page's blocks
+/// are pre-order, so an ancestor walk is enough (no set to maintain).
+fn hidden_by_ancestor(blocks: &[Block], b: &Block) -> bool {
+    if matches!(b.kind, BlockKind::TableCell | BlockKind::Column) {
+        return true;
+    }
     let mut parent = b.parent;
     let mut guard = 0;
     while let Some(pid) = parent {
         let Some(p) = blocks.iter().find(|x| x.id == pid) else {
             break;
         };
-        if p.folded {
+        if p.folded || matches!(p.kind, BlockKind::Table | BlockKind::Columns | BlockKind::Column)
+        {
             return true;
         }
         parent = p.parent;
@@ -2639,17 +2899,244 @@ fn has_folded_ancestor(blocks: &[Block], b: &Block) -> bool {
 }
 
 /// Positions (into the page's block list) of the blocks that get an editor
-/// row: a folded block stays, its whole subtree does not. SPEC §三十七 is
-/// explicit that hiding a collapsed section costs real rows rather than
-/// `visible: false` delegates, so every row-index consumer shares this one
-/// list — see `drop_index_for_row`.
+/// row: a folded block stays, its whole subtree does not, and so does a
+/// table's grid. SPEC §三十七 is explicit that hiding a collapsed section
+/// costs real rows rather than `visible: false` delegates, so every row-index
+/// consumer shares this one list — see `drop_index_for_row`.
 pub fn visible_block_indices(blocks: &[Block]) -> Vec<usize> {
     blocks
         .iter()
         .enumerate()
-        .filter(|(_, b)| !has_folded_ancestor(blocks, b))
+        .filter(|(_, b)| !hidden_by_ancestor(blocks, b))
         .map(|(i, _)| i)
         .collect()
+}
+
+/// A table as the editor sees it: its cells in row-major order and the column
+/// count. Cells are child blocks, and a page's block list is display order, so
+/// filtering it yields the grid — the same reading `command::grid` uses.
+struct LiveGrid {
+    table: i32,
+    cells: Vec<BlockId>,
+    cols: usize,
+}
+
+/// A columns layout as the editor sees it: every block inside its boxes, in
+/// reading order — the same list the row's `column-items` carries, built by
+/// the same walk, so focus and the model cannot disagree about what is there.
+struct LiveLayout {
+    layout: i32,
+    items: Vec<BlockId>,
+}
+
+impl LiveLayout {
+    fn of(doc: &Document, id: BlockId) -> Option<Self> {
+        let b = doc.block(id)?;
+        if b.kind != BlockKind::Columns || b.columns == 0 {
+            // a layout with no boxes has no shape to edit, and the commands
+            // refuse it the same way a degenerate grid is refused
+            return None;
+        }
+        let blocks = doc.page_blocks(b.page);
+        let items = layout_slots(blocks, b)
+            .into_iter()
+            .map(|s| blocks[s.index].id)
+            .collect();
+        Some(Self { layout: id.as_u64() as i32, items })
+    }
+}
+
+impl LiveGrid {
+    fn of(doc: &Document, id: BlockId) -> Option<Self> {
+        let b = doc.block(id)?;
+        let cols = b.columns as usize;
+        if b.kind != BlockKind::Table || cols == 0 {
+            return None;
+        }
+        let cells = grid_blocks(doc.page_blocks(b.page), b)
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
+        Some(Self { table: id.as_u64() as i32, cells, cols })
+    }
+
+    fn rows(&self) -> usize {
+        self.cells.len() / self.cols
+    }
+}
+
+/// A table's cells in row-major order — child blocks, and a page's block list
+/// is display order, so filtering it yields the grid. The same reading
+/// `command::grid` makes.
+fn grid_blocks<'a>(blocks: &'a [Block], table: &Block) -> Vec<&'a Block> {
+    let mut cells: Vec<&Block> = blocks
+        .iter()
+        .filter(|b| b.parent == Some(table.id) && b.kind == BlockKind::TableCell)
+        .collect();
+    // one table's cells live on one page, where the list is already display
+    // order; the sort says so out loud
+    cells.sort_by_key(|b| b.order);
+    // whole rows only: the delegate chunks this list by `columns` and indexes
+    // into it, so a ragged tail would be read out of range. Such a grid is not
+    // editable either — `command::grid` refuses it — so the stray cells stay
+    // in the document, unseen, rather than rendering as a broken row.
+    let cols = table.columns.max(1) as usize;
+    cells.truncate(cells.len() - cells.len() % cols);
+    cells
+}
+
+/// The cells of one table, as the row's data.
+fn table_cells(blocks: &[Block], table: &Block) -> Vec<TableCell> {
+    grid_blocks(blocks, table)
+        .into_iter()
+        .map(|c| TableCell {
+            id: c.id.0 as i32,
+            text: c.text.clone().into(),
+            runs: runs_to_model(c),
+        })
+        .collect()
+}
+
+/// One block of a columns layout, placed in the flat list the delegate draws.
+struct ColumnSlot {
+    /// which box, 0-based
+    column: i32,
+    /// how far inside that box (0 = a box's own child), for the indent
+    depth: i32,
+    /// position in the page's block list
+    index: usize,
+    /// has children, so the toggle chevron shows
+    can_fold: bool,
+}
+
+/// A block's direct children, as positions in the page list. The list is kept
+/// sorted by order key, so the sort is only saying so out loud.
+fn child_indices(blocks: &[Block], parent: BlockId) -> Vec<usize> {
+    let mut v: Vec<usize> = blocks
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| b.parent == Some(parent))
+        .map(|(i, _)| i)
+        .collect();
+    v.sort_by_key(|i| blocks[*i].order);
+    v
+}
+
+/// Emit `i` and everything below it, in reading order. A folded block keeps
+/// its own slot and loses its subtree, exactly as the row list does.
+fn column_slots(blocks: &[Block], i: usize, column: i32, depth: i32, out: &mut Vec<ColumnSlot>) {
+    let b = &blocks[i];
+    let kids = child_indices(blocks, b.id);
+    out.push(ColumnSlot { column, depth, index: i, can_fold: !kids.is_empty() });
+    // the depth cap is only a corrupt-data guard: nothing in the app nests
+    // blocks eight deep inside one box
+    if b.folded || depth >= 8 {
+        return;
+    }
+    for k in kids {
+        if blocks[k].kind == BlockKind::Column {
+            continue; // a box is a container, never content
+        }
+        column_slots(blocks, k, column, depth + 1, out);
+    }
+}
+
+/// A layout's content in reading order: every box's blocks, left to right.
+/// The boxes are the layout's `Column` children — the same reading
+/// `command::column_blocks` makes.
+fn layout_slots(blocks: &[Block], layout: &Block) -> Vec<ColumnSlot> {
+    let mut out = Vec::new();
+    let mut box_n = 0i32;
+    for c in child_indices(blocks, layout.id) {
+        let b = &blocks[c];
+        if b.kind != BlockKind::Column {
+            // content hanging off the layout itself rather than a box has no
+            // box to name, so it reads as the first one's
+            column_slots(blocks, c, box_n, 0, &mut out);
+            continue;
+        }
+        for k in child_indices(blocks, b.id) {
+            if blocks[k].kind == BlockKind::Column {
+                continue;
+            }
+            column_slots(blocks, k, box_n, 0, &mut out);
+        }
+        box_n += 1;
+    }
+    out
+}
+
+/// The blocks inside one layout, as the row's data, and its boxes as the
+/// delegate sees them. Numbering restarts per box, which is what a reader
+/// sees; the boxes carry where each group starts in the flat item list, since
+/// Slint has no recursive component to work it out itself.
+fn column_projection(
+    blocks: &[Block],
+    layout: &Block,
+) -> (Vec<ColumnItem>, Vec<ColumnBox>) {
+    // the layout's own boxes, left to right — the same reading
+    // `command::column_blocks` makes
+    let mut box_ids: Vec<BlockId> = Vec::new();
+    for c in child_indices(blocks, layout.id) {
+        if blocks[c].kind == BlockKind::Column {
+            box_ids.push(blocks[c].id);
+        }
+    }
+    let mut sizes = vec![0i32; box_ids.len()];
+    let mut items = Vec::new();
+    let mut numbers: Vec<(i32, i32)> = Vec::new();
+    for s in layout_slots(blocks, layout) {
+        let b = &blocks[s.index];
+        let number = if b.kind == BlockKind::Numbered {
+            match numbers.iter_mut().find(|(c, _)| *c == s.column) {
+                Some((_, n)) => {
+                    *n += 1;
+                    *n
+                }
+                None => {
+                    numbers.push((s.column, 1));
+                    1
+                }
+            }
+        } else {
+            0
+        };
+        if let Some(n) = sizes.get_mut(s.column as usize) {
+            *n += 1;
+        }
+        items.push(ColumnItem {
+            id: b.id.0 as i32,
+            column: s.column,
+            depth: s.depth,
+            kind: kind_to_int(b.kind),
+            text: b.text.clone().into(),
+            runs: runs_to_model(b),
+            checked: b.checked,
+            number,
+            folded: b.folded,
+            can_fold: s.can_fold,
+            color: b.color.slot(),
+            bg: b.background.slot(),
+            attachment: b.attachment.map(|a| a.as_u64() as i32).unwrap_or(0),
+        });
+    }
+    // `layout_slots` walks box by box, so the groups are already contiguous
+    let mut first = 0i32;
+    let boxes = box_ids
+        .iter()
+        .enumerate()
+        .map(|(i, id)| {
+            let b = ColumnBox {
+                id: id.0 as i32,
+                column: i as i32,
+                first,
+                size: sizes[i],
+            };
+            first += sizes[i];
+            b
+        })
+        .collect();
+    (items, boxes)
 }
 
 /// Project a page's blocks into editor rows: numbered items renumbered by
@@ -2660,6 +3147,16 @@ pub fn project_blocks(blocks: &[Block]) -> Vec<BlockRow> {
         .into_iter()
         .map(|i| {
             let b = &blocks[i];
+            // one walk per layout row, at most: the pair is built together
+            let (column_items, column_boxes) = if b.kind == BlockKind::Columns {
+                let (items, boxes) = column_projection(blocks, b);
+                (
+                    slint::ModelRc::from(Rc::new(VecModel::from(items))),
+                    slint::ModelRc::from(Rc::new(VecModel::from(boxes))),
+                )
+            } else {
+                (ModelRc::default(), ModelRc::default())
+            };
             BlockRow {
                 id: b.id.0 as i32,
                 kind: kind_to_int(b.kind),
@@ -2677,8 +3174,20 @@ pub fn project_blocks(blocks: &[Block]) -> Vec<BlockRow> {
                 attachment: b.attachment.map(|a| a.as_u64() as i32).unwrap_or(0),
                 img_percent: b.img_percent as i32,
                 // any block can be a parent; EditorBlock only draws the
-                // chevron for a Toggle
-                can_fold: blocks.iter().any(|x| x.parent == Some(b.id)),
+                // chevron for a Toggle, and a table's children are its grid
+                // and a layout's its boxes, which no fold can reveal
+                can_fold: blocks.iter().any(|x| x.parent == Some(b.id))
+                    && !matches!(b.kind, BlockKind::Table | BlockKind::Columns),
+                columns: b.columns as i32,
+                // the guards are the whole cost of these fields: both walks
+                // scan the page, so calling them for every row would make the
+                // projection quadratic on a 10 000-block page
+                table_cells: if b.kind == BlockKind::Table {
+                    slint::ModelRc::from(Rc::new(VecModel::from(table_cells(blocks, b))))
+                } else {
+                    ModelRc::default()
+                },
+                column_items, column_boxes,
             }
         })
         .collect();
@@ -2710,6 +3219,11 @@ pub const BLOCK_PAGE: i32 = 11;
 pub const BLOCK_LINK: i32 = 12;
 pub const BLOCK_TOGGLE: i32 = 13;
 pub const BLOCK_IMAGE: i32 = 14;
+pub const BLOCK_FILE: i32 = 15;
+pub const BLOCK_TABLE: i32 = 16;
+pub const BLOCK_TABLE_CELL: i32 = 17;
+pub const BLOCK_COLUMNS: i32 = 18;
+pub const BLOCK_COLUMN: i32 = 19;
 
 fn block(kind: i32, text: &str) -> BlockRow {
     BlockRow {
@@ -2728,6 +3242,10 @@ fn block(kind: i32, text: &str) -> BlockRow {
         attachment: 0,
         img_percent: 100,
         can_fold: false,
+        columns: 0,
+        table_cells: ModelRc::from(Rc::new(VecModel::from(Vec::new()))),
+        column_items: ModelRc::from(Rc::new(VecModel::from(Vec::new()))),
+        column_boxes: ModelRc::from(Rc::new(VecModel::from(Vec::new()))),
     }
 }
 
@@ -3034,6 +3552,7 @@ mod tests {
             folded,
             attachment: None,
             img_percent: 100,
+            columns: 0,
         };
         vec![
             mk(1, None, 10, BlockKind::Toggle, true, "section"),
@@ -3227,5 +3746,102 @@ mod tests {
             std::fs::remove_file(state.store.dir().join(format!("{id}.png"))).ok();
             std::fs::remove_file(state.store.dir().join(format!("{id}.cache.png"))).ok();
         }
+    }
+
+    /// A 3x2 grid between two paragraphs, in display order. Cell "A1" is bold.
+    fn grid_scene() -> Vec<crate::core::Block> {
+        use crate::core::{Block, BlockId, BlockKind, ColorKind, Mark, MarkKind, OrderKey, PageId};
+        let mk = |id: u64, parent: Option<u64>, kind: BlockKind, text: &str| Block {
+            id: BlockId(id),
+            page: PageId(1),
+            parent: parent.map(BlockId),
+            order: OrderKey(0),
+            kind,
+            text: text.into(),
+            checked: false,
+            marks: Vec::new(),
+            color: ColorKind::Default,
+            background: ColorKind::Default,
+            page_ref: None,
+            folded: false,
+            attachment: None,
+            img_percent: 100,
+            columns: if kind == BlockKind::Table { 3 } else { 0 },
+        };
+        let cell = |id: u64, text: &str| mk(id, Some(8), BlockKind::TableCell, text);
+        let mut blocks = vec![
+            mk(1, None, BlockKind::Paragraph, "before"),
+            mk(8, None, BlockKind::Table, ""),
+            cell(2, "A0"),
+            Block {
+                marks: vec![Mark { start: 0, end: 2, kind: MarkKind::Bold, url: String::new() }],
+                ..cell(3, "A1")
+            },
+            cell(4, "A2"),
+            cell(5, "B0"),
+            cell(6, "B1"),
+            cell(7, "B2"),
+            mk(9, None, BlockKind::Paragraph, "after"),
+        ];
+        // the vec *is* display order — that is what a page's block list is
+        for (i, b) in blocks.iter_mut().enumerate() {
+            b.order = OrderKey((i as u64 + 1) * 10);
+        }
+        blocks
+    }
+
+    fn cell_texts(row: &crate::BlockRow) -> Vec<String> {
+        use slint::Model;
+        (0..row.table_cells.row_count())
+            .map(|i| row.table_cells.row_data(i).unwrap().text.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn a_grid_costs_one_row_and_carries_its_cells() {
+        use slint::Model;
+        let blocks = grid_scene();
+        let rows = super::project_blocks(&blocks);
+        // ADR-0028: the cells paint inside the grid delegate, so they must not
+        // also cost a row each — SPEC §三十七 counts hidden as really hidden.
+        let ids: Vec<i32> = rows.iter().map(|r| r.id).collect();
+        assert_eq!(ids, vec![1, 8, 9]);
+        let table = &rows[1];
+        assert_eq!((table.kind, table.columns), (super::BLOCK_TABLE, 3));
+        assert!(!table.can_fold, "a grid has no chevron: no fold reveals its cells");
+        assert_eq!(cell_texts(table), ["A0", "A1", "A2", "B0", "B1", "B2"], "row-major");
+        // §十 marks ride into the grid: the delegate reads runs like a line's
+        let marked = table.table_cells.row_data(1).unwrap();
+        assert_eq!(marked.runs.row_count(), 1);
+        let run = marked.runs.row_data(0).unwrap();
+        assert_eq!((run.text.as_str(), run.bold), ("A1", true));
+        assert_eq!(
+            table.table_cells.row_data(0).unwrap().runs.row_count(),
+            0,
+            "an unmarked cell keeps the wrapping Text"
+        );
+        assert!(rows.last().unwrap().tail);
+    }
+
+    #[test]
+    fn a_ragged_grid_projects_whole_rows() {
+        use slint::Model;
+        let mut blocks = grid_scene();
+        // stray cells (a v8 database touched by hand) must not become a
+        // half-row: the delegate chunks by `columns` and indexes into the list
+        blocks.retain(|b| b.id != crate::core::BlockId(6) && b.id != crate::core::BlockId(7));
+        let rows = super::project_blocks(&blocks);
+        assert_eq!(rows[1].table_cells.row_count(), 3, "four cells is one row of three");
+        assert_eq!(cell_texts(&rows[1]), ["A0", "A1", "A2"]);
+    }
+
+    #[test]
+    fn every_row_index_consumer_shares_the_one_visible_list() {
+        let blocks = grid_scene();
+        // a cell has no row, so no row can carry kind 17 and no row index can
+        // land inside a grid — drop_index_for_row reads the same list
+        let rows = super::project_blocks(&blocks);
+        assert!(rows.iter().all(|r| r.kind != super::BLOCK_TABLE_CELL));
+        assert_eq!(super::visible_block_indices(&blocks), vec![0, 1, 8]);
     }
 }

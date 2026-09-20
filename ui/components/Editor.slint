@@ -22,6 +22,12 @@ component DocumentRow inherits Rectangle {
     height: head.height + body.height + (block.tail ? Theme.spacing-hero * 2 : 0px);
 
     head := Rectangle {
+        // Both x and y are spelled out on purpose. A Rectangle that binds
+        // `height` but leaves `y` alone is centred in its parent, and this
+        // delegate grows taller with its block -- so a tall first block (the
+        // table) dragged the page title down on top of itself.
+        x: 0px;
+        y: 0px;
         width: parent.width;
         height: root.first ? Theme.spacing-hero + title.height + Theme.spacing-lg : 0px;
 

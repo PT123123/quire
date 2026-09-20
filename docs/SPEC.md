@@ -2239,6 +2239,19 @@ Open / Save-as 两个显式按钮（`ShellExecuteW`，不 spawn explorer）；Ma
 导出写成链接而不是图片形状，因此能过导入器往返。PDF 首页缩略图按 2026-09-20
 用户指示推迟，未做）
 
+table（批次 B 第二项，ADR-0031：`blocks.columns` + v8 迁移，单元格是 Table 的
+子块（`table_cell` kind）、行主序平铺，所以 rows = cells / columns 是派生值不是
+存储值；Tab / Shift-Tab 跨格、越出末格增行，hover 边缘条增删行列；⋮⋮ Turn into
+双向（转成表格时整行文字进左上格，展平时格子变回段落）；Markdown 导出 GFM 表格，
+导入侧 `|a|b|` 仍按段落处理并有测试钉住。明确不是数据库视图）
+
+columns（批次 B 第三项，ADR-0032：不新增迁移，`columns` 块的 `blocks.columns` 存栏数，
+栏是它的 `column` 子块、栏内的行是栏的子块；投影把 layout 的内容摊成一个 `column-items`
+模型加一个 `column-boxes` 形状表，因为 Slint 没有递归组件，layout 的 row delegate 就是
+它自己那一条，所以分栏只在可见窗口内展开；平铺交给 Slint 1.18 的 FlexboxLayout，
+`alignment: stretch` + 每格 `horizontal-stretch: 1`；hover 边缘条增删栏（2 栏以下拒绝、
+3 栏以上拒绝），删栏时栏里的字回流到前一栏；Markdown 导出摊平成页面级段落）
+
 顺序按「日常笔记撞墙的速度」排，不按 Notion 的字母表排。
 
 ---
@@ -2273,11 +2286,16 @@ PDF：
 
 ## 批次 B：结构
 
-table（简单表格，不是 Database）：
+table（简单表格，不是 Database）—— 2026-09-20 已交付，ADR-0031：
 
 * N×M 单元格，Tab 跨格，最后一格 Tab 增行，增删行列
 * 单元格内是纯文本 + §十 的 inline marks
 * 明确不是数据库视图；schema、过滤、排序属于 §三十九
+* 交付时确定的边界（都不算缺陷，见 ADR-0031 的 Consequences）：单元格内没有
+  Enter 拆行、没有退格合并、没有上下键跨行，只有 Tab / Shift-Tab 走格；格子里做不了
+  链接（Ctrl+L 未接），加粗/斜体/行内码/删除线可用；把一行带 marks 的文字转成表格时
+  字留下、marks 丢掉；删除最后一行 / 最后一列被 plan 拒绝（表格至少 1×1）；
+  残缺网格（cell 数不是 columns 的整数倍）只读不可编辑
 
 toggle（折叠块）：
 
@@ -2286,11 +2304,17 @@ toggle（折叠块）：
 * 折叠是视图状态：只入库一个 folded 标志，Markdown 导出照常带上子树（§二十六），导入侧不还原
 * 只有 Toggle 画三角：把一个折叠着的块 Turn into 成别的种类，必须顺手展开它，否则子树回不来
 
-columns（分栏）：
+columns（分栏）—— 2026-09-20 已交付，ADR-0032：
 
 * 2 / 3 栏，栏内为块序列
 * 用 Slint 1.18 的 FlexboxLayout，不自己写排版
 * 与 §十二 冲突时优先保虚拟化：分栏只在可见窗口内展开
+* 交付形态：layout 是 `columns` 块，栏是它的 `column` 子块，栏里的行是栏的子块，
+  所以整套结构不需要新迁移（复用 v8 的 `blocks.columns` 存栏数）
+* 交付时确定的边界（都不算缺陷，见 ADR-0032 的 Consequences）：栏内的 ↑/↓ 只动光标、
+  不会离开 layout，Tab / Shift-Tab 在栏与栏之间走字但到两端就停住（出栏靠点击）；
+  空栏只写「Empty column」，点它才生成第一行；Markdown 导出把分栏摊平成页面级段落
+  （形状丢失、文字全留），导入侧本来就没有分栏语法
 
 ---
 
@@ -2322,7 +2346,8 @@ synced block：依赖 §四十 的引用基础设施，排在它之后
 
 少一处即视为未完成。
 
-两种块还要多改两处，因为它们的行是动态的（2026-09-20 实现 toggle 时确认）：
+凡是「行是动态的」块都要多改两处，因为（2026-09-20 实现 toggle 时确认，table
+于 ADR-0031 命中同一条）：
 
 * projection（`project_blocks`）必须真的把隐藏的子树从 rows 里删掉，不是留一个 `visible: false` 的 delegate
 * 凡是拿 row index 当 model index 用的地方（现在是 §八 的拖拽落点）都要做一次 row→model 换算；折叠一发生，这两个编号就不再看同一个位置

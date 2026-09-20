@@ -106,6 +106,7 @@ fn duplicated_nested_list_keeps_parents_in_the_copy() {
         folded: false,
         attachment: None,
         img_percent: 100,
+        columns: 0,
             },
             quire::core::Block {
                 id: child,
@@ -122,6 +123,7 @@ fn duplicated_nested_list_keeps_parents_in_the_copy() {
         folded: false,
         attachment: None,
         img_percent: 100,
+        columns: 0,
             },
         ],
     );
@@ -391,6 +393,7 @@ fn a_folded_section_shifts_drag_landings_but_not_row_numbers() {
         folded,
         attachment: None,
         img_percent: 100,
+        columns: 0,
     };
     state.doc.borrow_mut().set_page_blocks(
         pid,

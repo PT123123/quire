@@ -72,7 +72,7 @@ fn write_bmp(path: &str, buffer: &SharedPixelBuffer<Rgb8Pixel>) -> Result<(), St
     std::fs::write(path, out).map_err(|e| e.to_string())
 }
 
-fn render(ui: &AppWindow, w: u32, h: u32) -> bool {
+fn render(w: u32, h: u32) -> bool {
     WINDOW.with(|slot| -> bool {
         let window = slot.borrow().clone().expect("window adapter");
         window.draw_if_needed(|renderer| {
@@ -111,6 +111,20 @@ fn dispatch_click(window: &slint::Window, x: f32, y: f32) {
     let pos = LogicalPosition::new(x, y);
     window.dispatch_event(WindowEvent::PointerPressed { position: pos, button: PointerEventButton::Left });
     window.dispatch_event(WindowEvent::PointerReleased { position: pos, button: PointerEventButton::Left });
+}
+
+/// Park the pointer at logical coordinates without pressing anything: the
+/// engine's enter events fire on the move, which is the only way a headless
+/// shot can light up hover-only UI (a table's edge toolbar, a row's handle).
+fn dispatch_hover(window: &slint::Window, x: f32, y: f32) {
+    window.dispatch_event(WindowEvent::PointerMoved { position: LogicalPosition::new(x, y) });
+}
+
+/// Parse an "x,y" argument value.
+fn parse_xy(spec: &str) -> (f32, f32) {
+    spec.split_once(',')
+        .and_then(|(a, b)| Some((a.trim().parse().ok()?, b.trim().parse().ok()?)))
+        .unwrap_or_else(|| panic!("expected x,y, got {spec}"))
 }
 
 /// Print the block projection as `id:kind` pairs (the --probe-blocks flag):
@@ -154,7 +168,7 @@ fn run() -> Result<(), String> {
     }
     ui.show().map_err(|e| e.to_string())?;
 
-    let drawn = render(&ui, w, h);
+    let drawn = render(w, h);
     if !drawn {
         return Err("window never requested a redraw".into());
     }
@@ -169,11 +183,14 @@ fn run() -> Result<(), String> {
     // before and after the input (the "before" one proves the scene really
     // opened the popup the "after" one claims to have dismissed).
     let mut interacted = false;
+    if let Some(spec) = parse(&argv, "--hover") {
+        let (x, y) = parse_xy(&spec);
+        probe(&ui, "before-input:");
+        dispatch_hover(ui.window(), x, y);
+        interacted = true;
+    }
     if let Some(spec) = parse(&argv, "--click") {
-        let (x, y) = spec
-            .split_once(',')
-            .and_then(|(a, b)| Some((a.trim().parse().ok()?, b.trim().parse().ok()?)))
-            .unwrap_or_else(|| panic!("--click expects x,y, got {spec}"));
+        let (x, y) = parse_xy(&spec);
         probe(&ui, "before-input:");
         dispatch_click(ui.window(), x, y);
         interacted = true;

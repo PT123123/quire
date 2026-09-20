@@ -8,6 +8,8 @@ import { Colors } from "../Colors.slint";
 import { Typography } from "../Typography.slint";
 import { Icon } from "../Icons.slint";
 import { BlockHandle } from "./BlockHandle.slint";
+import { TableBlock } from "./TableBlock.slint";
+import { ColumnsBlock } from "./ColumnsBlock.slint";
 import { BlockRow, UIState } from "../Types.slint";
 
 export component EditorBlock inherits Rectangle {
@@ -27,6 +29,8 @@ export component EditorBlock inherits Rectangle {
     property <bool> is-page-ish: is-page || is-link;
     property <bool> is-image: block.kind == 14;
     property <bool> is-file: block.kind == 15;
+    property <bool> is-table: block.kind == 16;
+    property <bool> is-columns: block.kind == 18;
     // picture (kind 14): the row's height comes from the raster's ratio, which
     // Rust knows from the attachments row. 0 means there is no picture to
     // show — a missing file or an attachment from another library — and the
@@ -42,7 +46,8 @@ export component EditorBlock inherits Rectangle {
     property <string> file-size: is-file ? UIState.attachment-size(block.attachment) : "";
     property <bool> editing: UIState.editing-id == block.id
         && block.kind != 9 && block.kind != 11 && block.kind != 12
-        && block.kind != 14 && block.kind != 15;
+        && block.kind != 14 && block.kind != 15 && block.kind != 16
+        && block.kind != 18;
 
     // toggle (kind 13) keeps a gutter for its chevron even when the block
     // has no children yet, so the text does not jump as the section grows
@@ -68,7 +73,8 @@ export component EditorBlock inherits Rectangle {
         block.kind == 1 ? Theme.spacing-xl
         : block.kind == 2 ? Theme.spacing-lg + Theme.spacing-xs
         : block.kind == 3 || block.kind == 9 || block.kind == 10
-            || block.kind == 14 || block.kind == 15
+            || block.kind == 14 || block.kind == 15 || block.kind == 16
+            || block.kind == 18
             ? Theme.spacing-md
         : 0px;
 
@@ -98,6 +104,8 @@ export component EditorBlock inherits Rectangle {
         : block.kind == 9 ? 20px
         : block.kind == 14 ? (pic-aspect > 0 ? pic-height : missing-text.height)
         : block.kind == 15 ? root.file-height
+        : block.kind == 16 ? tbl.height
+        : block.kind == 18 ? clm.height
         : is-page-ish ? page-text.height
         : plain-text.height;
 
@@ -114,7 +122,11 @@ export component EditorBlock inherits Rectangle {
             // have taken the hover the block handle depends on
             if (is-image) {
                 UIState.preview-attachment = block.attachment;
-            } else if (!editing) {
+            }
+            // a table owns its clicks: each cell is the thing you aim at, and
+            // activating the table itself would put a caret in nowhere. Same
+            // for a layout: its boxes are where the text is.
+            else if (!is-table && !is-columns && !editing) {
                 UIState.block-activate(block.id);
             }
         }
@@ -140,8 +152,11 @@ export component EditorBlock inherits Rectangle {
         block-id: block.id;
         // hover on the row OR on the buttons themselves — never gated on
         // !editing: opacity 0 does not stop hit-testing, so an editing-row
-        // handle hidden by that clause stayed clickable in the dark
-        visible-flag: ta.has-hover || handle.hovered;
+        // handle hidden by that clause stayed clickable in the dark. The grid
+        // adds its own hover: a cell's TouchArea takes the row's, and the
+        // handle would disappear the moment the pointer reached the table.
+        visible-flag: ta.has-hover || handle.hovered || tbl.inner-hover
+            || clm.inner-hover;
         plus-clicked => {
             // anchor the insert menu below this block: bottom edge in list
             // coords + the text column x
@@ -721,6 +736,33 @@ export component EditorBlock inherits Rectangle {
                 }
             }
         }
+    }
+
+    // table (kind 16): the whole grid is this one row. Its cells are child
+    // blocks the projection hides, so they reach the grid inside the row's
+    // own data (SPEC §三十七 批次 B).
+    tbl := TableBlock {
+        x: content-x;
+        y: top-margin;
+        width: content-width;
+        visible: is-table;
+        block: block;
+        grid-width: content-width;
+        hovered: ta.has-hover || handle.hovered || tbl.inner-hover;
+    }
+
+    // columns (kind 18): the whole layout is this one row, and its boxes'
+    // blocks ride in on the row's data for the same reason a grid's do
+    clm := ColumnsBlock {
+        x: content-x;
+        y: top-margin;
+        width: content-width;
+        visible: is-columns;
+        block: block;
+        layout-width: content-width;
+        line-y: row-y;
+        line-x: content-x;
+        hovered: ta.has-hover || handle.hovered || clm.inner-hover;
     }
 
     // drag-reorder drop indicator: accent line where the block would land.

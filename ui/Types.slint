@@ -22,9 +22,48 @@ export struct TextRun {
     url: string,
 }
 
+/// One cell of a table (SPEC §三十七 批次 B). The grid rides on its table's
+/// row as a flat row-major list — Slint has no array of arrays in a struct —
+/// with `columns` telling the delegate where each row ends.
+export struct TableCell {
+    id: int,
+    text: string,
+    runs: [TextRun], // inline marks; a cell carries them like any block
+}
+
+/// One block inside a columns layout (SPEC §三十七 批次 B). Its column is a
+/// child block the projection leaves out of the row list, so the layout's
+/// whole content rides on the layout's own row as one flat list, grouped by
+/// box: `column` says which box, `depth` how far inside that box.
+export struct ColumnItem {
+    id: int,
+    column: int, // 0-based box of the layout
+    depth: int, // nesting inside its own column, for the indent
+    kind: int, // same ints as BlockRow.kind: only the marker differs
+    text: string,
+    runs: [TextRun],
+    checked: bool,
+    number: int, // numbered-list position inside its own box
+    folded: bool, // a toggle's subtree is left out of this list, as in the rows
+    can-fold: bool,
+    color: int,
+    bg: int, // callout tint, same palette slots
+    attachment: int, // picture an image item points at; 0 = none
+}
+
+/// One box of a columns layout, as the delegate sees it: the `Column` block
+/// it is, and where its content sits in the flat `column-items` list. Slint
+/// has no recursive components, so this is how a layout finds its own shape.
+export struct ColumnBox {
+    id: int,
+    column: int, // 0-based position in the layout
+    first: int,  // index in `column-items` of this box's first item
+    size: int,   // how many items it holds; 0 = nothing to draw yet
+}
+
 export struct BlockRow {
     id: int,
-    kind: int, // 0 para, 1 h1, 2 h2, 3 h3, 4 bullet, 5 numbered, 6 todo, 7 quote, 8 code, 9 divider, 10 callout, 11 page, 12 link, 13 toggle, 14 image, 15 file
+    kind: int, // 0 para, 1 h1, 2 h2, 3 h3, 4 bullet, 5 numbered, 6 todo, 7 quote, 8 code, 9 divider, 10 callout, 11 page, 12 link, 13 toggle, 14 image, 15 file, 16 table, 18 columns (17 = table_cell, 19 = column: containers' children, never a row)
     text: string,
     checked: bool,
     number: int,
@@ -38,6 +77,13 @@ export struct BlockRow {
     can-fold: bool, // this block has children (the chevron itself is toggle-only)
     attachment: int, // attachments row an image (14) or file (15) points at; 0 = none
     img-percent: int, // image display width, percent of the editor column
+    columns: int, // table (16) or columns (18) box count; 0 = neither
+    // a table's cells, row-major: cell (r,c) is `table-cells[r * columns + c]`
+    table-cells: [TableCell],
+    // a columns layout's content, grouped by box in box order
+    column-items: [ColumnItem],
+    // and its boxes, left to right: the layout reads its own shape from these
+    column-boxes: [ColumnBox],
 }
 
 export struct CommandRow {
@@ -239,6 +285,27 @@ export global UIState {
     callback attachment-opened(int);
     callback attachment-saved(int);
     callback block-activate(int);
+    // table grid (SPEC §三十七 批次 B): the cells are child blocks the
+    // projection hides, so they ride on their table's row and reach Rust
+    // through these. Tab walks the grid row-major; the delete ops act on the
+    // focused cell's row/column (Rust reads it back from editing-id), which
+    // is why they carry no index.
+    callback table-cell-move(int, int); // cell id, delta (+1 / -1)
+    callback cell-changed(); // a container item's live text moved: re-arm the commit
+    callback table-row-added(int);
+    callback table-row-removed(int);
+    callback table-column-added(int);
+    callback table-column-removed(int);
+    // columns layout (SPEC §三十七 批次 B): the boxes and their content are
+    // child blocks the projection hides too, so the focused item is again read
+    // back from editing-id. Tab walks the items in reading order; "remove"
+    // always takes the layout's last box, which is why it carries no index.
+    callback column-item-move(int, int); // item id, delta (+1 / -1)
+    callback column-added(int);
+    callback column-removed(int);
+    // a box with no blocks has nothing to click into, so it offers its own id
+    // and Rust gives it its first line
+    callback column-fill(int); // box (Column block) id
     // rich paste (SPEC §二十七): true = the clipboard landed as blocks (the
     // key is consumed); false = fall through to the native plain paste
     callback rich-paste(int) -> bool;

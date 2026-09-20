@@ -1,0 +1,594 @@
+// One block inside a columns box (SPEC §三十七 批次 B).
+//
+// This is not `EditorBlock`: Slint has no recursive components, and the
+// layout's own row is the only delegate that can draw the layout, so the
+// blocks inside it need a second renderer. It keeps the row renderer's fonts,
+// markers and palette and drops the chrome a box has no room for — the ⋮⋮
+// handle, the drag target, the hover tint all stay at the layout's row level,
+// where one set of them covers every box.
+
+import { Theme } from "../Theme.slint";
+import { Colors } from "../Colors.slint";
+import { Typography } from "../Typography.slint";
+import { Icon } from "../Icons.slint";
+import { ColumnItem, UIState } from "../Types.slint";
+
+export component ColumnItemRow inherits Rectangle {
+    in property <ColumnItem> item;
+    in property <length> box-width;
+    // the layout row's position: the slash menu anchors off the block being
+    // edited, which for an item means its own y inside a row inside the list
+    in property <length> row-y;
+    in property <length> content-x;
+    // the layout's shared pointer claim, so its ⋮⋮ handle survives the item's
+    // own TouchArea (see ColumnsBlock). Read in, written out: a two-way binding
+    // here would put one binding per item on the layout's property.
+    in property <int> pointer;
+    callback pointer-claimed(int); // the claimer's id, or -1 when it lets go
+
+    // a divider, a picture and an attachment name have no text to hold a caret
+    property <bool> can-edit: item.kind != 9 && item.kind != 14 && item.kind != 15;
+    property <bool> is-edit: can-edit && UIState.editing-id == item.id;
+    property <bool> is-list: item.kind == 4 || item.kind == 5 || item.kind == 6;
+    property <bool> is-heading: item.kind == 1 || item.kind == 2 || item.kind == 3;
+    property <bool> is-page-ish: item.kind == 11 || item.kind == 12;
+    // the kinds that draw a shape of their own rather than a line of text
+    property <bool> is-shape: item.kind == 7 || item.kind == 8 || item.kind == 9
+        || item.kind == 10 || item.kind == 14 || item.kind == 15;
+    // everything else — including a kind this renderer predates — is a line
+    property <bool> is-text-line: !is-shape;
+    property <bool> is-image: item.kind == 14;
+    property <bool> is-file: item.kind == 15;
+
+    // everything that is not text pushing right: the list marker, a toggle's
+    // chevron gutter, a quote's bar, a callout's emoji, a page/link icon, and
+    // the indent of blocks nested inside the box
+    property <length> gutter: (is-list ? 26px : 0px)
+        + (item.kind == 13 ? 22px : 0px)
+        + (item.kind == 7 ? Theme.spacing-md : 0px)
+        + (item.kind == 10 ? 40px : 0px)
+        + (is-page-ish ? 26px : 0px)
+        + item.depth * 16px;
+    property <length> text-width: box-width - root.gutter
+        - (item.kind == 8 ? 2 * Theme.spacing-md : 0px);
+
+    property <color> text-color: Colors.block-text(item.color);
+    property <color> bg-color: Colors.block-bg(item.bg);
+    property <length> font-size: item.kind == 1 ? Typography.size-h1
+        : item.kind == 2 ? Typography.size-h2
+        : item.kind == 3 ? Typography.size-h3
+        : item.kind == 8 ? Typography.size-code
+        : Typography.size-body;
+    property <float> line-factor: item.kind == 1 ? Typography.line-h1
+        : item.kind == 2 ? Typography.line-h2
+        : item.kind == 3 ? Typography.line-h3
+        : item.kind == 8 ? Typography.line-code
+        : Typography.line-body;
+
+    property <float> pic-aspect: is-image ? UIState.image-aspect(item.attachment) : 0;
+    property <length> pic-width: box-width;
+    property <length> pic-height: root.pic-width * root.pic-aspect;
+    property <length> file-height: Typography.size-body * Typography.line-body
+        + 2 * Theme.spacing-sm;
+    property <string> file-size: is-file ? UIState.attachment-size(item.attachment) : "";
+
+    property <length> top-margin: item.kind == 1 ? Theme.spacing-md
+        : item.kind == 2 || item.kind == 3 ? Theme.spacing-sm
+        : item.kind == 14 || item.kind == 15 || item.kind == 10 || item.kind == 9
+            ? Theme.spacing-sm
+        : 0px;
+
+    // the same measure-the-text-then-size-the-row contract as EditorBlock, so
+    // a box grows exactly as far as its own content
+    property <length> body-height:
+        is-edit ? (measure-text.height
+                + (item.kind == 8 ? 2 * Theme.spacing-md
+                    : item.kind == 10 ? 2 * Theme.spacing-sm
+                    : item.kind == 7 ? Theme.spacing-xs : 0px))
+        : item.kind == 7 ? quote-text.height + Theme.spacing-xs
+        : item.kind == 8 ? code-text.height + 2 * Theme.spacing-md
+        : item.kind == 10 ? callout-text.height + 2 * Theme.spacing-sm
+        : item.kind == 9 ? 20px
+        : item.kind == 14 ? (root.pic-aspect > 0 ? root.pic-height : plain-text.height)
+        : item.kind == 15 ? root.file-height
+        : is-text-line && item.runs.length > 0 ? run-frame.height
+        : plain-text.height;
+
+    height: root.top-margin + root.body-height + Theme.spacing-xs;
+
+    item-ta := TouchArea {
+        width: parent.width;
+        height: parent.height;
+        mouse-cursor: root.is-page-ish || root.is-image ? MouseCursor.pointer : MouseCursor.text;
+        property <bool> hovering: self.has-hover;
+        changed hovering => {
+            if (hovering) {
+                root.pointer-claimed(item.id);
+            } else if (root.pointer == item.id) {
+                root.pointer-claimed(-1);
+            }
+        }
+        clicked => {
+            if (root.is-image) {
+                UIState.preview-attachment = item.attachment;
+            } else if (!is-edit && root.can-edit && !root.is-file) {
+                // a file row's own buttons sit on top; the row click would
+                // only put a caret where there is no text to edit
+                UIState.block-activate(item.id);
+            }
+        }
+    }
+
+    // code (8) and callout (10) paint their box first, so the text lands on it
+    Rectangle {
+        x: root.gutter;
+        y: root.top-margin;
+        width: box-width - root.gutter;
+        height: root.body-height;
+        visible: item.kind == 8;
+        border-radius: Theme.radius-md;
+        background: item.bg > 0 ? root.bg-color : Colors.code-background;
+        border-width: 1px;
+        border-color: Colors.border;
+    }
+    Rectangle {
+        x: root.gutter;
+        y: root.top-margin;
+        width: box-width - root.gutter;
+        height: root.body-height;
+        visible: item.kind == 10;
+        border-radius: Theme.radius-md;
+        background: item.bg > 0 ? root.bg-color : Colors.callout-background;
+    }
+    Text {
+        x: root.gutter + Theme.spacing-sm;
+        y: root.top-margin + Theme.spacing-sm;
+        width: 26px;
+        visible: item.kind == 10;
+        text: "💡";
+        font-size: Typography.size-body;
+        vertical-alignment: center;
+    }
+
+    // quote (7): the bar is the whole shape at this width
+    Rectangle {
+        x: root.gutter - Theme.spacing-md;
+        y: root.top-margin + 2px;
+        width: 3px;
+        height: quote-text.height - 2px;
+        visible: item.kind == 7 && !is-edit;
+        border-radius: 2px;
+        background: root.text-color;
+    }
+
+    // list markers: the same columns EditorBlock uses, measured back from the
+    // text, because `gutter` is what the indent adds up to
+    Rectangle {
+        x: root.gutter - 18px;
+        y: root.top-margin + Typography.size-body * Typography.line-body / 2 - 5px;
+        width: 6px;
+        height: 6px;
+        border-radius: 3px;
+        visible: item.kind == 4;
+        background: root.text-color;
+    }
+    Text {
+        x: root.gutter - 24px;
+        y: root.top-margin;
+        width: 22px;
+        visible: item.kind == 5;
+        text: "\{item.number}.";
+        font-family: Typography.ui-font;
+        font-size: Typography.size-body;
+        color: root.text-color;
+        line-height-factor: Typography.line-body;
+    }
+    Rectangle {
+        x: root.gutter - 24px;
+        y: root.top-margin + Typography.size-body * Typography.line-body / 2 - 8px;
+        width: 17px;
+        height: 17px;
+        visible: item.kind == 6;
+        border-radius: Theme.radius-xs;
+        border-width: item.checked ? 0px : 1.5px;
+        border-color: Colors.border-strong;
+        background: item.checked ? Colors.accent : transparent;
+        Icon {
+            x: 1.5px; y: 1.5px;
+            name: "todo-check";
+            size: 14px;
+            stroke-width: 2.4px;
+            color: Colors.text-on-accent;
+            visible: item.checked;
+        }
+        TouchArea {
+            mouse-cursor: MouseCursor.pointer;
+            clicked => {
+                UIState.todo-toggled(item.id);
+            }
+        }
+    }
+
+    // toggle (13): the chevron shows only when there is something to hide,
+    // which the projection decides (`can-fold`) because it is the one that
+    // left the folded subtree out of this list
+    Rectangle {
+        x: root.gutter - 22px;
+        y: root.top-margin + Typography.size-body * Typography.line-body / 2 - 9px;
+        width: 18px;
+        height: 18px;
+        border-radius: Theme.radius-xs;
+        visible: item.kind == 13 && item.can-fold;
+        background: fold-ta.has-hover ? Colors.hover-fill : transparent;
+        animate background { duration: Theme.duration-instant; }
+        Icon {
+            x: 1px; y: 1px;
+            name: item.folded ? "chevron-right" : "chevron-down";
+            size: 16px;
+            stroke-width: 1.8px;
+            color: Colors.text-secondary;
+        }
+        fold-ta := TouchArea {
+            mouse-cursor: MouseCursor.pointer;
+            clicked => {
+                UIState.toggle-fold(item.id);
+            }
+        }
+    }
+
+    // page (11) / link-to-page (12): icon + live title, open-only
+    Icon {
+        x: root.gutter - 26px;
+        y: root.top-margin + 2px;
+        visible: root.is-page-ish;
+        name: item.kind == 12 ? "link" : "page";
+        size: 17px;
+        stroke-width: 1.6px;
+        color: root.text-color;
+    }
+
+    // ---- the text itself ----
+    quote-text := Text {
+        x: root.gutter;
+        y: root.top-margin;
+        width: root.text-width;
+        visible: item.kind == 7 && !is-edit;
+        text: item.text;
+        font-family: Typography.ui-font;
+        font-size: Typography.size-body;
+        color: root.text-color;
+        line-height-factor: Typography.line-body;
+        wrap: word-wrap;
+    }
+    code-text := Text {
+        x: root.gutter + Theme.spacing-md;
+        y: root.top-margin + Theme.spacing-md;
+        width: root.text-width;
+        visible: item.kind == 8 && !is-edit;
+        text: item.text;
+        font-family: Typography.mono-font;
+        font-size: Typography.size-code;
+        color: root.text-color;
+        line-height-factor: Typography.line-code;
+        wrap: word-wrap;
+    }
+    callout-text := Text {
+        x: root.gutter + 40px;
+        y: root.top-margin + Theme.spacing-sm;
+        width: box-width - root.gutter - 40px - Theme.spacing-sm;
+        visible: item.kind == 10 && !is-edit;
+        text: item.text;
+        font-family: Typography.ui-font;
+        font-size: Typography.size-body;
+        color: root.text-color;
+        line-height-factor: Typography.line-body;
+        wrap: word-wrap;
+    }
+    // The live text, measured: the input itself is created by an `if`, so its
+    // height is not readable from outside it, and a row has to grow while its
+    // text is being edited. An invisible Text keeps its geometry (TableBlock
+    // measures its cells the same way).
+    measure-text := Text {
+        x: root.gutter;
+        y: root.top-margin;
+        width: root.text-width;
+        text: UIState.editing-text;
+        font-family: item.kind == 8 ? Typography.mono-font : Typography.ui-font;
+        font-size: root.font-size;
+        font-weight: root.is-heading ? Typography.weight-semibold : Typography.weight-regular;
+        line-height-factor: root.line-factor;
+        wrap: word-wrap;
+        visible: false;
+    }
+
+    plain-text := Text {
+        x: root.gutter;
+        y: root.top-margin;
+        width: root.text-width;
+        visible: root.is-text-line && !is-edit && item.runs.length == 0;
+        text: item.text;
+        font-family: Typography.ui-font;
+        font-size: root.font-size;
+        font-weight: root.is-heading ? Typography.weight-semibold : Typography.weight-regular;
+        color: item.checked && item.kind == 6 ? Colors.text-muted : root.text-color;
+        line-height-factor: root.line-factor;
+        wrap: word-wrap;
+    }
+
+    // marked text: runs side by side, clipped to one line (Slint Text has no
+    // inline formatting) — the documented limitation, shared with the rows
+    run-frame := Rectangle {
+        x: root.gutter;
+        y: root.top-margin;
+        width: root.text-width;
+        height: run-row.min-height;
+        visible: root.is-text-line && !is-edit && item.runs.length > 0;
+        clip: true;
+        run-row := HorizontalLayout {
+            spacing: 0px;
+            for run in item.runs : Rectangle {
+                min-width: run-text.preferred-width;
+                height: run-text.preferred-height;
+                vertical-stretch: 0;
+                horizontal-stretch: 0;
+                if run.code : Rectangle {
+                    border-radius: Theme.radius-xs;
+                    background: Colors.code-background;
+                    border-width: 1px;
+                    border-color: Colors.border;
+                }
+                run-text := Text {
+                    x: 0; y: 0;
+                    wrap: no-wrap;
+                    text: run.text;
+                    font-family: run.code ? Typography.mono-font
+                        : run.italic ? "Segoe UI Italic" : Typography.ui-font;
+                    font-size: run.code ? Typography.size-code : root.font-size;
+                    font-weight: run.bold ? Typography.weight-bold
+                        : (root.is-heading ? Typography.weight-semibold
+                            : Typography.weight-regular);
+                    color: run.link ? Colors.accent-text : root.text-color;
+                    line-height-factor: root.line-factor;
+                }
+                if run.strike : Rectangle {
+                    y: (parent.height - 1.2px) / 2;
+                    width: parent.width;
+                    height: 1.2px;
+                    background: Colors.text-secondary;
+                }
+                if run.link : Rectangle {
+                    y: parent.height - 2px;
+                    width: parent.width;
+                    height: 1px;
+                    background: Colors.accent-text;
+                }
+                if run.link : TouchArea {
+                    mouse-cursor: MouseCursor.pointer;
+                    clicked => {
+                        UIState.open-link(run.url);
+                    }
+                }
+            }
+        }
+    }
+
+    // divider (9)
+    Rectangle {
+        x: 0;
+        y: root.top-margin + 10px;
+        width: box-width;
+        height: 1px;
+        visible: item.kind == 9;
+        background: Colors.divider;
+    }
+
+    // picture (14): the box's own width, and the raster's ratio for the height
+    Rectangle {
+        x: root.gutter;
+        y: root.top-margin;
+        width: root.pic-width - root.gutter;
+        height: root.pic-height;
+        visible: root.is-image && root.pic-aspect > 0;
+        clip: true;
+        border-radius: Theme.radius-sm;
+        Image {
+            x: 0; y: 0;
+            width: parent.width; height: parent.height;
+            image-fit: contain;
+            source: UIState.image-for(item.attachment);
+        }
+    }
+    Text {
+        x: root.gutter;
+        y: root.top-margin;
+        width: root.text-width;
+        visible: root.is-image && root.pic-aspect <= 0;
+        text: item.text + " · no picture";
+        font-family: Typography.ui-font;
+        font-size: Typography.size-body;
+        color: Colors.text-muted;
+        line-height-factor: Typography.line-body;
+        wrap: word-wrap;
+    }
+
+    // attachment (15): the name, the size, and the two system actions. Narrow
+    // as the box is, this is the same row the editor draws at full width.
+    Rectangle {
+        x: root.gutter;
+        y: root.top-margin;
+        width: box-width - root.gutter;
+        height: root.file-height;
+        visible: root.is-file;
+        border-radius: Theme.radius-md;
+        border-width: 1px;
+        border-color: Colors.border;
+        background: item.bg > 0 ? root.bg-color : Colors.code-background;
+
+        Icon {
+            x: Theme.spacing-sm;
+            y: (parent.height - self.height) / 2;
+            name: "page";
+            size: 19px;
+            stroke-width: 1.6px;
+            color: Colors.text-secondary;
+        }
+        Text {
+            x: Theme.spacing-sm + 19px + Theme.spacing-sm;
+            y: 0;
+            height: parent.height;
+            width: Math.max(0px, parent.width - self.x - 96px);
+            vertical-alignment: center;
+            text: item.text;
+            font-family: Typography.ui-font;
+            font-size: Typography.size-body;
+            color: root.text-color;
+            overflow: elide;
+        }
+        Rectangle {
+            x: parent.width - 60px;
+            y: (parent.height - self.height) / 2;
+            width: 26px;
+            height: 26px;
+            border-radius: Theme.radius-xs;
+            background: open-ta.has-hover ? Colors.surface-hover : transparent;
+            Icon {
+                x: 4px; y: 4px;
+                name: "arrow-right";
+                size: 18px;
+                stroke-width: 1.7px;
+                color: Colors.text-secondary;
+            }
+            open-ta := TouchArea {
+                mouse-cursor: MouseCursor.pointer;
+                clicked => {
+                    UIState.attachment-opened(item.attachment);
+                }
+            }
+        }
+        Rectangle {
+            x: parent.width - 30px;
+            y: (parent.height - self.height) / 2;
+            width: 26px;
+            height: 26px;
+            border-radius: Theme.radius-xs;
+            background: save-ta.has-hover ? Colors.surface-hover : transparent;
+            Icon {
+                x: 4px; y: 4px;
+                name: "export";
+                size: 18px;
+                stroke-width: 1.7px;
+                color: Colors.text-secondary;
+            }
+            save-ta := TouchArea {
+                mouse-cursor: MouseCursor.pointer;
+                clicked => {
+                    UIState.attachment-saved(item.attachment);
+                }
+            }
+        }
+    }
+
+    // ---- the live editor ----
+    if is-edit : edit := TextInput {
+        x: root.gutter;
+        y: root.top-margin + (item.kind == 8 ? Theme.spacing-md : 0px)
+            + (item.kind == 10 ? Theme.spacing-sm : 0px);
+        width: root.text-width;
+        // explicit preferred height: an implicit height would derive from the
+        // row, which derives its height from this input (loop)
+        height: self.preferred-height;
+        font-family: item.kind == 8 ? Typography.mono-font : Typography.ui-font;
+        font-size: root.font-size;
+        font-weight: root.is-heading ? Typography.weight-semibold : Typography.weight-regular;
+        color: item.checked && item.kind == 6 ? Colors.text-muted : root.text-color;
+        line-height-factor: root.line-factor;
+        wrap: word-wrap;
+        single-line: item.kind != 8;
+        text <=> UIState.editing-text;
+        selection-foreground-color: Colors.text-primary;
+        selection-background-color: Colors.selection;
+        edited => {
+            // the same path a row's input takes: line shortcuts, the "/" menu,
+            // and the debounced commit
+            UIState.editing-changed(root.row-y + root.top-margin, root.body-height,
+                root.content-x + root.gutter);
+        }
+        accepted => {
+            UIState.enter-at-caret(self.cursor-position-byte-offset);
+        }
+        key-pressed(event) => {
+            if (UIState.slash-open && event.text == Key.UpArrow) {
+                UIState.slash-move(-1);
+                accept
+            } else if (UIState.slash-open && event.text == Key.DownArrow) {
+                UIState.slash-move(1);
+                accept
+            } else if (UIState.slash-open && event.text == Key.Return) {
+                UIState.slash-apply-selected();
+                accept
+            } else if (UIState.slash-open && event.text == Key.Escape) {
+                UIState.slash-close();
+                accept
+            } else if (UIState.slash-open && event.text == " ") {
+                UIState.slash-close();
+                reject
+            } else if (event.text == Key.Tab
+                && !event.modifiers.shift) {
+                UIState.column-item-move(item.id, 1);
+                accept
+            } else if (event.text == Key.Tab && event.modifiers.shift) {
+                UIState.column-item-move(item.id, -1);
+                accept
+            } else if (event.modifiers.control && event.text == Key.B
+                && self.anchor-position-byte-offset != self.cursor-position-byte-offset) {
+                UIState.toggle-mark(0, self.anchor-position-byte-offset, self.cursor-position-byte-offset);
+                accept
+            } else if (event.modifiers.control && event.text == Key.I
+                && self.anchor-position-byte-offset != self.cursor-position-byte-offset) {
+                UIState.toggle-mark(1, self.anchor-position-byte-offset, self.cursor-position-byte-offset);
+                accept
+            } else if (event.modifiers.control && event.modifiers.shift && event.text == Key.X
+                && self.anchor-position-byte-offset != self.cursor-position-byte-offset) {
+                UIState.toggle-mark(2, self.anchor-position-byte-offset, self.cursor-position-byte-offset);
+                accept
+            } else if (event.modifiers.control && event.text == Key.E
+                && self.anchor-position-byte-offset != self.cursor-position-byte-offset) {
+                UIState.toggle-mark(3, self.anchor-position-byte-offset, self.cursor-position-byte-offset);
+                accept
+            } else if (event.modifiers.control && event.text == Key.L
+                && self.anchor-position-byte-offset != self.cursor-position-byte-offset) {
+                UIState.link-start = Math.min(self.anchor-position-byte-offset, self.cursor-position-byte-offset);
+                UIState.link-end = Math.max(self.anchor-position-byte-offset, self.cursor-position-byte-offset);
+                UIState.link-url = "";
+                UIState.link-open = true;
+                accept
+            } else if (event.modifiers.control && event.text == Key.Z && event.modifiers.shift) {
+                UIState.redo-requested();
+                accept
+            } else if (event.modifiers.control && event.text == Key.Z) {
+                UIState.undo-requested();
+                accept
+            } else if (event.modifiers.control && event.text == Key.Y) {
+                UIState.redo-requested();
+                accept
+            } else if (event.text == Key.Backspace
+                && self.cursor-position-byte-offset == 0
+                && self.anchor-position-byte-offset == 0) {
+                UIState.backspace-at-start();
+                accept
+            } else if (event.text == Key.Escape) {
+                UIState.cancel-editing();
+                accept
+            } else {
+                reject
+            }
+        }
+        init => {
+            edit.focus();
+            if (UIState.pending-caret >= 0) {
+                edit.set-selection-offsets(UIState.pending-caret, UIState.pending-caret);
+                UIState.pending-caret = -1;
+            }
+        }
+    }
+}

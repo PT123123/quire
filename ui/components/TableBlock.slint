@@ -1,0 +1,270 @@
+// The table block (SPEC §三十七 批次 B): one editor row that owns a whole
+// grid. Its cells are child blocks, and the projection leaves them out of the
+// row list, so they arrive as `block.table-cells` — flat, row-major — with
+// `block.columns` saying where each row ends (Slint has no array of arrays in
+// a struct, so the chunking happens here rather than in the data).
+//
+// A VerticalLayout of HorizontalLayouts, not absolute positioning, so a row
+// grows to its tallest cell. The cells tile a `Colors.border` box with 1px
+// gaps: the gaps ARE the grid lines, which costs one Rectangle per cell.
+//
+// Every control here is hover-gated, Notion-style, and the whole grid is one
+// row's delegate, so a page with a table in it costs the same as a page
+// without one until the pointer arrives (SPEC §二十二).
+
+import { Theme } from "../Theme.slint";
+import { Colors } from "../Colors.slint";
+import { Typography } from "../Typography.slint";
+import { Icon } from "../Icons.slint";
+import { BlockRow, TableCell, UIState } from "../Types.slint";
+import { TableEdge } from "./TableEdge.slint";
+
+export component TableBlock inherits Rectangle {
+    in property <BlockRow> block;
+    in property <length> grid-width;
+    // the editor row's hover: the edge toolbar rides in with it
+    in property <bool> hovered;
+    // ... and the ride is mutual. A cell's TouchArea takes the row's hover
+    // away, so the row cannot see the pointer while it is over the grid —
+    // which is exactly when the handle and the toolbar matter.
+    //
+    // The pills report theirs by binding. The cells cannot: Slint delivers the
+    // new target's move before the old one's exit (send_exit_events runs after
+    // send_mouse_event_to_item), so a shared "something here" boolean would
+    // read false on every cell-to-cell move. So each cell claims the pointer by
+    // its own id, and only lets go when nobody has claimed it since.
+    property <int> pointer-cell: -1;
+    out property <bool> inner-hover: pointer-cell >= 0
+        || e1.hovered || e2.hovered || e3.hovered || e4.hovered;
+
+    property <int> cols: Math.max(block.columns, 1);
+    // Rust projects whole rows only, so this divides exactly
+    property <int> rows: block.table-cells.length / cols;
+    property <length> pad: Theme.spacing-sm;
+    property <length> cell-width:
+        (grid-width - 2px - (cols - 1) * 1px) / cols;
+    // the toolbar collapses to nothing (and its buttons stop hit-testing)
+    property <length> strip-height: hovered || inner-hover ? 22px : 0px;
+
+    background: Colors.border;
+    border-radius: Theme.radius-xs;
+    height: grid.height + 2px;
+
+    grid := VerticalLayout {
+        x: 1px;
+        y: 1px;
+        width: parent.width - 2px;
+        // the fake layout property, not a function call: the grid is the
+        // thing that decides how tall this block is, so it measures itself
+        height: self.min-height;
+        spacing: 1px;
+
+        for ri in root.rows : HorizontalLayout {
+            spacing: 1px;
+            for ci in root.cols : Rectangle {
+                width: root.cell-width;
+                // `cell-text` mirrors the live text while this cell holds the
+                // editor, so the row tracks the caret without a second measure
+                min-height: 2 * root.pad + cell-text.height;
+                border-radius: 0px;
+                border-width: is-edit ? 1.5px : 0px;
+                border-color: Colors.focus-ring;
+                background: Colors.background;
+
+                property <TableCell> cell: root.block.table-cells[ri * root.cols + ci];
+                property <bool> is-edit: UIState.editing-id == cell.id;
+                // 1.18 TouchArea has no entered()/exited() — mirror has-hover
+                // and react.
+                property <bool> hovering: cell-hit.has-hover;
+                changed hovering => {
+                    if (hovering) {
+                        root.pointer-cell = cell.id;
+                    } else if (root.pointer-cell == cell.id) {
+                        root.pointer-cell = -1;
+                    }
+                }
+
+                cell-hit := TouchArea {
+                    enabled: !is-edit;
+                    mouse-cursor: MouseCursor.text;
+                    clicked => {
+                        UIState.block-activate(cell.id);
+                    }
+                }
+
+                // unmarked cells wrap (the only place a cell's text is drawn);
+                // marked cells fall to the run row below, clipped to one line
+                // like every other marked block
+                cell-text := Text {
+                    x: root.pad; y: root.pad;
+                    width: parent.width - 2 * root.pad;
+                    visible: cell.runs.length == 0 && !is-edit;
+                    text: is-edit ? UIState.editing-text : cell.text;
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-body;
+                    color: Colors.text-primary;
+                    line-height-factor: Typography.line-body;
+                    wrap: word-wrap;
+                }
+
+                // marked cells fall to this run row, clipped to one line like
+                // every other marked block (Slint clips a Rectangle, not a
+                // layout, so the frame is its own element)
+                Rectangle {
+                    x: root.pad; y: root.pad;
+                    width: parent.width - 2 * root.pad;
+                    height: run-row.min-height;
+                    visible: cell.runs.length > 0 && !is-edit;
+                    clip: true;
+                    run-row := HorizontalLayout {
+                        spacing: 0px;
+                        for run in cell.runs : Rectangle {
+                            min-width: run-text.preferred-width;
+                            height: run-text.preferred-height;
+                            vertical-stretch: 0;
+                            horizontal-stretch: 0;
+                            if run.code : Rectangle {
+                                border-radius: Theme.radius-xs;
+                                background: Colors.code-background;
+                                border-width: 1px;
+                                border-color: Colors.border;
+                            }
+                            run-text := Text {
+                                x: 0; y: 0;
+                                wrap: no-wrap;
+                                text: run.text;
+                                font-family: run.code ? Typography.mono-font
+                                    : run.italic ? "Segoe UI Italic" : Typography.ui-font;
+                                font-size: run.code ? Typography.size-code
+                                    : Typography.size-body;
+                                font-weight: run.bold ? Typography.weight-bold
+                                    : Typography.weight-regular;
+                                color: run.link ? Colors.accent-text : Colors.text-primary;
+                                line-height-factor: Typography.line-body;
+                            }
+                            if run.strike : Rectangle {
+                                y: (parent.height - 1.2px) / 2;
+                                width: parent.width;
+                                height: 1.2px;
+                                background: Colors.text-secondary;
+                            }
+                            if run.link : Rectangle {
+                                y: parent.height - 2px;
+                                width: parent.width;
+                                height: 1px;
+                                background: Colors.accent-text;
+                            }
+                        }
+                    }
+                }
+
+                // Created with the focus, like the rename input in the sidebar:
+                // an always-there input would have to be told to take the
+                // keyboard, and `init` is the one moment that is reliable.
+                if is-edit : cell-edit := TextInput {
+                    x: root.pad; y: root.pad;
+                    width: parent.width - 2 * root.pad;
+                    height: self.preferred-height;
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-body;
+                    color: Colors.text-primary;
+                    line-height-factor: Typography.line-body;
+                    wrap: word-wrap;
+                    single-line: false;
+                    text <=> UIState.editing-text;
+                    selection-foreground-color: Colors.text-primary;
+                    selection-background-color: Colors.selection;
+                    edited => {
+                        UIState.cell-changed();
+                    }
+                    key-pressed(event) => {
+                        if (event.text == Key.Tab) {
+                            UIState.table-cell-move(cell.id, event.modifiers.shift ? -1 : 1);
+                            accept
+                        } else if (event.modifiers.control && event.text == Key.B
+                            && self.anchor-position-byte-offset != self.cursor-position-byte-offset) {
+                            UIState.toggle-mark(0, self.anchor-position-byte-offset, self.cursor-position-byte-offset);
+                            accept
+                        } else if (event.modifiers.control && event.text == Key.I
+                            && self.anchor-position-byte-offset != self.cursor-position-byte-offset) {
+                            UIState.toggle-mark(1, self.anchor-position-byte-offset, self.cursor-position-byte-offset);
+                            accept
+                        } else if (event.modifiers.control && event.modifiers.shift && event.text == Key.X
+                            && self.anchor-position-byte-offset != self.cursor-position-byte-offset) {
+                            UIState.toggle-mark(2, self.anchor-position-byte-offset, self.cursor-position-byte-offset);
+                            accept
+                        } else if (event.modifiers.control && event.text == Key.E
+                            && self.anchor-position-byte-offset != self.cursor-position-byte-offset) {
+                            UIState.toggle-mark(3, self.anchor-position-byte-offset, self.cursor-position-byte-offset);
+                            accept
+                        } else if (event.modifiers.control && event.text == Key.Z && event.modifiers.shift) {
+                            UIState.redo-requested();
+                            accept
+                        } else if (event.modifiers.control && event.text == Key.Z) {
+                            UIState.undo-requested();
+                            accept
+                        } else if (event.modifiers.control && event.text == Key.Y) {
+                            UIState.redo-requested();
+                            accept
+                        } else if (event.text == Key.Escape) {
+                            UIState.cancel-editing();
+                            accept
+                        } else {
+                            reject
+                        }
+                    }
+                    init => {
+                        cell-edit.focus();
+                        if (UIState.pending-caret >= 0) {
+                            cell-edit.set-selection-offsets(UIState.pending-caret, UIState.pending-caret);
+                            UIState.pending-caret = -1;
+                        }
+                    }
+                }
+            }
+        }
+
+        // The grid's only structural controls, and the reason the row keeps
+        // its ⋮⋮ handle working: rows and columns are added at the end and
+        // deleted where the caret sits (Rust reads that back from editing-id).
+        Rectangle {
+            height: root.strip-height;
+            // A collapsed strip must paint nothing: the pills' icons carry
+            // their own 13px size, so a 0-height parent does not clip them --
+            // they would straddle the grid's bottom border with no labels
+            // (the Text does follow the parent height, so only it disappears).
+            visible: root.strip-height > 0px;
+            // the root paints the border colour so the 1px cell gaps read as
+            // grid lines; the strip is not a grid line, so it needs its own
+            // page-coloured ground
+            background: Colors.background;
+
+            HorizontalLayout {
+                x: 0; y: 0; width: parent.width; height: parent.height;
+                spacing: Theme.spacing-xs;
+                e1 := TableEdge {
+                    icon: "plus";
+                    label: "Add row";
+                    edge-clicked => { UIState.table-row-added(root.block.id); }
+                }
+                e2 := TableEdge {
+                    icon: "plus";
+                    label: "Add column";
+                    edge-clicked => { UIState.table-column-added(root.block.id); }
+                }
+                e3 := TableEdge {
+                    icon: "x";
+                    label: "Delete row";
+                    can: root.rows > 1;
+                    edge-clicked => { UIState.table-row-removed(root.block.id); }
+                }
+                e4 := TableEdge {
+                    icon: "x";
+                    label: "Delete column";
+                    can: root.cols > 1;
+                    edge-clicked => { UIState.table-column-removed(root.block.id); }
+                }
+            }
+        }
+    }
+}

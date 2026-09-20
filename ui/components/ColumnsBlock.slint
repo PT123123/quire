@@ -1,0 +1,156 @@
+// The columns block (SPEC §三十七 批次 B): one editor row that owns a whole
+// layout. Its boxes and their content are child blocks, and the projection
+// leaves them out of the row list, so they arrive as `block.column-boxes` and
+// one flat `block.column-items` that the boxes slice. Slint has no recursive
+// components, which is why the layout row is the only delegate here and
+// `ColumnItemRow` is a second, smaller renderer rather than `EditorBlock`.
+//
+// `FlexboxLayout` does the tiling: one row, no wrap, and every box with
+// `horizontal-stretch: 1`, so the boxes split the width evenly and each grows
+// to its own content. A box is left as a box: no chrome of its own, because
+// the layout's row carries the ⋮⋮ handle and the drop target for all of them.
+//
+// Only the visible window costs anything — the items ride on the layout's own
+// row delegate (SPEC §三十七: 分栏只在可见窗口内展开).
+
+import { Theme } from "../Theme.slint";
+import { Colors } from "../Colors.slint";
+import { Typography } from "../Typography.slint";
+import { BlockRow, UIState } from "../Types.slint";
+import { TableEdge } from "./TableEdge.slint";
+import { ColumnItemRow } from "./ColumnItemRow.slint";
+
+export component ColumnsBlock inherits Rectangle {
+    in property <BlockRow> block;
+    in property <length> layout-width;
+    // the editor row's own geometry, for the slash menu an item can open
+    in property <length> line-y;
+    in property <length> line-x;
+    // the layout row's hover: the edge toolbar rides in with it
+    in property <bool> hovered;
+
+    // The pointer claim, copied from TableBlock: an item's TouchArea takes the
+    // row's hover away, so the row cannot see the pointer while it is inside
+    // the layout — exactly when the ⋮⋮ handle matters. Slint 1.18 delivers the
+    // new target's move before the old target's exit, so a shared boolean
+    // would read false on every item-to-item move; each item claims by id.
+    property <int> pointer-item: -1;
+    out property <bool> inner-hover: pointer-item >= 0 || e1.hovered || e2.hovered;
+
+    // The projection emits one entry per `Column` child, so this length IS the
+    // layout's shape — and a row that is not a layout has no boxes at all,
+    // which keeps every index below in range without a guard.
+    property <int> boxes: block.column-boxes.length;
+    property <length> gap: Theme.spacing-lg;
+    // even halves/thirds of what is left after the gaps
+    property <length> each-width: (layout-width - (boxes - 1) * gap) / boxes;
+    // the toolbar collapses to nothing (and its buttons stop hit-testing)
+    property <length> strip-height: hovered || inner-hover ? 22px : 0px;
+
+    height: outer.height;
+
+    outer := VerticalLayout {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        height: self.min-height;
+        spacing: 0px;
+
+        FlexboxLayout {
+            width: parent.width;
+            height: self.min-height;
+            flex-direction: row;
+            // the builtin default is `wrap`, which would drop a third box onto
+            // a second line as soon as the boxes want more room than they have
+            flex-wrap: no-wrap;
+            // `alignment: stretch` is flexbox's flex-grow, weighted per item
+            alignment: stretch;
+            cross-axis-alignment: start;
+            spacing-horizontal: gap;
+
+            for bx in block.column-boxes : Rectangle {
+                horizontal-stretch: 1;
+                vertical-stretch: 0;
+                min-height: bx.size > 0 ? box-col.min-height : 24px;
+                border-radius: Theme.radius-xs;
+
+                box-col := VerticalLayout {
+                    x: 0;
+                    y: 0;
+                    width: parent.width;
+                    height: self.min-height;
+                    spacing: 0px;
+
+                    for ri in bx.size : ColumnItemRow {
+                        item: block.column-items[bx.first + ri];
+                        box-width: each-width;
+                        row-y: line-y;
+                        content-x: line-x;
+                        pointer: pointer-item;
+                        pointer-claimed(v) => {
+                            pointer-item = v;
+                        }
+                    }
+                }
+
+                // A box with no blocks has no line to point at, and a box the
+                // pointer cannot enter cannot be filled — so it says so, and
+                // takes the click as "give me a paragraph".
+                if bx.size == 0 : Rectangle {
+                    box-empty := TouchArea {
+                        width: parent.width;
+                        height: parent.height;
+                        mouse-cursor: MouseCursor.pointer;
+                        property <bool> hovering: self.has-hover;
+                        changed hovering => {
+                            if (hovering) {
+                                root.pointer-item = bx.id;
+                            } else if (root.pointer-item == bx.id) {
+                                root.pointer-item = -1;
+                            }
+                        }
+                        clicked => {
+                            UIState.column-fill(bx.id);
+                        }
+                    }
+                    Text {
+                        x: 0;
+                        y: 0;
+                        width: parent.width;
+                        height: parent.height;
+                        vertical-alignment: center;
+                        text: "Empty column";
+                        font-family: Typography.ui-font;
+                        font-size: Typography.size-caption;
+                        color: Colors.text-muted;
+                    }
+                }
+            }
+        }
+
+        // The layout's only structural controls: a box is added at the right
+        // end and taken from it, its blocks moving into the box before.
+        Rectangle {
+            height: strip-height;
+            visible: strip-height > 0px;
+            background: Colors.background;
+
+            HorizontalLayout {
+                x: 0; y: 0; width: parent.width; height: parent.height;
+                spacing: Theme.spacing-xs;
+                e1 := TableEdge {
+                    icon: "plus";
+                    label: "Add column";
+                    can: boxes < 3;
+                    edge-clicked => { UIState.column-added(block.id); }
+                }
+                e2 := TableEdge {
+                    icon: "x";
+                    label: "Delete column";
+                    can: boxes > 2;
+                    edge-clicked => { UIState.column-removed(block.id); }
+                }
+            }
+        }
+    }
+}

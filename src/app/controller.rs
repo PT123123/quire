@@ -912,11 +912,14 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
     }
 
     // debounce the typing commit: each keystroke restarts the timer; the
-    // Timer must outlive this scope (leaked, like the bench timers)
+    // Timer must outlive this scope (leaked, like the bench timers). The table
+    // cells arm the same timer — they skip everything above it, because a cell
+    // is not a line of prose: no markdown shortcut converts in a grid, and the
+    // slash menu has no room to open in one.
+    let t: &'static slint::Timer = Box::leak(Box::new(slint::Timer::default()));
     {
         let gw = gw.clone();
         let s = state.clone();
-        let t: &'static slint::Timer = Box::leak(Box::new(slint::Timer::default()));
         ui.global::<UIState>()
             .on_editing_changed(move |row_y, row_h, content_x| {
                 let gw = gw.clone();
@@ -970,8 +973,13 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                         g.set_slash_focus(0);
                         let scroll = g.get_editor_scroll_y();
                         let edge = if g.get_sidebar_open() { 260.0 } else { 0.0 };
+                        // the same fit-the-window rule the "+" menu uses: the
+                        // list is as tall as its rows, so a hardcoded reserve
+                        // would push the last entries off the bottom as soon
+                        // as the menu grew another kind
+                        let menu_h = g.get_slash_items().row_count() as f32 * 32.0 + 8.0;
                         let y = (40.0 + (row_y as f32) - scroll + (row_h as f32) + 4.0)
-                            .clamp(48.0, g.get_window_h() - 350.0);
+                            .clamp(48.0, (g.get_window_h() - menu_h - 8.0).max(48.0));
                         g.set_slash_x(edge + (content_x as f32));
                         g.set_slash_y(y);
                         g.set_slash_open(true);
@@ -979,16 +987,133 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                         g.set_slash_open(false);
                     }
                 }
-                t.start(
-                    slint::TimerMode::SingleShot,
-                    std::time::Duration::from_millis(300),
-                    move || {
-                        if let Some(g) = gw.upgrade() {
-                            flush_pending_edit(&g, &s);
-                        }
-                    },
-                );
+                debounce_arm(t, &gw, &s);
             });
+    }
+
+    // ---- table grid (SPEC §三十七 批次 B) ----
+    // The cells are child blocks the projection hides, so everything here
+    // goes through `editing-id`: the row model carries them, Rust reads the
+    // focused cell back out of the UI state, and the grid's own text never
+    // touches `editing-changed` (a cell has no line shortcuts to run).
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_table_cell_move(move |cell, delta| {
+            let g = gw.upgrade().unwrap();
+            flush_pending_edit(&g, &s);
+            // Tab off the last cell appends a row first; Shift-Tab off the
+            // front stays put, which is what `None` means
+            if let Some(next) = s.table_step(cell, delta) {
+                focus_block(&g, &s, next, i32::MAX);
+            }
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_cell_changed(move || {
+            debounce_arm(t, &gw, &s);
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_table_row_added(move |table| {
+            let g = gw.upgrade().unwrap();
+            flush_pending_edit(&g, &s);
+            s.table_add_row(table, g.get_editing_id());
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_table_column_added(move |table| {
+            let g = gw.upgrade().unwrap();
+            flush_pending_edit(&g, &s);
+            s.table_add_column(table, g.get_editing_id());
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_table_row_removed(move |table| {
+            let g = gw.upgrade().unwrap();
+            flush_pending_edit(&g, &s);
+            let cell = g.get_editing_id();
+            let at = s.table_cell_index(cell);
+            if s.table_delete_row(table, cell) {
+                table_refocus(&g, &s, table, at);
+            }
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_table_column_removed(move |table| {
+            let g = gw.upgrade().unwrap();
+            flush_pending_edit(&g, &s);
+            let cell = g.get_editing_id();
+            let at = s.table_cell_index(cell);
+            if s.table_delete_column(table, cell) {
+                table_refocus(&g, &s, table, at);
+            }
+        });
+    }
+
+    // ---- columns layout (SPEC §三十七 批次 B) ----
+    // The boxes and their blocks are child blocks the projection hides, so —
+    // exactly as for a grid — everything here goes through `editing-id`, and
+    // the layout's row never sees `editing-changed` for them.
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_column_item_move(move |item, delta| {
+            let g = gw.upgrade().unwrap();
+            flush_pending_edit(&g, &s);
+            // either end of the layout stops: a box is left by clicking out,
+            // not by tabbing past the edge
+            if let Some(next) = s.column_step(item, delta) {
+                focus_block(&g, &s, next, i32::MAX);
+            }
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_column_added(move |layout| {
+            let g = gw.upgrade().unwrap();
+            flush_pending_edit(&g, &s);
+            if s.column_add(layout) {
+                columns_refocus(&g, &s);
+            }
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_column_removed(move |layout| {
+            let g = gw.upgrade().unwrap();
+            flush_pending_edit(&g, &s);
+            // the last box's blocks move into the one before it, so the
+            // focused block survives its own box going away
+            if s.column_remove(layout) {
+                columns_refocus(&g, &s);
+            }
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_column_fill(move |column| {
+            let g = gw.upgrade().unwrap();
+            flush_pending_edit(&g, &s);
+            // the empty box just got a line, and the caret should be on it —
+            // otherwise the click looks like it did nothing
+            if let Some(id) = s.column_fill(column) {
+                focus_block(&g, &s, id, i32::MAX);
+            }
+        });
     }
 
     {
@@ -1197,15 +1322,32 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                 id: BlockId(id as u64),
                 text: cleaned.clone(),
             });
-            let _ = s.exec_on_open_page(Command::SetBlockType {
+            let changes = s.exec_on_open_page(Command::SetBlockType {
                 id: BlockId(id as u64),
                 kind,
             });
             g.set_slash_open(false);
             g.set_slash_insert(false);
-            g.set_editing_text(cleaned.clone().into());
-            g.set_pending_caret(cleaned.len() as i32);
-            g.set_editing_id(id);
+            // a grid and a layout draw no row input of their own, so the caret
+            // cannot stay on the row that just became one: it goes into the
+            // first cell or the first line, which is where the words moved
+            let target = match kind {
+                crate::core::BlockKind::Table => {
+                    changes.as_deref().and_then(find_inserted_cell_id)
+                }
+                crate::core::BlockKind::Columns => {
+                    changes.as_deref().and_then(find_inserted_line_id)
+                }
+                _ => None,
+            };
+            match target {
+                Some(target) => focus_block(&g, &s, target, i32::MAX),
+                None => {
+                    g.set_editing_text(cleaned.clone().into());
+                    g.set_pending_caret(cleaned.len() as i32);
+                    g.set_editing_id(id);
+                }
+            }
         });
     }
 
@@ -1760,6 +1902,48 @@ fn poll_arm(gw: &slint::Weak<UIState<'static>>, s: &Rc<AppState>) {
     );
 }
 
+/// Restart the 300 ms typing-commit timer. A prose row arms it after its
+/// markdown and slash work; a table cell arms it alone, since a cell is a grid
+/// slot rather than a line.
+fn debounce_arm(
+    t: &'static slint::Timer,
+    gw: &slint::Weak<UIState<'static>>,
+    s: &Rc<AppState>,
+) {
+    let gw = gw.clone();
+    let s = s.clone();
+    t.start(
+        slint::TimerMode::SingleShot,
+        std::time::Duration::from_millis(300),
+        move || {
+            if let Some(g) = gw.upgrade() {
+                flush_pending_edit(&g, &s);
+            }
+        },
+    );
+}
+
+/// Where the caret belongs after a row or column delete: `at` was the focused
+/// cell's row-major slot, so the same slot of the smaller grid is the cell
+/// nearest to it. `None` means the caret was never in this grid — the delete
+/// took a row from under someone else, so it keeps its own focus.
+fn table_refocus(g: &UIState<'_>, s: &Rc<AppState>, table: i32, at: Option<usize>) {
+    match at.and_then(|at| s.table_cell_at(table, at)) {
+        Some(cell) => focus_block(g, s, cell, i32::MAX),
+        None => refresh_focused_text(g, s),
+    }
+}
+
+/// Adding or removing a box rebuilds the layout's row, and the item's input
+/// is created with the focus — so it would come back with the caret at the
+/// start of the line. Hand it back where the reader left it.
+fn columns_refocus(g: &UIState<'_>, s: &Rc<AppState>) {
+    let id = g.get_editing_id();
+    if id > 0 && s.is_column_item(id) {
+        focus_block(g, s, id, i32::MAX);
+    }
+}
+
 /// Commit the live editing text as a `ReplaceText` command (no-op when the
 /// text is unchanged). Called by the debounce timer and before every
 /// structural operation so undo history stays consistent.
@@ -1775,6 +1959,16 @@ fn flush_pending_edit(g: &UIState<'_>, state: &Rc<AppState>) {
         text: text.clone(),
     });
     if applied.is_some() {
+        if state.is_table_cell(editing) {
+            // a cell has no row of its own: its text rides on the table's row
+            state.sync_cell_text(editing, &text);
+            return;
+        }
+        if state.is_column_item(editing) {
+            // ... and so does a block inside a columns box
+            state.sync_column_text(editing, &text);
+            return;
+        }
         // targeted row sync; no delegate rebuild
         let mut i = 0;
         while let Some(mut row) = state.blocks.row_data(i) {
@@ -2061,6 +2255,30 @@ pub fn import_from_path(g: &UIState<'_>, state: &Rc<AppState>, path: &std::path:
 fn find_inserted_id(changes: &[Change]) -> Option<i32> {
     changes.iter().find_map(|c| match c {
         Change::BlockInserted(b) => Some(b.id.0 as i32),
+        _ => None,
+    })
+}
+
+/// The first cell a grid-building command created — the cell a table's caret
+/// starts in. `apply` inserts cells in row-major order, so this is the
+/// top-left one, which is where the converted line's words went.
+fn find_inserted_cell_id(changes: &[Change]) -> Option<i32> {
+    changes.iter().find_map(|c| match c {
+        Change::BlockInserted(b) if b.kind == crate::core::BlockKind::TableCell => {
+            Some(b.id.0 as i32)
+        }
+        _ => None,
+    })
+}
+
+/// The first line a layout-building command created — where a columns caret
+/// starts, since that is where the converted line's words moved. The command
+/// inserts a box and its first line as a pair, so this is the first box.
+fn find_inserted_line_id(changes: &[Change]) -> Option<i32> {
+    changes.iter().find_map(|c| match c {
+        Change::BlockInserted(b) if b.kind == crate::core::BlockKind::Paragraph => {
+            Some(b.id.0 as i32)
+        }
         _ => None,
     })
 }
@@ -2400,6 +2618,110 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
                 return;
             };
             let _ = state.insert_attachment(after, att, crate::core::BlockKind::File);
+        }
+        // SPEC §三十七 批次 B: a grid sitting in the page. `table-edit` is the
+        // same table with the caret in one cell, so the pair proves both the
+        // resting shape and that a cell can take the editor at all — the
+        // second is the one a static model could fake.
+        "table" | "table-edit" => {
+            let page = core_page_id(state.open_page.get());
+            let target = {
+                let d = state.doc.borrow();
+                d.page_blocks(page)
+                    .iter()
+                    .find(|b| b.kind == crate::core::BlockKind::Paragraph && !b.text.is_empty())
+                    .map(|b| b.id)
+            };
+            let Some(line) = target else { return };
+            // built the way the menu builds one: the line's own words move into
+            // the top-left cell, which is where a scene like this starts
+            let _ = state.exec_on_open_page(Command::SetBlockType {
+                id: line,
+                kind: crate::core::BlockKind::Table,
+            });
+            let cells = {
+                let d = state.doc.borrow();
+                d.page_blocks(page)
+                    .iter()
+                    .filter(|b| b.kind == crate::core::BlockKind::TableCell)
+                    .map(|b| b.id)
+                    .collect::<Vec<_>>()
+            };
+            for (cell, word) in cells.iter().zip(["North", "South", "East", "West", "Up"]) {
+                let _ = state.exec_editor(Command::ReplaceText {
+                    id: *cell,
+                    text: (*word).into(),
+                });
+            }
+            state.reproject_blocks();
+            if scene == "table-edit" {
+                if let Some(cell) = cells.get(3) {
+                    focus_block(&g, state, cell.as_u64() as i32, i32::MAX);
+                }
+            }
+        }
+        // SPEC §三十七 批次 B: a layout tiling the page. `columns-3` is the same
+        // layout after the strip's "Add column", so the pair proves the boxes
+        // really re-tile — a static model could show a count that never moved
+        // the widths.
+        "columns" | "columns-3" => {
+            let page = core_page_id(state.open_page.get());
+            let target = {
+                let d = state.doc.borrow();
+                d.page_blocks(page)
+                    .iter()
+                    .find(|b| b.kind == crate::core::BlockKind::Paragraph && !b.text.is_empty())
+                    .map(|b| b.id)
+            };
+            let Some(line) = target else { return };
+            // built the way the menu builds one, so the words move into the
+            // first box and the scene shows a layout with content in it
+            let _ = state.exec_on_open_page(Command::SetBlockType {
+                id: line,
+                kind: crate::core::BlockKind::Columns,
+            });
+            if scene == "columns-3" {
+                let layout = {
+                    let d = state.doc.borrow();
+                    d.page_blocks(page)
+                        .iter()
+                        .find(|b| b.kind == crate::core::BlockKind::Columns)
+                        .map(|b| b.id.0 as i32)
+                };
+                if let Some(id) = layout {
+                    state.column_add(id);
+                }
+            }
+            let boxes = {
+                let d = state.doc.borrow();
+                let mut boxes = d
+                    .page_blocks(page)
+                    .iter()
+                    .filter(|b| b.kind == crate::core::BlockKind::Column)
+                    .map(|b| (b.order, b.id))
+                    .collect::<Vec<_>>();
+                // left to right, whatever order the page slice happens to hold
+                boxes.sort();
+                boxes.into_iter().map(|(_, id)| id).collect::<Vec<_>>()
+            };
+            for (n, bx) in boxes.iter().enumerate() {
+                // one word per box, so an uneven render is visible at a glance
+                let first = {
+                    let d = state.doc.borrow();
+                    d.page_blocks(page)
+                        .iter()
+                        .filter(|b| b.parent == Some(*bx))
+                        .min_by_key(|b| b.order)
+                        .map(|b| b.id)
+                };
+                if let Some(id) = first {
+                    let _ = state.exec_editor(Command::ReplaceText {
+                        id,
+                        text: format!("Column {}", n + 1).into(),
+                    });
+                }
+            }
+            state.reproject_blocks();
         }
         "find" => {
             g.set_find_open(true);

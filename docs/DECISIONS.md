@@ -2,6 +2,133 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0032 · A layout is two levels of ordinary blocks, and it draws itself inside its own row
+
+Decision: `columns` (SPEC §三十七 批次 B, M10's fifth slice) stores a layout as
+**two levels of child blocks** and adds **no schema**. The `columns` block carries
+its box count in the very same `blocks.columns` column v8 introduced for a grid;
+each box is a `BlockKind::Column` child of it; each line inside a box is an
+ordinary child of that box. One `Change` still carries the shape
+(`BlockColumnsSet`) and every other edit is `BlockInserted` / `BlockDeleted` /
+`BlockMoved` / `BlockTextSet` / `BlockKindSet`, so undo, redo and §十八 keep
+working without knowing what a layout is. The UI projects the whole layout into
+the layout's **single** delegate as a flat `[ColumnItem]` plus a `[ColumnBox]`
+shape table (`id`, `column`, `first`, `size`) that slices it, and
+`visible_block_indices` hides both the boxes and their lines — the same filter
+ADR-0028 uses for a folded subtree and ADR-0031 for cells, so a layout is one
+row however wide it is. Tiling is Slint 1.18's `FlexboxLayout` (one row,
+`flex-wrap: no-wrap`, `alignment: stretch`, `horizontal-stretch: 1` per box), not
+hand-written widths. The hover strip reuses `TableEdge` for Add / Delete column,
+and `plan()` refuses below two and above three boxes.
+
+Why: Slint has no recursive components, so a box cannot hold an `EditorBlock`
+that itself holds boxes — the only place a layout's content can be drawn is the
+layout's own row delegate, which is precisely what §三十七's "分栏只在可见窗口内
+展开" asks for and what §十二's virtualization premise requires. Reusing v8's
+integer is the same argument ADR-0030 made about v7: a box count and a column
+count are one fact ("how many boxes does this container hold"), and a schema
+version for a rename is not worth a migration. A box always holds at least one
+line, and `ColumnsAddBlock` exists because an empty box is the one thing on the
+page a click cannot put a caret in: the empty box says so, and the click asks for
+its first paragraph.
+
+Consequences: a box has no row of its own, so nothing outside the delegate can
+address its lines by row index — Tab walks them through `column-item-move` and
+stops dead at either end, ↑/↓ move the caret inside the line rather than leaving
+the layout, and leaving a box is a click. Markdown export flattens: the
+containers write no marker of their own and their lines come out at page depth in
+reading order, which a test pins in both directions (re-import keeps every word
+and loses only the shape), and the importer learns no columns syntax — the same
+degradation ADR-0031 accepted for a grid. `InsertBlockAfter` had to stop treating
+a container's row as its own slot: it now inserts after the container's whole
+subtree and inherits the anchor's parent, which closes the identical hole for a
+grid — "+" on a table used to be able to wedge a top-level block between the
+table and its first cell, and a page's blocks are one flat slice sorted by
+`order`, so a container whose subtree is not contiguous stops being one
+container: `subtree()` walks off it, and every index-based reader with it. Two QOML findings came out of this slice and both
+belong in UI_ARCHITECTURE.md: `for … : if … : Component` is a parse error, so a
+filtered repetition has to become a shape table the delegate slices
+(`ColumnBox.first` / `size`), and an identifier on the right-hand side of a
+property inside a component instantiation resolves in the **enclosing**
+component, so a child cannot be handed its own parent's `root.x` — the layout
+passes `line-y`, `line-x` and `each-width` by plain names. The pointer-claim
+protocol ADR-0031 needed for a grid crosses a component boundary here as
+`in property pointer` plus `callback pointer-claimed(int)`, because N two-way
+bindings onto one parent property is not something Slint lets you write. And the
+"/" popup anchored itself with a hardcoded 350 px window reserve, which this
+slice is the first to outgrow — the anchor now measures the real list height the
+way the "+" menu already did. Deliberately not built: per-box width control
+(Notion's resize handle), more than three boxes, and a layout nested inside a
+box.
+
+## ADR-0031 · A table is a block that owns its cells, and the grid is one editor row
+
+Decision: `table` (SPEC §三十七 批次 B, M10's fourth slice) stores the grid as
+**child blocks**, not as a payload. `BlockKind::Table` gains one stored number —
+`blocks.columns INTEGER NOT NULL DEFAULT 0`, schema **v8** — and each cell is a
+`BlockKind::TableCell` child of it, kept in row-major order by its ordinary
+`order` key. Row count is therefore *derived* (`cells / columns`), never stored,
+so adding a row is inserting `columns` blocks and nothing else moves. One new
+`Change` carries the shape (`BlockColumnsSet`); every other table edit is plain
+`BlockInserted` / `BlockDeleted` / `BlockTextSet` / `BlockKindSet`, which means
+undo, redo and the §十八 storage contract all keep working without knowing
+what a table is. The UI projects the whole grid
+into the table's single delegate as a flat `[TableCell]` + `columns`, and
+`visible_block_indices` filters cells out the same way ADR-0028 filters a folded
+subtree — a table is one row, always, however big it gets.
+Why: the alternatives are a JSON blob column (a cell would stop being a block,
+so inline marks, undo granularity and §三十九's later relation/rollup work all
+have to be reinvented outside the model) or a real table-per-row schema (§三十九
+owns that, and SPEC is explicit that this kind is *not* a database view). Cells
+as blocks cost one integer column and reuse everything. The two rules ADR-0028
+added for dynamically-rowed kinds apply here and are honoured: the projection
+really drops the hidden rows, and every row-index consumer goes through
+`visible_block_indices`. A grid whose cell count is not a multiple of `columns`
+is refused by `grid()` rather than repaired — `plan()` says no instead of
+guessing which row is short, and `DuplicateBlock` will not copy such a table at
+all, because a cell-less grid opens broken.
+Consequences: cells never appear in the row list, so no code that reads
+`rows[i]` can be handed a cell — `SetBlockType` refuses a cell as both source
+and target, and a cell's kind belongs to its grid, not to the Turn-into menu.
+Turning a block *into* a table moves its whole line into the top-left cell of a
+fresh 3×2 grid rather than dropping it, because a table block draws no text of
+its own; flattening it back turns each cell into a paragraph, so the words
+survive both directions — the *marks* do not, since `new_cell` starts clean and
+a mark range pointing at the old block's text would mean nothing inside one
+cell. Adding a column is the one command that must insert
+`rows` blocks into `rows` different gaps at once, which is why
+`OrderKey::STRIDE` is 1<<16 and why `renumber_page` now spreads with it: one
+midpoint per insert halves a gap, so a batch has to be keyed whole. The
+projection reads a table's cells by scanning the page, so it is guarded on
+`kind == Table` — unguarded it ran that scan for all 10 000 rows of a bench page
+and allocated an empty model with each, which measured ≈2 MB of working set on
+D and nothing on the 24-row A (`docs/PERFORMANCE.md`). Markdown
+export writes GitHub-flavoured tables (first row is the header, `|` escapes to
+`\|`, a newline in a cell becomes a space); **import does not read them** — a
+`|a|b|` line stays a paragraph, pinned by a test in `markdown_test.rs`, because
+the importer's shape is line-at-a-time and a table needs lookahead. Deliberately
+not built: Enter splits a cell, backspace merges, Up/Down cross rows, Ctrl+L
+marks a link in a cell, and a cell's text width does not feed back into column
+widths.
+Hover-only UI needed a new shot capability: `quire-shot --hover x,y` dispatches
+`PointerMoved` without a button, which is the only headless way to light the
+edge toolbar; `table` and `table-edit` are in the sweep but the 22 px strip they
+show is verified by a manual `--hover` shot, and hovering a table reflows the
+content below it by exactly that much. Two Slint 1.18 geometry findings came out
+of this slice and both belong in UI_ARCHITECTURE.md: an element in a non-layout
+parent that binds `height` but leaves `y` unbound is rendered **centred** in that
+parent, so `DocumentRow.head` had been sitting 34 px below its binding in every
+scene ever shipped and the table — the first tall *first* block — finally painted
+over the page title; the fix is explicit `x: 0px; y: 0px;`. And `absolute-position`
+readings inside a ListView delegate are not trustworthy (row 1 reported its head
+below its own body with both at `y: 0`), so the delegate's real geometry is
+`parent.y + head.height`, which is what `row-y` already passes down. Verified
+headlessly: `cargo test --features software` green, and the 37-of-42 changed
+scenes in the new baseline all differ **only** inside the title band, which is
+the fix above and not the table; the projection guard was re-swept afterwards
+and came back 42-of-42 byte-identical, so it is a memory change and not a
+visual one.
+
 ## ADR-0030 · A file attachment is stored without ever being looked at
 
 Decision: `file` (SPEC §三十七 批次 A, M10's third slice) adds **no schema**. A

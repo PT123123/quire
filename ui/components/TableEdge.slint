@@ -1,0 +1,54 @@
+// One pill of a table's edge toolbar (SPEC §三十七 批次 B). The grid keeps its
+// controls to four, so a table needs no per-row and per-column handle column:
+// rows and columns are added at the end and deleted at the caret, which Rust
+// resolves from the focused cell rather than from an index painted here.
+
+import { Theme } from "../Theme.slint";
+import { Colors } from "../Colors.slint";
+import { Typography } from "../Typography.slint";
+import { Icon } from "../Icons.slint";
+
+export component TableEdge inherits Rectangle {
+    in property <string> icon;
+    in property <string> label;
+    // "Delete column" on a one-column table has nothing to delete: muted, and
+    // inert, so the toolbar never silently does nothing
+    in property <bool> can: true;
+    callback edge-clicked();
+    // The grid's toolbar is hover-only, so the pill reports its own hover for
+    // the table to OR in — four of these, plus whatever the cells claim.
+    out property <bool> hovered: edge-ta.has-hover;
+
+    horizontal-stretch: 0;
+    width: 2 * Theme.spacing-sm + 13px + 4px + edge-label.preferred-width;
+    background: edge-ta.has-hover && can ? Colors.surface-hover : transparent;
+    border-radius: Theme.radius-xs;
+    animate background { duration: Theme.duration-instant; }
+
+    Icon {
+        x: Theme.spacing-sm;
+        y: (parent.height - self.height) / 2;
+        name: root.icon;
+        size: 13px;
+        stroke-width: 1.8px;
+        color: can ? Colors.text-secondary : Colors.text-muted;
+    }
+    edge-label := Text {
+        x: Theme.spacing-sm + 13px + 4px;
+        y: 0;
+        height: parent.height;
+        vertical-alignment: center;
+        text: root.label;
+        font-family: Typography.ui-font;
+        font-size: Typography.size-caption;
+        color: can ? Colors.text-secondary : Colors.text-muted;
+    }
+    edge-ta := TouchArea {
+        mouse-cursor: can ? MouseCursor.pointer : MouseCursor.default;
+        clicked => {
+            if can {
+                root.edge-clicked();
+            }
+        }
+    }
+}

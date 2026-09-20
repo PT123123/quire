@@ -73,10 +73,12 @@ live in `controller::apply_scene` + `apply_scene_overlay` — popups open in
 the overlay half so headless two-pass renders see their transitions.
 Current set: default, dark, palette, search-notes, menu, rename, settings,
 dialog, empty, edit, slash, block-menu, marks, link, find, nest, toggle,
-toggle-fold, image, image-half, file, recovered, title-edit, plus dark combos (dark-slash,
-dark-find, dark-marks, dark-link, dark-block-menu, dark-title-edit).
-`benchmarks/scripts/sweep.ps1` holds the authoritative list — 40 scenes as of
-ADR-0030 — and this prose is the summary, so when the two disagree trust the
+toggle-fold, image, image-half, file, recovered, title-edit, table, table-edit,
+columns, columns-3,
+plus dark combos (dark-slash, dark-find, dark-marks, dark-link, dark-block-menu,
+dark-title-edit).
+`benchmarks/scripts/sweep.ps1` holds the authoritative list — 44 scenes as of
+ADR-0032 — and this prose is the summary, so when the two disagree trust the
 script. Every visual change ships with re-shot
 scenes; the judge-reviewed set is the regression baseline. `toggle` and
 `toggle-fold` are a pair on purpose: the same section open and closed, so a
@@ -88,7 +90,76 @@ opposite: a 1.8 MB attachment the renderer never opens, so the row is the whole
 feature, and its fixture payload has a fixed length because the size label is
 the one number it paints. The fixture's process id goes in the temp *folder*
 name, not the file name — a label that carried the pid would change every
-sweep.
+sweep. `table` and `table-edit` are that pair again: the same 2×3 grid with the
+caret in cell three or nowhere, so an editing cell that forgets to mirror the
+live text shows up as a diff between them. The grid's hover toolbar is *not* in
+the sweep — `quire-shot --hover x,y` exists (ADR-0031) and the strip is checked
+with a hand-run shot, because a swept scene that parks the pointer would make
+every later scene's hover state dependent on it.
+`columns` and `columns-3` are the layout pair (ADR-0032): one line converted into
+a two-box layout with a word in each box, and the same layout after the strip's
+"Add column". They are a pair because the whole point of the scene is the
+*tiling* — a third box that arrives without re-splitting the width leaves the
+third word where the second one was. `diffbbox.ps1` measured that pair at 1 111
+changed pixels, and every one of them inside the layout's own band (y 205..221),
+which is the evidence that the flexbox re-flowed rather than the scene drifting. The layout's hover strip is
+kept out of the sweep for the same reason the grid's is.
+The baseline is `.scratch/sweep12` (44 scenes). The set before it, `.scratch/sweep10`
+(42 scenes), re-baselined 37 of them for a
+reason unrelated to tables: `DocumentRow.head` bound `height` without `y` and so
+was centred in its delegate, which had been sitting the page title ~34 px below
+its binding in every scene ever shipped (see the trap below). A re-sweep after a
+layout change is judged by diffing, not by looking:
+`benchmarks/scripts/diffbbox.ps1 -OldDir A -NewDir B` reports the bounding box
+of changed pixels per scene, and if every box lands inside the region the change
+explains, one verdict covers the whole set.
+
+## Slint geometry traps
+
+Measured on 1.18 while chasing a table that appeared to paint over its own page
+title; both cost a rebuild to find and neither is in the docs where you look.
+
+* A child of a **non-layout** parent that binds `height` (or `width`) but leaves
+  the other axis unbound is *centred* on that axis — offset
+  `(parent.height - self.height) / 2`, exact to the pixel. Inside a ListView
+  delegate whose height grows with its block, that silently drags siblings
+  around as the block changes, so it looks like the neighbour's bug. Spell out
+  `x: 0px; y: 0px;` on anything positioned by hand; checklist item 4 below is
+  this rule.
+* `absolute-position` read **inside a delegate** is unreliable — it reported row
+  1's head below its own body with both at `y: 0` — and reading a sibling's
+  absolute position from a binding can trip the core's recursion assert. The
+  delegate's real geometry is `parent.y` (the ListView's row offset) plus the
+  in-row arithmetic you wrote; that is why `EditorBlock` is handed `row-y`
+  instead of measuring itself.
+
+## Slint language traps (1.18)
+
+Found while building the columns layout (ADR-0032), where the content of a block
+has to be drawn inside that block's own delegate. Each of these cost a compile
+error or a rebuild to understand.
+
+* **`for … : if … : Component` does not parse.** A repetition cannot be filtered
+  by an inline `if` before the element. So a layout does not iterate its items and
+  skip the ones that are not in this box; the projection hands the delegate a
+  shape table (`ColumnBox { id, column, first, size }`) and the delegate iterates
+  `for ri in bx.size` over `block.column-items[bx.first + ri]`. The grouping lives
+  in Rust, where it is a sort, not in QOML.
+* **Inside a component instantiation, a bare identifier resolves in the
+  *enclosing* component.** `ColumnItemRow { item: block.column-items[…] }` reads
+  the parent's `block`, exactly like `EditorBlock { block: block }` has always
+  done. Writing `root.thing` there does not reach the parent — `root` is the
+  component being instantiated, so it becomes a self-reference. Anything a child
+  needs from its parent is passed by plain name (`line-y`, `line-x`, `each-width`).
+* **A `for` cannot share one two-way binding across N iterations.** `x <-> parent`
+  inside a repetition installs one binding per item on the same property. The
+  grid's pointer-claim protocol therefore crosses the component boundary as
+  `in property pointer` plus `callback pointer-claimed(int)`: read in, written
+  out, one writer per event.
+* **`FlexboxLayout` defaults to `flex-wrap: wrap`.** A row of boxes that want
+  more room than they have drops onto a second line and the layout silently stops
+  being a layout. `flex-wrap: no-wrap` is not optional, and `alignment: stretch`
+  is what flex-grow is called here — weighted per item by `horizontal-stretch`.
 
 ## Adding a component (checklist)
 
@@ -98,5 +169,7 @@ sweep.
 3. Popups: `close-policy: no-auto-close`, never read own `is-open`,
    flag-driven from Rust (ADR-0008).
 4. Inside a plain `Rectangle`, give every child explicit `x/y/width/height`
-   or layout alignment — Slint centers children that set width without x.
+   or layout alignment — Slint centers children that set width without x, and
+   the same happens vertically to a child that sets height without y (see the
+   traps above; this one moved the page title in every scene).
 5. Re-shoot `just shot` scenes and have them reviewed.
