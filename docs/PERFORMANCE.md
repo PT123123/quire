@@ -515,5 +515,11 @@ is 51 ms), and one linear term at 13 ms per 1 000 blocks. (2) If someone wants
 a faster start for the common case, the floor is the only prize; for the heavy
 case, the rebuild is the only term that grows, and it grows slowly enough that
 no cliff is hiding between 10 000 and 20 000 blocks. (3) The skia comparison is
-still open for the same reason as before — it needs its own release build, and
-this batch was taken with the femtovg default.
+still open, and the reason is narrower than it was costed: `target-skia/` is
+still on disk from the M7 matrix, and neither `Cargo.lock` nor
+`[profile.release]` has changed since `3498618`, so a `--features skia` build
+there should be incremental (the `quire` crate alone) rather than the ≈10 min
+full rebuild it was estimated at — unmeasured, so treat it as the optimistic
+case. What it really needs is a settled tree: the comparison is only honest if
+both binaries come from the same source state, and the femtovg batch above came
+from a committed one. Deferred on those grounds, not on cost.
