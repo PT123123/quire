@@ -139,6 +139,35 @@ fn apply_find_hit(g: &UIState<'_>, s: &Rc<AppState>, bid: i32, start: usize, end
     g.set_find_sel_gen(gen);
 }
 
+/// Machine-readable renderer id for the A2 measurement JSON
+/// ("femtovg"/"skia"/...). The display name lives in `renderer_name`.
+pub fn renderer_id() -> &'static str {
+    #[cfg(feature = "femtovg")]
+    return "femtovg";
+    #[cfg(all(not(feature = "femtovg"), feature = "femtovg-wgpu"))]
+    return "femtovg-wgpu";
+    #[cfg(all(
+        not(feature = "femtovg"),
+        not(feature = "femtovg-wgpu"),
+        any(feature = "skia", feature = "skia-opengl")
+    ))]
+    return "skia";
+    #[cfg(all(
+        not(feature = "femtovg"),
+        not(feature = "femtovg-wgpu"),
+        not(any(feature = "skia", feature = "skia-opengl")),
+        feature = "software"
+    ))]
+    return "software";
+    #[cfg(all(
+        not(feature = "femtovg"),
+        not(feature = "femtovg-wgpu"),
+        not(any(feature = "skia", feature = "skia-opengl")),
+        not(feature = "software")
+    ))]
+    return "unknown";
+}
+
 fn renderer_name() -> &'static str {
     if cfg!(feature = "femtovg") {
         "FemtoVG · GL"
@@ -1959,8 +1988,11 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             g.set_title_editing(true);
         }
         "recovered" => {
+            // mirror the real string from main.rs (the library lives in the
+            // per-user profile since ADR-0020; a sweep shot that invents copy
+            // gets judged as if users read it)
             g.set_db_notice(
-                "The database was damaged — this session was restored from a backup (appdata/quire.db.bak1). The damaged file was kept beside it.".into(),
+                "the database was damaged — restored from a backup (C:\\Users\\you\\AppData\\Roaming\\Quire\\quire.db.bak1).".into(),
             );
         }
 

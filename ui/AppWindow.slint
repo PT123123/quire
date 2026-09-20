@@ -61,7 +61,9 @@ component BlockMenuPopup inherits PopupWindow {
                     border-radius: 7px;
                     background: item.swatch-bg ? Colors.block-bg(item.swatch)
                         : Colors.block-text(item.swatch);
-                    border-width: item.swatch == 0 && item.swatch-bg ? 1px : 0px;
+                    // every background swatch carries a border: the light
+                    // pastels were invisible on the popup (A4 sweep)
+                    border-width: item.swatch-bg ? 1px : 0px;
                     border-color: Colors.border-strong;
                 }
                 if item.swatch < 0 : Icon {
@@ -177,7 +179,10 @@ component SlashMenuPopup inherits PopupWindow {
 
 component LinkDialog inherits PopupWindow {
     width: 380px;
-    height: content-col.preferred-height + Theme.spacing-lg * 2;
+    // preferred-height already carries the layout's own padding; adding
+    // spacing-lg here gave the layout slack, which it spent as a ~50 px gap
+    // between the title and the URL field (A4 sweep, D8)
+    height: content-col.preferred-height;
     close-policy: PopupClosePolicy.no-auto-close;
 
     property <bool> opened: UIState.link-open;

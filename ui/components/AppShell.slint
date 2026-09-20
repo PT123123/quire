@@ -26,6 +26,20 @@ export component AppShell inherits Rectangle {
         || UIState.block-menu-open-id >= 0;
 
     VerticalLayout {
+        TopBar {
+            minimize-requested => {
+                root.minimize-requested();
+            }
+            maximize-requested => {
+                root.maximize-requested();
+            }
+            close-requested => {
+                root.close-requested();
+            }
+        }
+        // the notice sits UNDER the title bar, not above it: an additive
+        // band at the very top shrank the sidebar and clipped its last row
+        // (A4 sweep, recovered scene)
         if UIState.db-notice != "" : Rectangle {
             height: 30px;
             background: Theme.dark ? #3d3517 : #f6e7b2;
@@ -51,17 +65,6 @@ export component AppShell inherits Rectangle {
                         UIState.close-db-notice();
                     }
                 }
-            }
-        }
-        TopBar {
-            minimize-requested => {
-                root.minimize-requested();
-            }
-            maximize-requested => {
-                root.maximize-requested();
-            }
-            close-requested => {
-                root.close-requested();
             }
         }
         HorizontalLayout {

@@ -141,35 +141,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// The renderer name baked in at compile time (no runtime cost, no ambiguity:
-/// each feature-gated build reports its own renderer).
-fn renderer_name() -> &'static str {
-    #[cfg(feature = "femtovg")]
-    return "femtovg";
-    #[cfg(all(not(feature = "femtovg"), feature = "femtovg-wgpu"))]
-    return "femtovg-wgpu";
-    #[cfg(all(
-        not(feature = "femtovg"),
-        not(feature = "femtovg-wgpu"),
-        any(feature = "skia", feature = "skia-opengl")
-    ))]
-    return "skia";
-    #[cfg(all(
-        not(feature = "femtovg"),
-        not(feature = "femtovg-wgpu"),
-        not(any(feature = "skia", feature = "skia-opengl")),
-        feature = "software"
-    ))]
-    return "software";
-    #[cfg(all(
-        not(feature = "femtovg"),
-        not(feature = "femtovg-wgpu"),
-        not(any(feature = "skia", feature = "skia-opengl")),
-        not(feature = "software")
-    ))]
-    return "unknown";
-}
-
 /// A2 follow-up · phase stamps (--measure-startup only).
 ///
 /// `first_paint_ms` says how long the start took, not where. This records the
@@ -250,7 +221,7 @@ fn install_startup_measurement(
             reported2.set(true);
             eprintln!(
                 "{{\"event\":\"first_paint\",\"renderer\":\"{}\",\"first_paint_ms\":{:.1},\"method\":\"AfterRendering\"{}}}",
-                renderer_name(),
+                quire::app::controller::renderer_id(),
                 start.elapsed().as_secs_f64() * 1000.0,
                 paint_json(&phases2)
             );
@@ -270,7 +241,7 @@ fn install_startup_measurement(
                     reported.set(true);
                     eprintln!(
                         "{{\"event\":\"first_paint\",\"renderer\":\"{}\",\"first_paint_ms\":{:.1},\"method\":\"event_loop_proxy\",\"confidence\":\"low\"{}}}",
-                        renderer_name(),
+                        quire::app::controller::renderer_id(),
                         start.elapsed().as_secs_f64() * 1000.0,
                         paint_json(&phases3)
                     );
