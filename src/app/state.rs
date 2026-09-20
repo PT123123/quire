@@ -9,7 +9,8 @@
 use crate::app::workspace::{SearchHit, Workspace, BENCH_ID_BASE, MAX_RECENTS};
 use crate::core::persistence::{Change, Repository};
 use crate::core::{
-    Block, BlockId, BlockKind, ColorKind, Command, Document, History, OrderKey, PageId,
+    Attachment, AttachmentId, Block, BlockId, BlockKind, ColorKind, Command, Document, History,
+    OrderKey, PageId,
 };
 use crate::services::find_service::FindSession;
 use crate::services::persistence::PersistenceService;
@@ -19,7 +20,7 @@ use crate::storage::SqliteRepository;
 use crate::{BlockRow, CommandRow, MenuRow, SearchRow, SidebarNode, SlashRow, TextRun};
 use slint::{Model, ModelRc, VecModel};
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -45,6 +46,20 @@ pub struct AppState {
     pub repo: Option<Arc<crate::storage::SqliteRepository>>,
     /// FTS-backed search (M7). `None` falls back to the in-memory scan.
     pub search_service: Option<Arc<SearchService>>,
+    /// Where attachments live (SPEC §三十七 批次 A). Beside the database, or
+    /// in the temp folder for a headless session with no database at all.
+    pub store: crate::services::attachment_store::AttachmentStore,
+    /// Attachment rows by id, loaded at startup and appended on import.
+    pub attachments: RefCell<BTreeMap<i64, Attachment>>,
+    /// Decoded rasters by attachment id. Populated only for a row the ListView
+    /// realizes, and capped by `MAX_ATTACHMENT_CACHE_BYTES` — Slint's own
+    /// image cache is keyed by path and holds 5 MB, which is one photograph,
+    /// so scrolling a photo page through it re-decodes on every frame.
+    attachment_images: RefCell<BTreeMap<i64, CachedImage>>,
+    attachment_cache_bytes: Cell<usize>,
+    attachment_tick: Cell<u64>,
+    /// Next attachment id: one past the highest row this session loaded.
+    next_attachment_id: Cell<i64>,
     /// In-flight async search with its generation; superseded queries drop
     /// their result instead of overwriting newer ones.
     pending_search: RefCell<Option<(u64, crate::services::search_service::PendingSearch)>>,
@@ -80,6 +95,23 @@ pub struct AppState {
     /// Benchmark scroll bookkeeping (scene F): last viewport-y seen.
     pub last_scroll_y: Cell<f32>,
 }
+
+/// One decoded picture plus what it costs to keep it decoded.
+#[derive(Clone)]
+struct CachedImage {
+    /// LRU stamp: the tick of the last projection that asked for this raster.
+    used: u64,
+    /// Decoded bytes (RGBA), which is what the budget below is spent against.
+    bytes: usize,
+    image: slint::Image,
+}
+
+/// Ceiling on the decoded rasters this session holds. A 1280x720 RGBA frame is
+/// 3.7 MB, so this is roughly eight pictures — a screenful with room to scroll
+/// back one page without re-decoding. Without a ceiling the map only ever
+/// grows, and §二十二's low-RAM promise dies the first time someone pastes a
+/// hundred screenshots.
+const MAX_ATTACHMENT_CACHE_BYTES: usize = 32 * 1024 * 1024;
 
 /// Go Back / Go Forward stacks (SPEC §十六), newest entry last. Kept as a
 /// plain struct with no Slint or database in it so the stepping rules —
@@ -308,6 +340,33 @@ impl AppState {
         let repo_for_state = repo.clone();
         let search_service = repo.map(crate::services::search_service::SearchService::new_arc);
 
+        // Attachments ride the same database. Their rows are read once here —
+        // a small table of metadata, not pixels — so painting a realized
+        // image row is a map lookup plus (first time only) one decode. A
+        // library that predates v7 has no rows at all. A failed read costs
+        // the session its pictures, not its documents.
+        let store = crate::services::attachment_store::AttachmentStore::for_db(
+            repo_for_state.as_ref().and_then(|r| r.path()),
+        );
+        let mut attachments: BTreeMap<i64, Attachment> = BTreeMap::new();
+        let mut next_attachment_id: i64 = 1;
+        let mut attachment_notice: Option<String> = None;
+        if let Some(r) = &repo_for_state {
+            match r.load_attachments() {
+                Ok(rows) => {
+                    for a in rows {
+                        let key = a.id.as_u64() as i64;
+                        next_attachment_id = next_attachment_id.max(key + 1);
+                        attachments.insert(key, a);
+                    }
+                }
+                Err(e) => {
+                    attachment_notice =
+                        Some(format!("attachments could not be loaded: {e}"));
+                }
+            }
+        }
+
         // fresh database: record the whole session once so a restart
         // reproduces exactly this state
         if let (Some(p), true) = (&persistence, persisted.is_none()) {
@@ -358,13 +417,21 @@ impl AppState {
             settings: RefCell::new(restored_settings),
             recents_restored: Cell::new(restored_recents),
             ui: RefCell::new(None),
-            db_notice: RefCell::new(abort_notice.into_iter().collect()),
+            db_notice: RefCell::new(
+                abort_notice.into_iter().chain(attachment_notice).collect(),
+            ),
             all_commands,
             doc: RefCell::new(doc),
             history: RefCell::new(History::default()),
             persistence,
             repo: repo_for_state,
             search_service,
+            store,
+            attachments: RefCell::new(attachments),
+            attachment_images: RefCell::new(BTreeMap::new()),
+            attachment_cache_bytes: Cell::new(0),
+            attachment_tick: Cell::new(0),
+            next_attachment_id: Cell::new(next_attachment_id),
             pending_search: RefCell::new(None),
             search_generation: Cell::new(0),
             find_session: RefCell::new(None),
@@ -592,6 +659,15 @@ impl AppState {
             let mut words = 0;
             let mut chars = 0;
             for b in doc.page_blocks(page) {
+                // An attachment's text is the file name: on a picture row it
+                // is invisible metadata, on a file row it is a label rather
+                // than prose. Neither belongs in the word count.
+                if matches!(
+                    b.kind,
+                    crate::core::BlockKind::Image | crate::core::BlockKind::File
+                ) {
+                    continue;
+                }
                 let t = b.text.trim();
                 if !t.is_empty() {
                     words += t.split_whitespace().count();
@@ -751,6 +827,16 @@ impl AppState {
         let changes = self.exec_editor(cmd)?;
         self.reproject_blocks();
         Some(changes)
+    }
+
+    /// Translate a drag landing from the editor row the pointer is over into
+    /// the position `MoveBlockTo` counts in. The two agree while nothing is
+    /// folded; a collapsed subtree takes its rows out from under the count.
+    pub fn drop_index_for_row(&self, row: i32, below: bool) -> Option<i32> {
+        let doc = self.doc.borrow();
+        let blocks = doc.page_blocks(core_page_id(self.open_page.get()));
+        let model = *visible_block_indices(blocks).get(usize::try_from(row).ok()?)?;
+        Some((model + below as usize) as i32)
     }
 
     /// Read-only check whether a drag landing is valid (hover feedback must
@@ -946,6 +1032,8 @@ impl AppState {
     pub const MOVE_TO_BASE: i32 = 100_000;
     pub const COLOR_TEXT_BASE: i32 = 200_000;
     pub const COLOR_BG_BASE: i32 = 300_000;
+    /// Plus the display width in percent, so the id carries the pick.
+    pub const IMAGE_WIDTH_BASE: i32 = 500_000;
 
 
     /// Fill the handle menu for one block — Notion's ⋮⋮ set, minus the
@@ -954,10 +1042,12 @@ impl AppState {
     /// internal clipboard holds a block. Submenus swap the rows and keep
     /// the popup open; the controller routes action ids:
     ///   1..8    root actions + Turn into (7) + Back (8)
-    ///   9..12   copy link / Move to / Text color / Background color opens
+    ///   9..13   copy link / Move to / Text color / Background color opens,
+    ///           and Image width (13, pictures only)
     ///   100+k   Turn-into target kinds
     ///   MOVE_TO_BASE+pid / COLOR_TEXT_BASE+slot / COLOR_BG_BASE+slot
-    pub fn fill_block_menu(&self) {
+    ///   IMAGE_WIDTH_BASE+percent
+    pub fn fill_block_menu(&self, id: i32) {
         let mut rows = vec![
             row(7, "Turn into", "chevron-right", false, -1, false),
             row(3, "Duplicate", "copy", false, -1, false),
@@ -969,10 +1059,38 @@ impl AppState {
             row(2, "Move down", "chevron-down", false, -1, false),
             row(4, "Copy block", "copy", false, -1, false),
         ];
+        if self.block_kind(id) == Some(BlockKind::Image) {
+            rows.insert(1, row(13, "Image width", "chevron-right", false, -1, false));
+        }
         if self.clipboard.borrow().is_some() {
             rows.push(row(5, "Paste below", "import", false, -1, false));
         }
         rows.push(row(6, "Delete", "trash", true, -1, false));
+        self.block_menu.set_vec(rows);
+    }
+
+    /// Width submenu for a picture. Three stops, not Notion's four: the
+    /// editor column is ~780 px, so a "fit content" tier below 25 % would
+    /// resolve to a thumbnail nobody can read (SPEC §三十七).
+    pub fn fill_block_menu_image_width(&self, id: i32) {
+        let current = self
+            .doc
+            .borrow()
+            .block(BlockId(id.max(0) as u64))
+            .map(|b| b.img_percent as i32);
+        let mut rows = vec![row(8, "Back", "chevron-left", false, -1, false)];
+        for percent in [25, 50, 100] {
+            let mut menu_row = row(
+                AppState::IMAGE_WIDTH_BASE + percent,
+                &format!("{percent}%"),
+                "",
+                false,
+                -1,
+                false,
+            );
+            menu_row.check = current == Some(percent);
+            rows.push(menu_row);
+        }
         self.block_menu.set_vec(rows);
     }
 
@@ -986,6 +1104,9 @@ impl AppState {
                 let icon = match kind {
                     BlockKind::Paragraph => "pencil",
                     BlockKind::Callout | BlockKind::Code => "page",
+                    BlockKind::Toggle => "chevron-right",
+                    BlockKind::Image => "image",
+                    BlockKind::File => "page",
                     _ => "minimize",
                 };
                 rows.push(row(
@@ -1190,12 +1311,170 @@ impl AppState {
             self.reproject_blocks();
             return true;
         }
+        // An attachment block's pointer is shared, not owned: the paste shows
+        // the same file from a second row. With no row to point at — an
+        // attachment from a database this session never loaded — the name is
+        // still worth more as text than as a broken reference.
+        if matches!(c.kind, BlockKind::Image | BlockKind::File) {
+            let row = c.attachment.and_then(|a| {
+                self.attachments
+                    .borrow()
+                    .get(&(a.as_u64() as i64))
+                    .cloned()
+            });
+            if let Some(att) = row {
+                return self.insert_attachment(id, att, c.kind);
+            }
+            return self
+                .exec_on_open_page(Command::InsertBlockAfter {
+                    id: BlockId(id as u64),
+                    kind: BlockKind::Paragraph,
+                    text: c.text,
+                })
+                .is_some();
+        }
         self.exec_on_open_page(Command::InsertBlockAfter {
             id: BlockId(id as u64),
             kind: c.kind,
             text: c.text,
         })
         .is_some()
+    }
+
+    // --- attachments (SPEC §三十七 批次 A) ---
+
+    /// Id for the next attachment the session stores. Ids only have to be
+    /// unique, not dense, so a cancelled file pick may burn one.
+    pub fn claim_attachment_id(&self) -> AttachmentId {
+        let id = self.next_attachment_id.get();
+        self.next_attachment_id.set(id + 1);
+        AttachmentId(id as u64)
+    }
+
+    /// The attachment lands as a new block below `after_id` — the "+" menu and
+    /// block paste, which mean "a picture/file appears here". `kind` selects
+    /// between the two attachment commands; nothing else in the app does.
+    pub fn insert_attachment(&self, after_id: i32, attachment: Attachment, kind: BlockKind) -> bool {
+        let id = BlockId(after_id.max(0) as u64);
+        let cmd = match kind {
+            BlockKind::Image => Command::InsertImage { id, attachment: attachment.clone() },
+            BlockKind::File => Command::InsertFile { id, attachment: attachment.clone() },
+            _ => return false,
+        };
+        self.run_attachment_command(cmd, attachment)
+    }
+
+    /// This block becomes the attachment — slash "/" and Turn into, which
+    /// convert the block they were opened on. The id survives, so a row with
+    /// children keeps them.
+    pub fn set_block_attachment(&self, id: i32, attachment: Attachment, kind: BlockKind) -> bool {
+        let bid = BlockId(id.max(0) as u64);
+        let cmd = match kind {
+            BlockKind::Image => Command::SetBlockImage { id: bid, attachment: attachment.clone() },
+            BlockKind::File => Command::SetBlockFile { id: bid, attachment: attachment.clone() },
+            _ => return false,
+        };
+        self.run_attachment_command(cmd, attachment)
+    }
+
+    /// Both attachment edits put the `attachments` row into the database as
+    /// part of the command's own batch, so persistence and undo stay
+    /// single-tracked. The in-memory copy is the lookup `image_for` and
+    /// `attachment_size` use; a rejected plan leaves a row nothing points at,
+    /// which costs a file in the folder and nothing on screen.
+    fn run_attachment_command(&self, cmd: Command, attachment: Attachment) -> bool {
+        self.attachments
+            .borrow_mut()
+            .insert(attachment.id.as_u64() as i64, attachment);
+        self.exec_on_open_page(cmd).is_some()
+    }
+
+    /// One attachment row as this session loaded it. `None` for an id from a
+    /// database we never opened — a block copied in from another library,
+    /// which has bytes on screen but nothing to hand the system.
+    pub fn attachment_row(&self, id: i32) -> Option<Attachment> {
+        if id <= 0 {
+            return None;
+        }
+        self.attachments.borrow().get(&(id as i64)).cloned()
+    }
+
+    /// "1.4 MiB" for a file row's right-hand label; empty when there is no row
+    /// to size. A callback rather than a model field so the string is not
+    /// rebuilt for every row on every keystroke (§三十七, ADR-0029).
+    pub fn attachment_size(&self, id: i32) -> String {
+        let Some(att) = self.attachment_row(id) else {
+            return String::new();
+        };
+        crate::services::attachment_store::format_size(att.bytes).into()
+    }
+
+    /// The display width of an image block (25 / 50 / 100, SPEC §三十七).
+    pub fn set_image_width(&self, id: i32, percent: i32) -> bool {
+        let percent = percent.clamp(1, 100) as u16;
+        self.exec_on_open_page(Command::SetImageWidth {
+            id: BlockId(id as u64),
+            percent,
+        })
+        .is_some()
+    }
+
+    /// The raster behind an image row, decoded the first time it is asked for.
+    /// This is a callback rather than a model field precisely so it is asked
+    /// only for rows the ListView realizes: a page with five hundred pictures
+    /// holds about ten in memory (§二十二). Slint caches by path, and so do we.
+    pub fn image_for(&self, id: i32) -> slint::Image {
+        let key = id as i64;
+        if id <= 0 {
+            return slint::Image::default();
+        }
+        self.attachment_tick.set(self.attachment_tick.get() + 1);
+        let tick = self.attachment_tick.get();
+        if let Some(hit) = self.attachment_images.borrow_mut().get_mut(&key) {
+            hit.used = tick;
+            return hit.image.clone();
+        }
+        let Some(att) = self.attachments.borrow().get(&key).cloned() else {
+            return slint::Image::default();
+        };
+        let path = self.store.display_path(&att);
+        let img = slint::Image::load_from_path(&path).unwrap_or_default();
+        // A file that cannot be decoded caches as blank: the row must not
+        // re-open it on every repaint, and a zero-size raster costs the budget
+        // nothing. Replacing the file on disk needs a restart to show up.
+        let size = img.size();
+        let bytes = size.width.max(0) as usize * size.height.max(0) as usize * 4;
+        self.cache_image(key, CachedImage { used: tick, bytes, image: img.clone() });
+        img
+    }
+
+    /// Insert, then spend the budget: the least-recently-realized raster goes
+    /// first, so a fast scroll through a photo page cannot stack up frames.
+    fn cache_image(&self, key: i64, entry: CachedImage) {
+        let weight = entry.bytes;
+        let mut cache = self.attachment_images.borrow_mut();
+        if let Some(old) = cache.insert(key, entry) {
+            self.attachment_cache_bytes.set(self.attachment_cache_bytes.get() - old.bytes);
+        }
+        let mut total = self.attachment_cache_bytes.get() + weight;
+        while total > MAX_ATTACHMENT_CACHE_BYTES {
+            // A dozen entries live here at most, so scanning for the oldest
+            // use beats keeping a second, ordered structure in step.
+            let Some((&oldest, _)) = cache.iter().min_by_key(|(_, v)| v.used) else { break };
+            total -= cache.remove(&oldest).unwrap().bytes;
+        }
+        self.attachment_cache_bytes.set(total);
+    }
+
+    /// height / width of the raster `image_for` returns, 0 when there is
+    /// nothing to show. The row needs the ratio to size itself before it has
+    /// the picture, and `slint::Image`'s size is not readable from .slint.
+    pub fn image_aspect(&self, id: i32) -> f32 {
+        let size = self.image_for(id).size();
+        if size.width <= 0 {
+            return 0.0;
+        }
+        size.height as f32 / size.width as f32
     }
 
     /// The directory the database lives in (settings storage row). `None`
@@ -2121,6 +2400,9 @@ pub fn core_page_id(id: i32) -> PageId {
 /// the symbol converts, so the menu only lists the rest (ADR-0022).
 const SLASH_ITEMS: &[(BlockKind, &str, &str)] = &[
     (BlockKind::Paragraph, "Text", "Plain paragraph"),
+    (BlockKind::Toggle, "Toggle list", "Collapsible section"),
+    (BlockKind::Image, "Image", "Embed a picture from a file"),
+    (BlockKind::File, "File", "Attach a file of any type"),
     (BlockKind::Callout, "Callout", "Highlighted box with an emoji"),
     (BlockKind::Code, "Code", "Monospaced block — or type ```"),
     (BlockKind::Divider, "Divider", "Visual separator — or type ---"),
@@ -2131,14 +2413,16 @@ const TURN_INTO_ITEMS: &[(BlockKind, &str, &str)] = SLASH_ITEMS;
 
 /// Insert-menu ("+" handle) descriptors: the full Notion-style list, unlike
 /// the curated "/" menu (ADR-0022). Rows whose id is a BlockKind int are
-/// insertable today; id < 0 marks the v1-excluded kinds (PLAN.md "out of
-/// scope": Toggle, database views) as disabled placeholders, so the menu
-/// shape matches Notion and the roadmap stays visible. Keyboard navigation
-/// skips placeholders and applying to one is a no-op.
+/// insertable today; id < 0 marks the kinds still on the roadmap (SPEC
+/// §三十七, §三十九) as disabled placeholders, so the menu shape matches
+/// Notion and the roadmap stays visible. Keyboard navigation skips
+/// placeholders and applying to one is a no-op.
 const INSERT_ITEMS: &[(i32, &str, &str)] = &[
     (kind_to_int(BlockKind::Paragraph), "Text", "Plain paragraph"),
     (kind_to_int(BlockKind::Page), "Page", "Embed a child page"),
     (kind_to_int(BlockKind::Link), "Link to page", "Point at an existing page"),
+    (kind_to_int(BlockKind::Image), "Image", "Embed a picture from a file"),
+    (kind_to_int(BlockKind::File), "File", "Attach a file of any type"),
     (kind_to_int(BlockKind::Todo), "To-do list", "Track tasks with a checkbox"),
     (kind_to_int(BlockKind::Heading1), "Heading 1", "Big section heading"),
     (kind_to_int(BlockKind::Heading2), "Heading 2", "Medium section heading"),
@@ -2146,7 +2430,7 @@ const INSERT_ITEMS: &[(i32, &str, &str)] = &[
     (-1, "Table", "Table view · later"),
     (kind_to_int(BlockKind::Bullet), "Bulleted list", "Simple bulleted list"),
     (kind_to_int(BlockKind::Numbered), "Numbered list", "Ordered list"),
-    (-1, "Toggle list", "Collapsible section · later"),
+    (kind_to_int(BlockKind::Toggle), "Toggle list", "Collapsible section"),
     (kind_to_int(BlockKind::Quote), "Quote", "Capture a quote"),
     (kind_to_int(BlockKind::Divider), "Divider", "Visual separator"),
     (kind_to_int(BlockKind::Callout), "Callout", "Highlighted box with an emoji"),
@@ -2188,7 +2472,8 @@ fn row(id: i32, label: impl AsRef<str>, icon: &str, danger: bool, swatch: i32, s
 
 /// BlockKind int (UI menu ids) -> kind. Public: the controller resolves
 /// Turn-into menu actions with it.
-pub fn kind_from_int(kind: i32) -> BlockKind {    match kind {
+pub fn kind_from_int(kind: i32) -> BlockKind {
+    match kind {
         1 => BlockKind::Heading1,
         2 => BlockKind::Heading2,
         3 => BlockKind::Heading3,
@@ -2201,6 +2486,9 @@ pub fn kind_from_int(kind: i32) -> BlockKind {    match kind {
         10 => BlockKind::Callout,
         11 => BlockKind::Page,
         12 => BlockKind::Link,
+        13 => BlockKind::Toggle,
+        14 => BlockKind::Image,
+        15 => BlockKind::File,
         _ => BlockKind::Paragraph,
     }
 }
@@ -2219,6 +2507,9 @@ const fn kind_to_int(kind: BlockKind) -> i32 {
         BlockKind::Callout => 10,
         BlockKind::Page => 11,
         BlockKind::Link => 12,
+        BlockKind::Toggle => 13,
+        BlockKind::Image => 14,
+        BlockKind::File => 15,
         BlockKind::Paragraph => 0,
     }
 }
@@ -2268,6 +2559,9 @@ fn rows_to_blocks(page: i32, rows: Vec<BlockRow>, doc: &mut Document) -> Vec<Blo
                 color: ColorKind::Default,
                 background: ColorKind::Default,
                 page_ref: None,
+                folded: false,
+                attachment: None,
+                img_percent: 100,
             }
         })
         .collect()
@@ -2322,23 +2616,70 @@ fn build_runs(text: &str, marks: &[crate::core::Mark]) -> Vec<TextRun> {
         .collect()
 }
 
-/// Project a page's blocks into editor rows: numbered items renumbered by
-/// position, the last row flagged as the tail spacer carrier.
-pub fn project_blocks(blocks: &[Block]) -> Vec<BlockRow> {
-    let mut out: Vec<BlockRow> = blocks
+/// True when a folded block sits anywhere above `b` in the same page: `b`
+/// then has no editor row. The page's blocks are pre-order, so an ancestor
+/// walk is enough (no set to maintain).
+fn has_folded_ancestor(blocks: &[Block], b: &Block) -> bool {
+    let mut parent = b.parent;
+    let mut guard = 0;
+    while let Some(pid) = parent {
+        let Some(p) = blocks.iter().find(|x| x.id == pid) else {
+            break;
+        };
+        if p.folded {
+            return true;
+        }
+        parent = p.parent;
+        guard += 1;
+        if guard >= 64 {
+            break;
+        }
+    }
+    false
+}
+
+/// Positions (into the page's block list) of the blocks that get an editor
+/// row: a folded block stays, its whole subtree does not. SPEC §三十七 is
+/// explicit that hiding a collapsed section costs real rows rather than
+/// `visible: false` delegates, so every row-index consumer shares this one
+/// list — see `drop_index_for_row`.
+pub fn visible_block_indices(blocks: &[Block]) -> Vec<usize> {
+    blocks
         .iter()
-        .map(|b| BlockRow {
-            id: b.id.0 as i32,
-            kind: kind_to_int(b.kind),
-            text: b.text.clone().into(),
-            checked: b.checked,
-            number: 0,
-            tail: false,
-            runs: runs_to_model(b),
-            depth: block_depth(blocks, b),
-            color: b.color.slot(),
-            bg: b.background.slot(),
-            page_ref: b.page_ref.map(|p| p.as_u64() as i32).unwrap_or(-1),
+        .enumerate()
+        .filter(|(_, b)| !has_folded_ancestor(blocks, b))
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// Project a page's blocks into editor rows: numbered items renumbered by
+/// position, the last row flagged as the tail spacer carrier. Folded
+/// subtrees are left out entirely.
+pub fn project_blocks(blocks: &[Block]) -> Vec<BlockRow> {
+    let mut out: Vec<BlockRow> = visible_block_indices(blocks)
+        .into_iter()
+        .map(|i| {
+            let b = &blocks[i];
+            BlockRow {
+                id: b.id.0 as i32,
+                kind: kind_to_int(b.kind),
+                text: b.text.clone().into(),
+                checked: b.checked,
+                number: 0,
+                tail: false,
+                runs: runs_to_model(b),
+                depth: block_depth(blocks, b),
+                color: b.color.slot(),
+                bg: b.background.slot(),
+                page_ref: b.page_ref.map(|p| p.as_u64() as i32).unwrap_or(-1),
+                folded: b.folded,
+                // 0 = none: the UI resolves an id through the attachment cache
+                attachment: b.attachment.map(|a| a.as_u64() as i32).unwrap_or(0),
+                img_percent: b.img_percent as i32,
+                // any block can be a parent; EditorBlock only draws the
+                // chevron for a Toggle
+                can_fold: blocks.iter().any(|x| x.parent == Some(b.id)),
+            }
         })
         .collect();
     let mut n = 0;
@@ -2367,6 +2708,8 @@ pub const BLOCK_DIVIDER: i32 = 9;
 pub const BLOCK_CALLOUT: i32 = 10;
 pub const BLOCK_PAGE: i32 = 11;
 pub const BLOCK_LINK: i32 = 12;
+pub const BLOCK_TOGGLE: i32 = 13;
+pub const BLOCK_IMAGE: i32 = 14;
 
 fn block(kind: i32, text: &str) -> BlockRow {
     BlockRow {
@@ -2381,6 +2724,10 @@ fn block(kind: i32, text: &str) -> BlockRow {
         color: 0,
         bg: 0,
         page_ref: -1,
+        folded: false,
+        attachment: 0,
+        img_percent: 100,
+        can_fold: false,
     }
 }
 
@@ -2662,6 +3009,95 @@ mod tests {
     use super::{mock_commands, NavHistory, CMD_NAV_BACK, CMD_NAV_FORWARD, NAV_MAX};
     use crate::app::workspace::Workspace;
 
+    /// A page's blocks in display order: a folded toggle with two children
+    /// (one of them a grandchild of the other) and a trailing paragraph.
+    fn fold_scene() -> Vec<crate::core::Block> {
+        use crate::core::{Block, BlockId, BlockKind, ColorKind, OrderKey, PageId};
+        let page = PageId(1);
+        let mk = |id: u64,
+                  parent: Option<u64>,
+                  order: u64,
+                  kind: BlockKind,
+                  folded: bool,
+                  text: &str| Block {
+            id: BlockId(id),
+            page,
+            parent: parent.map(|p| BlockId(p)),
+            order: OrderKey(order),
+            kind,
+            text: text.into(),
+            checked: false,
+            marks: Vec::new(),
+            color: ColorKind::Default,
+            background: ColorKind::Default,
+            page_ref: None,
+            folded,
+            attachment: None,
+            img_percent: 100,
+        };
+        vec![
+            mk(1, None, 10, BlockKind::Toggle, true, "section"),
+            mk(2, Some(1), 11, BlockKind::Paragraph, false, "a"),
+            mk(3, Some(2), 12, BlockKind::Bullet, false, "a/1"),
+            mk(4, None, 13, BlockKind::Toggle, false, "open section"),
+            mk(5, Some(4), 14, BlockKind::Paragraph, false, "b"),
+            mk(6, None, 15, BlockKind::Paragraph, false, "tail"),
+        ]
+    }
+
+    #[test]
+    fn a_folded_subtree_produces_no_rows_at_all() {
+        let blocks = fold_scene();
+        let rows = super::project_blocks(&blocks);
+        // SPEC §三十七: the collapsed section costs real rows, not hidden
+        // delegates — block 2 and its own child 3 drop out with their parent.
+        let ids: Vec<i32> = rows.iter().map(|r| r.id).collect();
+        assert_eq!(ids, vec![1, 4, 5, 6]);
+        assert_eq!(super::visible_block_indices(&blocks), vec![0, 3, 4, 5]);
+    }
+
+    #[test]
+    fn unfolding_returns_the_subtree_in_its_source_order() {
+        let mut blocks = fold_scene();
+        blocks[0].folded = false;
+        let ids: Vec<i32> = super::project_blocks(&blocks).iter().map(|r| r.id).collect();
+        assert_eq!(ids, vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn the_fold_flag_reports_children_not_kind() {
+        let blocks = fold_scene();
+        let rows = super::project_blocks(&blocks);
+        assert!(rows.iter().find(|r| r.id == 1).unwrap().can_fold);
+        assert!(rows.iter().find(|r| r.id == 4).unwrap().can_fold);
+        // a section with nothing in it reports false: no chevron to click.
+        // The stored flag stays whatever it was — it just hides nothing.
+        let lone = vec![{
+            let mut b = blocks[0].clone();
+            b.id = crate::core::BlockId(9);
+            b.parent = None;
+            b
+        }];
+        let rows = super::project_blocks(&lone);
+        assert!(!rows[0].can_fold, "toggle with no children");
+        assert_eq!(rows[0].kind, super::BLOCK_TOGGLE);
+        assert!(rows[0].folded, "the flag rides along with the block");
+    }
+
+    #[test]
+    fn hidden_rows_do_not_rename_the_numbered_list() {
+        use crate::core::BlockKind;
+        let mut blocks = fold_scene();
+        blocks[0].kind = BlockKind::Numbered;
+        blocks[1].kind = BlockKind::Numbered;
+        blocks[2].kind = BlockKind::Numbered;
+        blocks[5].kind = BlockKind::Numbered;
+        let rows = super::project_blocks(&blocks);
+        // 2 and 3 are inside the fold: the visible list is 1 then 2, not 4
+        let nums: Vec<i32> = rows.iter().filter(|r| r.kind == 5).map(|r| r.number).collect();
+        assert_eq!(nums, vec![1, 2]);
+    }
+
     /// Pages 1..=9 are alive; anything else was deleted.
     fn live(id: i32) -> bool {
         (1..=9).contains(&id)
@@ -2726,5 +3162,70 @@ mod tests {
             assert!(nav.step(false, 0, live).is_some());
         }
         assert_eq!(nav.step(false, 0, live), None);
+    }
+
+    /// §二十二's promise in one number: a page of photographs must not cost
+    /// the session more decoded rasters than the budget allows.
+    #[test]
+    fn the_picture_cache_spends_its_budget_and_drops_the_stalest_first() {
+        use super::{AppState, HandleArgs, MAX_ATTACHMENT_CACHE_BYTES};
+        use crate::core::AttachmentId;
+
+        let state = AppState::new(
+            &HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0 },
+            None,
+        );
+        // No database, so the store is the temp fallback; the high id range
+        // keeps this fixture away from anything else writing there.
+        let base: i64 = 900_000;
+
+        // One pixel over MAX_EDGE, so the store hands the editor a 1280x720
+        // raster = 3.7 MB. Eleven of them want 40 MB against a 32 MB budget.
+        const COUNT: i64 = 11;
+        let show = |state: &AppState, n: i64| {
+            if !state.attachments.borrow().contains_key(&n) {
+                let id = (base + n) as u64;
+                let att = state.store.create_fixture(AttachmentId(id), 1281, 720).unwrap();
+                assert_eq!(att.thumb, format!("{id}.cache.png"), "no downsample to measure");
+                state.attachments.borrow_mut().insert(n, att);
+            }
+            assert!(
+                state.image_for(n as i32).size().width > 0,
+                "the fixture must really decode, or the cache is being \
+                 measured on blanks"
+            );
+        };
+        for n in 1..=COUNT {
+            show(&state, n);
+        }
+        let cached = state.attachment_images.borrow().len();
+        assert!(cached < COUNT as usize, "nothing was ever dropped: {cached} rasters");
+        let spent = state.attachment_cache_bytes.get();
+        assert!(spent <= MAX_ATTACHMENT_CACHE_BYTES, "budget blown by {spent}");
+        // control: the survivors are full-size rasters, so the eviction above
+        // emptied a real cache rather than a map of zero-weight blanks
+        assert!(spent > MAX_ATTACHMENT_CACHE_BYTES / 2, "only {spent} spent");
+        for n in (COUNT - 2)..=COUNT {
+            assert!(
+                state.attachment_images.borrow().contains_key(&n),
+                "the newest raster {n} should still be decoded"
+            );
+        }
+
+        // Re-showing the oldest survivor makes it the freshest thing here, so
+        // the next round of evictions has to take 5, 6 and 7 and leave 4 —
+        // first-in-first-out would drop 4, and scroll-back would re-decode.
+        show(&state, 4);
+        for n in 12..15 {
+            show(&state, n);
+        }
+        assert!(state.attachment_images.borrow().contains_key(&4), "4 was just on screen");
+        assert!(!state.attachment_images.borrow().contains_key(&5), "5 is the stalest");
+
+        for n in 1..15 {
+            let id = (base + n) as u64;
+            std::fs::remove_file(state.store.dir().join(format!("{id}.png"))).ok();
+            std::fs::remove_file(state.store.dir().join(format!("{id}.cache.png"))).ok();
+        }
     }
 }

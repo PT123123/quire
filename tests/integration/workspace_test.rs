@@ -103,6 +103,9 @@ fn duplicated_nested_list_keeps_parents_in_the_copy() {
         color: quire::core::ColorKind::Default,
         background: quire::core::ColorKind::Default,
         page_ref: None,
+        folded: false,
+        attachment: None,
+        img_percent: 100,
             },
             quire::core::Block {
                 id: child,
@@ -116,6 +119,9 @@ fn duplicated_nested_list_keeps_parents_in_the_copy() {
         color: quire::core::ColorKind::Default,
         background: quire::core::ColorKind::Default,
         page_ref: None,
+        folded: false,
+        attachment: None,
+        img_percent: 100,
             },
         ],
     );
@@ -355,4 +361,63 @@ fn duplicate_appends_consistently_when_the_gap_is_exhausted() {
     sorted.sort();
     assert_eq!(keys_in_vec, sorted, "session order == restart order");
     assert_eq!(*kids.last().unwrap(), copy, "the copy is the run's last");
+}
+
+/// SPEC §三十七: a folded subtree costs real rows, so an editor row index
+/// stops being a model index. The drag landing is the one consumer that
+/// counts model positions, and a forgotten translation is a rejected drop,
+/// not a subtle corruption — which is why both halves are asserted here.
+#[test]
+fn a_folded_section_shifts_drag_landings_but_not_row_numbers() {
+    use quire::app::state::project_blocks;
+    use quire::core::{Block, BlockId, BlockKind, ColorKind, OrderKey};
+
+    let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0 };
+    let state = AppState::new(&args, None);
+    let page = state.create_page(None);
+    let pid = core_page_id(page);
+    let mk = |id: u64, parent: Option<u64>, kind: BlockKind, folded: bool| Block {
+        id: BlockId(id),
+        page: pid,
+        parent: parent.map(BlockId),
+        order: OrderKey(id * 10),
+        kind,
+        text: format!("b{id}"),
+        checked: false,
+        marks: Vec::new(),
+        color: ColorKind::Default,
+        background: ColorKind::Default,
+        page_ref: None,
+        folded,
+        attachment: None,
+        img_percent: 100,
+    };
+    state.doc.borrow_mut().set_page_blocks(
+        pid,
+        vec![
+            mk(1, None, BlockKind::Toggle, true),
+            mk(2, Some(1), BlockKind::Paragraph, false),
+            mk(3, None, BlockKind::Paragraph, false),
+            mk(4, None, BlockKind::Paragraph, false),
+        ],
+    );
+
+    let rows = project_blocks(state.doc.borrow().page_blocks(pid));
+    assert_eq!(
+        rows.iter().map(|r| r.id).collect::<Vec<i32>>(),
+        vec![1, 3, 4],
+        "block 2 sits inside the fold and has no row"
+    );
+
+    assert_eq!(state.drop_index_for_row(0, false), Some(0));
+    assert_eq!(state.drop_index_for_row(1, false), Some(2));
+    assert_eq!(state.drop_index_for_row(2, true), Some(4));
+    assert_eq!(state.drop_index_for_row(3, false), None, "there is no 4th row");
+    // dropping right below a folded parent is its first child's slot, which
+    // the subtree rule already refused when the section was open
+    assert_eq!(state.drop_index_for_row(0, true), Some(1));
+    assert!(!state.can_move_block_to(4, 1));
+
+    // dragging b4 above the row that shows b3: row 1, model 2
+    assert!(state.can_move_block_to(4, state.drop_index_for_row(1, false).unwrap()));
 }

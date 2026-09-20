@@ -50,8 +50,10 @@ Document (M3: one row per page in SQLite)
             order       fractional ranking key (insert between neighbors)
             kind        paragraph | heading_1..3 | bullet | numbered | todo
                         | quote | code | divider      (M4 set)
+                        | callout | page | link_to_page | toggle (M9/M10)
             text        plain UTF-8 (M4) / inline span refs (M6)
             checked     todo only
+            folded      toggle only: its subtree gets no editor rows
 ```
 
 - The **in-memory truth** is `core::Document` owning a page's blocks in a

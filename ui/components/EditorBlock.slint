@@ -21,12 +21,32 @@ export component EditorBlock inherits Rectangle {
     property <bool> is-list: block.kind == 4 || block.kind == 5 || block.kind == 6;
     property <length> list-indent: (is-list ? root.depth * 24px : 0px);
     property <bool> is-heading: block.kind == 1 || block.kind == 2 || block.kind == 3;
-    property <bool> is-plain: block.kind <= 6;
+    property <bool> is-plain: block.kind <= 6 || block.kind == 13;
     property <bool> is-page: block.kind == 11;
     property <bool> is-link: block.kind == 12;
     property <bool> is-page-ish: is-page || is-link;
+    property <bool> is-image: block.kind == 14;
+    property <bool> is-file: block.kind == 15;
+    // picture (kind 14): the row's height comes from the raster's ratio, which
+    // Rust knows from the attachments row. 0 means there is no picture to
+    // show — a missing file or an attachment from another library — and the
+    // row falls back to naming it.
+    property <float> pic-aspect: is-image ? UIState.image-aspect(block.attachment) : 0;
+    property <length> pic-width: content-width
+        * (block.img-percent > 0 ? block.img-percent : 100) / 100;
+    property <length> pic-height: root.pic-width * pic-aspect;
+    // file (kind 15): one line of label in a fixed box. The size is a lookup
+    // because it lives in the attachments row, not in the block.
+    property <length> file-height: Typography.size-body * Typography.line-body
+        + 2 * Theme.spacing-md;
+    property <string> file-size: is-file ? UIState.attachment-size(block.attachment) : "";
     property <bool> editing: UIState.editing-id == block.id
-        && block.kind != 9 && block.kind != 11 && block.kind != 12;
+        && block.kind != 9 && block.kind != 11 && block.kind != 12
+        && block.kind != 14 && block.kind != 15;
+
+    // toggle (kind 13) keeps a gutter for its chevron even when the block
+    // has no children yet, so the text does not jump as the section grows
+    property <length> fold-gutter: block.kind == 13 ? 22px : 0px;
 
     // block color pair (⋮⋮ Text color / Background color; ADR-0023)
     property <color> block-text-color: Colors.block-text(block.color);
@@ -47,15 +67,19 @@ export component EditorBlock inherits Rectangle {
     property <length> top-margin:
         block.kind == 1 ? Theme.spacing-xl
         : block.kind == 2 ? Theme.spacing-lg + Theme.spacing-xs
-        : block.kind == 3 || block.kind == 9 || block.kind == 10 ? Theme.spacing-md
+        : block.kind == 3 || block.kind == 9 || block.kind == 10
+            || block.kind == 14 || block.kind == 15
+            ? Theme.spacing-md
         : 0px;
 
     property <length> input-x: content-x
         + (is-list ? 26px : 0px)
+        + root.fold-gutter
         + (block.kind == 7 ? Theme.spacing-md : 0px)
         + (block.kind == 10 ? 40px : 0px);
     property <length> input-width: content-width
         - (is-list ? 26px : 0px)
+        - root.fold-gutter
         - (block.kind == 7 ? Theme.spacing-md : 0px)
         - (block.kind == 10 ? 40px : 0px)
         - (block.kind == 8 ? 2 * Theme.spacing-md : 0px);
@@ -72,6 +96,8 @@ export component EditorBlock inherits Rectangle {
         : block.kind == 8 ? code-text.height + 2 * Theme.spacing-md
         : block.kind == 10 ? callout-text.height + 2 * Theme.spacing-sm
         : block.kind == 9 ? 20px
+        : block.kind == 14 ? (pic-aspect > 0 ? pic-height : missing-text.height)
+        : block.kind == 15 ? root.file-height
         : is-page-ish ? page-text.height
         : plain-text.height;
 
@@ -82,9 +108,13 @@ export component EditorBlock inherits Rectangle {
         height: parent.height;
         // stays enabled while editing so hover (and the handle) keep working;
         // only the click is suppressed — the live input sits on top for text
-        mouse-cursor: is-page-ish ? MouseCursor.pointer : MouseCursor.text;
+        mouse-cursor: is-page-ish || is-image ? MouseCursor.pointer : MouseCursor.text;
         clicked => {
-            if (!editing) {
+            // one TouchArea for the row: a second one over the picture would
+            // have taken the hover the block handle depends on
+            if (is-image) {
+                UIState.preview-attachment = block.attachment;
+            } else if (!editing) {
                 UIState.block-activate(block.id);
             }
         }
@@ -150,8 +180,8 @@ export component EditorBlock inherits Rectangle {
     // marked block renders as side-by-side runs (single line, clipped —
     // documented limitation). Unmarked blocks keep the wrapping Text.
     if is-plain && !editing && block.runs.length > 0 : Rectangle {
-        x: content-x + list-indent + (is-list ? 26px : 0px);
-        width: content-width - list-indent - (is-list ? 26px : 0px);
+        x: content-x + list-indent + (is-list ? 26px : 0px) + root.fold-gutter;
+        width: content-width - list-indent - (is-list ? 26px : 0px) - root.fold-gutter;
         y: top-margin;
         height: plain-text.height;
         clip: true;
@@ -211,8 +241,8 @@ export component EditorBlock inherits Rectangle {
     }
 
     plain-text := Text {
-        x: content-x + list-indent + (is-list ? 26px : 0px);
-        width: content-width - list-indent - (is-list ? 26px : 0px);
+        x: content-x + list-indent + (is-list ? 26px : 0px) + root.fold-gutter;
+        width: content-width - list-indent - (is-list ? 26px : 0px) - root.fold-gutter;
         y: top-margin;
         visible: is-plain && !editing && block.runs.length == 0;
         text: block.text;
@@ -424,6 +454,33 @@ export component EditorBlock inherits Rectangle {
         }
     }
 
+    // toggle (kind 13): the chevron is the whole affordance — the text stays
+    // an ordinary editable line. `can-fold` (Rust: the block has children)
+    // keeps the triangle off a section that has nothing to hide.
+    Rectangle {
+        x: content-x + list-indent;
+        y: top-margin + Typography.size-body * Typography.line-body / 2 - 9px;
+        width: 18px;
+        height: 18px;
+        border-radius: Theme.radius-xs;
+        visible: block.kind == 13 && block.can-fold;
+        background: fold-ta.has-hover ? Colors.hover-fill : transparent;
+        animate background { duration: Theme.duration-instant; }
+        Icon {
+            x: 1px; y: 1px;
+            name: block.folded ? "chevron-right" : "chevron-down";
+            size: 16px;
+            stroke-width: 1.8px;
+            color: Colors.text-secondary;
+        }
+        fold-ta := TouchArea {
+            mouse-cursor: MouseCursor.pointer;
+            clicked => {
+                UIState.toggle-fold(block.id);
+            }
+        }
+    }
+
     Rectangle {
         x: content-x;
         y: top-margin + 2px;
@@ -536,6 +593,134 @@ export component EditorBlock inherits Rectangle {
         color: block.page-ref >= 0 ? block-text-color : Colors.text-muted;
         line-height-factor: body-line-factor;
         wrap: word-wrap;
+    }
+
+    // picture (kind 14). The source arrives through `image-for`, so only a
+    // realized row ever decodes it; the width is the block's own tier and the
+    // height follows the raster's ratio (SPEC §三十七, §二十二).
+    Rectangle {
+        x: content-x;
+        y: top-margin;
+        width: root.pic-width;
+        height: root.pic-height;
+        visible: is-image && pic-aspect > 0;
+        clip: true;
+        border-radius: Theme.radius-sm;
+        Image {
+            x: 0; y: 0;
+            width: parent.width; height: parent.height;
+            // the box is already the raster's own ratio, so this is exact
+            image-fit: contain;
+            source: UIState.image-for(block.attachment);
+        }
+    }
+    missing-text := Text {
+        x: content-x;
+        y: top-margin;
+        width: content-width;
+        visible: is-image && pic-aspect <= 0;
+        text: block.text + " · no picture";
+        font-family: Typography.ui-font;
+        font-size: Typography.size-body;
+        color: Colors.text-muted;
+        line-height-factor: Typography.line-body;
+        wrap: word-wrap;
+    }
+
+    // file (kind 15): a name, a size, and the two things a system can do with
+    // stored bytes. Painting this row reads nothing but the attachments row —
+    // the label is the block's own text — so a 2 GB attachment costs the same
+    // as a 2 KB one until the user asks for it (SPEC §三十七 批次 A, §二十二).
+    Rectangle {
+        x: content-x;
+        y: top-margin;
+        width: content-width;
+        height: root.file-height;
+        visible: is-file;
+        border-radius: Theme.radius-md;
+        border-width: 1px;
+        border-color: ta.has-hover ? Colors.border-strong : Colors.border;
+        background: block.bg > 0 ? block-bg-color : Colors.code-background;
+
+        Icon {
+            x: Theme.spacing-md;
+            y: (parent.height - self.height) / 2;
+            name: "page";
+            size: 19px;
+            stroke-width: 1.6px;
+            color: Colors.text-secondary;
+        }
+        file-text := Text {
+            x: Theme.spacing-md + 19px + Theme.spacing-sm;
+            y: 0;
+            height: parent.height;
+            width: Math.max(0px, parent.width - self.x - 140px);
+            vertical-alignment: center;
+            text: block.text;
+            font-family: Typography.ui-font;
+            font-size: Typography.size-body;
+            color: block-text-color;
+            overflow: elide;
+        }
+        Text {
+            x: parent.width - 132px;
+            y: 0;
+            width: 60px;
+            height: parent.height;
+            vertical-alignment: center;
+            horizontal-alignment: right;
+            text: root.file-size;
+            font-family: Typography.ui-font;
+            font-size: Typography.size-caption;
+            color: Colors.text-muted;
+        }
+        // Always drawn rather than hover-revealed: a row that offers nothing
+        // to press reads as a broken attachment, which is the one thing a
+        // file block must never look like.
+        Rectangle {
+            x: parent.width - 64px;
+            y: (parent.height - self.height) / 2;
+            width: 26px;
+            height: 26px;
+            border-radius: Theme.radius-xs;
+            background: open-ta.has-hover ? Colors.surface-hover : transparent;
+            animate background { duration: Theme.duration-instant; }
+            Icon {
+                x: 4px; y: 4px;
+                name: "arrow-right";
+                size: 18px;
+                stroke-width: 1.7px;
+                color: Colors.text-secondary;
+            }
+            open-ta := TouchArea {
+                mouse-cursor: MouseCursor.pointer;
+                clicked => {
+                    UIState.attachment-opened(block.attachment);
+                }
+            }
+        }
+        Rectangle {
+            x: parent.width - 34px;
+            y: (parent.height - self.height) / 2;
+            width: 26px;
+            height: 26px;
+            border-radius: Theme.radius-xs;
+            background: save-ta.has-hover ? Colors.surface-hover : transparent;
+            animate background { duration: Theme.duration-instant; }
+            Icon {
+                x: 4px; y: 4px;
+                name: "export";
+                size: 18px;
+                stroke-width: 1.7px;
+                color: Colors.text-secondary;
+            }
+            save-ta := TouchArea {
+                mouse-cursor: MouseCursor.pointer;
+                clicked => {
+                    UIState.attachment-saved(block.attachment);
+                }
+            }
+        }
     }
 
     // drag-reorder drop indicator: accent line where the block would land.

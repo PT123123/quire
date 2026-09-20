@@ -1,0 +1,4 @@
+{"label":"m10file-A2","exe":"target/release/quire.exe","db":"<temp>\\quire-m10file.db","blocks":0,"startup_ms":548,"idle_cpu_pct":0.19,"ram_workingset_mb":120.7,"ram_private_mb":92.5,"exit_code":0,"typing":null}
+{"label":"m10file-A3","exe":"target/release/quire.exe","db":"","blocks":0,"startup_ms":513,"idle_cpu_pct":0.19,"ram_workingset_mb":119.2,"ram_private_mb":91.7,"exit_code":0,"typing":null}
+{"label":"m10file-D1-seed","exe":"target/release/quire.exe","db":"<temp>\\quire-m10file.db","blocks":10000,"startup_ms":542,"idle_cpu_pct":0.2,"ram_workingset_mb":126.5,"ram_private_mb":101.3,"exit_code":0,"typing":null}
+{"label":"m10file-D1","exe":"target/release/quire.exe","db":"<temp>\\quire-m10file.db","blocks":10000,"startup_ms":516,"idle_cpu_pct":0.0,"ram_workingset_mb":126.6,"ram_private_mb":101.1,"exit_code":0,"typing":null}

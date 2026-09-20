@@ -273,16 +273,20 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         let s = state.clone();
         ui.global::<UIState>().on_block_drag_hover(move |data, index, below| {
             let Some(id) = block_drag_id(&data) else { return false };
-            s.can_move_block_to(id, index + (below as i32))
+            // the delegate reports a row index; the command counts model
+            // positions, and a folded subtree makes those differ
+            let Some(target) = s.drop_index_for_row(index, below) else { return false };
+            s.can_move_block_to(id, target)
         });
     }
     {
         let s = state.clone();
         ui.global::<UIState>().on_block_dropped(move |data, index, below| {
             let Some(id) = block_drag_id(&data) else { return };
+            let Some(target) = s.drop_index_for_row(index, below) else { return };
             let _ = s.exec_on_open_page(Command::MoveBlockTo {
                 id: BlockId(id as u64),
-                index: index + (below as i32),
+                index: target,
             });
         });
     }
@@ -726,6 +730,61 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         });
     }
 
+    // toggle block (SPEC §三十七): the chevron hides/shows the subtree. The
+    // rows themselves come and go, so this takes the full reproject that
+    // `exec_on_open_page` does — unlike the todo patch above. The pending
+    // typing commits first: the block losing its row must not eat it.
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_toggle_fold(move |id| {
+            if id <= 0 {
+                return;
+            }
+            let g = gw.upgrade().unwrap();
+            flush_pending_edit(&g, &s);
+            s.exec_on_open_page(Command::ToggleFold {
+                id: BlockId(id as u64),
+            });
+        });
+    }
+
+    // picture block (SPEC §三十七 批次 A): the row asks for its raster by
+    // attachments id. Both callbacks run during layout of a realized row, so
+    // a page with five hundred pictures decodes the handful on screen.
+    {
+        let s = state.clone();
+        ui.global::<UIState>().on_image_for(move |id| s.image_for(id));
+    }
+    {
+        let s = state.clone();
+        ui.global::<UIState>().on_image_aspect(move |id| s.image_aspect(id));
+    }
+
+    // file block (SPEC §三十七 批次 A): the size label is a lookup, the two
+    // buttons hand the stored bytes to the system.
+    {
+        let s = state.clone();
+        ui.global::<UIState>()
+            .on_attachment_size(move |id| s.attachment_size(id).into());
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_attachment_opened(move |id| {
+            let g = gw.upgrade().unwrap();
+            attachment_action(&g, &s, id, false);
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_attachment_saved(move |id| {
+            let g = gw.upgrade().unwrap();
+            attachment_action(&g, &s, id, true);
+        });
+    }
+
     // ---- block editing (M4) ----
     {
         let gw = gw.clone();
@@ -1087,6 +1146,29 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
             if id <= 0 {
                 return;
             }
+            // An attachment is not a text style: it needs a file before the
+            // block can exist, so the menu closes and the picker decides. "/"
+            // means "this line becomes the picture" (the line is empty once
+            // the /filter is stripped); the "+" menu means "a picture appears
+            // here", so the line it was opened on keeps whatever it holds.
+            if matches!(
+                kind,
+                crate::core::BlockKind::Image | crate::core::BlockKind::File
+            ) {
+                g.set_slash_open(false);
+                g.set_slash_insert(false);
+                g.set_editing_id(-1);
+                if insert_mode {
+                    pick_attachment(&g, &s, id, false, kind);
+                } else {
+                    let _ = s.exec_on_open_page(Command::ReplaceText {
+                        id: BlockId(id as u64),
+                        text: cleaned.clone(),
+                    });
+                    pick_attachment(&g, &s, id, true, kind);
+                }
+                return;
+            }
             // Page is insert-menu-only: applying it creates the child page
             // and converts the (empty insert-mode) row; no text edit involved
             if kind == crate::core::BlockKind::Page {
@@ -1142,7 +1224,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         ui.global::<UIState>()
             .on_block_menu_opened(move |id, handle_y, content_x| {
                 let g = gw.upgrade().unwrap();
-                s.fill_block_menu();
+                s.fill_block_menu(id);
                 // anchor beside the handle: window y = top bar + list-layout
                 // y (pre-scroll) - scroll; x aligns with the text column.
                 // The height follows the row count so the tall root menu
@@ -1173,7 +1255,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                 return;
             }
             if action == 8 {
-                s.fill_block_menu();
+                s.fill_block_menu(id);
                 return;
             }
             if action == 10 {
@@ -1188,12 +1270,25 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                 s.fill_block_menu_colors(id, true);
                 return;
             }
+            if action == 13 {
+                s.fill_block_menu_image_width(id);
+                return;
+            }
             // color picks stay open (Notion-style live preview); everything
             // else closes first
             let color_pick = (AppState::COLOR_TEXT_BASE..AppState::COLOR_BG_BASE + 100)
                 .contains(&action);
-            if !color_pick {
+            let width_pick = (AppState::IMAGE_WIDTH_BASE
+                ..AppState::IMAGE_WIDTH_BASE + 200)
+                .contains(&action);
+            if !(color_pick || width_pick) {
                 g.set_block_menu_open_id(-1);
+            }
+            if width_pick {
+                s.set_image_width(id, action - AppState::IMAGE_WIDTH_BASE);
+                // refill so the current-tier check follows the pick
+                s.fill_block_menu_image_width(id);
+                return;
             }
             if action == 9 {
                 crate::platform::copy_to_clipboard(&s.block_link(id));
@@ -1267,9 +1362,19 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                     // leaving Page/Link via Turn-into drops the reference; a
                     // Page's child page survives in the tree, unowned
                     let old_kind = s.block_kind_of(id);
+                    let new_kind = kind_from_int(a - 100);
+                    // A picture is not a style: it takes a file first, and the
+                    // block only converts once the user has chosen one.
+                    if matches!(
+                        new_kind,
+                        crate::core::BlockKind::Image | crate::core::BlockKind::File
+                    ) {
+                        pick_attachment(&g, &s, id, true, new_kind);
+                        return;
+                    }
                     let _ = s.exec_on_open_page(Command::SetBlockType {
                         id: BlockId(id as u64),
-                        kind: kind_from_int(a - 100),
+                        kind: new_kind,
                     });
                     if matches!(
                         old_kind,
@@ -1761,6 +1866,105 @@ pub fn import_lan_pages(
     imported
 }
 
+/// One picture round-trip: the native file dialog, then store the bytes beside
+/// the database and put the block in the page. `convert` picks between the two
+/// image commands — this block becomes the picture, or a picture block appears
+/// below it.
+///
+/// The dialog blocks, deliberately, exactly like the import/export buttons do:
+/// it runs on the click that opened it, before the editor takes another event,
+/// so there is no half-inserted state to reconcile. A cancelled dialog changes
+/// nothing; a failed import says why in the notice bar.
+fn pick_attachment(
+    g: &UIState<'_>,
+    s: &Rc<AppState>,
+    anchor: i32,
+    convert: bool,
+    kind: crate::core::BlockKind,
+) {
+    let pictures = kind == crate::core::BlockKind::Image;
+    let picker = rfd::FileDialog::new().set_title(if pictures {
+        "Insert a picture"
+    } else {
+        "Attach a file"
+    });
+    // The picture picker constrains the choice, because the decoder reads four
+    // formats — png, jpeg, bmp, gif — and nothing else. The file one must not:
+    // naming any type is the whole point of the kind.
+    let picker = if pictures {
+        picker.add_filter("Pictures", &["png", "jpg", "jpeg", "bmp", "gif"])
+    } else {
+        picker.add_filter("All files", &["*"])
+    };
+    let Some(path) = picker.pick_file() else {
+        return;
+    };
+    let id = s.claim_attachment_id();
+    let imported = if pictures {
+        s.store.import_file(id, &path)
+    } else {
+        s.store.import_any_file(id, &path)
+    };
+    let placed = match imported {
+        Ok(att) => {
+            if convert {
+                s.set_block_attachment(anchor, att, kind)
+            } else {
+                s.insert_attachment(anchor, att, kind)
+            }
+        }
+        Err(e) => {
+            g.set_db_notice(e.to_string().into());
+            return;
+        }
+    };
+    if !placed {
+        g.set_db_notice(
+            if pictures {
+                "That picture did not fit into the page."
+            } else {
+                "That file did not fit into the page."
+            }
+            .into(),
+        );
+    }
+}
+
+/// Hand an attachment's stored bytes to whatever the system opens this type
+/// with, or copy them out to a path the user picks. Both read the `attachments`
+/// row rather than the block, so the name and the extension agree (SPEC
+/// §三十七 批次 A).
+fn attachment_action(g: &UIState<'_>, s: &Rc<AppState>, id: i32, save: bool) {
+    let Some(att) = s.attachment_row(id) else {
+        g.set_db_notice("That attachment belongs to another library.".into());
+        return;
+    };
+    let label = att.name.clone();
+    let path = s.store.stored_path(&att);
+    if save {
+        let Some(target) = rfd::FileDialog::new()
+            .set_title("Save attachment as")
+            .set_file_name(s.store.save_name(&att))
+            .save_file()
+        else {
+            return;
+        };
+        let notice = match s.store.export_to(&att, &target) {
+            Ok(()) => format!("Saved {label}."),
+            Err(e) => e.to_string(),
+        };
+        g.set_db_notice(notice.into());
+        return;
+    }
+    if !path.is_file() {
+        g.set_db_notice(format!("{label}: the stored file is gone.").into());
+        return;
+    }
+    if !crate::platform::open_with_default(&path) {
+        g.set_db_notice(format!("Nothing here opens {label}.").into());
+    }
+}
+
 /// Export the open page's blocks to a .md file via the native save dialog.
 /// "Copy Page as Markdown" (palette): the page through the exporter onto
 /// the clipboard. The FFI write path is mandatory here — a markdown page
@@ -1942,6 +2146,9 @@ fn show_open_page(g: &UIState<'_>, state: &Rc<AppState>) {
     g.set_page_title(title.into());
     g.set_page_breadcrumb(crumb.into());
     g.set_sidebar_selected_id(id);
+    // a picture from the page you just left must not keep covering the one
+    // you arrived at
+    g.set_preview_attachment(0);
 }
 
 fn search_target(g: &UIState<'_>, state: &Rc<AppState>) -> i32 {
@@ -2108,6 +2315,91 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             if let Some(id) = target {
                 let _ = state.exec_on_open_page(Command::IndentList { id });
             }
+        }
+        // SPEC §三十七: a collapsible section. `toggle` is the open shape
+        // (chevron down, child visible) and `toggle-fold` closes it, so the
+        // two captures must differ by exactly the child's row.
+        "toggle" | "toggle-fold" => {
+            let page = core_page_id(state.open_page.get());
+            let bullets = {
+                let d = state.doc.borrow();
+                d.page_blocks(page)
+                    .iter()
+                    .filter(|b| b.kind == crate::core::BlockKind::Bullet)
+                    .take(2)
+                    .map(|b| b.id)
+                    .collect::<Vec<_>>()
+            };
+            if bullets.len() == 2 {
+                let (parent, child) = (bullets[0], bullets[1]);
+                let _ = state.exec_on_open_page(Command::IndentList { id: child });
+                let _ = state.exec_on_open_page(Command::SetBlockType {
+                    id: parent,
+                    kind: crate::core::BlockKind::Toggle,
+                });
+                if scene == "toggle-fold" {
+                    let _ = state.exec_on_open_page(Command::ToggleFold { id: parent });
+                }
+            }
+        }
+        // SPEC §三十七 批次 A: a picture sitting in the page. `image-half` is
+        // the same block at the 50 % tier, so the pair shows the width setting
+        // really does drive the row geometry. The fixture is generated rather
+        // than picked — the native file dialog is the one part of this feature
+        // a headless scene cannot reach.
+        "image" | "image-half" => {
+            let page = core_page_id(state.open_page.get());
+            let after = {
+                let d = state.doc.borrow();
+                d.page_blocks(page)
+                    .iter()
+                    .find(|b| b.kind == crate::core::BlockKind::Paragraph && !b.text.is_empty())
+                    .map(|b| b.id.0 as i32)
+            };
+            let aid = state.claim_attachment_id();
+            let (Some(after), Some(att)) = (after, state.store.create_fixture(aid, 640, 400))
+            else {
+                return;
+            };
+            if !state.insert_attachment(after, att, crate::core::BlockKind::Image)
+                || scene != "image-half"
+            {
+                return;
+            }
+            let pic = {
+                let d = state.doc.borrow();
+                d.page_blocks(page)
+                    .iter()
+                    .find(|b| b.kind == crate::core::BlockKind::Image)
+                    .map(|b| b.id.0 as i32)
+            };
+            if let Some(id) = pic {
+                state.set_image_width(id, 50);
+            }
+        }
+        // The other half of 批次 A: bytes the editor names but never opens. The
+        // payload has to be a fixed length or the size label — the one number
+        // this row paints — would differ between sweeps.
+        "file" => {
+            let page = core_page_id(state.open_page.get());
+            let after = {
+                let d = state.doc.borrow();
+                d.page_blocks(page)
+                    .iter()
+                    .find(|b| b.kind == crate::core::BlockKind::Paragraph && !b.text.is_empty())
+                    .map(|b| b.id.0 as i32)
+            };
+            let aid = state.claim_attachment_id();
+            let payload = vec![0xA5u8; 1_842_000];
+            let (Some(after), Some(att)) = (
+                after,
+                state
+                    .store
+                    .create_file_fixture(aid, "quarterly-report.pdf", &payload),
+            ) else {
+                return;
+            };
+            let _ = state.insert_attachment(after, att, crate::core::BlockKind::File);
         }
         "find" => {
             g.set_find_open(true);
@@ -2298,7 +2590,7 @@ pub fn apply_scene_overlay(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
                     .map(|b| b.id.0 as i32)
             };
             if let Some(id) = target {
-                state.fill_block_menu();
+                state.fill_block_menu(id);
                 g.set_block_menu_x(320.0);
                 g.set_block_menu_y(300.0);
                 g.set_block_menu_open_id(id);

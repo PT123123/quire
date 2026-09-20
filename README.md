@@ -55,7 +55,12 @@ UI 不直接碰数据库或磁盘 IO。Renderer 需实测对比 FemtoVG·wgpu �
 ## 功能亮点（v0.1 RC）
 
 - **块编辑器**：段落、三级标题、列表（含待办勾选）、引用、代码块、分割线、
-  Callout 标注块；Enter/Backspace 合并拆分、Tab 列表嵌套、Ctrl+D 复制块
+  Callout 标注块、Toggle 折叠块、Image 图片块、File 任意文件附件；
+  Enter/Backspace 合并拆分、Tab 列表嵌套、Ctrl+D 复制块
+- **附件**：图片与任意文件都落在库旁的 `attachments` 目录，SQLite 只存引用；
+  图片超尺寸自动生成降采样显示副本而不动原图，⋮ 里可调 25/50/100 % 宽、
+  点击放大；文件行显示名字与体积，Open 交给系统默认程序、Save-as 抄回磁盘，
+  导入过程全程不把文件读进进程
 - **Notion 式交互**：`/` 斜杠菜单；`# ` `- ` `1. ` `[] ` `> ` `---` ` ``` ` 等
   Markdown 行内快捷方式；块手柄（＋/⋮⋮）拖拽排序，橙色落点线提示
 - **⋮⋮ 块菜单**：Turn into / Duplicate / Copy link to block（复制

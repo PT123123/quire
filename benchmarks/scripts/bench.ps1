@@ -83,6 +83,12 @@ if ($reportFile -ne "" -and (Test-Path $reportFile)) {
     $line = (Get-Content $reportFile | Where-Object { $_ -like '{*"scene"*' } | Select-Object -Last 1)
     if ($line) { $typingReport = $line.Trim() }
 }
+# Scene E's scratch database and its report are both this script's mess, so
+# this script cleans it. Only the `.db` used to be purged, and only before the
+# run, so every label left its startup `.bak1` snapshot plus the wal/shm
+# siblings behind in `%TEMP%` forever.
+if ($dbFile -ne "") { Get-ChildItem -Path "$dbFile*" | Remove-Item -Force }
+if ($reportFile -ne "") { Remove-Item -Path $reportFile -Force }
 # a Windows path is not a legal JSON string until its backslashes are doubled,
 # and `$json` has to survive ConvertFrom-Json for bench_matrix.ps1
 $jsonExe = $Exe -replace '\\', '\\'

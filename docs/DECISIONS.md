@@ -2,6 +2,175 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0030 · A file attachment is stored without ever being looked at
+
+Decision: `file` (SPEC §三十七 批次 A, M10's third slice) adds **no schema**. A
+file is a block kind, and the v7 columns ADR-0029 introduced for pictures —
+the `attachments` row plus `blocks.attachment` — describe it exactly as well,
+so the slice ships with `user_version` unchanged. What is new is that the bytes
+never enter the process: `AttachmentStore::import_any_file` `fs::copy`s the
+picked file straight to `<library>/attachments/<id>.<ext>` and records its
+length, with no decode, no `image` call and deliberately **no size cap** — a
+2 GB attachment is stored in 2 GB of kernel-side copying and 0 of working set.
+The row paints three things from the database line alone: the name, a
+`format_size` label, and two buttons. Open goes to `platform::open_with_default`
+(a hand-declared `ShellExecuteW`); Save-as goes to `rfd` + `export_to`, which
+copies the stored bytes out under `save_name`. Undo drops the reference and
+never the bytes, unchanged from ADR-0029.
+Why: the priority list in ROADMAP.md puts low RAM above feature count, and the
+§二十二 promise is the one this kind would break first — the obvious
+implementation, read the file into a `Vec` and write it back, is a 2 GB working
+set for a note. The picture path solves the same problem by downsampling; the
+file path solves it by never looking. `ShellExecuteW` rather than
+`spawn("explorer.exe", path)` because explorer returns 0x1 **on success** by
+design, so a subprocess can never tell a launched app from a blocked file
+association, while the FFI answers `> 32` only for a real launch — and one
+extern declaration keeps the `windows` crate out, the same rule ADR-0025
+follows for the clipboard.
+Consequences: the label keeps its extension while a picture's drops it, because
+for a picture the content is the truth and for a `.zip` the name is; that split
+is why `save_name` exists (it rejoins stem + extension for pictures, and leaves
+a file name alone — case-insensitively, since `file` lowercases the extension
+and `name` keeps the user's). Open is an explicit button rather than
+click-the-row, because a row that launches an arbitrary executable on a stray
+click is not a row you can safely select text in; the two buttons stay drawn
+rather than hover-revealed, since a file block that shows nothing to press
+reads as a broken attachment. The size is a `pure callback attachment-size(int)`
+rather than a `BlockRow` field so the string is not rebuilt for every row on
+every keystroke — the same viewport-not-document argument ADR-0029 makes for
+the rasters. Markdown export writes `[name](quire://attachment/<id>)`, a
+*link* rather than the picture's `![](...)`, and that is the one place the two
+kinds differ in the exporter: the importer has no picture shape but it does have
+a link shape, so a file's reference survives an export/import round trip and a
+picture's does not. Still open here: orphaned bytes (no FK, no cascade, same
+gap as pictures), clipboard-bitmap paste, and the PDF first-page thumbnail,
+which the user deferred on 2026-09-20 — until it lands a PDF and a `.zip` look
+identical apart from their names. Verified headlessly, not by eye: 36 of 40
+scenes byte-identical against the previous sweep, `slash`/`plus`/`dark-slash`
+moved only because the menus gained the File row, and `file` is new — a
+760×48 px box at x 390..1149 with the label left, "1.8 MiB" right-aligned, and
+two 26 px buttons at x 1086..1112 / 1116..1142. The fixture's first draft put
+`std::process::id()` in the file name, which made the label different every
+run; the id moved to the temp *folder* so the scene is reproducible.
+
+## ADR-0029 · Pictures are files beside the database, and the editor never loads the original raster
+
+Decision: `image` (SPEC §三十七 批次 A, M10's second slice) stores its bytes in
+`<library>/attachments/<id>.<ext>` and keeps only a reference in SQLite — a new
+`attachments` table plus `blocks.attachment INTEGER` (schema v7). The column
+carries **no foreign key on purpose**: a block whose file row has vanished must
+still load and render as a missing picture, because a user who copies the `.db`
+without its folder owns a library, not a crash. Import downsamples anything
+longer than `MAX_EDGE = 1280` px into a second file, `<id>.cache.png`, and
+`AttachmentStore::display_path` hands the UI only that copy — the original
+stays byte-identical on disk, so viewing never degrades the user's file. The
+decoded rasters live in a cache owned by `AppState`, keyed by attachment id and
+capped at 32 MiB weighted by RGBA bytes, evicting the least-recently-realized
+entry first. Rows reach it through the `image-for` / `image-aspect` **callbacks**
+rather than model fields, because Slint invokes a binding only for the rows it
+realizes. Undo drops the reference and never the bytes: `Change::AttachmentAdded`
+is an upsert and there is deliberately no `AttachmentDeleted`.
+Why: Slint's own decode cache is a thread-local `CLruCache` capped at 5 MiB
+weighted by decoded bytes and keyed by path + mtime (`i-slint-core-1.18.0`,
+`graphics/image/cache.rs`). One 1280×720 RGBA frame is 3.7 MiB, so that budget
+is a single photograph — scrolling a page of pictures through it re-decodes on
+every frame. The obvious alternative, an uncapped cache of our own, is how a
+low-RAM app dies quietly, and §二十二's promise sits on the first slot of the
+priority list in ROADMAP.md. Callbacks are what keep the cost proportional to
+the viewport instead of to the document: a page with five hundred pictures
+holds about ten.
+Consequences: the 32 MiB ceiling is ≈eight full-width frames, and it is a
+construction bound, tested as one (`the_picture_cache_spends_its_budget_and_
+drops_the_stalest_first` also pins LRU over FIFO by re-showing an evicted id
+mid-scroll). A failed decode caches as a zero-weight blank so a missing file is
+not re-opened per repaint — which also means replacing a file on disk in place
+needs a restart to show up, since our key is the id and not the mtime. The
+extension and MIME come from sniffing the bytes, so a screenshot saved as
+`.jpg` but encoded PNG is stored as the PNG it is. `blocks.img_percent`
+(25 / 50 / 100, default 100) is the width tier; setting it back to the default
+plans no change, so the menu cannot leave an undo step that does nothing.
+Markdown export writes `![name](quire://attachment/<id>)`; the importer has no
+picture shape, so the line survives as literal text and the file name is never
+lost — the reference goes out, nothing comes back, which is the same asymmetry
+§三十七 accepted for toggle folds (ADR-0030 gives `file` the link form, so that
+one does round-trip). Still open in this kind: pasting a clipboard bitmap
+(needs a `CF_DIBV5` reader in `platform/`), and the PDF first-page thumbnail,
+which reuses this store unchanged.
+
+## ADR-0028 · A folded subtree gets zero realized rows, so row indexes stop being model indexes
+
+Decision: `toggle` (SPEC §三十七, M10 批次 B's first slice) persists its fold
+as a `blocks.folded` column (schema v6) and hides its subtree by **filtering
+it out of the projection** — `project_blocks` builds rows through
+`visible_block_indices`, so a hidden block has no `BlockRow`, no delegate and
+no height. There is no `visible: false` row. Because that makes the editor's
+row numbering independent of the document's, every consumer that treats a row
+index as a model index must translate first; the one that exists today (the
+§八 drag landing) goes through the new `AppState::drop_index_for_row`, which
+shares `visible_block_indices` with the projection.
+Why: Slint's `ListView` realizes exactly one `for` child per item, so a
+0-height delegate would still cost a component, a binding and a slotmap
+lookup per hidden block — on a page whose top section is folded that is the
+whole point of folding, paid for and thrown away. Deleting the row is also
+what makes the behaviour correct by construction: a hidden block cannot be
+tabbed into, dragged, found-by-⌘F or renumbered if it is not in the model.
+The cost is that two numbering systems now coexist, and the repo had been
+using them interchangeably.
+Consequences: fold is undoable view state, not content — `Command::ToggleFold`
+emits `Change::BlockFoldedSet`, the same shape `PageExpandedSet` already uses
+for the sidebar, so it rides the persistence queue and never bumps a document.
+Only a Toggle draws the chevron, so `SetBlockType` away from Toggle clears the
+fold (undo restores it) rather than stranding a subtree with no way back;
+`SplitBlock` and `DuplicateBlock` force `folded: false`, because neither one
+copies a subtree and a fold over nothing is a trap. Markdown export degrades a
+toggle to a quote line — CommonMark has no fold syntax, so it degrades exactly
+like a callout already did, while the subtree still rides along indented and
+import never restores the fold (§三十七 asks for precisely that asymmetry).
+And SPEC §三十七's 硬性约束 gained a rule for the next dynamic-row kind
+(`table`, `columns`): the projection must really delete rows, and new
+row-index consumers must translate. Verified headlessly, not by eye: 32 of 35
+baseline scenes are byte-identical after the change, `slash`/`plus`/
+`dark-slash` moved only because the menus gained the Toggle row, and
+`toggle` vs `toggle-fold` differ by 6 006 px in exactly four places — the
+triangle glyph, the vanished child line, the one-row reflow below it, and a
+2 px taller scrollbar thumb.
+
+## ADR-0027 · The parked feature set is unscheduled, not cancelled; only six capabilities stay out
+
+Decision: of everything the SPEC had deferred, only sync, real-time
+collaboration, cloud, plugin market, AI, publish-to-site and
+comments/discussions/reactions remain out of scope (SPEC §三十三, extended
+2026-09-20 with the last two). Everything else that §九 and §十七 had
+written as "后续再加" is now a scheduled phase with a milestone: §三十七 →
+M10/M11 (image, file, PDF, table, toggle, columns, then highlighting,
+bookmark, embed, math, TOC), §三十八 → M12 (icon, cover, page font /
+full-width / small-text, lock, version history, templates), §四十 → M13
+(@-mention, backlinks, synced block), §三十九 → M14 (Database). Ordering
+follows "how fast a daily note hits the wall", not Notion's feature
+alphabet: media and structure blocks before the database, and the database
+only after the reference layer exists, because `relation` and the simple
+table would otherwise each get their own ad-hoc version of it.
+Why: an audit of SPEC.md against Notion found three different things being
+reported as one — items genuinely ruled out (§三十三), items deliberately
+deferred with a spec line (§九), and items never written down at all
+(page-level properties, backlinks, templates, version history, all views
+and property types of the database layer, i.e. the largest single gap).
+The third group was the problem: §三十五's "feature count ranks last"
+had been read as licence to leave them unwritten, so they could not be
+planned, estimated or refused. Recording them costs nothing now and makes
+"第一期不做" an explicit statement per item instead of a blanket.
+Consequences: §三十五's priority order still binds each of these phases,
+so every one carries a measured gate rather than a checkbox — M10 must
+keep the 10 000-block scene inside 1.2× the current RAM baseline (image
+downsampling is where a low-RAM app normally dies), M14 must do filter and
+sort in SQL and never realize 10 000 rows (SPEC §三十九's red lines), and
+math/highlighting/embed may not smuggle in a JS, WASM or WebView runtime
+that §二 forbids. `person` degrades to a local name list because there is
+no account model to point at. New sections were appended as §三十七–§四十
+rather than inserted in phase order: existing cross-references (ROADMAP
+cites §六/§十六/§三十五, ADR-0026 cites §八) are all by section number, and
+renumbering would have silently broken every one of them.
+
 ## ADR-0026 · Page and Link-to-page blocks share blocks.page_ref; ownership is a kind-level contract
 Decision: both page-bearing block kinds — `Page` (kind 11) and `Link`
 (kind 12) — point at a page through the SAME nullable `blocks.page_ref`

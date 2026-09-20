@@ -9,5 +9,8 @@ pub mod core;
 pub mod platform;
 pub mod services;
 pub mod storage;
+// Scratch-directory guard for tests; see the module header for why it is not
+// `#[cfg(test)]`.
+pub mod testing;
 
 slint::include_modules!();

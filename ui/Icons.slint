@@ -466,6 +466,39 @@ component IcPalette {
     }
 }
 
+/// lucide's `image`: frame + sun + ridge. Slint's shapes are Rectangle and
+/// Path, so the sun is a rounded square and only the ridge is path geometry.
+component IcImage {
+    in property <brush> color: Colors.text-secondary;
+    in property <length> size: 16px;
+    width: size; height: size;
+    Rectangle {
+        x: root.size * 3 / 24;
+        y: root.size * 3 / 24;
+        width: root.size * 18 / 24;
+        height: root.size * 18 / 24;
+        border-radius: root.size * 2 / 24;
+        border-width: 1.5px;
+        border-color: color;
+    }
+    Rectangle {
+        x: root.size * 7.4 / 24;
+        y: root.size * 7.4 / 24;
+        width: root.size * 3.2 / 24;
+        height: root.size * 3.2 / 24;
+        border-radius: root.size * 1.6 / 24;
+        background: color;
+    }
+    Path {
+        width: parent.width; height: parent.height;
+        viewbox-x: 0; viewbox-y: 0; viewbox-width: 24; viewbox-height: 24;
+        stroke: color; stroke-width: 1.8px;
+        stroke-line-cap: round; stroke-line-join: round;
+        fill: transparent;
+        MoveTo { x: 20; y: 15; } LineTo { x: 15; y: 10; } LineTo { x: 5; y: 21; }
+    }
+}
+
 export component Icon {
     in property <string> name;
     in property <length> size: 16px;
@@ -500,6 +533,7 @@ export component Icon {
     IcExport { visible: root.name == "export"; size: root.size; color: root.color; }
     IcImport { visible: root.name == "import"; size: root.size; color: root.color; }
     IcLink { visible: root.name == "link"; size: root.size; color: root.color; }
+    IcImage { visible: root.name == "image"; size: root.size; color: root.color; }
     IcArrowLeft { visible: root.name == "arrow-left"; size: root.size; color: root.color; }
     IcArrowRight { visible: root.name == "arrow-right"; size: root.size; color: root.color; }
     IcPalette { visible: root.name == "palette"; size: root.size; color: root.color; }

@@ -1,6 +1,8 @@
 // Platform adapters — only where Slint/Windows forces us to (M8).
 // Policy (ADR-0002): never implement TSF/IME ourselves.
 
+use std::path::Path;
+
 /// Copy `text` to the system clipboard, as CF_UNICODETEXT via the same FFI
 /// `read_clipboard` uses (ADR-0025's write half: `clip.exe`'s OEM-codepage
 /// stdin garbles non-ASCII, and "Copy page as Markdown" must carry CJK).
@@ -85,6 +87,55 @@ pub fn open_folder(path: &str) -> bool {
             .arg(path)
             .spawn()
             .is_ok()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+/// Open a file with whatever the system has registered for its type — an
+/// attachment block's "Open" (SPEC §三十七 批次 A). `ShellExecuteW` rather than
+/// `explorer.exe <path>`: explorer exits 0x1 on success by design, so the
+/// subprocess can't tell a launched app from a blocked extension, while the
+/// FFI call answers `> 32` only for a real launch. One call, so no `windows`
+/// crate — the same rule that keeps user32 hand-declared above.
+pub fn open_with_default(path: &Path) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        const SW_SHOWDEFAULT: i32 = 10;
+
+        #[link(name = "shell32")]
+        extern "system" {
+            fn ShellExecuteW(
+                hwnd: isize,
+                operation: *const u16,
+                file: *const u16,
+                parameters: *const u16,
+                directory: *const u16,
+                show: i32,
+            ) -> isize;
+        }
+
+        fn wide(s: &std::ffi::OsStr) -> Vec<u16> {
+            use std::os::windows::ffi::OsStrExt;
+            s.encode_wide().chain(std::iter::once(0)).collect()
+        }
+
+        let verb = wide(std::ffi::OsStr::new("open"));
+        let target = wide(path.as_os_str());
+        // Below 33 the return value is an SE_ERR_* code, not an HINSTANCE.
+        unsafe {
+            ShellExecuteW(
+                0,
+                verb.as_ptr(),
+                target.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                SW_SHOWDEFAULT,
+            ) > 32
+        }
     }
     #[cfg(not(target_os = "windows"))]
     {

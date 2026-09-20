@@ -31,11 +31,33 @@ First functional release: a local, single-file-database notes workspace.
   list only carry kinds without a symbol shortcut (ADR-0022)
 - "+" handle opens Notion's insert menu: it creates the empty line below
   and shows the full block list (Text, Page, To-do, Headings, Bulleted /
-  Numbered, Quote, Divider, Callout, Code) — picking a row converts the
-  new line, clicking away or Escape keeps the empty line, typing filters
-  the menu. Toggle list and the database views (Table, Board, Gallery,
+  Numbered, Quote, Divider, Callout, Code, Toggle list, Image, File) — picking a
+  row converts the new line, clicking away or Escape keeps the empty line,
+  typing filters the menu. The database views (Table, Board, Gallery,
   List, Calendar, Timeline) appear as muted "later" placeholders and
   cannot be picked yet
+- Toggle list: a collapsible section. The chevron folds its whole subtree
+  out of existence — the hidden blocks get no rows at all, so they cannot
+  be tabbed into, dragged or renumbered — and the fold is a view setting,
+  not content, so it survives restarts and never bumps the document.
+  Turning a Toggle into another kind re-opens it rather than stranding its
+  children; Markdown export degrades a toggle to a quote line
+- Image block: pick a file from the insert menu, the slash menu or Turn
+  into, and the picture lands in the page. The bytes go to an
+  `attachments` folder beside the database (the app keeps only a
+  reference), oversized pictures get a downscaled display copy while the
+  original stays untouched, and the ⋮⋮ menu's "Image width" sets the row
+  to 25 / 50 / 100 % of the column. Click a picture to view it full-width
+  behind a scrim; clicking anywhere closes it. Undo removes the reference,
+  never the file. The picker offers png, jpg, bmp and gif — the four
+  formats the decoder is asked for; a gif becomes a still, its first frame
+- File block: any file at all, from the same three doors as a picture. The
+  row shows the name with its extension, the size, and two buttons — Open
+  hands the bytes to whatever the system has registered for that type,
+  Save-as copies them out under their original name. The file is streamed
+  straight into the `attachments` folder and never read into the app, so a
+  2 GB attachment costs the same as a 2 KB one until you press one of those
+  buttons. Undo removes the reference, never the file
 - Page block: embeds a child page (insert menu "Page"). The row shows a
   page icon and the child's live title (renames propagate), clicking it
   opens the child, deleting the block deletes the child page, and
@@ -76,12 +98,16 @@ First functional release: a local, single-file-database notes workspace.
   restarts)
 
 ### Persistence & reliability
-- SQLite (bundled, no server): pages, blocks, marks, colors, settings,
-  metadata (schema v1–v4)
+- SQLite (bundled, no server): pages, blocks, marks, colors, attachments,
+  settings, metadata (schema v1–v7)
 - Debounced batched writes; Ctrl+S forces a save; close saves too
 - Rotating snapshots on every open (5 generations), restore-at-open when
   the main file is damaged, damaged file quarantined (`.corrupt`)
-- Startup integrity checks; schema migrations (v1–v4)
+- Startup integrity checks; schema migrations (v1–v7)
+- Picture and file bytes live in an `attachments` folder beside the database
+  and the row is only a reference — a reference whose file row is gone still
+  loads the library and renders as a missing picture. A file is copied in
+  without being read, so nothing about attaching one scales with its size
 - An unclean end (panic, kill, native crash, power loss) is recognized on
   the next start: the notice bar says so and the fact is queryable in the
   metadata table (a panic additionally keeps its report)
@@ -94,10 +120,27 @@ First functional release: a local, single-file-database notes workspace.
 - Markdown export/import (page level, inline marks round-trip)
 - "Copy Page as Markdown" (command palette): the page through the
   exporter onto the clipboard, CJK-safe (Win32 FFI write path)
+- An attached file opens in whatever the system has registered for its type
+  (one `ShellExecuteW` call — no `windows` crate, no subprocess), and saves
+  back out to any path picked in a Save-as dialog
 - Installer (Inno Setup): per-user, Start menu + desktop shortcuts,
   optional `.md` "Open with" association; `--open <path>` dispatch
 - GPU rendering (FemtoVG default; Skia / wgpu builds selectable); idle
-  CPU ≈ 0, 10 000-block pages cost single-digit MB
+  CPU ≈ 0, a 10 000-block page costs ≈10 MB over the empty shell
+
+### Build & test
+- `just check`: `cargo check --all-targets`, the whole test suite, a release
+  build. Visual regression and the RAM/CPU scenes run from
+  `benchmarks/scripts/` (`sweep.ps1` compares against a manifest of hashes)
+- A test that needs a folder — a database, a log family, an attachments
+  directory — gets one from `quire::testing::ScratchDir`, which deletes it when
+  the test ends. Each helper used to create a uniquely named `%TEMP%` directory
+  and walk away from it: 3 639 of them had accumulated, and the naming that
+  existed to stop a test reading a stale database was only load-bearing
+  because nothing ever cleaned up
+- The bench scripts delete the scratch database, its `.bak<N>` snapshots and
+  their own report file when a run ends; the purge used to happen before the
+  run and covered only the `.db`, so every label left its snapshot behind
 
 ### Known limitations
 - Switching directly from one open menu to another (e.g. ⋮⋮ on a different
@@ -112,5 +155,17 @@ First functional release: a local, single-file-database notes workspace.
   round trip, and Callout blocks export as quotes
 - Inline-mark paragraphs render runs on one line (no cross-run reflow —
   Slint `Text` has no inline formatting yet)
+- Pictures: pasting an image from the clipboard is not wired yet (insert
+  from a file is), replacing a stored file on disk in place needs a
+  restart to show up, and a page of pictures is not yet measured in the
+  benchmark scenes — the decode cache is capped by construction, not by
+  a reading
+- Attachments are never garbage-collected: deleting the last block that
+  points at a stored file leaves the bytes in the `attachments` folder.
+  Same for pictures and files, and it is deliberate for now — undo has to
+  be able to bring a reference back without touching disk
+- A PDF attaches and opens, but shows no first-page thumbnail: it looks
+  like any other file apart from its name. Deferred by explicit decision
+  2026-09-20; the renderer route for it is still undecided
 - Chinese IME: the manual acceptance pass (docs/IME_CHECKLIST.md) is
   signed off — 2026-09-20

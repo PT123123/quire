@@ -683,3 +683,311 @@ instead of silently binding.
   new `Alt+Left / Right` row lands exactly on the cut line, visible but the
   last thing on screen. Fixing it means making the popup scroll or clamping its
   height, which is its own item — recorded, not done here.
+
+## M10–M14 · 规格已定，未开工（2026-09-20）
+
+范围由用户点定：除云同步 / 协作 / AI / 插件 / 发布站点 / 评论外，
+Notion 的其余能力全部进入排期。规格见 SPEC §三十七–§四十，
+里程碑与验收门槛见 SPEC §二十九 与 ROADMAP 的 M10–M14，
+决定记录为 ADR-0027。开工前仍按 §三十 的流程走：读架构 → 最小改动 →
+编译 → 测试 → 检查 UI → 记录性能影响。
+
+建议起手：M10 批次 A 的 image 块（附件落盘 + 降采样缓存是这批里唯一
+会动摇低 RAM 卖点的部分，值得最先测量）。
+
+## M10 批次 B · slice 1 — toggle 折叠块（2026-09-20，on `master`）
+
+§三十七 的第一条完整竖切。没按批次 A 起手，是为了先把「行的生死」这件事
+做对：toggle 是这一批里唯一会改变 projection 输出的 kind，而 table / columns
+只会重复它。
+
+**改动面**（六处接线，SPEC §三十七 的门槛）：`BlockKind::Toggle`（int 13，
+`as_str` = `"toggle"`）；`blocks.folded` 列 = schema v6（条件 ALTER，走
+`pragma_table_info` 探测，和晚近几列同一写法）；`Command::ToggleFold` →
+`Change::BlockFoldedSet`（可撤销，和侧栏 `PageExpandedSet` 同形，属视图状态
+不入正文）；slash / Turn into / ⋮ 菜单各一行；`EditorBlock.slint` 的
+chevron（`chevron-down` / `chevron-right`）；scene `toggle` + `toggle-fold`。
+
+**projection 是这次真正的决定**：折叠的子树不产生 row。`project_blocks` 经
+`visible_block_indices` 过滤，同一个函数也被新的 `drop_index_for_row` 用——
+两条编号（row / model）从此不再等价，§八 的拖拽落点必须换算。这个缝只留
+一个，防止两边漂移。`SetBlockType` 离开 Toggle 时会清掉 fold（undo 会还原），
+否则子树被藏起来且没有任何出口；`SplitBlock` / `DuplicateBlock` 强制
+`folded: false`，因为它们都不复制子树。Markdown 导出把 toggle 降级成 quote 行
+（CommonMark 没有折叠语法，和 callout 的降级同一条路），子树仍按 depth 缩进带上，
+导入侧不还原折叠——§三十七 要的就是这个不对称。
+
+**验证**：`just check` 全绿（check --all-targets / 119+13+9+35+5+17+16+13 测试
+/ release build 3m16s）。新增测试：v6 迁移（先 `DROP COLUMN folded` +
+`user_version=5` 造旧库，带 control 断言证明夹具真的缺这列，再跑两遍验幂等）、
+fold 往返 + 不存在 id 报错、折叠子树零 row、展开回到源顺序、编号列表不因隐藏
+而改号、拖拽落点换算（并证明朴素的 row index 1 会被 `can_move_block_to` 拒）。
+三处故意变异（关掉 filter、`can_fold` 恒真、关掉 SetBlockType 的守卫）各自
+只打挂预期的测试后回滚——绿得不算数的测试我不留。
+
+**像素**（headless `quire-shot`，`.scratch/sweep6`，基线 sweep5）：35 个旧
+scene 里 32 个逐字节相同；只有 `slash` / `plus` / `dark-slash` 动了，原因就是
+菜单多了 Toggle 一行。`toggle` vs `nest` 差 1 257 px，全在父块那一行（18 px
+高的一条），即 chevron + 22 px gutter 生效且没有波及；`toggle` vs
+`toggle-fold` 差 6 006 px，分成四块且每块都有解释：三角形字形、消失的子块
+行、其下方整体上移一行、右侧滚动条滑块高了两像素。gutter 只按 kind 给、不按
+`can-fold` 给，所以第一个子块出现时文字不会跳。
+
+**未验证**：交互。桌面 UI 不归我点——chevron 的 hover 命中、折叠后继续打字、
+⌘F 命中隐藏块、拖进隐藏区这几条要用户手测。另外 `blocks.folded` 目前没有任何
+UI 入口能折叠「非 Toggle」的父块，这是刻意的（没有出口的状态不算状态）。
+
+## M10 批次 A · slice 2 — image 块（2026-09-20，on `master`）
+
+回到 §三十七 批次 A。这一条是 M10 里唯一会动摇低 RAM 卖点的 kind，所以
+先做它、并且真的去量它，而不是等 table / columns 把媒体层逼到墙角再补。
+
+**改动面**（§三十七 的六处接线，逐条对上）：`BlockKind::Image`（int 14，
+`as_str` = `"image"`）；schema v7 = 新表 `attachments` + `blocks.attachment` +
+`blocks.img_percent DEFAULT 100`；新的 `services/attachment_store.rs`（落盘、
+嗅探格式、降采样）；`Command::InsertImage` / `SetBlockImage` / `SetImageWidth`
+三个命令，各自 `Change` 可撤销；slash 与 Turn into 各一行 Image，⋮ 菜单对
+图片块多开一个 `Image width` 子菜单（25 / 50 / 100，action id 基址
+`IMAGE_WIDTH_BASE = 500_000`）；Markdown 导出 `![name](quire://attachment/<id>)`、
+导入侧没有图片形状，整行按字面文本留在段落里（文件名因此不丢）；
+`EditorBlock.slint` 的图片行 + `AppWindow.slint` 的点击放大遮罩层；
+scene `image` + `image-half`。
+
+**三个决定**：
+
+1. **字节在库里不在库外**——`<library>/attachments/<id>.<ext>`，SQLite 只留一行
+   引用。`blocks.attachment` 刻意**不建外键**：文件行丢了，块必须还能载入并画成
+   「缺图」，而不是让整本库打不开（用户只拷走 `.db` 是常态）。这条由
+   `a_picture_whose_attachment_row_vanished_still_loads` 用裸 SQL 删行钉住。
+2. **编辑器永远看不到原图**。超过 `MAX_EDGE = 1280` 的导入会另写一张
+   `<id>.cache.png`，`display_path` 只交这张；原始字节一个 bit 都不动，看画
+   不该降级用户的文件。扩展名与 MIME 由 `image::guess_format` 嗅字节得出，
+   不看文件名——存成 `.jpg` 的 PNG 要按它真的是 PNG 来存。
+3. **解码缓存自己管，且有上限**。Slint 的 `i-slint-core` 图片缓存是
+   thread-local `CLruCache`，按解码字节加权、上限 **5 MiB**、键是 path+mtime
+   ——一张 1280×720 RGBA 就 3.7 MiB，即整个缓存装得下一张照片，滚过图页每帧
+   重解码。反过来做一张无上限的自有 map，就是 §二十二 的 RAM 承诺死在第一条
+   截图墙上。所以是 `AppState` 里一张按 attachment id 的 LRU，权重 w·h·4，
+   上限 `MAX_ATTACHMENT_CACHE_BYTES = 32 MiB`（≈八张全宽帧）。行通过
+   `image-for` / `image-aspect` **回调**取图而不是模型字段——Slint 只为它
+   realize 的行求值，于是成本跟视口走，不跟文档走。
+
+`Command::InsertImage` 的 apply 是 `AttachmentAdded`（`INSERT OR REPLACE` 的
+upsert）+ `BlockInserted`，revert 只删引用、**没有** `AttachmentDeleted`：撤销
+一次插入不该删磁盘上的字节，redo 也因此不需要碰盘。Image 块复制粘贴共享同一
+个 attachment 指针而不是拥有两份；⋮ 的宽度设回默认 100 时 `plan()` 返回
+`None`，菜单点不出空撤销步。
+
+**验证**：`cargo test --workspace` 全绿（129 + 13 + 9 + 36 + 5 + 17 + 19 + 13 =
+241 个测试，EXIT=0），`just check` 的 `cargo check --all-targets` 与 release
+build（3m11s）在本 slice 的代码收尾处跑过，之后只动过文档。新增测试里值得点名
+的：v7 迁移（先造 v6 旧库 + control 断言证明表和列真的不存在，再跑两遍验幂等）、
+附件往返、悬空引用仍能载入、`attachment_store` 五个（含 `MAX_EDGE + 1` 卡在
+分支边界上的降采样，以及「不是图片的字节被拒绝且不落盘」）、markdown 的
+`quire://attachment/` 往返、command 层四个撤销用例。缓存那条
+`the_picture_cache_spends_its_budget_and_drops_the_stalest_first` 先证明预算
+**真的被花掉**（`spent > MAX/2`，否则断言在空缓存上恒真），再证明淘汰的是
+最久没被 realize 的那张而不是最早插入的那张（把一张已淘汰的 id 重新 show 出来，
+再灌四张新的，它必须还在、它的邻居必须不在）。这条测试抓到过一个真 bug：
+`cache_image` 插入后没把新条目的权重计进 running total，于是 11 张全留着、
+一个字节都没淘汰——断言把它逼出来了。
+
+**RAM**（release `quire.exe`，`bench.ps1`，每场景 seed 遍 + 测量遍、独立 pinned
+`--db`，原始行 `benchmarks/results/2026-09-20-m10-image-ram.jsonl`）：A 空壳
+116.5–116.6 MB WS / 88.1–88.9 private；D 10 000 blocks 126.4–126.5 /
+100.9–101.3，四遍的散布 ≤0.4 MB。对 M7 matrix 的同名两行（114.3 / 88.2 与
+121.5 / 97.4）是 **1.02× 与 1.04×**，M10 的 ≤1.2× 门槛守住；idle CPU
+0.2–0.59%。注意这一遍量的是「加了 v7 列、加了缓存字段、但页面上没有一张图」
+的回归基线，它证明的不是图便宜，只是没有把别的东西弄贵。
+
+**像素**（headless `quire-shot`，`.scratch/sweep7`，基线 sweep6）：37 个旧
+scene 里 34 个逐字节相同；`slash` / `plus` / `dark-slash` 动了，裁出来就是
+菜单尾部（Callout / Code / Divider 整体下移一行）和引用块，原因就是菜单多了
+Image 一行。两张新 scene 是宽度档位的几何证据，不是眼看：同一张 640×400 的
+fixture，`image` 画到 **760×474**、`image-half` 画到 **380×237**，左边和上边
+都还在 x=390 / y 同一条线上——横竖都精确减半，比例没变形；两图差 339 118 px，
+`image-half` 里图片下方已经回流进「Why a local-first editor」整段，而 `image`
+那一屏只有图。行高由 `pic-aspect` 在拿到像素之前算出，所以半档那行是真的矮了，
+不是被裁了。
+
+**未验证**：交互。桌面 UI 不归我点——文件选择器（`rfd`）挑图、点图放大、
+遮罩层点击关闭、⋮ 里 `Image width` 子菜单的命中，这几条要用户手测。RAM 也
+只量了无图的场景；「一万块 + 一屏图」滚动时的 RSS 需要一个 bench 场景，
+目前没有，32 MiB 上限是构造性保证 + 单测证明，不是测量结果。原地替换磁盘上
+的同名文件要重启才生效（我们的键是 id，Slint 的键才带 mtime）。粘贴剪贴板
+位图（`CF_DIBV5`，`platform/`）与 file / PDF 缩略图仍在本批次里没做，它们复用
+同一个 store。
+
+下一步仍是 §三十七 批次 A：file + PDF 缩略图（复用 attachment store），
+然后批次 B 的 table + columns。
+
+## M10 批次 A · slice 3 — file 附件块（2026-09-20，on `master`）
+
+批次 A 的第二条。用户 2026-09-20 指定「pdf 附件的先跳过，做其他的」，所以
+这一条交付 file 本体，PDF 首页缩略图留在原地。
+
+**改动面**（§三十七 的六处接线）：`BlockKind::File`（int 15，`as_str` =
+`"file"`）；**schema 不动**，`user_version` 停在 7——v7 为图片开的 `attachments`
+行与 `blocks.attachment` 列描述一个 zip 和描述一张 png 一模一样；
+`attachment_store.rs` 加 `import_any_file`（`fs::copy` 流式落盘）、`export_to`、
+`save_name`、`format_size`、`create_file_fixture`；`Command::InsertFile` /
+`SetBlockFile`，并且图片那两条的 `plan()` 助手被泛化成 `insert_attachment` /
+`set_block_attachment`（只有 `kind` 一个参数不同），`AppState` 侧四个方法同样
+收成两个带 kind 的 `insert_attachment` / `set_block_attachment`；slash、insert
+（+）、Turn into 三个菜单各加一行 File，⋮ 的 `Image width` 子菜单**仍然只对图片
+开**；Markdown 导出 `[name](quire://attachment/<id>)`；`Types.slint` 三个回调
+`attachment-size`（pure）/ `attachment-opened` / `attachment-saved`，
+`EditorBlock.slint` 的 kind 15 行；`platform::open_with_default`；scene `file`。
+页脚字数把 File 和 Image 一起跳过——附件的 text 是文件名，不是散文。
+
+**三个决定**：
+
+1. **不加 schema**。这不是省事，是 v7 当初就按「一个块指向一坨存起来的字节」
+   设计的，图片只是它的第一种用法。于是这一条 slice 没有迁移、没有幂等测试、
+   没有旧库升级路径要验，`PRAGMA user_version` 那条 v7 迁移测试原样通过。
+2. **字节不进进程**。`import_any_file` 用 `fs::copy` 把源文件直接抄进
+   `attachments` 目录，只记长度：不解码、不调 `image`、**刻意不设体积上限**。
+   图片那条路靠降采样守 §二十二，文件这条路靠「根本不看」守——一张 2 GB 的
+   附件和一个 2 KB 的附件在编辑器里花一样的钱，直到用户去按按钮。
+   `fs::copy` 返回的字节数与 `metadata().len()` 不符就删掉半成品并报错，
+   所以不存在「半个附件」留在目录里。
+3. **打开是显式按钮，不是点行**。一行点击就调用系统默认程序启动任意可执行文件
+   的块，是不敢在里面选文字的块；所以行本身照旧走 `block-activate`（可选、可
+   复制），右侧两个 26 px 按钮才做事。两个按钮**常画**而不是 hover 才出现：
+   一个看上去没东西可按的文件块，读起来就是坏掉的附件，那是这类块唯一不能给的
+   印象。`ShellExecuteW` 而不是 `spawn("explorer.exe", path)`——explorer 成功时
+   也返回 0x1（它的设计），子进程分不出「拉起了应用」和「扩展名被拦」，而这个
+   FFI 只在真拉起来时答 `> 32`；一个 extern 声明，`windows` crate 不进依赖树，
+   跟 ADR-0025 读剪贴板同一条规矩。
+
+**这一条里改过的两个设计**：文件的名字**保留扩展名**（`import_any_file` 取
+`file_name()` 而不是 `file_stem()`），图片仍只留词干——一张图的内容就是它的
+类型说明，一个 `quarterly-report` 什么都不说。这带来 `save_name` 的一个坑：
+存进去的 `file` 列扩展名被小写过（`22.pdf`），`name` 保留用户大小写
+（`Report.PDF`），拼回去时必须忽略大小写比较，否则给文件名加一遍后缀。
+另一个是 fixture 的确定性：`create_file_fixture` 第一版把 `std::process::id()`
+拼进文件名，而文件名就是行上那个 label，于是 scene 每跑一遍哈希就变一次；
+pid 移到临时**目录**名上，文件名回到干净。这条是在看截图时发现的，不是靠眼看
+判缺陷。
+
+**验证**：`cargo check --all-targets` 干净；`cargo test` 全绿
+**249 passed / 0 failed / 4 ignored**（11 个 target：lib 136、13、9、37、5、
+17、19、13），`cargo build --release` exit 0。本 slice 新增 8 个测试：
+`command.rs` 三个（文件块把文件名当 text、撤销只丢引用且 redo 不碰盘、
+Turn into 换掉文字并还原、一张图和一个文件可以指向同一行 attachment）、
+`attachment_store.rs` 四个（任意文件逐字节抄进去且从不解码、copy 失败不留半成品
+含无扩展名回落到 `.bin`、`save_name` 的两种拼法、`format_size` 的读数）、
+`markdown_test.rs` 一个（导出成链接且导入侧真的把 `quire://attachment/12` 带回来
+——这是 file 与 image 在导出上唯一的方向性差别）。`attachment_store` 那条
+`format_size` 测试当场抓到一个真缺陷：`bytes` 为负时 `< 1024` 分支打印的是原始
+值而不是钳过的值，于是返回 `"-5 B"`；断言逼出来了。
+
+**RAM**（release `quire.exe`，`bench.ps1`，原始行
+`benchmarks/results/2026-09-20-m10-file-ram.jsonl`）：D 10 000 blocks
+126.5–126.6 MB WS / 101.1–101.3 private，与 image 那遍的 126.4–126.5 /
+100.9–101.3 差 ≤0.2 MB——**1.04×**，门槛 ≤1.2× 守住。A 空壳 119.2–120.7 /
+91.7–92.5，比 image 那遍的 116.5–116.6 / 88.1–88.9 高 2.6–4.1 MB。**这个差
+没有归因**：两遍 A 场景里都没有任何附件，不可能是文件行的钱，而且这一遍两趟
+自己就散 1.5 MB（上一遍散 0.1 MB），说明空壳读数本身没那么可复现。写下来而不
+是圆过去。第一趟 A（`m10file-A1`）因为 `-PinnedDb` 被 bash 吞成 `:TEMP\...`
+而废掉，那一臂无法自证开了哪个库，已从 jsonl 里剔除。
+
+**像素**（headless `quire-shot`，`.scratch/sweep8`，基线 `.scratch/sweep7` 的
+39 个 scene）：36 个逐字节相同，`slash` / `plus` / `dark-slash` 动了，裁出来
+就是菜单里多出 File 一行、下面整体下移，`slash.png` 全图能看到
+Text / Toggle list / Image / **File — Attach a file of any type** / Callout 的
+顺序。`file` 是新 scene，量出来的几何：盒子 x 390..1149（760 宽）、
+y 265..312（48 高，正是 `size-body × line-body + 2 × spacing-md`），左边
+`page` 图标 + 文件名，右侧右对齐 "1.8 MiB"，两个 26 px 按钮落在 x 1086..1112
+与 1116..1142——按钮无 hover 时透明，所以列占用图上只有两处图标笔画（x≈1099、
+x≈1135），这与「常画但只在 hover 才有底色」是两件事，别混。**新基线是
+`.scratch/sweep8`（40 scene）**。
+
+**未验证**：全部交互。文件选择器（`rfd`，All files 过滤器）、Open 按钮真的把
+字节交给系统、Save-as 对话框给的文件名、两个按钮的 hover 命中、⋮ 菜单、
+撤销/重做、Turn into 成 File、以及把窗口拉窄时 `width: parent.width - self.x -
+140px` 那条 elide 会不会吃掉文件名——都要用户手测。另外两个已知没做的：
+PDF 首页缩略图（按指示推迟，渲染路线未定），以及**附件永不回收**——没有外键、
+没有级联，删掉最后一个指向它的块，字节还在 `attachments` 目录里；这是刻意的
+（撤销要能不碰盘地找回引用），但对用户就是一条看不见的磁盘泄漏。
+
+**下一步**：批次 A 收尾的仍是那张「一万块 + 一屏媒体」的滚动 bench 场景
+（image 欠的，file 让它欠了两次），然后批次 B 的 table + columns。
+
+## M10 批次 A · 收尾 1+2 — 临时目录卫生，和一条并不是死代码的 GIF 分支（2026-09-20，on `master`）
+
+file 竖切之后那份盘点里的头两项，用户点定「先做 1+2，然后 commit，再往下走
+table」。两项都不是功能，但第二条在做的过程中翻出一个前提错误，所以也记一笔。
+
+**1. 测试在漏 `%TEMP%`。** 症状是 1648 个 `quire-log-*`；查下来是仓库级的问题，
+不是一处：`logging.rs`、`storage/database.rs`、`storage/data_location.rs`、
+`services/attachment_store.rs`、四个 `tests/integration/*`，加上三个 bench 脚本，
+一共十几个前缀、3639 个条目。每个 helper 都建一个「pid + 计数器 + 时钟」的独
+立目录并且注释里郑重解释为什么要唯一——**唯一性之所以必要，恰恰因为从来没人
+删**。所以收法不是给每个 helper 补一句 `remove_dir_all`，而是加一个会自己删除
+的守卫：`src/testing.rs` 的 `ScratchDir`（`Drop` 删树，`Deref<Target = Path>`
+让 `dir.join(..)` / `&dir` 原样可用）。它必须是 `pub` 而不是 `#[cfg(test)]`：
+集成测试是另一个 crate，编译 lib 时不带那个 flag，`tests/integration/**` 看不
+到 `#[cfg(test)]` 的东西。
+
+换下来的写法里有三处值得记：
+
+* `scratch_logger` 原来返回 `Arc<Logger>`，现在返回一个把 logger 和守卫一起
+  装进去的 `ScratchLogger`，靠 deref 让测试体一个字不用改。返回 `(Logger,
+  ScratchDir)` 也行，但那会让 12 个调用点都变成解构。
+* `Logger::new(scratch("clean")) 这种一行式必须拆开绑成变量：临时守卫在语句结
+  束时就 drop，目录会在 logger 还在往里写的时候被删掉——不报错，只是下一行又
+  把它建回来，于是白改。
+* `backup_test.rs` 的 14 个测试每个末尾都有一句 `remove_dir_all(&dir).unwrap()`，
+  它只在绿的时候执行；`persistence_test.rs` 里那段「先把上一轮的 `.db.bak<N>`
+  删干净」的手扫，在目录名必然全新的前提下是死代码，一起删了。
+* `data_location.rs` 的 `per_user_dir()` 原本返回 `PathBuf`，而它派生自的那个根
+  目录才是守卫；两者拆开会留下悬空路径，所以并成一个 `Root { _appdata, per_user }`。
+
+**量具**：`cargo test` 全绿（139 + 13 + 9 + 37 + 5 + 17 + 19 + 13 = **252**，
+EXIT=0），跑完后 `%TEMP%` 里 `quire-*` 的总数从 3639 变成 **3639**，按 mtime
+筛 10 分钟内新建的只剩 `quire-attachments/` 一条——那是 `for_db(None)` 的兜底目
+录，固定路径、内容确定（`1.png` / `1.pdf`），不随运行增长，所以这次不动它。
+被删掉的守卫自己也有测试：`testing::tests` 两条，一条证明绑定时目录在、离开作用
+域后不在（断言写在 `Drop` 之外，否则自己给自己打分），一条证明同名两次调用不会
+撞车。
+
+**PS1 那一半**：`bench.ps1 -Typing` 和 `startup_bench.ps1` 原来只在跑之前清
+`.db` / `-wal` / `-shm`，从不清跑之后。证据是对 `%TEMP%` 里 91 个
+`quire-firstpaint-*` 分类：71 个 `.db.bak1` + 10 个 `.db.bak2` + 10 个
+`.db.bak3`，全是应用自己写的首开快照，正好落在旧清理清单的缝里。现在两处都改成
+`Get-ChildItem "$db*" | Remove-Item -Force`（整个文件族），`bench.ps1` 顺手删自
+己的报告 json。`bench_matrix.ps1` / `profile_bench.ps1` 不动：它们的 scratch 是
+单个固定目录（`quire-matrix` / `quire-profile`），有界且本来就是复用。
+
+**2. GIF 分支不是死代码——我原来的判断是错的。** 盘点时我说 `ext_of` /
+`mime_of` 的 `ImageFormat::Gif` 两条到不了，理由是 `Cargo.toml` 只要了
+`png`/`jpeg`/`bmp`。查 `cargo tree -e features -i image`：`image feature "gif"`
+**是开着的**，路径是 `slint "image-default-formats"` → `i-slint-core` →
+`image "default-formats"` → `gif`（顺带 avif/exr/tiff/webp 全都在）。也即
+`load_from_memory` 今天真能解 GIF，那两条分支活得好好的；按原计划删掉它们，反而
+会把一张真收进来的 GIF 命名成 `.img` + `application/octet-stream`。
+
+所以修法是反向的：把 `gif` 显式写进我们自己的 features（不额外编译任何东西，
+但行的格式从此是我们声明的，不是依赖的选择），选择器加上 `gif`（否则那条分支
+在 UI 里到不了，等于白留），并补一条测试 `a_gif_is_stored_as_a_still_gif`——它
+用**同一个 crate 编码**一张 GIF 再导入，编不出来就直接 fail，而不是在一条走不到
+的分支上恒真。gif 在这里是静图：解码器给首帧，App 里没有动画时钟，SPEC §三十七
+新增的那条格式条目把这个边界写死了（webp / tiff 能解但不进选择器，因为它们的行
+扩展名只能落到 `.img` 兜底）。
+
+**docs**：SPEC §三十七 批次 A `image` 加格式条目；CHANGELOG 新增 `### Build &
+test` 节（`just check`、`ScratchDir`、脚本清理）并在 Image 条里补格式；
+PERFORMANCE scene E 脚注说明 harness 现在会删自己的库和快照。PLAN 就是本节。
+
+**顺手清掉的历史遗留**：`%TEMP%` 里那 3639 个 `quire-*` 条目是这些泄漏的账本，
+测试已经不再生产它们，所以按前缀列出来核对（1648 log / 621 test / 599 location /
+447 persist / 124 search / 91 firstpaint / 71 typing / 10 backup，尾上是
+matrix / dbg / imgbench / integrity / ab / lan / d9 / attachments 这些一次性探测）
+后全部删除，现在 `ls $TEMP/quire-*` 是 0 条。没有 quire 进程在跑，所以删的都是
+已完结会话的遗留。
+
+**视觉**：这一轮没有改动任何会被画出来的东西，但 `create_file_fixture` 换了临时
+目录的形状（pid 从名字里挪进目录名），而 `file` scene 的行标签正是从那次导入得出
+的，所以复扫一遍 40 个 scene 对照 `.scratch/sweep8`：**changed 0 / identical 40**。
+基线不变，`gif` 那条特性与选择器条目也就此确认没有把任何一张图挪动过。

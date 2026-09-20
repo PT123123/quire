@@ -36,7 +36,7 @@ $renderer = ""
 $method = ""
 for ($i = 1; $i -le $Runs; $i++) {
     $db = Join-Path $env:TEMP "quire-firstpaint-$Label-$i.db"
-    foreach ($stale in @($db, "$db-wal", "$db-shm")) { if (Test-Path $stale) { Remove-Item $stale } }
+    Get-ChildItem -Path "$db*" | Remove-Item -Force
     $errFile = Join-Path $env:TEMP "quire-firstpaint-$Label-$i.err"
     if (Test-Path $errFile) { Remove-Item $errFile }
 
@@ -72,7 +72,9 @@ for ($i = 1; $i -le $Runs; $i++) {
         $p.Kill(); [void]$p.WaitForExit()
     }
     Remove-Item $errFile
-    foreach ($stale in @($db, "$db-wal", "$db-shm")) { if (Test-Path $stale) { Remove-Item $stale } }
+    # every run owns the whole file family it created: the database, its
+    # wal/shm siblings, and the startup `.bak1` snapshot the app writes
+    Get-ChildItem -Path "$db*" | Remove-Item -Force
     if (-not $line) {
         Write-Warning "run $i recorded no first_paint line (exit $($p.ExitCode))"
         continue

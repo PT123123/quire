@@ -24,7 +24,7 @@ export struct TextRun {
 
 export struct BlockRow {
     id: int,
-    kind: int, // 0 para, 1 h1, 2 h2, 3 h3, 4 bullet, 5 numbered, 6 todo, 7 quote, 8 code, 9 divider, 10 callout, 11 page
+    kind: int, // 0 para, 1 h1, 2 h2, 3 h3, 4 bullet, 5 numbered, 6 todo, 7 quote, 8 code, 9 divider, 10 callout, 11 page, 12 link, 13 toggle, 14 image, 15 file
     text: string,
     checked: bool,
     number: int,
@@ -34,6 +34,10 @@ export struct BlockRow {
     color: int, // text palette slot (0 = theme default, 1.. = gray..red)
     bg: int,    // row background palette slot (0 = transparent)
     page-ref: int, // the page a Page-kind block (11) opens; -1 = none/dangling
+    folded: bool, // toggle (13) showing its chevron collapsed; its subtree has no rows
+    can-fold: bool, // this block has children (the chevron itself is toggle-only)
+    attachment: int, // attachments row an image (14) or file (15) points at; 0 = none
+    img-percent: int, // image display width, percent of the editor column
 }
 
 export struct CommandRow {
@@ -172,6 +176,9 @@ export global UIState {
     in-out property <string> dialog-message: "";
     in-out property <string> dialog-confirm-label: "Delete";
     in-out property <bool> settings-open: false;
+    // picture preview (SPEC §三十七): the attachments id shown full-window,
+    // 0 = closed. Clicking a picture opens it; clicking the scrim closes it.
+    in-out property <int> preview-attachment: 0;
 
     // window geometry mirror (for centering/anchoring popups from Rust)
     in-out property <length> window-w: 1280px;
@@ -212,6 +219,25 @@ export global UIState {
     callback command-invoked();
     callback palette-move(int);
     callback todo-toggled(int);
+    // toggle block (SPEC §三十七): show/hide this block's subtree
+    callback toggle-fold(int);
+    // image block (SPEC §三十七 批次 A): resolve an attachments id to its
+    // downsampled raster. A callback and not a model field, so a picture only
+    // decodes for a row the ListView actually realizes. Both are `pure`: the
+    // id always maps to the same picture, and Rust's cache makes the repeat
+    // calls a binding evaluation costs a map lookup.
+    pure callback image-for(int) -> image;
+    // height / width of that raster, 0 when there is nothing to show. The row
+    // needs the ratio to size itself before it has the picture, and a value
+    // of type `image` does not expose its size to .slint.
+    pure callback image-aspect(int) -> float;
+    // file block (SPEC §三十七 批次 A): a row that names bytes instead of
+    // drawing them. The label comes from the attachments row, so it is a
+    // lookup and not a model field; the two actions hand those bytes to the
+    // system, which is the only thing in the app that reaches outside it.
+    pure callback attachment-size(int) -> string;
+    callback attachment-opened(int);
+    callback attachment-saved(int);
     callback block-activate(int);
     // rich paste (SPEC §二十七): true = the clipboard landed as blocks (the
     // key is consumed); false = fall through to the native plain paste

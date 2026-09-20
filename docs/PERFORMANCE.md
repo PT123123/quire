@@ -101,7 +101,10 @@ a timer appends one character to a random block every `1/rate` s through
 takes — so a keystroke covers binding → 300 ms edit debounce → command + undo
 entry → model row update → repaint → 600 ms flush → SQLite + FTS5 write. Each
 run types against a fresh file DB in `%TEMP%`; CPU% and memory are sampled
-over 8 s of that, which is ~350 strokes at 30/s.
+over 8 s of that, which is ~350 strokes at 30/s. Since 2026-09-20 the harness
+deletes that DB, its `.bak<N>` snapshots and its own report file when the run
+ends — the pre-run purge covered only the `.db`, so every label ever used left
+a snapshot in `%TEMP%`.
 
 30 strokes/s, one search every 100 strokes (`--search-every 100`):
 
@@ -599,3 +602,83 @@ device numbers, not a prediction of them. (3) The desktop `skia` (wgpu /
 softbuffer candidates) arm has **no** first-paint number, and cannot have one
 with the current method; if it ever needs one, measure it from outside the
 process, not through the notifier.
+
+## M10 · the picture cache, and the gate it had to clear (2026-09-20, ADR-0029)
+
+SPEC §三十七 puts a measured gate on every new block kind: the 10 000-block
+scene must stay inside 1.2× the recorded RAM baseline. `image` is the kind that
+gate was written for — it is the only one that can put megabytes into the
+process — so it is measured before it is called done.
+
+Release `quire.exe`, `benchmarks/scripts/bench.ps1`, every idle scene run as a
+fresh-DB seed pass plus a measured pass against its own pinned `%TEMP%`
+database. Raw rows: `benchmarks/results/2026-09-20-m10-image-ram.jsonl`.
+
+| scene | passes | WS MB | private MB | idle CPU % | M7 matrix | ratio |
+|-------|--------|------:|-----------:|-----------:|-----------|-------:|
+| A empty shell   | 2 | 116.5 – 116.6 | 88.1 – 88.9 | 0.20 – 0.39 | 114.3 / 88.2 | 1.02× |
+| D 10 000 blocks | 4 (2 seed + 2 measured) | 126.4 – 126.5 | 100.9 – 101.3 | 0.39 – 0.59 | 121.5 / 97.4 | 1.04× |
+
+**Reading.** The gate holds with room: 1.04× on the number it is written
+against, and the four D passes spread by 0.4 MB, so this is not a difference
+that could hide a regression. A 10 000-block page now costs **+10 MB WS /
++12.5 MB private** over the empty shell, against the +7.2 / +9.2 the M7 matrix
+recorded — the widening is inside the noise of two batches taken a day apart
+on an iGPU box, and it is the honest number to compare the next kind against.
+
+**What this batch does *not* measure.** Neither scene contains a picture. These
+rows say the v7 columns, the `attachments` map and the cache fields did not
+make everything else dearer; they do not say pictures are cheap. The actual
+picture cost is bounded by construction instead: `AppState` holds decoded
+rasters in an LRU weighted at `w × h × 4` and capped at
+`MAX_ATTACHMENT_CACHE_BYTES = 32 MiB` (≈eight full-width 1280×720 frames), and
+`the_picture_cache_spends_its_budget_and_drops_the_stalest_first` asserts both
+the ceiling and that eviction is by last-realized, not by insertion order. The
+reason a ceiling is needed at all is upstream: Slint's own decode cache
+(`i-slint-core-1.18.0/graphics/image/cache.rs`) is a thread-local `CLruCache`
+weighted by decoded bytes with a **5 MiB** budget keyed by path + mtime — one
+photograph — so relying on it would re-decode on every frame of a scroll
+through a photo page.
+
+**Follow-up owed.** A bench scene that seeds N image blocks and scrolls them is
+the missing measurement; it belongs with the `file` / PDF thumbnail kind, which
+reuses the same store and will want the same scene.
+
+## M10 · the file kind, which had to cost nothing because it reads nothing (2026-09-20, ADR-0030)
+
+`file` is the second kind under the same §三十七 gate, and it is the kind the
+gate was least likely to catch: the store `fs::copy`s the bytes and records
+their length, so nothing of an attachment ever enters the process to be
+painted. The row reads one `attachments` line and formats one string. The
+measurement below is therefore a **non-regression** check — proof the extra
+block kind, the three new `UIState` callbacks and the wider slash menu did not
+make the rest of the app dearer — not a claim about attachments.
+
+Release `quire.exe`, `benchmarks/scripts/bench.ps1`, same method as the batch
+above. Raw rows: `benchmarks/results/2026-09-20-m10-file-ram.jsonl`.
+
+| scene | passes | WS MB | private MB | idle CPU % | M7 matrix | ratio |
+|-------|--------|------:|-----------:|-----------:|-----------|-------:|
+| A empty shell   | 2 | 119.2 – 120.7 | 91.7 – 92.5 | 0.19 | 114.3 / 88.2 | 1.05× |
+| D 10 000 blocks | 2 (1 seed + 1 measured) | 126.5 – 126.6 | 101.1 – 101.3 | 0.00 – 0.20 | 121.5 / 97.4 | 1.04× |
+
+**Reading.** D is the number the gate is written against, and it is the same
+number the `image` batch recorded — 126.4 – 126.5 / 100.9 – 101.3 against
+126.5 – 126.6 / 101.1 – 101.3, i.e. inside 0.2 MB across two batches a session
+apart. A moved: 116.5 – 116.6 → 119.2 – 120.7 WS, +2.6 to +4.1 MB. **That delta
+is not attributable to this slice, and it is not attributed here.** Neither A
+run contains an attachment, so it cannot be the file row's cost; the two A
+passes of this batch also spread 1.5 MB against the previous batch's 0.1 MB,
+which says the empty-shell reading is less repeatable than the D reading and
+that some of the shift is session rather than code. The gate is ≤1.2×, so at
+1.05× there is no decision hanging on resolving it; recording it unresolved is
+the honest version, and the next kind measured on A gets to compare against
+*this* row, not the 116.5 one.
+
+**What this batch does not measure.** A page full of file blocks. The row's
+cost is one attachments lookup and one `format_size` per *realized* row — the
+`attachment-size` callback exists precisely so that is viewport-proportional
+rather than document-proportional — but that is an argument plus the unit test,
+not a reading, and it is the same shape of gap the picture batch flagged above.
+The scrolled-media scene owed there is now owed twice, and it should measure
+pictures and files on one page.

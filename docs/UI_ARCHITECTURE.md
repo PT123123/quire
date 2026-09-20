@@ -72,10 +72,23 @@ renderer (`quire-shot`, ADR-0011) into `.scratch/shots/latest.png`. Scenes
 live in `controller::apply_scene` + `apply_scene_overlay` — popups open in
 the overlay half so headless two-pass renders see their transitions.
 Current set: default, dark, palette, search-notes, menu, rename, settings,
-dialog, empty, edit, slash, block-menu, marks, link, find, nest, recovered,
-title-edit, plus dark combos (dark-slash, dark-find, dark-marks, dark-link,
-dark-block-menu, dark-title-edit). Every visual change ships with re-shot
-scenes; the judge-reviewed set is the regression baseline.
+dialog, empty, edit, slash, block-menu, marks, link, find, nest, toggle,
+toggle-fold, image, image-half, file, recovered, title-edit, plus dark combos (dark-slash,
+dark-find, dark-marks, dark-link, dark-block-menu, dark-title-edit).
+`benchmarks/scripts/sweep.ps1` holds the authoritative list — 40 scenes as of
+ADR-0030 — and this prose is the summary, so when the two disagree trust the
+script. Every visual change ships with re-shot
+scenes; the judge-reviewed set is the regression baseline. `toggle` and
+`toggle-fold` are a pair on purpose: the same section open and closed, so a
+fold that hides the wrong rows shows up as a diff between the two PNGs.
+`image` and `image-half` are the same pair for the width tier — one picture
+block at 100 % and at 50 %, so a width setting that only moves the label and
+not the raster is caught by the row geometry. `file` is the picture scene's
+opposite: a 1.8 MB attachment the renderer never opens, so the row is the whole
+feature, and its fixture payload has a fixed length because the size label is
+the one number it paints. The fixture's process id goes in the temp *folder*
+name, not the file name — a label that carried the pid would change every
+sweep.
 
 ## Adding a component (checklist)
 

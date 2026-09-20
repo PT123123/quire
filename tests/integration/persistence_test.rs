@@ -3,7 +3,7 @@
 // writes, Ctrl+S / shutdown flushes land before the next "session" loads
 // the file, and the periodic snapshot (M8 D10) reaches the `.bak<N>` family.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use quire::core::persistence::{Change, Repository};
@@ -12,15 +12,17 @@ use quire::services::persistence::{
     FakeClock, PersistenceService, DEFAULT_DEBOUNCE_MS, DEFAULT_SNAPSHOT_INTERVAL_MS,
 };
 use quire::storage::{backup, SqliteRepository};
+use quire::testing::ScratchDir;
 
-fn temp_db(name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "quire-persist-{}-{}",
-        std::process::id(),
-        name
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir.join("quire.db")
+/// A database path, and the folder holding it. The folder comes back as a
+/// guard that deletes itself, because a session leaves `.bak<N>` snapshots
+/// beside the file — cleaning up the database alone would strand those, and
+/// cleaning up nothing at all is what four hundred leftover `quire-persist-*`
+/// directories in `%TEMP%` were the evidence of.
+fn temp_db(name: &str) -> (ScratchDir, PathBuf) {
+    let dir = ScratchDir::new(&format!("persist-{name}"));
+    let path = dir.join("quire.db");
+    (dir, path)
 }
 
 fn seeded(path: &Path) -> Arc<SqliteRepository> {
@@ -46,6 +48,9 @@ fn seeded(path: &Path) -> Arc<SqliteRepository> {
         color: quire::core::ColorKind::Default,
         background: quire::core::ColorKind::Default,
         page_ref: None,
+        folded: false,
+        attachment: None,
+        img_percent: 100,
         }),
     ])
     .unwrap();
@@ -54,7 +59,7 @@ fn seeded(path: &Path) -> Arc<SqliteRepository> {
 
 #[test]
 fn burst_then_quiet_writes_exactly_once() {
-    let path = temp_db("burst");
+    let (_dir, path) = temp_db("burst");
     let repo = seeded(&path);
     let clock = Arc::new(FakeClock::new());
     let svc = PersistenceService::new(repo.clone(), clock.clone(), 300);
@@ -84,7 +89,7 @@ fn burst_then_quiet_writes_exactly_once() {
 
 #[test]
 fn shutdown_flush_then_next_session_loads_it() {
-    let path = temp_db("session");
+    let (_dir, path) = temp_db("session");
     {
         let repo = seeded(&path);
         let clock = Arc::new(FakeClock::new());
@@ -101,6 +106,9 @@ fn shutdown_flush_then_next_session_loads_it() {
         color: quire::core::ColorKind::Default,
         background: quire::core::ColorKind::Default,
         page_ref: None,
+        folded: false,
+        attachment: None,
+        img_percent: 100,
         })]);
         clock.set(10); // nowhere near due — this is the Ctrl+S/quit path
         svc.force_flush().unwrap();
@@ -117,7 +125,7 @@ fn shutdown_flush_then_next_session_loads_it() {
 
 #[test]
 fn deadline_guides_the_timer_and_multiple_bursts_stay_ordered() {
-    let path = temp_db("deadline");
+    let (_dir, path) = temp_db("deadline");
     let repo = seeded(&path);
     let clock = Arc::new(FakeClock::new());
     clock.set(1000);
@@ -154,16 +162,7 @@ fn deadline_guides_the_timer_and_multiple_bursts_stay_ordered() {
 /// made since the last tick instead of everything since startup.
 #[test]
 fn a_quiet_period_after_a_write_reaches_the_snapshot_family() {
-    let path = temp_db("periodic-snapshot");
-    // a rerun must start from no database and no family, not last run's
-    let mut stale = vec![path.clone()];
-    stale.extend((1..=backup::KEEP).map(|index| backup::slot(&path, index)));
-    for file in &stale {
-        let _ = std::fs::remove_file(file);
-        for suffix in ["-wal", "-shm"] {
-            let _ = std::fs::remove_file(format!("{}{suffix}", file.display()));
-        }
-    }
+    let (_dir, path) = temp_db("periodic-snapshot");
     let repo = seeded(&path); // this open wrote the startup snapshot
     let clock = Arc::new(FakeClock::new());
     let svc = PersistenceService::new(repo.clone(), clock.clone(), DEFAULT_DEBOUNCE_MS)
@@ -201,7 +200,6 @@ fn a_quiet_period_after_a_write_reaches_the_snapshot_family() {
     );
     drop(svc);
     drop(repo);
-    let _ = std::fs::remove_dir_all(path.parent().unwrap());
 }
 
 /// How many generations the family at `path` currently holds.
@@ -228,7 +226,7 @@ fn title_at(path: &Path) -> Option<String> {
 fn settings_storage_row_reports_the_folder_and_snapshots_on_demand() {
     use quire::app::state::{AppState, HandleArgs};
 
-    let path = temp_db("settings-storage-row");
+    let (_dir, path) = temp_db("settings-storage-row");
     let repo = seeded(&path);
     let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0 };
     let state = AppState::new(&args, Some(repo.clone()));

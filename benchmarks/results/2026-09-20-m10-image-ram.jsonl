@@ -1,0 +1,6 @@
+{"label":"m10img-A1","exe":"target/release/quire.exe","db":"","blocks":0,"startup_ms":683,"idle_cpu_pct":0.2,"ram_workingset_mb":116.5,"ram_private_mb":88.9,"exit_code":0,"typing":null}
+{"label":"m10img-A2","exe":"target/release/quire.exe","db":"","blocks":0,"startup_ms":556,"idle_cpu_pct":0.39,"ram_workingset_mb":116.6,"ram_private_mb":88.1,"exit_code":0,"typing":null}
+{"label":"m10img-D1-seed","exe":"target/release/quire.exe","db":"<temp>\\quire-m10image.db","blocks":10000,"startup_ms":197,"idle_cpu_pct":0.39,"ram_workingset_mb":126.4,"ram_private_mb":100.9,"exit_code":0,"typing":null}
+{"label":"m10img-D1","exe":"target/release/quire.exe","db":"<temp>\\quire-m10image.db","blocks":10000,"startup_ms":240,"idle_cpu_pct":0.39,"ram_workingset_mb":126.5,"ram_private_mb":101.1,"exit_code":0,"typing":null}
+{"label":"m10img-D2-seed","exe":"target/release/quire.exe","db":"<temp>\\quire-m10image.db","blocks":10000,"startup_ms":229,"idle_cpu_pct":0.39,"ram_workingset_mb":126.4,"ram_private_mb":100.9,"exit_code":0,"typing":null}
+{"label":"m10img-D2","exe":"target/release/quire.exe","db":"<temp>\\quire-m10image.db","blocks":10000,"startup_ms":179,"idle_cpu_pct":0.59,"ram_workingset_mb":126.5,"ram_private_mb":101.3,"exit_code":0,"typing":null}

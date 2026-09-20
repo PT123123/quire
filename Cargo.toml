@@ -7,6 +7,11 @@ description = "A local, GPU-accelerated, Notion-like document app built with Rus
 default-run = "quire"
 
 [dependencies]
+# gif is listed because `attachment_store` names a GIF row `gif` / `image/gif`.
+# Without it here the decoder would still be compiled in — slint's
+# `image-default-formats` unifies `image`'s features across the graph — so the
+# store would be relying on a dependency's choice for its own row format.
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "bmp", "gif"] }
 rfd = "0.17.2"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 # Renderer is selected per cargo feature (see [features]); default-features are off so

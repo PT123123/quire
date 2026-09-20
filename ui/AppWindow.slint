@@ -564,4 +564,44 @@ export component AppWindow inherits Window {
         x: (root.width - self.width) / 2;
         y: (root.height - self.height) / 2;
     }
+
+    // Picture preview (SPEC §三十七): the block's raster enlarged to fit the
+    // window over a dimmed page; a click anywhere closes it. It is deliberately
+    // the same bounded raster the row loads, not the original file — a
+    // 4000x3000 image must not enter memory at its own size (§二十二), and the
+    // full-resolution bytes stay on disk for any viewer that can show them.
+    Rectangle {
+        x: 0; y: 0;
+        width: root.width; height: root.height;
+        visible: UIState.preview-attachment != 0;
+        background: Colors.scrim;
+
+        TouchArea {
+            mouse-cursor: MouseCursor.pointer;
+            clicked => { UIState.preview-attachment = 0; }
+        }
+
+        Rectangle {
+            property <float> aspect: UIState.image-aspect(UIState.preview-attachment);
+            property <length> box-w: root.width - 2 * Theme.spacing-xl;
+            property <length> box-h: root.height - 2 * Theme.spacing-xl;
+            property <length> pic-w: self.aspect > 0
+                ? Math.min(self.box-w, self.box-h / self.aspect) : 0px;
+            x: (root.width - self.pic-w) / 2;
+            width: self.pic-w;
+            height: self.pic-w * self.aspect;
+            y: (root.height - self.height) / 2;
+            clip: true;
+            border-radius: Theme.radius-md;
+            border-width: 1px;
+            border-color: Colors.border;
+
+            Image {
+                x: 0; y: 0;
+                width: parent.width; height: parent.height;
+                image-fit: contain;
+                source: UIState.image-for(UIState.preview-attachment);
+            }
+        }
+    }
 }
