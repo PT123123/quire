@@ -5,6 +5,8 @@
 
 use std::collections::HashMap;
 
+use crate::services::search_service::snap_to_words;
+
 /// How many pages the Recent section keeps.
 pub const MAX_RECENTS: usize = 6;
 
@@ -595,16 +597,20 @@ fn find_ci(hay: &[char], needle: &[char]) -> Option<usize> {
     })
 }
 
-/// ±`pad` chars around a match, on char boundaries, with ellipses.
+/// ±`pad` chars around a match, on char boundaries, with ellipses. The edges
+/// are snapped to whole words by the same rule the FTS snippet uses.
 fn extract_snippet(text: &str, pos: usize, needle_len: usize, pad: usize) -> String {
     let chars: Vec<char> = text.chars().collect();
     let start = pos.saturating_sub(pad);
     let end = (pos + needle_len + pad).min(chars.len());
+    let (s, e) = snap_to_words(&chars, start, end, pos, pos + needle_len);
+    let window = chars[s..e].iter().collect::<String>();
+    let window = window.trim();
     let mut s = String::new();
     if start > 0 {
         s.push('…');
     }
-    s.extend(&chars[start..end]);
+    s.push_str(window);
     if end < chars.len() {
         s.push('…');
     }
@@ -719,6 +725,32 @@ mod tests {
         assert!(!w.search("").is_empty());
         // no hits
         assert!(w.search("zzzz-not-there").is_empty());
+    }
+
+    #[test]
+    fn local_search_snippet_breaks_on_words() {
+        let mut w = ws();
+        // The repo-less path is what the A4 `search-notes` shot renders, and
+        // there the ±48-char window opened inside "quiet": the row read
+        // "…uiet home for thinking". Varying token lengths make some of these
+        // windows cut mid-token and some not; all must come back whole.
+        let text: String = (0..120).map(|i| format!("w{i} ")).collect();
+        w.set_search_text(113, text.clone());
+        for term in 20..40 {
+            let needle = format!("w{term}");
+            let hits = w.search(&needle);
+            assert_eq!(hits.len(), 1, "term {needle} unmatched");
+            let s = &hits[0].snippet;
+            assert!(s.contains(&needle), "term lost: {s}");
+            let body = s.trim_matches('…');
+            let at = text
+                .find(body)
+                .unwrap_or_else(|| panic!("not a source window: {s}"));
+            let head_ok = at == 0 || text.as_bytes()[at - 1] == b' ';
+            let tail = at + body.len();
+            let tail_ok = tail == text.len() || text.as_bytes()[tail] == b' ';
+            assert!(head_ok && tail_ok, "split word in {s:?} (term {needle})");
+        }
     }
 
     #[test]
