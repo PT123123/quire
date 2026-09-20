@@ -250,10 +250,18 @@ export component Editor inherits Rectangle {
         }
     }
 
-    // empty state — a page with no blocks yet
+    // empty state — a page with no blocks yet. The panel is a click target:
+    // this is the one place on the page with nothing to select, so it has to
+    // make its own first block (see UIState.empty-page-started).
     if UIState.blocks.length == 0 : Rectangle {
         width: parent.width;
         height: parent.height;
+        TouchArea {
+            mouse-cursor: MouseCursor.text;
+            clicked => {
+                UIState.empty-page-started();
+            }
+        }
         VerticalLayout {
             spacing: Theme.spacing-sm;
             alignment: center;
@@ -274,7 +282,7 @@ export component Editor inherits Rectangle {
                 horizontal-alignment: center;
             }
             Text {
-                text: "The block editor arrives in a later milestone — pages, search, and navigation are already live.";
+                text: "Click here to write, or press Enter in the title above.";
                 font-family: Typography.ui-font;
                 font-size: Typography.size-ui;
                 color: Colors.text-muted;

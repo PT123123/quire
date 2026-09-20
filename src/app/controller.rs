@@ -6,7 +6,8 @@
 // 'static callbacks capture a Weak and upgrade() it at fire time.
 
 use crate::app::state::{
-    core_page_id, kind_from_int, AppState, PAGE_GETTING_STARTED, ROW_NEW_PAGE,
+    core_page_id, kind_from_int, palette_action, AppState, PaletteAction, PAGE_GETTING_STARTED,
+    ROW_NEW_PAGE,
 };
 use crate::core::{BlockId, Change, Command};
 use crate::{AppWindow, UIState};
@@ -548,28 +549,35 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
             g.set_palette_query("".into());
             s.set_query("");
             g.set_palette_focus(0);
-            match id {
-                1 => {
+            // One id -> action mapping in state.rs, matched here with no
+            // wildcard arm: this dispatch used to be `match id` over literals
+            // plus constants, and a constant whose import was missing turns
+            // into a catch-all *binding* rather than a pattern — that shadowed
+            // every command with id >= 9 for one round (`aaa3763`). An enum
+            // path cannot bind, and a variant with no arm here no longer
+            // compiles.
+            match palette_action(id) {
+                PaletteAction::NewPage => {
                     let new_id = s.create_page(None);
                     open(&g, &s, new_id);
                     g.set_renaming_id(new_id);
                 }
-                2 => {
+                PaletteAction::SearchPages => {
                     g.set_search_open(true);
                 }
-                3 => g.set_sidebar_open(!g.get_sidebar_open()),
-                4 => g.set_dark(!g.get_dark()),
-                5 => g.set_settings_open(true),
-                6 => {
+                PaletteAction::ToggleSidebar => g.set_sidebar_open(!g.get_sidebar_open()),
+                PaletteAction::ToggleTheme => g.set_dark(!g.get_dark()),
+                PaletteAction::Settings => g.set_settings_open(true),
+                PaletteAction::RenamePage => {
                     g.set_renaming_id(g.get_sidebar_selected_id());
                 }
-                7 => {
+                PaletteAction::DuplicatePage => {
                     let cur = s.open_page.get();
                     if let Some(new_id) = s.duplicate_page(cur) {
                         open(&g, &s, new_id);
                     }
                 }
-                8 => {
+                PaletteAction::DeletePage => {
                     let cur = s.open_page.get();
                     if s.workspace.borrow().contains(cur) {
                         let (_t, message) = s.delete_dialog_text(cur);
@@ -578,20 +586,13 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                         g.set_dialog_open(true);
                     }
                 }
-                // fully qualified on purpose: a bare identifier in a match
-                // pattern silently becomes a catch-all binding when its
-                // import is missing (that exact bug shadowed every command
-                // with id >= 9 for one round — rustc warns, tests don't walk
-                // this dispatch)
-                crate::app::state::CMD_EXPORT_PAGE => export_current_page(&g, &s),
-                crate::app::state::CMD_IMPORT_MD => import_markdown_dialog(&g, &s),
-                crate::app::state::CMD_COPY_MD => copy_current_page_markdown(&g, &s),
-                crate::app::state::CMD_NAV_BACK => navigate(&g, &s, false),
-                crate::app::state::CMD_NAV_FORWARD => navigate(&g, &s, true),
-                other if other >= crate::app::state::CMD_PAGE_BASE => {
-                    open(&g, &s, other - crate::app::state::CMD_PAGE_BASE);
-                }
-                _ => {}
+                PaletteAction::ExportMarkdown => export_current_page(&g, &s),
+                PaletteAction::ImportMarkdown => import_markdown_dialog(&g, &s),
+                PaletteAction::CopyMarkdown => copy_current_page_markdown(&g, &s),
+                PaletteAction::NavigateBack => navigate(&g, &s, false),
+                PaletteAction::NavigateForward => navigate(&g, &s, true),
+                PaletteAction::OpenPage(page) => open(&g, &s, page),
+                PaletteAction::None => {}
             }
         });
     }
@@ -1779,6 +1780,24 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
             }
             s.rename_page(cur, &title);
             g.set_page_title(title.into());
+            // Enter from the title of an empty page lands the caret in the
+            // body — which on such a page means making it exist first.
+            if s.blocks.row_count() == 0 {
+                if let Some(id) = s.start_page() {
+                    focus_block(&g, &s, id, 0);
+                }
+            }
+        });
+    }
+
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_empty_page_started(move || {
+            let g = gw.upgrade().unwrap();
+            if let Some(id) = s.start_page() {
+                focus_block(&g, &s, id, 0);
+            }
         });
     }
 

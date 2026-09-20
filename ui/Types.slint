@@ -259,6 +259,10 @@ export global UIState {
     callback find-close();
     callback title-commit(string);
     callback title-cancel();
+    // A page with no blocks shows a panel instead of rows, and every insert
+    // command is anchored to a block that does not exist yet. This is that
+    // panel's front door: make the first paragraph and put the caret in it.
+    callback empty-page-started();
     callback open-link(string);
     callback palette-query-changed();
     callback palette-open-requested();

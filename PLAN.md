@@ -991,3 +991,235 @@ matrix / dbg / imgbench / integrity / ab / lan / d9 / attachments 这些一次�
 目录的形状（pid 从名字里挪进目录名），而 `file` scene 的行标签正是从那次导入得出
 的，所以复扫一遍 40 个 scene 对照 `.scratch/sweep8`：**changed 0 / identical 40**。
 基线不变，`gif` 那条特性与选择器条目也就此确认没有把任何一张图挪动过。
+
+## M10 批次 B · slice 4 — table 网格（2026-09-20，on `master`，ADR-0031）
+
+批次 B 的第一条。SPEC §三十七 写死它是「简单表格，不是 Database」，所以这条 slice
+的全部设计压力都落在一个点上：**怎么让网格不变成第二套内容模型**。
+
+**改动面**（§三十七 的六处接线）：`BlockKind::Table` + `BlockKind::TableCell`
+（`as_str` = `"table"` / `"table_cell"`）；schema **v8**，`blocks.columns INTEGER
+NOT NULL DEFAULT 0`，`add_columns_column` 一步；`Command` 四条
+`TableAddRow` / `TableAddColumn` / `TableDeleteRow` / `TableDeleteColumn`，但它们在
+`plan()` 里全部摊成一串普通的 `BlockInserted` / `BlockDeleted` / `BlockTextSet`
+外加唯一一个新 `Change`——`BlockColumnsSet`；`Types.slint` 加 `TableCell` struct，
+`BlockRow` 复用 v8 那个 `columns: int`（kind 16 = table、18 = columns 的栏数）并加
+`table-cells`；新组件 `TableBlock.slint`（画整张网格并
+宿主那一个活的 `TextInput`）与 `TableEdge.slint`（hover 边缘条，Add row / Add
+column / Delete row / Delete column）；`UIState.table-cell-move` 走 Tab /
+Shift-Tab；slash、insert（+）、Turn into 三个菜单各一行；Markdown 导出 GFM 表格；
+scene `table` 与 `table-edit`。
+
+**四个决定**：
+
+1. **格子是子块，不是 payload**。三条路里选的最窄的一条：JSON blob 会让格子不再是
+   块，于是 inline marks、undo 粒度、§三十九 的 relation/rollup 全得在模型外面重造
+   一遍；真·每行一条记录的 schema 是 §三十九 的活，而 SPEC 明说这个 kind **不是**
+   数据库视图。子块只多花一列整数，其余全部复用。代价是 `rows` 不能存，只能派生
+   （`cells / columns`），所以行主序的 `order` 是这套结构唯一的责任人。
+2. **整张网格占一个编辑器行**。`visible_block_indices` 把格子从 rows 里删掉——
+   与 ADR-0028 藏折叠子树同一个过滤器、同一个位置。这张表因此不论多大都只花一条
+   delegate，而 §十二 的虚拟化前提不被破坏。
+3. **加列是这轮唯一真正的难点**：它要在 `rows` 个不同的缝里同时插 `rows` 个块。
+   `OrderKey::STRIDE` 定成 `1 << 16`、`renumber_page` 改用同一个 stride 铺开，就是
+   为了这个批量——每插一个就取一次中点会把缝对半砍掉，缝很快就没了。新助手
+   `keys_between` / `keys_in_gaps` 一次算完整批。
+4. **残缺网格只读**。`grid()` 见到 `cells % columns != 0` 直接 `None`，`plan()`
+   于是拒绝一切编辑——与其猜哪一行缺了，不如不动。`DuplicateBlock` 对这种表也拒绝
+   复制，因为没有格子的网格一打开就是坏的。
+
+**这一轮翻出来的一个老缺陷**：`DocumentRow.head` 绑了 `height` 却没绑 `y`，而
+Slint 对这种子元素做的是**在父元素里垂直居中**。M1 起每个 scene 的页面标题就一直
+画在它绑定位置的下面 ~34 px，只是以前的首块全是一行高，居中量看不出来；table 是
+第一个「高的首块」，于是网格直接压在标题上（~60 px）。显式写 `x: 0px; y: 0px;`
+修掉。同一条 scene 复扫时又发现 `absolute-position` 在 ListView delegate 里不可信
+（row 1 报出自己的 head 在自己的 body 下面，而两者 `y` 都是 0），真实几何只能用
+`parent.y + head.height`，也就是 `row-y` 已经在往下传的那个值。两条都记进
+`docs/UI_ARCHITECTURE.md` 的「Slint geometry traps」。
+
+**验证**：`cargo check --all-targets` 干净、`cargo test` 全绿、`cargo build --release`
+exit 0。本 slice 新增的代表性测试：`command.rs` 侧 `a_line_becomes_a_grid_that_holds_its_words`、
+`adding_a_column_puts_one_cell_in_every_row`、`cells_key_into_one_gap_as_a_batch`、
+`a_ragged_grid_is_not_editable`、`every_row_index_consumer_shares_the_one_visible_list`、
+`flattening_a_grid_gives_the_words_back_as_paragraphs`、`undoing_a_table_delete_brings_the_grid_back`；
+`storage_test.rs` 的 `a_grid_and_its_cells_round_trip_through_storage` 与
+`the_v8_step_adds_columns_to_a_v7_database`；`markdown_test.rs` 四条（GFM 带表头、
+格子里的 marks 与转义、空格子导出成空、以及 `|a|b|` **导入回段落**这条反直觉的边界）。
+
+**RAM**（release `quire.exe`，原始行 `benchmarks/results/2026-09-20-m10-table-ram.jsonl`）：
+D 10 000 blocks 130.8–131.0 / 104.5–105.7 = **1.08×**，A 空壳 124.8–125.3 / 96.7–98.3。
+门槛 ≤1.2× 守住。两个值得记的点：一是与上一批比 A +4.1…6.1、D +4.2…4.5，**两臂同向
+同幅**，所以那笔移动不是表格的钱（空壳里一个网格都没有），记为 session drift；
+二是这批里唯一可归因的 A/B——投影里 `table_cells` 不加 `kind == Table` 保护时，
+每行都扫一遍页面并分配一个空 `VecModel`，D 高 ≈2 MB WS / ≈2.5 MB private，A 在自己
+的散布内不动（空壳只有 24 行，付 24 次）。启动时间两臂都没动（475–525 vs 498–552 ms），
+因为 `startup_ms` 停在窗口句柄那里，而投影发生在那之后——保护留着是因为内存读数加
+渐近线，不是因为某个数字动了。
+
+**像素**：`--hover x,y` 是这条 slice 给 `quire-shot` 加的能力（只发 `PointerMoved`
+不按下），因为边缘条只活在 hover 上，这是唯一的 headless 路子。`table` /
+`table-edit` 进 sweep，22 px 那条边缘条另有手工 `--hover` 一张。标题居中的修复
+**重基线了 42 个 scene 里的 37 个**（`.scratch/sweep10`），判法是新工具
+`benchmarks/scripts/diffbbox.ps1 -OldDir A -NewDir B`：逐 scene 打印变化像素的
+bounding box，37 个框全部落在标题带里，于是一个结论管住整套，而不是看 37 张图。
+投影保护那次复扫（`.scratch/sweep11`）**42/42 逐字节相同**，所以它是内存改动不是
+视觉改动。
+
+**未验证**：格子内 Ctrl+L（链接）没接；Enter 不拆格、退格不并格、上下键不跨行，
+只有 Tab / Shift-Tab 走格；带 marks 的一行 Turn into 成表格时字留下、marks 丢掉；
+hover 时边缘条作为一行挤进布局，所以表格下方内容在指针停留时下移 22 px。这些全写
+进 CHANGELOG 的 Known limitations 与 SPEC 批次 B 的边界条目，不当缺陷处理。
+
+**下一步**：批次 B 剩下的 columns。
+
+## M10 批次 B · slice 5 — columns 分栏（2026-09-20，on `master`，ADR-0032）
+
+批次 B 收尾。**这一条没有新迁移**：栏数就存在上一条为网格开的那个
+`blocks.columns` 里。理由与 ADR-0030 对 v7 的说法同一个——「这个容器有几个栏」和
+「这个网格有几列」是同一个事实，为一个改名付一次迁移不值。
+
+**改动面**：`BlockKind::Columns` + `BlockKind::Column`；`Command` 三条
+`ColumnsAddColumn` / `ColumnsDeleteColumn` / `ColumnsAddBlock`，同样摊成子块的
+增删改 + 一个 `BlockColumnsSet`；`Types.slint` 两个 struct——`ColumnItem`（一个摊平
+的 `[ColumnItem]`，带 `column` / `depth` / `kind` / `text` / `runs` / `checked` /
+`number` / `folded` / `color` / `bg` / `attachment`）与 `ColumnBox`（`id` /
+`column` / `first` / `size`，形状表）；新组件 `ColumnsBlock.slint` 与
+`ColumnItemRow.slint`；`UIState.column-item-move`（Tab / Shift-Tab 在栏间走字）与
+`column-fill`（空栏的点击）；slash / insert / Turn into 三处；Markdown 导出摊平成
+页面级段落；scene `columns` 与 `columns-3`。
+
+**三个决定**：
+
+1. **layout 的内容画在 layout 自己那一行里**。Slint 没有递归组件，一个栏不可能装
+   一个 `EditorBlock` 而后者又装栏，所以唯一能画的地方就是 layout 那一条 delegate
+   ——这恰好就是 §三十七 那句「分栏只在可见窗口内展开」要的，也是 §十二 虚拟化前提
+   要的。`visible_block_indices` 把栏和栏里的行一起藏掉。
+2. **平铺交给 `FlexboxLayout`**（单行、`flex-wrap: no-wrap`、`alignment: stretch`、
+   每格 `horizontal-stretch: 1`），不自己写宽度。SPEC 批次 B 本来就点名要这条。
+3. **空栏必须能被点开**。一页上只有这一种东西是指针能命中而光标进不去的，所以它
+   写「Empty column」，点它 = `ColumnsAddBlock` 给它第一个段落，而不是让点击静默。
+
+**两条 QOML 的坑**（都进 UI_ARCHITECTURE.md）：`for … : if … : Component` 是解析
+错误，所以「过滤后的重复」只能做成形状表让 delegate 自己切片（`ColumnBox.first` /
+`size`）；组件实例化里 property 右侧的标识符是在**外层**组件解析的，所以子组件拿不到
+自己父母的 `root.x`——layout 只能用普通名字往下传 `line-y` / `line-x` /
+`each-width`。另外 ADR-0031 那套「指针认领」协议在这里跨了一次组件边界，变成
+`in property pointer` + `callback pointer-claimed(int)`，因为 N 个子组件写两条
+双向绑定指向父组件同一条 property，Slint 不让写。
+
+**顺手修掉的一个真 bug**：`InsertBlockAfter` 以前把 `parent` 强制成 `None`，并且以
+容器自己那一行作为落点。于是一个「+」或者「Paste below」可以把一个顶层块塞进容器
+的子树里——而一页的块是按 `order` 排的一片平铺，**子树不连续的容器就不再是一个容器**：
+`subtree()` 会走过去，所有按索引读的地方跟着一起错。现在它按锚点的 kind 分岔：容器
+之后插在整棵子树之后，槽位（`TableCell` / `Column`）直接拒绝，其余地方继承锚点的
+parent。这条同时把网格上同一个洞补了。另一个是「/」菜单的锚定写死了 350 px 的窗口
+预留，这批加了一种块就溢出窗口下沿，改成按「+」菜单已有的办法量自己的高度。
+
+**验证**：`cargo check --all-targets` 干净；`cargo test` 全绿 **288 passed / 0 failed /
+4 ignored**；`cargo build --release` exit 0 且**零警告**。本 slice 新增的代表性测试：
+`a_line_becomes_a_layout_that_holds_its_words`、
+`adding_a_box_gives_it_a_line_and_deleting_one_reflows_its_words`、
+`an_empty_box_takes_the_click_as_a_request_for_a_line`、
+`editing_inside_a_box_stays_inside_it`、
+`a_layout_copy_carries_its_own_boxes`、`undoing_a_layout_delete_brings_its_boxes_back`、
+`a_box_is_not_a_prose_block`；`markdown_test.rs` 四条（按阅读顺序摊平、嵌套也摊平、
+空 layout 导出成空、往返只丢形状不丢字）；`storage_test.rs` 的
+`a_columns_layout_and_its_boxes_round_trip_through_storage`。
+
+**RAM**（原始行 `benchmarks/results/2026-09-20-m10-columns-ram.jsonl`）：D 10 000
+135.5–137.0 / 109.9–110.7 = **1.13×**，A 126.5–127.0 / 98.4–99.6 = 1.11×。门槛内，
+但这是这批离门槛最远的一次。归因写得很清楚：投影只给 `kind == Columns` 的行建那两条
+模型，其余行拿 `ModelRc::default()`——Slint 1.18 里它是 `ModelRc(None)`，
+`i-slint-core-1.18.0/model.rs:891` 查过，**不分配**——所以一页没有 layout 时每行多
+的只是两个 8 字节指针，一万行 ≈160 KB，而 D − A 涨了 ≈3.5 MB。算术到不了读数，
+所以读数记成 drift 不认领。**而这已经是连续第四批同向漂移**（A 116.5 → 127.0，
++10.7 MB），于是门槛本身的方法成了结论：拿另一个 session 的矩阵当分母，比值里有一半
+是 session。PERFORMANCE.md 里写下的是修法而不是放宽阈值——**下一条 kind 欠一个同
+session 的 control build**（把 slice 前一个提交单独编到自己的 target dir，两臂一次测完），
+ADR-0031 的投影保护就是这么定下来的。
+
+**像素**：sweep 长到 44 个 scene（`.scratch/sweep12`）。`columns` 与 `columns-3`
+是这对平铺场景，1 111 个差异像素全部落在 layout 自己那条带子里；另外三个菜单 scene
+动了，因为列表多了一行。判法依旧是 `diffbbox.ps1` 的框，不是眼看 44 张图。
+
+**未验证**：栏宽不能拖（Notion 的 resize handle 没做）、三栏以上不做、栏里再套 layout
+不做；栏内 ↑/↓ 只动光标不出 layout，出栏靠点击。Markdown 导入侧本来就没有分栏语法。
+
+**下一步**：批次 A 欠的三样（PDF 首页缩略图按用户指示仍推迟、剪贴板位图粘贴要在
+`platform/` 里读 `CF_DIBV5`、孤儿附件的 GC），以及那条欠了两批的「一万块 + 一屏媒体」
+滚动场景；批次 B 本身已收完。
+
+## M8 tail · A4 收尾批 — 空页面、调色板分发、模态遮罩（2026-09-21，on `master`，ADR-0033 / ADR-0034）
+
+M10 批次 B 收完之后，回到 M8 那条 A4 缺陷清单。这一批把里面**能靠代码关掉的四条**
+关掉了，其中一条比它的标题严重得多。
+
+**改动面**：`Command::AppendBlock { kind, text }`（`plan()` 里拒绝容器 kind，落点是
+`page_blocks(page).last()` 的 order 之后）；`AppState::start_page()`；`UIState`
+回调 `empty-page-started`；`Editor.slint` 空状态面板加 `TouchArea` + 换文案；
+`on_title_commit` 里零行页面提交标题后顺手起一行；`PaletteAction` 枚举 +
+`palette_action(id)` + controller 里那条**没有 wildcard arm** 的 `match`；
+`AppShell.slint` 的 `modal-open` 与 `Colors.scrim`；Toggle Sidebar 从
+`Control+B` 改 `Control+BackSlash`（`AppWindow.slint` 的 `KeyBinding`、Settings 的
+`ShortcutRow`、palette 的 hint 三处一起改）；demo 页占位段落那句
+「SQLite persistence lands with the next milestone」改成现在真实的行为。
+
+**四条决定**：
+
+1. **空页面自己造第一块，而不是在 create/open 时塞一块**。清单上写的是「文案过期」，
+   实际是死路：每条插入命令都要一个锚点 `BlockId`，而 `create_page` 和 `open_page`
+   都不播种子块，所以新建的页面**根本打不了字**。修法有三种——建页时塞一块、开页时
+   塞一块、页面被明确要求写时自己长出来。前两种会让每次取消掉的「New page」在库里留
+   一个空块，第二种还会让空状态永远不可达（并撞掉那条断言新页面投影 0 行的
+   workspace 测试）。选了第三种：`AppendBlock` 是这条路的正门，一次撤销就能回到空。
+2. **调色板的 id 空间在 Rust 里解码**。原来 controller 是 `match id { 1 => … }`，
+   常量没 import 就在 pattern 位置变成 catch-all binding——`aaa3763` 之前 id ≥ 9 的
+   每一行都在跑 `copy_current_page_markdown`，测试全绿，因为没有任何东西走这条分发。
+   ROADMAP 里那句「durable repair 还没写」要的是一个覆盖命令注册表的测试，而测试要
+   能存在，映射必须先是**一个函数**：`palette_action()` 返回枚举，`match` 不留
+   wildcard，加一条命令忘了加一个 arm 就是编译错误。
+3. **遮罩只给模态**。dialog / Settings / Add link 是模态，压 `Colors.scrim`；slash、
+   「+」、⋮⋮、Move to、palette、search 是**锚定 popup**，故意不压——一个让你给某一行
+   选类型的菜单，把那一行藏起来没有道理。锚定 popup 本来就靠 click-outside 自己关，
+   全窗口那块 Rectangle 留着当 `UIState` 失同步的兜底，非模态时它是 transparent。
+   规则写进 `docs/UI_ARCHITECTURE.md` §"Overlay layering"。
+4. **Ctrl+B 只属于 bold**。同一个和弦在两处标着两件事，是清单上的 LOW；挪到 Ctrl+\
+   而不是挪 bold，因为 bold 是别的编辑器都这么写的，而侧栏开关本来就少人记。
+
+**验证**：`cargo check --all-targets` 干净；`cargo test --all-targets` 全绿 **293
+passed / 0 failed / 4 ignored**；`cargo build --release` 零警告。本批新增测试：
+`an_empty_page_takes_one_paragraph_and_undo_empties_it_again`、
+`appending_lands_below_a_containers_whole_subtree`、
+`a_grid_or_a_layout_is_not_a_bare_append`、
+`every_palette_row_resolves_to_its_own_action`（走 `mock_commands()`，断言每行都
+解析到**自己那条**动作、非页面动作互不重复、没有一行落到 `None`）、
+`a_jump_row_carries_its_page_id_and_an_unknown_id_does_nothing`（0 / 14 / 9 999 / −1）；
+`workspace_test.rs` 里 `create_then_open_page_lands_empty` 现在接着断言
+`start_page()` 恰好给出一行、且 id 与返回值一致。
+
+**像素**：`.scratch/sweep13` 对 `.scratch/sweep12`（44 scene）——38 张字节相同，
+6 张动了，每张的 bbox 都能被这条改动解释：`empty` 724 个采样像素全在
+x 506..1032 / y 456..466（只有文案那一行）、`palette` 7 个像素（hint 的和弦）、
+`link` / `dialog` / `settings` / `dark-link` 整窗（遮罩；`settings` 另外因为多一条
+`ShortcutRow` 长了一截）。行为不看像素，看那条注册表测试——**这次修的东西本身只动了
+7 个像素**，正好是「绿的视觉门只证明画法、不证明行为」的现场教材。
+`--scene empty --click 640,458` 单独一张（`.scratch/a4fix/empty-clicked.png`）证明
+点击真的建出了带光标的聚焦首行。改完 demo 文案后再扫一遍（`.scratch/sweep14` 对
+sweep13）：**0 / 44 动**，所以 ADR 里那句「这段字在任何 scene 里都不出现」是读数而不
+是断言。
+
+**RAM**：本批不欠 bench——没有新 kind、没有新 schema 列、没有新的每行状态，
+`AppendBlock` 只在零行页面上跑。批次 B 欠的那个**同 session control build** 仍然欠着，
+记在下一条 kind 头上。
+
+**未验证**：`--click` 那张图没有走真实键盘，输入第一句话之后的换行/撤销链没测；
+Enter-in-title 起行只测了「零行页面」这一支，非空页面提交标题不动块列表这件事靠的是
+`row_count() == 0` 这个条件本身；遮罩在 dark 下几乎看不出来（背景本来就暗），好不好看
+要人眼看一次；A4 剩下的 1 HIGH（带 inline mark 的段落不折行）、1 MEDIUM（find 在失焦
+块上算得 16 次却一个都不画）、LOW（最暗提示行、最弱配色对）与 `renderer_name()` 那条
+编译期限制，都不在这批。
+
+**下一步**：先请用户手测一次（新建页面 → 点空面板 → 打字 → Ctrl+Z；Ctrl+\ 开合侧栏；
+打开 Settings 看遮罩），然后进批次 C 的第一条。批次 C 的两条硬限制在开工前已经查清：
+Slint 1.18 没有 `Text.rich-text`，语法高亮只能走已有的单行 runs 通道；TOC 的点击跳转
+没有可靠机制（没有 focus 自动滚动，`ListView.bring-into-view` 假设等高行）。

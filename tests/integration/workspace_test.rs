@@ -1,7 +1,7 @@
 // Integration tests: exercise the workspace model and the state projection
 // through the public crate API, the way a future `core/` consumer would.
 
-use quire::app::state::{core_page_id, AppState, HandleArgs, PAGE_GETTING_STARTED};
+use quire::app::state::{core_page_id, AppState, HandleArgs, BLOCK_PARAGRAPH, PAGE_GETTING_STARTED};
 use quire::app::workspace::Workspace;
 use slint::Model;
 
@@ -78,6 +78,14 @@ fn create_then_open_page_lands_empty() {
     assert_eq!(state.open_page.get(), id);
     assert_eq!(state.blocks.row_count(), 0, "new page shows the empty state");
     assert_eq!(state.workspace.borrow().title_of(id), Some("Untitled"));
+    // ...and the empty state is not a dead end: it can make its own first
+    // row, which is the only insert in the app with nothing to anchor on
+    let started = state.start_page().expect("the empty page takes a paragraph");
+    assert_eq!(state.blocks.row_count(), 1);
+    let row = state.blocks.row_data(0).unwrap();
+    assert_eq!(row.id, started);
+    assert_eq!(row.kind, BLOCK_PARAGRAPH);
+    assert!(row.text.is_empty());
 }
 
 #[test]

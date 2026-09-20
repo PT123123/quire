@@ -65,6 +65,27 @@ direct `Ic*` components for hot paths). No component hard-codes a second
 "8px". Zero-length path segments are forbidden — the software renderer
 drops them (see `Icons.slint` comment).
 
+## Overlay layering
+
+Two tiers, and the scrim is what separates them (`AppShell.slint`'s
+`modal-open`): a **modal** — the delete confirm, Settings, the Add-link card —
+owns the window, so it is drawn over `Colors.scrim` (`#00000059`), which dims
+everything below it including the title bar's neighbours. An **anchored popup**
+— slash, the "+" insert menu, the block menu, Move to, palette, search, the
+page context menu — points at the block or row you are still working on, so it
+gets no dim: dimming the page behind a menu that is asking you to pick a type
+for *that* line hides the line. Anchored popups instead auto-dismiss on a click
+outside themselves (the engine swallows that outside click while a popup is
+open), and `AppShell`'s full-window `Rectangle` + `TouchArea` stay in place for
+every overlay flag as the safety net against a `UIState`/popup desync — the
+Rectangle is simply `transparent` unless a modal is up.
+
+The empty-page panel is the one click target that is not an overlay: it is a
+`TouchArea` inside `Editor.slint` whose only job is to fire
+`UIState.empty-page-started()` so Rust can append the page's first block
+(ADR-0033). Keep it enabled whenever the page projects zero rows — a page you
+cannot click into is the defect that ADR-0033 exists to prevent.
+
 ## Visual regression
 
 `just shot <scene>` renders the real UI headlessly through the software

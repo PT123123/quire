@@ -104,6 +104,9 @@ First functional release: a local, single-file-database notes workspace.
 - Every popup (page menus, ⋮⋮ menu, slash menu, command palette, search)
   dismisses on a click outside it and on Escape; UI state follows so
   nothing stays blocked behind an already-closed menu
+- Modals — the delete confirm, Settings, the Add-link card — now dim the window
+  behind them. Anchored popups deliberately still do not: a menu that asks you
+  to pick a type for one line should not hide that line
 - The "/" block menu now measures its own height when it picks where to sit, so
   a long list stays inside the window instead of running off the bottom edge as
   soon as another kind is added to it
@@ -113,6 +116,11 @@ First functional release: a local, single-file-database notes workspace.
 - Inline marks: bold (Ctrl+B), italic (Ctrl+I), inline code (Ctrl+E),
   strikethrough (Ctrl+Shift+X), links (Ctrl+L + dialog; click a link to
   open it — internal quire:// links navigate in-app)
+- Toggle the sidebar with Ctrl+\ — it had been Ctrl+B, which is bold, so the
+  same chord was labelled two different things in two different places
+- A brand-new page can be written in: click the "This page is empty" panel, or
+  press Enter in the title, and the page makes its own first paragraph, focused
+  and one undo step away from gone (ADR-0033)
 - Per-page find bar (Ctrl+F) with hit counter and selection navigation
 - Undo/redo (Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z) — per page, command-based
 
@@ -183,6 +191,12 @@ First functional release: a local, single-file-database notes workspace.
   bounding box of the pixels that moved between two sweeps. A re-sweep is
   judged from that table rather than from 42 pictures: when every box lands
   inside the band the change explains, one verdict covers the set
+- The command palette's ids now resolve through `palette_action()` in Rust, and
+  its dispatch is a `match` with no wildcard arm, so a new command that skips a
+  variant is a compile error. A test walks the real command registry and asserts
+  every row resolves to its own distinct action — the class of bug that once
+  shipped with every palette row from id 9 up running one action, green tests
+  and all (ADR-0034)
 
 ### Known limitations
 - Switching directly from one open menu to another (e.g. ⋮⋮ on a different
@@ -190,9 +204,9 @@ First functional release: a local, single-file-database notes workspace.
   dismisses the open popup (standard Slint popup semantics)
 - A menu taller than the window (e.g. Move-to in a large workspace)
   overflows the bottom — the anchor clamps but the list does not scroll
-  yet. The Settings dialog has the same shape at 1280x800: its shortcut
-  tail, ABOUT and the Done button fall below the bottom edge, so Esc is
-  the way out
+  yet. The Settings dialog no longer has that shape: it fits 1280x800 with
+  its shortcut list, ABOUT and Done on screen, and the sidebar chord is now
+  one of the rows it lists
 - Block colors are cosmetic: they do not survive a Markdown export/import
   round trip, and Callout blocks export as quotes
 - Inline-mark paragraphs render runs on one line (no cross-run reflow —

@@ -2,6 +2,82 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0033 · An empty page writes its own first block
+
+Decision: the M8 A4 item filed as "the empty state still says the block editor
+arrives in a later milestone" was a functional dead end, not stale copy, and it
+is closed with a new command. `Command::AppendBlock { kind, text }` puts one
+block at the end of the page with no anchor; `AppState::start_page()` calls it
+with an empty paragraph and hands back the new id so the controller can focus
+it. Two doors use it: the empty panel is now a `TouchArea` (`empty-page-started`),
+and committing the page title on a page with zero rows starts the first block
+under it. Both are one undo step, and `plan()` refuses a container kind, the
+same rule `InsertBlockAfter` carries.
+
+Why: every existing insert command takes an anchor `BlockId` — after a block,
+into a table cell, into a column box — and a page with no blocks has nothing to
+anchor to, so `create_page` produced a page that could not be typed into at all
+(`open_page` seeds nothing either). The alternative fixes were worse: seeding a
+paragraph at `create_page` would litter the library with empty blocks on every
+cancelled "New page", and doing it at `open_page` would make the empty state
+unreachable and break the workspace test that asserts a fresh page projects zero
+rows. Making the page produce its own first row on the user's explicit
+interrupt keeps the document honest — a page is empty until someone means to
+write in it.
+
+Consequences: the empty state's copy is now an instruction ("Click here to
+write, or press Enter in the title above.") and the panel must stay a click
+target, so it cannot be turned back into a passive placeholder. Chasing that
+one string surfaced a second stale promise of the same family in the demo
+pages' placeholder paragraph — "changes live in memory for now; SQLite
+persistence lands with the next milestone", false since M3 — now rewritten as
+what actually happens; it is fixture text in the memory-only session the shot
+harness runs, so it moves no scene pixels and no sweep can confirm it.
+`AppendBlock` is deliberately
+page-scoped and always appends — it is not a general "insert at position" and
+does not become one; the 10 000-block page's "+" and Enter paths still go
+through the anchored commands. Verified headlessly: 3 command tests (empty page
+takes one paragraph and undo empties it again, an append lands below a
+container's whole subtree, a grid or a layout is refused), the workspace test
+now asserts `start_page()` yields exactly one row with the returned id, and the
+click is proven on pixels — `quire-shot --scene empty --click 640,458` renders
+the title plus one focused empty row with a caret where the panel used to be.
+The sweep's `empty` scene moved 724 sampled pixels, all inside x 506..1032 /
+y 456..466, i.e. only the copy line.
+
+## ADR-0034 · Palette ids resolve through a Rust function the tests can walk
+
+Decision: the command palette's integer id space is now decoded by
+`palette_action(id) -> PaletteAction` in `src/app/state.rs`, and the
+controller's dispatch is a `match` over that enum **with no wildcard arm**. The
+`OpenPage(i32)` case carries the page id; an id that is neither a declared
+command nor ≥ `CMD_PAGE_BASE` maps to `PaletteAction::None`. Two tests guard it:
+one walks `mock_commands()` and asserts every row resolves to its own distinct
+action (and no row to `None`), the other pins the boundaries (0, 14, 9 999, −1).
+
+Why: the palette rows arrive in Rust as a bare `i32`, and the dispatch used to
+be `match id { 1 => …, 2 => … }` with the named constants written as bare
+identifiers. A constant that is not imported silently becomes a *catch-all
+binding* in pattern position, so `aaa3763` shipped with every id ≥ 9 running
+`copy_current_page_markdown` — no page could be opened from the palette — while
+`cargo test` stayed green because nothing walked the dispatch. rustc warned
+(unreachable pattern) and the warning was the only correct signal in the
+pipeline. The repair ROADMAP.md:81 named as "still not written" is a test over
+the registry, and a test can only exist if the mapping is a function: an enum
+arm that cannot be shadowed by a missing `use`, and a match the compiler forces
+to stay exhaustive when a variant is added.
+
+Consequences: adding a palette command is now three edits in one file (a
+constant, a `PaletteAction` variant, an arm) plus the action's body in the
+controller, and forgetting the middle one is a compile error rather than a
+silent hijack. The id constants stay in `state.rs` because that is where
+`mock_commands` builds them. This closes the class for the palette only — any
+other callback that crosses the Slint boundary as a bare `i32` has the same
+exposure, so a future one should ride an enum the same way. Proven by the
+registry test rather than by pixels: this fix changes 7 sampled pixels in the
+`palette` scene (the sidebar hint now reads `Ctrl+\`), which is exactly the
+evidence that a green visual sweep says nothing about behaviour.
+
 ## ADR-0032 · A layout is two levels of ordinary blocks, and it draws itself inside its own row
 
 Decision: `columns` (SPEC §三十七 批次 B, M10's fifth slice) stores a layout as

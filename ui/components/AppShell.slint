@@ -25,6 +25,14 @@ export component AppShell inherits Rectangle {
         || UIState.slash-open
         || UIState.block-menu-open-id >= 0;
 
+    // The three cards that block the page underneath them, as opposed to the
+    // popups that hang off an element the user is already looking at. Only
+    // these dim the page: an anchored menu with a dark band behind it reads
+    // as a rendering fault, not as focus.
+    property <bool> modal-open: UIState.dialog-open
+        || UIState.settings-open
+        || UIState.link-open;
+
     VerticalLayout {
         TopBar {
             minimize-requested => {
@@ -82,7 +90,9 @@ export component AppShell inherits Rectangle {
         width: parent.width;
         height: parent.height;
         visible: root.overlay-open;
-        background: transparent;
+        // a modal over an undimmed page reads as a card pasted onto your
+        // text (A4 LOW); an anchored popup keeps the page as-is
+        background: root.modal-open ? Colors.scrim : transparent;
         scrim-ta := TouchArea {
             enabled: root.overlay-open;
             clicked => {

@@ -114,6 +114,16 @@ ColumnsAddBlock { id }
   anchor's parent — it used to force `None` — so a "Paste below" or a "+" on a
   nested list item stays inside that list instead of promoting the new block to
   the page.
+- `AppendBlock` is the only command with no anchor, and it exists for exactly
+  one situation: a page whose row count is zero, where every anchored command has
+  nothing to point at. It appends one block after the page's last row in `order`,
+  which for a page ending in a container is after that container's *whole*
+  subtree — so an append can never land inside a folded section or a box by
+  accident. `plan()` refuses a container kind, the same
+  rule `InsertBlockAfter` carries. `AppState::start_page()` is its only caller,
+  from the empty-state panel's click and from committing a title on an empty page
+  (ADR-0033). Do not generalize it into "insert at position" — the anchored
+  commands stay the only path that knows where a block goes.
 
 ## Editing surface: one TextEdit, rest are Text
 

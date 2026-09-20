@@ -1515,6 +1515,21 @@ impl AppState {
         }
     }
 
+    /// The empty page's front door: put one paragraph on a page that has no
+    /// rows, and hand back its id so the caller can land the caret in it.
+    /// Every other insert is anchored to an existing block, so until this
+    /// existed a page with zero blocks could not be typed into at all.
+    pub fn start_page(&self) -> Option<i32> {
+        let changes = self.exec_on_open_page(Command::AppendBlock {
+            kind: BlockKind::Paragraph,
+            text: String::new(),
+        })?;
+        changes.iter().find_map(|ch| match ch {
+            Change::BlockInserted(b) => Some(b.id.0 as i32),
+            _ => None,
+        })
+    }
+
     pub fn paste_below(&self, id: i32) -> bool {
         let clip = self.clipboard.borrow().clone();
         let Some(c) = clip else { return false };
@@ -3359,7 +3374,7 @@ fn mock_blocks_generic(_title: &str) -> Vec<BlockRow> {
         block(BLOCK_DIVIDER, ""),
         block(
             BLOCK_PARAGRAPH,
-            "Use the sidebar to create, rename, duplicate, and delete pages — changes live in memory for now; SQLite persistence lands with the next milestone.",
+            "Use the sidebar to create, rename, duplicate, and delete pages — everything you type is written to a local SQLite library and is there again after a restart.",
         ),
         block(BLOCK_BULLET, "Ctrl+P searches every page, titles and content"),
         block(BLOCK_BULLET, "Ctrl+K opens the command palette"),
@@ -3446,6 +3461,53 @@ pub const CMD_NAV_FORWARD: i32 = 13;
 /// Jump-to-page commands are 10 000 + page id.
 pub const CMD_PAGE_BASE: i32 = 10_000;
 
+/// What a palette row means, resolved from its id in exactly one place.
+///
+/// The controller matches on this instead of on the raw id, and that match has
+/// no wildcard arm: the palette dispatch used to be a `match id` over numeric
+/// literals, and one constant whose import was missing turned its arm into a
+/// catch-all *binding* — every command with id >= 9 silently ran `CopyMd`
+/// (`aaa3763`). rustc warned, and nothing tested it. A row that maps to no
+/// action is now a compile error at the dispatch and a failed assertion here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaletteAction {
+    NewPage,
+    SearchPages,
+    ToggleSidebar,
+    ToggleTheme,
+    Settings,
+    RenamePage,
+    DuplicatePage,
+    DeletePage,
+    ExportMarkdown,
+    ImportMarkdown,
+    CopyMarkdown,
+    NavigateBack,
+    NavigateForward,
+    OpenPage(i32),
+    None,
+}
+
+pub fn palette_action(id: i32) -> PaletteAction {
+    match id {
+        CMD_NEW_PAGE => PaletteAction::NewPage,
+        CMD_SEARCH => PaletteAction::SearchPages,
+        CMD_TOGGLE_SIDEBAR => PaletteAction::ToggleSidebar,
+        CMD_TOGGLE_THEME => PaletteAction::ToggleTheme,
+        CMD_SETTINGS => PaletteAction::Settings,
+        CMD_RENAME_PAGE => PaletteAction::RenamePage,
+        CMD_DUPLICATE_PAGE => PaletteAction::DuplicatePage,
+        CMD_DELETE_PAGE => PaletteAction::DeletePage,
+        CMD_EXPORT_PAGE => PaletteAction::ExportMarkdown,
+        CMD_IMPORT_MD => PaletteAction::ImportMarkdown,
+        CMD_COPY_MD => PaletteAction::CopyMarkdown,
+        CMD_NAV_BACK => PaletteAction::NavigateBack,
+        CMD_NAV_FORWARD => PaletteAction::NavigateForward,
+        page if page >= CMD_PAGE_BASE => PaletteAction::OpenPage(page - CMD_PAGE_BASE),
+        _ => PaletteAction::None,
+    }
+}
+
 fn mock_commands(ws: &Workspace) -> Vec<CommandRow> {
     let mut v = Vec::new();
     let mut cmd = |id: i32, name: &str, hint: &str, section: &str, icon: &str| {
@@ -3462,7 +3524,7 @@ fn mock_commands(ws: &Workspace) -> Vec<CommandRow> {
     cmd(
         CMD_TOGGLE_SIDEBAR,
         "Toggle Sidebar",
-        "Ctrl+B",
+        "Ctrl+\\",
         "Interface",
         "panel-left",
     );
@@ -3524,7 +3586,10 @@ fn fuzzy_subsequence(query: &str, target: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{mock_commands, NavHistory, CMD_NAV_BACK, CMD_NAV_FORWARD, NAV_MAX};
+    use super::{
+        mock_commands, palette_action, NavHistory, CMD_NAV_BACK, CMD_NAV_FORWARD,
+        CMD_PAGE_BASE, NAV_MAX, PaletteAction,
+    };
     use crate::app::workspace::Workspace;
 
     /// A page's blocks in display order: a folded toggle with two children
@@ -3632,6 +3697,54 @@ mod tests {
             let row = cmds.iter().find(|c| c.id == id).expect("row present");
             assert_eq!(row.name.as_str(), name);
             assert_eq!(row.section.as_str(), "Navigate");
+        }
+    }
+
+    /// The whole registry, walked: every row must resolve to an action of its
+    /// own. This is the durable repair for `aaa3763`, where a missing import
+    /// turned one `match` arm into a catch-all binding and every row with id
+    /// >= 9 ran `Copy Page as Markdown` — green tests, because nothing walked
+    /// the registry until now.
+    #[test]
+    fn every_palette_row_resolves_to_its_own_action() {
+        let cmds = mock_commands(&Workspace::sample());
+        assert!(!cmds.is_empty());
+        let mut actions: Vec<PaletteAction> = Vec::new();
+        for row in &cmds {
+            let action = palette_action(row.id);
+            assert_ne!(
+                action,
+                PaletteAction::None,
+                "row {:?} (id {}) maps to no action",
+                row.name.as_str(),
+                row.id
+            );
+            if !matches!(action, PaletteAction::OpenPage(_)) {
+                assert!(
+                    !actions.contains(&action),
+                    "two rows share the action {action:?} — one of them is dead"
+                );
+                actions.push(action);
+            }
+        }
+        // the ids themselves are unique too, or the palette cannot select one
+        let mut ids: Vec<i32> = cmds.iter().map(|c| c.id).collect();
+        ids.sort_unstable();
+        let before = ids.len();
+        ids.dedup();
+        assert_eq!(ids.len(), before, "two palette rows carry the same id");
+    }
+
+    #[test]
+    fn a_jump_row_carries_its_page_id_and_an_unknown_id_does_nothing() {
+        assert_eq!(
+            palette_action(CMD_PAGE_BASE + 42),
+            PaletteAction::OpenPage(42)
+        );
+        // nothing between the command block and the page block, and nothing
+        // the palette could invent, may reach a handler
+        for id in [0, 14, 9_999, -1] {
+            assert_eq!(palette_action(id), PaletteAction::None, "id {id}");
         }
     }
 
