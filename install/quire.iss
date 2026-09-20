@@ -46,14 +46,9 @@ CloseApplications=yes
 [Files]
 Source: "{#AppExe}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
-; The 256 px icon frame make_icon.ps1 writes beside the .ico. Nothing loads it
-; at runtime today — Slint 1.18 has no Window::set_icon, so the taskbar and
-; Explorer identity come from the exe's embedded IDI_MAIN (build.rs), verified
-; end to end by install/verify-installer.ps1. Kept because M8_FEEDBACK's
-; window-icon plan is a `icon: @image-url("../install/quire.png")` property in
-; ui/, which embeds at compile time from the repo path; a loose copy in {app}
-; is therefore not required even then. Dropping the line is Track A's call.
-Source: "quire.png"; DestDir: "{app}"; Flags: ignoreversion
+; No loose icon asset: Slint 1.18 sets no window icon, so the taskbar and
+; Explorer identity come from the exe's embedded IDI_MAIN (build.rs), which
+; install/verify-installer.ps1 checks by pixel signature.
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"

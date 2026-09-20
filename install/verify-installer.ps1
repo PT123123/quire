@@ -45,9 +45,16 @@ Write-Output "setup: $($setup.Name) ($([math]::Round($setup.Length / 1MB, 2)) MB
 $p = Start-Process -FilePath $setup.FullName -PassThru -Wait -ArgumentList @(
     "/VERYSILENT", "/NORESTART", "/SUPPRESSMSGBOXES", "/DIR=$Dir", "/TASKS=assocmd")
 Write-Output "install exit: $($p.ExitCode)"
-foreach ($f in @("quire.exe", "README.md", "quire.png", "unins000.exe")) {
-    Write-Output ("  payload {0,-14} {1}" -f $f, (Test-Path (Join-Path $Dir $f)))
+$missing = @()
+foreach ($f in @("quire.exe", "README.md", "unins000.exe")) {
+    $ok = Test-Path (Join-Path $Dir $f)
+    Write-Output ("  payload {0,-14} {1}" -f $f, $ok)
+    if (-not $ok) { $missing += $f }
 }
+$gone = -not (Test-Path (Join-Path $Dir "quire.png"))
+Write-Output ("  dropped  {0,-14} {1}" -f "quire.png", $gone)
+if ($missing.Count -gt 0) { throw "missing payload: $($missing -join ', ')" }
+if (-not $gone) { throw "quire.png still ships after being dropped from [Files]" }
 
 # ---- (a) the installed binary runs -----------------------------------------
 $err = Join-Path $data "launch.err"
