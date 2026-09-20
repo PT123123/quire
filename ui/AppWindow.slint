@@ -499,6 +499,18 @@ export component AppWindow inherits Window {
                 UIState.save-requested();
             }
         }
+        KeyBinding {
+            keys: @keys(Alt + LeftArrow);
+            activated => {
+                UIState.nav-back-requested();
+            }
+        }
+        KeyBinding {
+            keys: @keys(Alt + RightArrow);
+            activated => {
+                UIState.nav-forward-requested();
+            }
+        }
 
         AppShell {
             minimize-requested => {

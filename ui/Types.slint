@@ -236,6 +236,10 @@ export global UIState {
     callback undo-requested();
     callback redo-requested();
     callback save-requested();
+    // Go Back / Go Forward through the session's page history (SPEC §十六).
+    // Alt+Left / Alt+Right take the same path the palette rows do.
+    callback nav-back-requested();
+    callback nav-forward-requested();
     callback slash-move(int);
     callback slash-apply-selected();
     callback slash-close();

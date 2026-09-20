@@ -31,7 +31,7 @@ $all = @(
     "default", "edit", "empty", "nest", "rename", "title-edit", "recovered",
     "find", "marks", "block-colors", "page-block", "link-block",
     "slash", "plus", "block-menu", "move-to", "page-move-to", "text-color",
-    "bg-color", "link", "menu", "palette", "search", "search-notes",
+    "bg-color", "link", "menu", "palette", "palette-nav", "search", "search-notes",
     "dialog", "settings",
     "dark", "dark-slash", "dark-find", "dark-marks", "dark-link",
     "dark-block-menu", "dark-block-colors", "dark-title-edit"

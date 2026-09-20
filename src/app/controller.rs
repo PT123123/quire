@@ -582,6 +582,8 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                 crate::app::state::CMD_EXPORT_PAGE => export_current_page(&g, &s),
                 crate::app::state::CMD_IMPORT_MD => import_markdown_dialog(&g, &s),
                 crate::app::state::CMD_COPY_MD => copy_current_page_markdown(&g, &s),
+                crate::app::state::CMD_NAV_BACK => navigate(&g, &s, false),
+                crate::app::state::CMD_NAV_FORWARD => navigate(&g, &s, true),
                 other if other >= crate::app::state::CMD_PAGE_BASE => {
                     open(&g, &s, other - crate::app::state::CMD_PAGE_BASE);
                 }
@@ -737,7 +739,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
             // a Page block is open-only: activating it opens the child page
             // (the row is never editable, so this is its whole interaction)
             if let Some(child) = s.block_page_ref(id) {
-                s.open_page(child);
+                open(&g, &s, child);
                 return;
             }
             let (text, len) = {
@@ -807,6 +809,24 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         let s = state.clone();
         ui.global::<UIState>().on_save_requested(move || {
             s.persistence_force_flush();
+        });
+    }
+
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_nav_back_requested(move || {
+            let g = gw.upgrade().unwrap();
+            navigate(&g, &s, false);
+        });
+    }
+
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_nav_forward_requested(move || {
+            let g = gw.upgrade().unwrap();
+            navigate(&g, &s, true);
         });
     }
 
@@ -1895,7 +1915,29 @@ fn open(g: &UIState<'_>, state: &Rc<AppState>, id: i32) {
     if !state.workspace.borrow().contains(id) {
         return;
     }
+    // the typing flush is debounced 300 ms and resolves against the open
+    // page, so commit it before the page under it changes
+    flush_pending_edit(g, state);
+    state.nav_record(state.open_page.get(), id);
     state.open_page(id);
+    show_open_page(g, state);
+}
+
+/// Go Back / Go Forward (SPEC §十六): move along the session's page history.
+/// `nav_step` already parked the page being left onto the opposite stack, so
+/// this must not record again.
+fn navigate(g: &UIState<'_>, state: &Rc<AppState>, forward: bool) {
+    flush_pending_edit(g, state);
+    let Some(id) = state.nav_step(forward) else {
+        return;
+    };
+    state.open_page(id);
+    show_open_page(g, state);
+}
+
+/// Paint the shell for whatever `state.open_page` now holds.
+fn show_open_page(g: &UIState<'_>, state: &Rc<AppState>) {
+    let id = state.open_page.get();
     let (title, crumb) = state.open_page_info(id);
     g.set_page_title(title.into());
     g.set_page_breadcrumb(crumb.into());
@@ -2198,6 +2240,13 @@ pub fn apply_scene_overlay(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
     let g = ui.global::<UIState>();
     match scene {
         "palette" => g.set_palette_open(true),
+        // The Navigate rows sit below the palette's visible fold when the query
+        // is empty, so a scene that filters to them is the only way to see them.
+        "palette-nav" => {
+            state.set_query("go");
+            g.set_palette_query("go".into());
+            g.set_palette_open(true);
+        }
         "search" => {
             g.set_search_open(true);
         }

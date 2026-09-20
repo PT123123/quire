@@ -65,7 +65,9 @@ First functional release: a local, single-file-database notes workspace.
   on startup
 - Page title edits in place; word/char count in the editor footer
 - Slash menu ("/") for block types; command palette (Ctrl+K) with page
-  jumping
+  jumping, plus Go Back / Go Forward (Alt+← / Alt+→) along the pages
+  visited this session — a page deleted since drops out of the history
+  instead of being opened
 - Full-text search (Ctrl+P) — titles and content, Chinese included
   (FTS5 + segmentation)
 - Context menus on pages and blocks; pages move: Move up / Move down
@@ -103,10 +105,12 @@ First functional release: a local, single-file-database notes workspace.
   dismisses the open popup (standard Slint popup semantics)
 - A menu taller than the window (e.g. Move-to in a large workspace)
   overflows the bottom — the anchor clamps but the list does not scroll
-  yet
+  yet. The Settings dialog has the same shape at 1280x800: its shortcut
+  tail, ABOUT and the Done button fall below the bottom edge, so Esc is
+  the way out
 - Block colors are cosmetic: they do not survive a Markdown export/import
   round trip, and Callout blocks export as quotes
 - Inline-mark paragraphs render runs on one line (no cross-run reflow —
   Slint `Text` has no inline formatting yet)
-- Chinese IME behavior documented in docs/IME_CHECKLIST.md — acceptance
-  pass pending
+- Chinese IME: the manual acceptance pass (docs/IME_CHECKLIST.md) is
+  signed off — 2026-09-20

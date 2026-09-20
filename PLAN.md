@@ -609,3 +609,77 @@ instead of silently binding.
 - Track A next: skia comparison is blocked by the shared target lock
   (needs a CARGO_TARGET_DIR policy decision); renderer_name() duplication
   in main.rs vs controller.rs is Track A's to consolidate.
+
+## Track A round 14 — Go Back / Go Forward, and the IME pass closes (2026-09-20)
+
+- **M4 signed off**: the user walked `docs/IME_CHECKLIST.md` by hand and all
+  17 items are checked. Recorded in the file itself as a verbal attestation,
+  not a measurement — an item found wrong later gets un-checked there.
+  That was M4's last open item and M8's last non-code gate.
+- **M9 parked** by explicit decision ("安卓先不做"); ROADMAP says so and the
+  measured evaluation in `.scratch/m9/report.md` stands as the record.
+- **SPEC §十六 Go Back / Go Forward implemented** — the last palette item
+  SPEC names that had no code behind it.
+  - `NavHistory` (`src/app/state.rs`, next to `AppState`): two stacks, newest
+    last, `NAV_MAX` 50 entries, browser semantics (a new navigation drops the
+    forward branch). Deliberately a plain struct with no Slint and no
+    database in it, so the stepping rules — which are the whole feature —
+    are unit-testable; 5 tests in `state.rs::tests` cover retrace/rewind,
+    the forward-drop, the bounded stack, the first open, and one row that
+    asserts both palette rows exist with their ids (the id *is* the dispatch
+    key, which is what the round-13 CRITICAL shadowed).
+  - Deleted pages are skipped rather than opened: `nav_step` takes a
+    liveness predicate and pops until it finds a page still in the workspace.
+  - Recording happens in the controller's `open()` funnel and in
+    `create_page` (creating navigates, so Back returns where you were).
+    `navigate()` must not re-record — `nav_step` already parked the page
+    being left on the opposite stack.
+  - Alt+← / Alt+→ (`AppWindow.slint` KeyBinding → two `*-requested`
+    callbacks, the convention the rest of the shortcuts use) and the two
+    palette rows in a `Navigate` section, with a new `arrow-left` icon
+    mirroring `arrow-right`. Settings ▸ SHORTCUTS lists them.
+  - **Found on the way**: the typing flush is debounced 300 ms and resolves
+    against `state.open_page`, so navigating inside that window dropped the
+    last keystrokes — `flush_pending_edit` ran against a page that had
+    already changed. `open()` and `navigate()` now flush first. This fixed
+    every existing navigation path too (sidebar click, palette jump, search
+    result, Page block), not just the new one.
+  - **Behavior change worth knowing**: clicking a Page block now goes
+    through `open()`, so the top bar title and the sidebar highlight follow
+    it the way they do for every other navigation. Previously it called
+    `state.open_page()` directly and left the old title on screen.
+- **No page-management limitation existed**: a stale doc fragment claimed
+  CHANGELOG listed "create, rename, move, favorite pages" as missing. It
+  does not — grep finds no such line anywhere. Recorded so nobody re-adds it.
+- **Two audit errors of mine, corrected against the files**:
+  `.vscode/extensions.json` recommends `Slint.slint` and `settings.json`
+  configures its language server (I had it backwards, and reported it to the
+  user that way); `renderer_name()` exists once (`controller.rs:171`), so the
+  "Track A next" line above about consolidating it is stale. What §四 task 6
+  genuinely still lacks: rust-analyzer settings and a verified live preview.
+- **SPEC audit, still open** (each one re-read from source, not from this
+  ledger): §十二 block virtualization is not windowed — `reproject_blocks`
+  sets every row and `Editor.slint:237` is a plain `for` in a `ListView`, so
+  10 000 blocks are 10 000 realized rows each carrying a TextInput; M7's
+  "virtualization ✅" overstates it. §廿六 plain text absent (md only, dialog
+  filter `&["md"]`). §廿三 memory attribution absent (2 counters total, and
+  the checklist ticks "GPU-side memory separate ✓" with no GPU reading ever
+  taken). §廿七 tray / native menu / startup options / global shortcut: none,
+  and `system-tray` is compiled in unused. §卅一 DPI: 125/150/200% never
+  measured. §十三 `composition_state` never named.
+- **Visual gate, and what it exposed** (sweep5 vs the sweep4 baseline, hash
+  diff so only moved pixels get re-judged): 32 of 34 scenes byte-identical,
+  exactly the two that should have changed — `palette.png` (52 px, the scroll
+  thumb shortening) and `settings.png`. 52 px is the evidence that the two new
+  palette rows are *in the model but below the palette's visible fold* at an
+  empty query, so the sweep could not see them at all. Added a `palette-nav`
+  scene (`apply_scene_overlay`, query `go`) and it renders both rows with the
+  new `arrow-left` icon and the `Alt+Left` / `Alt+Right` hints intact — that
+  scene is now the permanent coverage for §十六's rows.
+- **Pre-existing defect, not this change's** (pixel-cropped from the baseline,
+  not eyeballed): the Settings popup is taller than the 1280x800 window, so
+  ▸ SHORTCUTS ▸ ABOUT ▸ the **Done button** have been off-screen since before
+  this commit — sweep4's last visible row was already `Ctrl+S / Save now`. The
+  new `Alt+Left / Right` row lands exactly on the cut line, visible but the
+  last thing on screen. Fixing it means making the popup scroll or clamping its
+  height, which is its own item — recorded, not done here.

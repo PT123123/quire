@@ -72,10 +72,61 @@ pub struct AppState {
     db_notice: RefCell<Vec<String>>,
     /// Currently open page (0 = none / empty workspace).
     pub open_page: Cell<i32>,
+    /// Go Back / Go Forward stacks (SPEC §十六). Session-only: a restart
+    /// starts with no history.
+    nav: RefCell<NavHistory>,
     /// Page awaiting delete confirmation.
     pub pending_delete: Cell<Option<i32>>,
     /// Benchmark scroll bookkeeping (scene F): last viewport-y seen.
     pub last_scroll_y: Cell<f32>,
+}
+
+/// Go Back / Go Forward stacks (SPEC §十六), newest entry last. Kept as a
+/// plain struct with no Slint or database in it so the stepping rules —
+/// which are the whole feature — are unit-testable.
+#[derive(Default)]
+struct NavHistory {
+    back: Vec<i32>,
+    forward: Vec<i32>,
+}
+
+/// How far back Go Back reaches before it starts dropping entries.
+const NAV_MAX: usize = 50;
+
+impl NavHistory {
+    /// A user-initiated move from one page to another. A new navigation
+    /// drops the forward branch, the way a browser does.
+    fn record(&mut self, from: i32, to: i32) {
+        if from > 0 && from != to {
+            self.back.push(from);
+            if self.back.len() > NAV_MAX {
+                self.back.remove(0);
+            }
+        }
+        self.forward.clear();
+    }
+
+    /// Step one page back (or forward), skipping pages deleted since they
+    /// were recorded, and push `current` onto the opposite stack. `live`
+    /// answers "does this page still exist?".
+    fn step(&mut self, forward: bool, current: i32, live: impl Fn(i32) -> bool) -> Option<i32> {
+        let (from, to) = if forward {
+            (&mut self.forward, &mut self.back)
+        } else {
+            (&mut self.back, &mut self.forward)
+        };
+        let target = loop {
+            match from.pop() {
+                Some(id) if live(id) => break id,
+                Some(_) => continue,
+                None => return None,
+            }
+        };
+        if current > 0 && live(current) && to.last() != Some(&current) {
+            to.push(current);
+        }
+        Some(target)
+    }
 }
 
 /// Block ids start above this so they never collide with anything derived
@@ -321,6 +372,7 @@ impl AppState {
             page_order: RefCell::new(page_order),
             flush_hook: RefCell::new(None),
             open_page: Cell::new(0),
+            nav: RefCell::new(NavHistory::default()),
             pending_delete: Cell::new(None),
             last_scroll_y: Cell::new(0.0),
         };
@@ -451,6 +503,25 @@ impl AppState {
     }
 
     // ---- operations (called by the controller) ----
+
+    /// Record that the user is moving from the page they had open to another
+    /// one, so Go Back can retrace it (SPEC §十六).
+    pub fn nav_record(&self, from: i32, to: i32) {
+        self.nav.borrow_mut().record(from, to);
+    }
+
+    /// The page to navigate to, stepping back (or forward) through the
+    /// session history; `None` when that direction is empty. `open_page` is
+    /// still the page being left when this is called, which is what makes it
+    /// the entry pushed onto the opposite stack.
+    pub fn nav_step(&self, forward: bool) -> Option<i32> {
+        let current = self.open_page.get();
+        self.nav
+            .borrow_mut()
+            .step(forward, current, |id| {
+                self.workspace.borrow().contains(id)
+            })
+    }
 
     pub fn open_page(&self, id: i32) {
         {
@@ -1302,7 +1373,11 @@ impl AppState {
             favorite: false,
             expanded: false,
         })]);
+        let from = self.open_page.get();
         self.open_page(id);
+        // creating a page navigates to it, so Go Back returns where the user
+        // was (SPEC §十六)
+        self.nav.borrow_mut().record(from, id);
         id
     }
 
@@ -2500,6 +2575,9 @@ pub const CMD_EXPORT_PAGE: i32 = 9;
 pub const CMD_IMPORT_MD: i32 = 10;
 /// Copy the open page's markdown onto the clipboard (FFI write, ADR-0025).
 pub const CMD_COPY_MD: i32 = 11;
+/// Retrace / re-advance the session's page navigation (SPEC §十六).
+pub const CMD_NAV_BACK: i32 = 12;
+pub const CMD_NAV_FORWARD: i32 = 13;
 /// Jump-to-page commands are 10 000 + page id.
 pub const CMD_PAGE_BASE: i32 = 10_000;
 
@@ -2549,6 +2627,14 @@ fn mock_commands(ws: &Workspace) -> Vec<CommandRow> {
         "Page",
         "copy",
     );
+    cmd(CMD_NAV_BACK, "Go Back", "Alt+Left", "Navigate", "arrow-left");
+    cmd(
+        CMD_NAV_FORWARD,
+        "Go Forward",
+        "Alt+Right",
+        "Navigate",
+        "arrow-right",
+    );
     for id in ws.dfs_order() {
         if id >= BENCH_ID_BASE {
             continue;
@@ -2569,4 +2655,76 @@ fn fuzzy_subsequence(query: &str, target: &str) -> bool {
         .chars()
         .filter(|c| !c.is_whitespace())
         .all(|q| it.any(|t| t == q))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{mock_commands, NavHistory, CMD_NAV_BACK, CMD_NAV_FORWARD, NAV_MAX};
+    use crate::app::workspace::Workspace;
+
+    /// Pages 1..=9 are alive; anything else was deleted.
+    fn live(id: i32) -> bool {
+        (1..=9).contains(&id)
+    }
+
+    /// SPEC §十六 names these two as palette commands, and the id a row
+    /// carries is exactly what the dispatch matches on — a drifted row is a
+    /// silently dead command, which is how the id >= 9 shadowing bug hid.
+    #[test]
+    fn the_palette_carries_the_navigation_commands() {
+        let cmds = mock_commands(&Workspace::sample());
+        for (id, name) in [(CMD_NAV_BACK, "Go Back"), (CMD_NAV_FORWARD, "Go Forward")] {
+            let row = cmds.iter().find(|c| c.id == id).expect("row present");
+            assert_eq!(row.name.as_str(), name);
+            assert_eq!(row.section.as_str(), "Navigate");
+        }
+    }
+
+    #[test]
+    fn back_retraces_and_forward_rewinds() {
+        let mut nav = NavHistory::default();
+        nav.record(1, 2);
+        nav.record(2, 3);
+        assert_eq!(nav.step(false, 3, live), Some(2));
+        assert_eq!(nav.step(false, 2, live), Some(1));
+        // nothing left behind the first page
+        assert_eq!(nav.step(false, 1, live), None);
+        assert_eq!(nav.step(true, 1, live), Some(2));
+    }
+
+    #[test]
+    fn a_new_navigation_drops_the_forward_branch() {
+        let mut nav = NavHistory::default();
+        nav.record(1, 2);
+        assert_eq!(nav.step(false, 2, live), Some(1));
+        nav.record(1, 9);
+        assert_eq!(nav.step(true, 9, live), None);
+    }
+
+    #[test]
+    fn deleted_pages_are_skipped_not_opened() {
+        let mut nav = NavHistory::default();
+        nav.record(1, 2);
+        // 99 sat in the history and has since been deleted
+        nav.record(99, 3);
+        assert_eq!(nav.step(false, 3, live), Some(1));
+        // the page that was left stays reachable in the direction it came from
+        assert_eq!(nav.step(true, 1, live), Some(3));
+    }
+
+    #[test]
+    fn the_first_open_records_nothing_and_the_stack_stays_bounded() {
+        let mut nav = NavHistory::default();
+        nav.record(0, 1);
+        assert_eq!(nav.step(false, 1, live), None);
+
+        for i in 0..(NAV_MAX + 20) {
+            nav.record((i % 9 + 1) as i32, (i % 9 + 2) as i32);
+        }
+        assert_eq!(nav.back.len(), NAV_MAX);
+        for _ in 0..NAV_MAX {
+            assert!(nav.step(false, 0, live).is_some());
+        }
+        assert_eq!(nav.step(false, 0, live), None);
+    }
 }

@@ -419,6 +419,21 @@ component IcLink {
     }
 }
 
+component IcArrowLeft {
+    in property <brush> color: Colors.text-secondary;
+    in property <length> size: 16px;
+    width: size; height: size;
+    Path {
+        width: parent.width; height: parent.height;
+        viewbox-x: 0; viewbox-y: 0; viewbox-width: 24; viewbox-height: 24;
+        stroke: color; stroke-width: 1.8px;
+        stroke-line-cap: round; stroke-line-join: round;
+        fill: transparent;
+        MoveTo { x: 19; y: 12; } LineTo { x: 5; y: 12; }
+        MoveTo { x: 11; y: 6; } LineTo { x: 5; y: 12; } LineTo { x: 11; y: 18; }
+    }
+}
+
 component IcArrowRight {
     in property <brush> color: Colors.text-secondary;
     in property <length> size: 16px;
@@ -485,6 +500,7 @@ export component Icon {
     IcExport { visible: root.name == "export"; size: root.size; color: root.color; }
     IcImport { visible: root.name == "import"; size: root.size; color: root.color; }
     IcLink { visible: root.name == "link"; size: root.size; color: root.color; }
+    IcArrowLeft { visible: root.name == "arrow-left"; size: root.size; color: root.color; }
     IcArrowRight { visible: root.name == "arrow-right"; size: root.size; color: root.color; }
     IcPalette { visible: root.name == "palette"; size: root.size; color: root.color; }
 }
