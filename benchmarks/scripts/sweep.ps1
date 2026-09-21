@@ -42,9 +42,10 @@ $all = @(
     "style-serif", "style-mono", "style-small", "style-full", "style-tight",
     "page-icon", "icon-picker",
     "page-cover", "page-cover-white", "page-cover-icon",
+    "page-lock", "page-lock-menu", "page-lock-block-menu",
     "dark", "dark-slash", "dark-find", "dark-marks", "dark-link", "dark-code-hl",
     "dark-block-menu", "dark-block-colors", "dark-title-edit", "dark-style-serif",
-    "dark-page-icon", "dark-page-cover", "dark-page-cover-white"
+    "dark-page-icon", "dark-page-cover", "dark-page-cover-white", "dark-page-lock"
 )
 $targets = if ($Scenes -eq "") { $all } else { $Scenes -split ',' }
 

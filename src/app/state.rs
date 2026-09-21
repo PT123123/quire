@@ -422,6 +422,7 @@ impl AppState {
                     small_text,
                     icon,
                     cover: None,
+                    locked: false,
                 }));
             }
             // rows before the blocks that point at them
@@ -874,9 +875,62 @@ impl AppState {
         }
     }
 
+    /// Does the page on screen refuse edits right now (SPEC §三十八 "lock")?
+    /// One question, asked at the one funnel every document command passes,
+    /// rather than at each of the ~70 call sites that would otherwise have to
+    /// remember it.
+    pub fn page_locked(&self) -> bool {
+        self.workspace.borrow().locked_of(self.open_page.get())
+    }
+
+    /// Say out loud that a lock just swallowed something. SPEC §三十八 asks for
+    /// the refusal to be visible, and a silently-ignored click is the failure
+    /// mode that section names. The controller calls it for the entry points
+    /// that never reach a command (a click on a row, a drag hover).
+    ///
+    /// What this deduplicates against is what the user can see. The notice bar
+    /// is sticky until dismissed, so a bar already carrying the line is a
+    /// visible refusal — and the drag-hover path answers once per frame of one
+    /// gesture, so writing it again would be its own defect. Without a window
+    /// the queue plays both roles: it remembers the refusal, and in a headless
+    /// session it is the only way one can be proved at all.
+    pub fn note_locked(&self) {
+        const LINE: &str = "This page is locked — ⋯ → Unlock page to edit.";
+        match self.ui.borrow().clone().and_then(|ui| ui.upgrade()) {
+            Some(g) => {
+                if g.get_db_notice().as_str() != LINE {
+                    g.set_db_notice(LINE.into());
+                }
+            }
+            None => {
+                if self.db_notice.borrow().last().is_some_and(|last| last == LINE) {
+                    return;
+                }
+                self.set_db_notice(LINE.to_string());
+            }
+        }
+    }
+
+    /// The one-line form every write entry point uses: refuse, and say why.
+    /// Returns true when the caller must not touch the document.
+    fn locked_refusal(&self) -> bool {
+        if !self.page_locked() {
+            return false;
+        }
+        self.note_locked();
+        true
+    }
+
     /// Run a command without reprojecting (typing): the caller keeps the
     /// delegate alive and syncs the single row itself.
     pub fn exec_editor(&self, cmd: Command) -> Option<Vec<Change>> {
+        // The one command a locked page still runs: folding changes what is on
+        // screen, not what the document says (§三十七 files it as persisted
+        // view state, and `Change::BlockFoldedSet` is why it reaches storage at
+        // all). Locking a page must not cost the user its outline.
+        if !matches!(cmd, Command::ToggleFold { .. }) && self.locked_refusal() {
+            return None;
+        }
         let page = core_page_id(self.open_page.get());
         let changes = crate::core::command::exec(
             &mut self.doc.borrow_mut(),
@@ -908,6 +962,12 @@ impl AppState {
     /// Read-only check whether a drag landing is valid (hover feedback must
     /// not mutate the document).
     pub fn can_move_block_to(&self, id: i32, index: i32) -> bool {
+        // A locked page shows no drop line at all: the hover path answers this
+        // once per frame of the gesture, so it stays silent — the drop that
+        // follows is the moment worth telling the user about.
+        if self.page_locked() {
+            return false;
+        }
         let page = core_page_id(self.open_page.get());
         crate::core::command::can_move_block_to(
             &self.doc.borrow(),
@@ -1218,6 +1278,14 @@ impl AppState {
             rows.push(row(5, "Paste below", "import", false, -1, false));
         }
         rows.push(row(6, "Delete", "trash", true, -1, false));
+        // A locked page keeps the two rows that only take information out
+        // (SPEC §三十八: "⋮⋮ 的编辑项全部关闭"). They are dropped rather than
+        // greyed because this menu has no disabled state, and a row that lies
+        // about what it will do is worse than a short menu.
+        let locked = self.page_locked();
+        if locked {
+            rows.retain(|r| r.id == 9 || r.id == 4);
+        }
         self.block_menu.set_vec(rows);
     }
 
@@ -1401,6 +1469,9 @@ impl AppState {
     /// Drop a Page/Link block's reference — the Turn-into path leaving those
     /// kinds. A Page's child page survives in the tree, unowned from here on.
     pub fn clear_block_ref(&self, id: i32) {
+        if self.locked_refusal() {
+            return;
+        }
         let change = Change::BlockRefSet {
             id: BlockId(id as u64),
             page: None,
@@ -1413,6 +1484,13 @@ impl AppState {
     /// Cross-page move (⋮⋮ "Move to"): one undo step for the whole subtree.
     pub fn move_block_to_page(&self, id: i32, page: i32) -> bool {
         if page == self.open_page.get() {
+            return false;
+        }
+        // The destination is locked as much as the source is: blocks arriving
+        // in a read-only page is a write to it, and the menu that offers this
+        // has no disabled state to say so with.
+        if self.workspace.borrow().locked_of(page) {
+            self.note_locked();
             return false;
         }
         self.exec_on_open_page(Command::MoveBlockToPage {
@@ -1710,6 +1788,9 @@ impl AppState {
     }
 
     pub fn paste_below(&self, id: i32) -> bool {
+        if self.locked_refusal() {
+            return false;
+        }
         let clip = self.clipboard.borrow().clone();
         let Some(c) = clip else { return false };
         // pasting a Page block would share the source's owned child page;
@@ -2094,6 +2175,9 @@ impl AppState {
 
     /// Plan+apply several commands as ONE undo step, refresh the rows.
     pub fn exec_all_on_open_page(&self, cmds: Vec<Command>) -> Option<Vec<Change>> {
+        if self.locked_refusal() {
+            return None;
+        }
         let page = core_page_id(self.open_page.get());
         let changes = crate::core::command::exec_all(
             &mut self.doc.borrow_mut(),
@@ -2195,6 +2279,12 @@ impl AppState {
     }
 
     pub fn undo_open_page(&self) -> Option<Vec<Change>> {
+        // Undo is an edit like any other (SPEC §三十八): a stack of steps built
+        // before the lock must not walk the document back through it.
+        if self.page_locked() {
+            self.note_locked();
+            return None;
+        }
         let page = core_page_id(self.open_page.get());
         let applied = crate::core::undo(
             &mut self.doc.borrow_mut(),
@@ -2207,6 +2297,10 @@ impl AppState {
     }
 
     pub fn redo_open_page(&self) -> Option<Vec<Change>> {
+        if self.page_locked() {
+            self.note_locked();
+            return None;
+        }
         let page = core_page_id(self.open_page.get());
         let applied = crate::core::redo(
             &mut self.doc.borrow_mut(),
@@ -2252,6 +2346,7 @@ impl AppState {
             small_text: false,
             icon: String::new(),
             cover: None,
+            locked: false,
         })]);
         let from = self.open_page.get();
         self.open_page(id);
@@ -2262,6 +2357,14 @@ impl AppState {
     }
 
     pub fn rename_page(&self, id: i32, title: &str) {
+        // The title is part of the document, so the lock covers it too — from
+        // the sidebar's rename-in-place as well as from the hero. An import
+        // names a page it just created, and that one is unlocked, so this gate
+        // never sits between a user and their own file.
+        if self.workspace.borrow().locked_of(id) {
+            self.note_locked();
+            return;
+        }
         let title = title.trim();
         if title.is_empty() {
             self.rebuild_sidebar();
@@ -2389,6 +2492,10 @@ impl AppState {
                 small_text: style.2,
                 icon,
                 cover,
+                // Unlocked, like the in-memory copy `Workspace::duplicate`
+                // just made: the look travels with a duplicate, the gate on
+                // editing does not.
+                locked: false,
             })];
             for b in &copies {
                 batch.push(Change::BlockInserted(b.clone()));
@@ -2473,6 +2580,9 @@ impl AppState {
     /// deleting the block leaves the page alone, so duplicates and pastes may
     /// share it freely. One recorded batch.
     pub fn create_page_link_block(&self, id: i32, target: i32) -> bool {
+        if self.locked_refusal() {
+            return false;
+        }
         let block_id = BlockId(id as u64);
         let page = self.open_page.get();
         {
@@ -2511,6 +2621,9 @@ impl AppState {
     /// recorded batch. Page creation is not undoable (same as the sidebar
     /// flow), so undo restores the block kind but not the page.
     pub fn create_page_block(&self, after_id: i32) -> Option<i32> {
+        if self.locked_refusal() {
+            return None;
+        }
         let block_id = BlockId(after_id as u64);
         let parent_page = self.open_page.get();
         {
@@ -2552,6 +2665,7 @@ impl AppState {
                 small_text: false,
                 icon: String::new(),
                 cover: None,
+                locked: false,
             }),
             Change::BlockRefSet {
                 id: block_id,
@@ -2575,6 +2689,9 @@ impl AppState {
     /// does NOT take this path: its target is unowned, so the plain duplicate
     /// (which clones the ref) is safe.
     pub fn duplicate_page_block(&self, id: i32) -> Option<i32> {
+        if self.locked_refusal() {
+            return None;
+        }
         if self.block_kind_of(id) != Some(BlockKind::Page) {
             return None;
         }
@@ -2709,7 +2826,7 @@ impl AppState {
         let Some(ui) = self.ui.borrow().clone() else {
             return;
         };
-        let (font, full_width, small_text, icon, cover) = {
+        let (font, full_width, small_text, icon, cover, locked) = {
             let ws = self.workspace.borrow();
             let (font, full_width, small_text) = ws
                 .page_style(self.open_page.get())
@@ -2720,6 +2837,7 @@ impl AppState {
                 small_text,
                 ws.icon_of(self.open_page.get()),
                 ws.cover_of(self.open_page.get()),
+                ws.locked_of(self.open_page.get()),
             )
         };
         let g = ui.upgrade().unwrap();
@@ -2737,6 +2855,9 @@ impl AppState {
         // a page and a block is decoded once, and a page with no cover never
         // evaluates the binding at all.
         g.set_page_cover_id(cover.map(|a| a.as_u64() as i32).unwrap_or(0));
+        // The lock rides the same route as the look, because the editor needs
+        // it at draw time: a row must not offer a caret it will not keep.
+        g.set_page_locked(locked);
     }
 
     pub fn set_page_font(&self, id: i32, font: PageFont) {
@@ -2794,6 +2915,22 @@ impl AppState {
                 cover: Some(cover),
             },
         ]);
+        self.apply_page_style();
+    }
+
+    /// Set or clear the page's read-only switch (SPEC §三十八 "lock"). Stored on
+    /// the page and outside undo like every other page property (ADR-0044):
+    /// locking is something you decide about a page, not something you did to
+    /// its text, and an undo step that silently unlocked a page would be the
+    /// one surprise this switch cannot allow.
+    pub fn set_page_locked(&self, id: i32, locked: bool) {
+        let Some(locked) = self.workspace.borrow_mut().set_locked(id, locked) else {
+            return;
+        };
+        self.record(vec![Change::PageLockedSet {
+            id: PageId(id as u32 as u64),
+            locked,
+        }]);
         self.apply_page_style();
     }
 
@@ -3058,6 +3195,20 @@ impl AppState {
         }
         let at = rows.len() - 2;
         rows.splice(at..at, look);
+        // The read-only switch, beside the other things a page decides about
+        // itself (SPEC §三十八). Its label is the state, not the action's
+        // opposite: "Lock page" on an open page, "Unlock page" on a shut one.
+        rows.insert(
+            rows.len() - 2,
+            row(
+                MENU_PAGE_LOCK,
+                if ws.locked_of(id) { "Unlock page" } else { "Lock page" },
+                "lock",
+                false,
+                -1,
+                false,
+            ),
+        );
         self.menu.set_vec(rows);
     }
 
@@ -3186,6 +3337,9 @@ pub const MENU_PAGE_ICON: i32 = 13;
 /// comes back — and the remove only appears when the page has a cover.
 pub const MENU_PAGE_COVER: i32 = 14;
 pub const MENU_PAGE_COVER_REMOVE: i32 = 15;
+/// ⋯ → Lock page / Unlock page (SPEC §三十八 "lock"). One id for both
+/// directions because the row's label already answers which one it is.
+pub const MENU_PAGE_LOCK: i32 = 16;
 /// "Top level" target of the page-menu Move-to submenu (root, `None` parent).
 pub const PAGE_MOVE_TO_ROOT: i32 = 499_999;
 /// Page-menu Move-to targets encode the destination page above this base.
@@ -5883,6 +6037,380 @@ mod tests {
             slot_of(leaf.id, "favorite"),
             Some(String::new()),
             "and a cleared favorite is a star again"
+        );
+    }
+
+    /// What the page's blocks currently say, as one comparable value: the
+    /// identity check the lock tests below run before and after a storm of
+    /// refusals.
+    fn words(state: &super::AppState) -> Vec<(i32, crate::core::BlockKind, String)> {
+        let doc = state.doc.borrow();
+        doc.page_blocks(super::core_page_id(state.open_page.get()))
+            .iter()
+            .map(|b| (b.id.0 as i32, b.kind, b.text.clone()))
+            .collect()
+    }
+
+    /// Append one paragraph to the open page and hand back its id. Panics with
+    /// the given reason when the page refuses it, so a fixture that never got
+    /// off the ground cannot read as a passing refusal.
+    fn add_line(
+        state: &super::AppState,
+        anchor: i32,
+        text: &str,
+    ) -> i32 {
+        use crate::core::{BlockId, BlockKind, Change, Command};
+        state
+            .exec_on_open_page(Command::InsertBlockAfter {
+                id: BlockId(anchor as u64),
+                kind: BlockKind::Paragraph,
+                text: text.into(),
+            })
+            .and_then(|chs| {
+                chs.into_iter().find_map(|c| match c {
+                    Change::BlockInserted(b) => Some(b.id.0 as i32),
+                    _ => None,
+                })
+            })
+            .expect("an unlocked page takes a block")
+    }
+
+    /// SPEC §三十八 "lock", the half a screenshot cannot show: every write
+    /// entry point answers no, and the document is the same document
+    /// afterwards. The controls matter as much as the refusals — a "no" proves
+    /// nothing unless the same call says "yes" with the switch off, from the
+    /// same fixture.
+    #[test]
+    fn a_locked_page_refuses_every_edit_and_leaves_the_document_as_it_was() {
+        use super::AppState;
+        use crate::core::{BlockId, BlockKind, Command};
+        use slint::Model as _;
+
+        let state = AppState::new(&plain_args(), None);
+        let page = state.create_page(None);
+        let host = state.start_page().expect("a new page takes its first block");
+        let second = add_line(&state, host, "second");
+        let link_host = add_line(&state, host, "");
+        let page_host = add_line(&state, host, "");
+        state
+            .exec_editor(Command::ReplaceText {
+                id: BlockId(host as u64),
+                text: "kept".into(),
+            })
+            .expect("typing works before the lock");
+        // a second page to name, created before the lock because creating one
+        // navigates to it
+        let other = state.create_page(None);
+        state.open_page(page);
+
+        // an inline sub-page, made before the lock because that is the only
+        // way one gets here: duplicating its row is the write under test
+        let sub = add_line(&state, host, "");
+        assert!(
+            state.create_page_block(sub).is_some(),
+            "one row becomes a sub-page before the switch goes on"
+        );
+        let kids = state.workspace.borrow().children_of(Some(page)).len();
+
+        let before = words(&state);
+        assert_eq!(before.len(), 5, "the fixture has five rows");
+        assert_eq!(state.blocks.row_count(), 5, "and the editor shows them");
+        state
+            .exec_on_open_page(Command::MoveBlockTo {
+                id: BlockId(second as u64),
+                index: 0,
+            })
+            .expect("a drag reorder works before the lock");
+        let before = words(&state);
+        assert_eq!(before[0].0, second, "and it landed");
+
+        state.set_page_locked(page, true);
+        assert!(state.page_locked(), "the switch is on the page on screen");
+
+        assert!(
+            state
+                .exec_editor(Command::ReplaceText {
+                    id: BlockId(host as u64),
+                    text: "typed after the lock".into(),
+                })
+                .is_none(),
+            "the editing input"
+        );
+        assert!(
+            state
+                .exec_editor(Command::SplitBlock {
+                    id: BlockId(host as u64),
+                    caret: 2,
+                })
+                .is_none(),
+            "Enter"
+        );
+        assert!(
+            state
+                .exec_editor(Command::MergeBackward {
+                    id: BlockId(second as u64),
+                })
+                .is_none(),
+            "Backspace at column 0"
+        );
+        assert!(
+            state
+                .exec_on_open_page(Command::InsertBlockAfter {
+                    id: BlockId(host as u64),
+                    kind: BlockKind::Heading1,
+                    text: "a heading".into(),
+                })
+                .is_none(),
+            "the slash and + menus"
+        );
+        assert!(
+            state
+                .exec_on_open_page(Command::DeleteBlock {
+                    id: BlockId(second as u64),
+                })
+                .is_none(),
+            "⋮⋮ → Delete"
+        );
+        assert!(
+            state
+                .exec_on_open_page(Command::DuplicateBlock {
+                    id: BlockId(second as u64),
+                })
+                .is_none(),
+            "⋮⋮ → Duplicate"
+        );
+        assert!(
+            state
+                .exec_on_open_page(Command::SetBlockType {
+                    id: BlockId(host as u64),
+                    kind: BlockKind::Todo,
+                })
+                .is_none(),
+            "Turn into"
+        );
+        assert!(
+            state
+                .exec_on_open_page(Command::ToggleMark {
+                    id: BlockId(host as u64),
+                    start: 0,
+                    end: 2,
+                    kind: crate::core::MarkKind::Bold,
+                    url: String::new(),
+                })
+                .is_none(),
+            "a mark"
+        );
+        assert!(
+            state
+                .exec_on_open_page(Command::MoveBlockTo {
+                    id: BlockId(second as u64),
+                    index: 2,
+                })
+                .is_none(),
+            "a drag landing"
+        );
+        assert!(
+            state
+                .exec_on_open_page(Command::ToggleTodoChecked {
+                    id: BlockId(second as u64),
+                })
+                .is_none(),
+            "a checkbox. The controller has its own gate for the same command, \
+             because that is the one caller that reaches the core layer directly"
+        );
+        assert!(
+            state
+                .exec_all_on_open_page(vec![Command::ReplaceText {
+                    id: BlockId(host as u64),
+                    text: "one undo step".into(),
+                }])
+                .is_none(),
+            "a multi-command edit (rich paste)"
+        );
+        state.copy_block(host);
+        assert!(!state.paste_below(host), "a paste from the clipboard");
+        assert!(
+            state.undo_open_page().is_none(),
+            "Ctrl+Z: a stack built before the lock does not walk the page back"
+        );
+        assert!(state.redo_open_page().is_none(), "Ctrl+Y");
+        state.rename_page(page, "Renamed while locked");
+        assert_eq!(
+            state.workspace.borrow().title_of(page),
+            Some("Untitled"),
+            "the title is part of the document, so the lock covers it too"
+        );
+        assert!(
+            !state.create_page_link_block(link_host, other),
+            "a link card is a write"
+        );
+        assert!(
+            state.create_page_block(page_host).is_none(),
+            "an inline sub-page is a write"
+        );
+        // The one refusal a grep for `exec_editor` cannot find: duplicating a
+        // Page block mints its child page through the tree, before the funnel
+        // ever sees the block command.
+        assert!(
+            state.duplicate_page_block(sub).is_none(),
+            "a Page block's duplicate is a write too"
+        );
+        assert_eq!(
+            state.workspace.borrow().children_of(Some(page)).len(),
+            kids,
+            "and it did not leave a second child page behind"
+        );
+
+        // Every refusal above, and the document is the one it was. This is the
+        // assertion the section's "不能静默吞输入" leans on: the input is
+        // refused, not half-applied.
+        assert_eq!(words(&state), before, "nothing was written");
+        assert_eq!(state.blocks.row_count(), 5, "nothing was reprojected away");
+        let line = state
+            .db_notice
+            .borrow()
+            .last()
+            .cloned()
+            .expect("and every one of them said so");
+        assert!(line.contains("locked"), "{line}");
+        assert!(line.contains("Unlock page"), "{line} names the way out");
+
+        // The switch off, and the same calls land — including the two whose
+        // refusal is above, which is what proves those rows were untouched
+        // rather than damaged.
+        state.set_page_locked(page, false);
+        assert!(!state.page_locked());
+        assert!(state
+            .exec_editor(Command::ReplaceText {
+                id: BlockId(host as u64),
+                text: "typed after the unlock".into(),
+            })
+            .is_some());
+        assert_eq!(
+            words(&state)
+                .into_iter()
+                .find(|(b, ..)| *b == host)
+                .map(|(_, _, t)| t),
+            Some("typed after the unlock".into()),
+            "the row took what was typed"
+        );
+        assert!(state.create_page_link_block(link_host, other), "the row is still an empty paragraph");
+        assert!(state.create_page_block(page_host).is_some(), "and so is this one");
+        // `kids` above has grown by the page that call just made, so the
+        // duplicate's arithmetic reads from here
+        let grown = state.workspace.borrow().children_of(Some(page)).len();
+        assert!(
+            state.duplicate_page_block(sub).is_some(),
+            "control: unlock it and the same duplicate lands"
+        );
+        assert_eq!(
+            state.workspace.borrow().children_of(Some(page)).len(),
+            grown + 1
+        );
+    }
+
+    /// The other half of "不能静默吞输入": one gesture, one message. The drag
+    /// hover asks `can_move_block_to` once per frame of the pointer's travel,
+    /// so the check that hides the drop line stays quiet while the drop that
+    /// follows it speaks — and speaks once, not sixty times.
+    #[test]
+    fn a_locked_page_refuses_once_per_gesture_and_still_folds() {
+        use super::AppState;
+        use crate::core::{BlockId, BlockKind, Command};
+
+        let state = AppState::new(&plain_args(), None);
+        let page = state.create_page(None);
+        let host = state.start_page().expect("a new page takes its first block");
+        let second = add_line(&state, host, "second");
+        let other = state.create_page(None);
+        state.open_page(page);
+        let queued = || state.db_notice.borrow().len();
+        let quiet = queued();
+
+        // The hover check is the per-frame caller, so it answers without a
+        // message. Control first: the same landing is valid with the lock off.
+        assert!(
+            state.can_move_block_to(second, 0),
+            "before the lock the landing is a drop target"
+        );
+        assert_eq!(queued(), quiet, "and hovering says nothing");
+        state.set_page_locked(page, true);
+        assert!(
+            !state.can_move_block_to(second, 0),
+            "a locked page shows no drop line at all"
+        );
+        assert_eq!(queued(), quiet, "the hover itself stays silent");
+
+        for _ in 0..30 {
+            let _ = state.exec_editor(Command::ReplaceText {
+                id: BlockId(host as u64),
+                text: "typed".into(),
+            });
+        }
+        assert_eq!(
+            queued(),
+            quiet + 1,
+            "thirty frames of one gesture, one line on the bar"
+        );
+
+        // The one command a locked page still runs, and the reason it is the
+        // exception: folding changes what is on screen, not what the document
+        // says (§三十七 files it as persisted view state).
+        assert!(
+            state
+                .exec_editor(Command::ToggleFold {
+                    id: BlockId(host as u64),
+                })
+                .is_some(),
+            "locking a page must not cost the user its outline"
+        );
+        assert!(
+            state
+                .exec_editor(Command::InsertBlockAfter {
+                    id: BlockId(host as u64),
+                    kind: BlockKind::Bullet,
+                    text: "- ".into(),
+                })
+                .is_none(),
+            "every other command still refuses"
+        );
+
+        // Moving a block *into* a locked page is a write to that page, and the
+        // menu offering it has no disabled state to say so with.
+        let block = {
+            let doc = state.doc.borrow();
+            doc.page_blocks(super::core_page_id(page))
+                .first()
+                .map(|b| b.id.0 as i32)
+                .expect("the locked page has a block")
+        };
+        assert!(
+            !state.move_block_to_page(block, other),
+            "the source page is locked, so the command never runs"
+        );
+        // the same call with the destination locked and the source open
+        state.set_page_locked(page, false);
+        state.open_page(other);
+        let moved = state.start_page().expect("the unlocked page takes a block");
+        state.set_page_locked(page, true);
+        assert!(
+            !state.move_block_to_page(moved, page),
+            "a locked page is not a drop destination either"
+        );
+        assert_eq!(
+            state
+                .doc
+                .borrow()
+                .block(BlockId(moved as u64))
+                .expect("the block is still there")
+                .page,
+            super::core_page_id(other),
+            "and it stayed where it was"
+        );
+        state.set_page_locked(page, false);
+        assert!(
+            state.move_block_to_page(moved, page),
+            "control: unlock the destination and the same move lands"
         );
     }
 }

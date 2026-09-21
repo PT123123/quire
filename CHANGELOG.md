@@ -238,6 +238,19 @@ First functional release: a local, single-file-database notes workspace.
   rule (it measured 1.04:1 before this was caught on pixels). Like Style and the
   icon, setting a cover is not an undo step, and a duplicated page starts with its
   source's (ADR-0047)
+- Page lock (top bar ⋯ → Lock page): a read-only switch on the page itself
+  (schema v13: `pages.locked`, `NOT NULL DEFAULT 0`, so "open" is a value and an
+  old library upgrades with nothing locked). It closes the document — every
+  block's content and the page's own title — while leaving the page's *look*
+  (icon, cover, Style, favourite), the tree (move, delete, duplicate) and every
+  read (navigation, search, folding) alone. Two gates, because one is not enough:
+  the command funnel refuses the write, and the row's `editing` binding refuses
+  the caret, so a stale edit cannot survive a lock/unlock/relock cycle. Nothing
+  is swallowed silently — the notice bar says which switch to flip, the page says
+  it in a pill above its title, the ⋯ row reads "Unlock page", and the ⋮⋮ menu
+  keeps only its two read-only Copy rows. Undo is refused while a page is locked
+  and its stack is kept, not dropped; a duplicated page starts **un**locked,
+  which is the one place a lock departs from a look (ADR-0048)
 - Slash menu ("/") for block types; command palette (Ctrl+K) with page
   jumping, plus Go Back / Go Forward (Alt+← / Alt+→) along the pages
   visited this session — a page deleted since drops out of the history
@@ -251,11 +264,11 @@ First functional release: a local, single-file-database notes workspace.
 
 ### Persistence & reliability
 - SQLite (bundled, no server): pages, blocks, marks, colors, attachments,
-  settings, metadata (schema v1–v12)
+  settings, metadata (schema v1–v13)
 - Debounced batched writes; Ctrl+S forces a save; close saves too
 - Rotating snapshots on every open (5 generations), restore-at-open when
   the main file is damaged, damaged file quarantined (`.corrupt`)
-- Startup integrity checks; schema migrations (v1–v12). The steps that only add a
+- Startup integrity checks; schema migrations (v1–v13). The steps that only add a
   column share one helper and each guard on its own column's absence, so a
   half-migrated file — one somebody edited by hand, or restored to the middle of a
   sequence — converges instead of erroring on a duplicate column name

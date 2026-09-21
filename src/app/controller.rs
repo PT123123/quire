@@ -274,6 +274,13 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         let s = state.clone();
         ui.global::<UIState>().on_block_drag_hover(move |data, index, below| {
             let Some(id) = block_drag_id(&data) else { return false };
+            // No drop line on a locked page: the gesture says for itself that
+            // there is nowhere to put the block. The notice is idempotent, so
+            // saying it once per drag frame is one message on screen.
+            if s.page_locked() {
+                s.note_locked();
+                return false;
+            }
             // the delegate reports a row index; the command counts model
             // positions, and a folded subtree makes those differ
             let Some(target) = s.drop_index_for_row(index, below) else { return false };
@@ -470,6 +477,21 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                 crate::app::state::MENU_PAGE_COVER_REMOVE => {
                     if id > 0 {
                         s.set_page_cover(id, None);
+                    }
+                }
+                crate::app::state::MENU_PAGE_LOCK => {
+                    if id > 0 {
+                        // The keystroke that is still in flight commits first:
+                        // what the user typed before the door closed stands,
+                        // and nothing after it is swallowed by the switch
+                        // itself. Then the live input and the title's editor
+                        // are both taken away, so the row cannot disagree with
+                        // the page it sits on.
+                        flush_pending_edit(&g, &s);
+                        g.set_editing_id(-1);
+                        g.set_title_editing(false);
+                        let now = !s.workspace.borrow().locked_of(id);
+                        s.set_page_locked(id, now);
                     }
                 }
                 crate::app::state::MENU_DELETE => {
@@ -778,6 +800,13 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
             if id <= 0 {
                 return;
             }
+            // A check box is an edit, and this one path calls the command
+            // layer directly so it can update a single row — so the lock is
+            // asked here as well as at the funnel.
+            if s.page_locked() {
+                s.note_locked();
+                return;
+            }
             // route through the command layer; targeted row update only
             let changes = crate::core::command::exec(
                 &mut s.doc.borrow_mut(),
@@ -901,6 +930,13 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
             // (the row is never editable, so this is its whole interaction)
             if let Some(child) = s.block_page_ref(id) {
                 open(&g, &s, child);
+                return;
+            }
+            // A locked page answers the click and stops there (SPEC §三十八).
+            // The row above this one still navigates, because opening the page
+            // a link names is reading, not editing.
+            if s.page_locked() {
+                s.note_locked();
                 return;
             }
             let (text, len) = {
@@ -1656,16 +1692,22 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                     // Link block's target is unowned and survives
                     let kind = s.block_kind_of(id);
                     let page_ref = s.block_page_ref(id);
-                    let _ = s.exec_on_open_page(Command::DeleteBlock {
-                        id: BlockId(id as u64),
-                    });
-                    if kind == Some(crate::core::BlockKind::Page) {
-                        if let Some(child) = page_ref {
-                            s.delete_page(child);
+                    // and the child only goes *with* the block: a refused
+                    // delete (SPEC §三十八) must not orphan the page behind it
+                    if s
+                        .exec_on_open_page(Command::DeleteBlock {
+                            id: BlockId(id as u64),
+                        })
+                        .is_some()
+                    {
+                        if kind == Some(crate::core::BlockKind::Page) {
+                            if let Some(child) = page_ref {
+                                s.delete_page(child);
+                            }
                         }
-                    }
-                    if g.get_editing_id() == id {
-                        g.set_editing_id(-1);
+                        if g.get_editing_id() == id {
+                            g.set_editing_id(-1);
+                        }
                     }
                 }
                 a if (100..200).contains(&a) => {
@@ -1682,15 +1724,20 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                         pick_attachment(&g, &s, id, true, new_kind);
                         return;
                     }
-                    let _ = s.exec_on_open_page(Command::SetBlockType {
+                    // the reference goes only when the kind actually changed:
+                    // a refused Turn into (SPEC §三十八) would otherwise strip
+                    // the pointer out of a row that still says it is a Page
+                    if s.exec_on_open_page(Command::SetBlockType {
                         id: BlockId(id as u64),
                         kind: new_kind,
-                    });
-                    if matches!(
-                        old_kind,
-                        Some(crate::core::BlockKind::Page)
-                            | Some(crate::core::BlockKind::Link)
-                    ) {
+                    })
+                    .is_some()
+                        && matches!(
+                            old_kind,
+                            Some(crate::core::BlockKind::Page)
+                                | Some(crate::core::BlockKind::Link)
+                        )
+                    {
                         s.clear_block_ref(id);
                     }
                 }
@@ -1990,6 +2037,16 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         });
     }
 
+    // A locked page answers the attempt (SPEC §三十八: 不能静默吞输入). The
+    // .slint side knows which clicks those are; the wording lives here, with
+    // every other refusal.
+    {
+        let s = state.clone();
+        ui.global::<UIState>().on_lock_nudge(move || {
+            s.note_locked();
+        });
+    }
+
     // ---- link dialog (M6) ----
     {
         let gw = gw.clone();
@@ -2238,6 +2295,7 @@ pub fn import_lan_pages(
             small_text: false,
             icon: String::new(),
             cover: None,
+            locked: false,
         };
         let changes = {
             let mut doc = state.doc.borrow_mut();
@@ -2460,6 +2518,7 @@ pub fn import_from_path(g: &UIState<'_>, state: &Rc<AppState>, path: &std::path:
         small_text: false,
         icon: String::new(),
         cover: None,
+        locked: false,
     };
     let changes = {
         let mut doc = state.doc.borrow_mut();
@@ -3272,6 +3331,45 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
         "dark-page-cover-white" => {
             g.set_dark(true);
             apply_scene(ui, state, "page-cover-white");
+        }
+        // The read-only switch (SPEC §三十八, ADR-0048), driven through the same
+        // state method the ⋯ menu calls so the shot proves the write too. A
+        // refusal is a *lack* of pixels, so what these scenes pin is the other
+        // half of the promise — the state has to be visible: the pill over the
+        // page, the ⋯ row that says "Unlock page", and the ⋮⋮ menu left with
+        // only its two read-only rows. The refusals themselves are what
+        // app::state's tests cover.
+        "page-lock" => {
+            state.set_page_locked(state.open_page.get(), true);
+        }
+        "page-lock-menu" => {
+            let page = state.open_page.get();
+            state.set_page_locked(page, true);
+            state.fill_menu(page);
+            g.set_menu_node_id(page);
+            g.set_menu_y(TREE_TOP_PX + state.sidebar_row_y(page) as f32 - 4.0);
+            g.set_menu_x(240.0);
+            g.set_menu_open(true);
+        }
+        "page-lock-block-menu" => {
+            let page = state.open_page.get();
+            state.set_page_locked(page, true);
+            let target = {
+                let d = state.doc.borrow();
+                d.page_blocks(core_page_id(page))
+                    .get(4)
+                    .map(|b| b.id.0 as i32)
+            };
+            if let Some(id) = target {
+                state.fill_block_menu(id);
+                g.set_block_menu_x(320.0);
+                g.set_block_menu_y(300.0);
+                g.set_block_menu_open_id(id);
+            }
+        }
+        "dark-page-lock" => {
+            g.set_dark(true);
+            apply_scene(ui, state, "page-lock");
         }
         "marks" => {
             // seed inline marks on the first paragraph (visual test only,

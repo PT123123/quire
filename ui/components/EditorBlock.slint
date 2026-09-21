@@ -54,7 +54,11 @@ export component EditorBlock inherits Rectangle {
     property <length> embed-height: PageType.size-body * PageType.line-body
         + Typography.size-caption * PageType.line-body + 2 * Theme.spacing-md;
     property <length> embed-inset: Theme.spacing-md + 19px + Theme.spacing-sm;
+    // A locked page has no live input, wherever its caret came from: binding
+    // the switch here means `editing-id` cannot survive an unlock/relock cycle
+    // into a row that would otherwise still be typing (SPEC §三十八).
     property <bool> editing: UIState.editing-id == block.id
+        && !UIState.page-locked
         && block.kind != 9 && block.kind != 11 && block.kind != 12
         && block.kind != 14 && block.kind != 15 && block.kind != 16
         && block.kind != 18 && !is-toc;

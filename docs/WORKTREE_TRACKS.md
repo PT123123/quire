@@ -154,22 +154,26 @@ worktree 里提交是干净的（只有一个 HEAD、只有你的改动）。**p
   '1,Np'` 裁到只含自己那段 → `git add` → 校验 `git diff --cached` 里没有别人的标记 →
   commit → 还原备份」这一套；还原后别人的未提交内容原样还在。
 - ADR 号：四条 track 一律**追加在 `docs/DECISIONS.md` 末尾**（§2.4），只有整合者把收
-  过来的 ADR 归位到文件头部。
+  过来的 ADR 归位到文件头部。事实核对（2026-09-22）：这个文件是**降序**的（ADR-0001 在
+  末尾），而 Track 1 的 0044–0048 五刀都直接落在头部第 5 行——`origin/master` 上的 0047
+  就在那儿。两种做法都不出错，只要号不撞；新切片接着头部往下写最省事，也和文件现状一致。
 
 ## 7 · 现在的登记
 
 | 位置 | 分支 | 归谁 | 状态 |
 |------|------|------|------|
 | 主工作树（仓库根本身） | `track/3-database`（HEAD） | 共享，四个 agent 都往里写 | 脏：挂着 T2/T3 的未提交改动 |
-| `.scratch/wt/t1` | `track/1-page-appearance` | Track 1（版式 → icon → cover 三刀在这里收口） | cover 一刀在此收口：`target/` **13 G**，sweep 到 **72 张**（基线 `sweep35`，只存在于这个 worktree 的 `.scratch/` 里），像素闸与 `contrast_probe.ps1` 都在这条上跑通 |
+| `.scratch/wt/t1` | `track/1-page-appearance` | Track 1（版式 → icon → cover → lock 四刀在这里收口） | lock 一刀在此收口：`target/` **13 G**，sweep 到 **76 张**（基线 `sweep36`，只存在于这个 worktree 的 `.scratch/` 里），像素闸与 `contrast_probe.ps1` 都在这条上跑通 |
 | （尚无） | — | Track 2 / 4 | 建议按 §2 各开一个，别在主工作树里建目录；**先读 §4 最后那段**，全量 worktree 开不起两个 |
 
 master 与 `origin/master` 在 `78ddf35`（本节写下时的值；Track 1 的 cover 一刀随后把 master
 往前挪，那一刀的 sha 以 `git log --oneline -1` 为准，不要以这里为准）。
 
-**给 Track 3 的一条**：`pages.cover` 花掉了 schema **v12**（ADR-0047），`CURRENT_VERSION`
-现在是 12。你那份草案里编号 12–15 的迁移步骤要整体往上挪一位起（database 那列如果是按
-v12 写的，改成 v13）。别指望撞号会替你报错得很清楚：`ensure_current`（migrations.rs:391）
+**给 Track 3 的一条**：`pages.cover` 花掉了 schema **v12**（ADR-0047），同一天 `pages.locked`
+花掉 **v13**（ADR-0048），`CURRENT_VERSION` 现在是 13。你那份草案里编号 13–16 的迁移步骤
+要整体往上挪一位起（database 那列如果是按 v13 写的，改成 v14）。别指望撞号会替你报错得很
+清楚：`ensure_current`（migrations.rs:412，v13 之后；这行的号会随新步骤往下漂，认函数名别
+认行号）
 只在**进函数时**读一次 `user_version`，循环里的判断是 `migration.version <= from`，所以两
 个都登记成 12 的步骤会**按注册顺序连着跑两遍**——撞在重复列名上就是一次
 `migration <label> failed`，而被 `add_page_columns` 那种判存守卫挡下来的话就一句都不报，

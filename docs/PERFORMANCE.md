@@ -1488,3 +1488,51 @@ rather than a re-shoot.
 **The number still owed** is the one the M10 image section already conceded: a
 bench scene that seeds N pictures and scrolls them. A cover does not pay that off
 — it adds one picture to the same page and the scene would want it anyway.
+
+## M12 · a lock costs one bool per page and one comparison per frame, so there is nothing for the gate to see (2026-09-22, ADR-0048)
+
+**No RAM bench owed, and the reason is that every number this slice touches is
+either per-page-open or a comparison.** A bench here would measure the thing the
+slice did not change.
+
+**Per page: one bool.** `Workspace::pages` is the already-loaded map the sidebar
+renders, so `locked_of(id)` (workspace.rs:444) is a `HashMap::get` and a field
+read — the same shape as `cover_of` one function above it, no SQL, no allocation.
+The struct grows by one `bool`, i.e. one byte of a page node that already carries
+a `SharedString` title, a font, an icon and an id. `apply_page_style` reads it as
+a sixth value when a page opens, which is once per page change, not once per row
+or per block.
+
+**Per frame: a comparison, in the two places a frame reaches.** `EditorBlock.editing`
+gains `&& !UIState.page-locked`. That is one more global dependency on a binding
+that already reads globals (`editing-id`) and already short-circuits on nine
+`block.kind` tests; the value is a bool living on the shared `UIState`, so there
+is no lookup, no allocation, and it is only re-dirtied when the lock actually
+flips — which is a menu click, not a frame. The binding is the point: a row must
+not offer a caret it will not keep, so the check has to be where the caret is
+decided. The ⋮⋮ drop-line
+query, `can_move_block_to`, answers `page_locked()` once per frame of the
+pointer's travel, and that is the only path in this slice called at anything like
+a frame rate; it is one map lookup returning a bool, with no string built, because
+the *refusal message* is deliberately not on it. The notice line comes from the
+drop, not the hover — and since the drag hover asks once per frame, the dedupe
+reads the bar's current text so thirty refused calls leave one line rather than
+thirty `SharedString` clones. That "one line per gesture" is asserted in Rust
+(`a_locked_page_refuses_once_per_gesture_and_still_folds`), because there is no
+bench that could find it.
+
+**Per migration: no rewrite.** `ADD COLUMN locked INTEGER NOT NULL DEFAULT 0` is
+SQLite's documented no-copy case — the default lives in the schema and rows that
+predate the column never get touched, so a v12 library migrates in the time of one
+`PRAGMA` dance regardless of page count. It is also why the column is `NOT NULL
+DEFAULT 0` rather than nullable like the cover: "not locked" is a value, so the
+read is a bool with no `Option` to unwrap at every one of those per-frame sites.
+
+**Substitute evidence is the same quiet kind as the cover's: `sweep35` →
+`sweep36` moved 1 of 72.** 71 byte-identical, `menu.png` at 8 sampled px in a
+single column (x 414, y 692..706) — the page menu's scrollbar thumb reshaping for
+its twelfth row inside a popup that was already clamped, not a layout change. Had
+the lock leaked cost into the
+drawing path — a row that re-reads the workspace, a token written per frame — the
+71 would not have been 71. And unlike the cover, this slice has no raster to argue
+about at all: the gate's resolution floor is ≈1 MB and everything above is bytes.

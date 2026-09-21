@@ -98,12 +98,13 @@ find-cols, find-callout, nest, toggle,
 toggle-fold, image, image-half, file, recovered, title-edit, table, table-edit,
 table-marks, columns, columns-3, columns-marks, math, math-inline, toc, embed,
 embed-empty, code-hl, style-serif, style-mono, style-small, style-full,
-style-tight, page-icon, icon-picker, page-cover, page-cover-white, page-cover-icon
+style-tight, page-icon, icon-picker, page-cover, page-cover-white, page-cover-icon,
+page-lock, page-lock-menu, page-lock-block-menu
 plus dark combos (dark-slash, dark-find, dark-marks, dark-link, dark-code-hl,
 dark-block-menu, dark-block-colors, dark-title-edit, dark-style-serif,
-dark-page-icon, dark-page-cover, dark-page-cover-white).
-`benchmarks/scripts/sweep.ps1` holds the authoritative list — 72 scenes as of
-ADR-0047 — and this prose is the summary, so when the two disagree trust the
+dark-page-icon, dark-page-cover, dark-page-cover-white, dark-page-lock).
+`benchmarks/scripts/sweep.ps1` holds the authoritative list — 76 scenes as of
+ADR-0048 — and this prose is the summary, so when the two disagree trust the
 script. Every visual change ships with re-shot
 scenes; the judge-reviewed set is the regression baseline. `toggle` and
 `toggle-fold` are a pair on purpose: the same section open and closed, so a
@@ -141,6 +142,22 @@ one of them changed, because an iconless tree row now shows its title's first
 character where it used to show a generic page glyph — and the diff stays inside
 the 16 px icon column (x 13..52), with **0 px** beyond x 53 in 63 of them. A row
 whose label had shifted its indent would have shown up as 64 movers past x 53.
+The four `*-lock` scenes are ADR-0048's, and they are the set that exists despite
+saying nothing: a lock is a *refusal*, and a refusal is an absence of pixels, so
+the gate cannot be "somebox changed when you typed". It is "the visible state of
+a locked page is pinned." `page-lock` is the pill (`Editor.slint` paints one
+24 px band at the viewport's top-left with the `lock` icon and
+"Page locked · ⋯ to unlock"); `page-lock-menu` is the same page with the ⋯ menu
+open over it, which is where the switch lives and the only scene here that shows
+the way out ("Unlock page" as a menu row); `page-lock-block-menu` is the ⋮⋮ handle menu on a locked page,
+which retains exactly its two information-taking rows ("Copy link to block",
+"Copy block") and drops the other eight rather than greying them; and
+`dark-page-lock` is the pill in the other theme, since its ink and ground are
+both theme tokens. Nothing here shows the notice bar: the four scenes set the lock directly, so no
+gesture is refused inside them, and the bar's pixels already belong to the
+`recovered` scene. "不能静默吞输入" is the part a PNG cannot say — a refusal is a
+missing change — so that half is proved in Rust, by the queued line each refused
+call leaves behind.
 `image` and `image-half` are the same pair for the width tier — one picture
 block at 100 % and at 50 %, so a width setting that only moves the label and
 not the raster is caught by the row geometry. `file` is the picture scene's
@@ -338,10 +355,32 @@ does not contain the claimed ink (exit 2, not a silent pass), and is demonstrate
 to be able to say no on a synthetic `#CCCCCC` ground (1.61:1, exit 1). Measured on
 the real renders: **6.19:1** for the white cover in both themes and 14.04:1 /
 14.09:1 for the photograph, against a 4.5:1 floor.
-The baseline is `.scratch/sweep35` (72 scenes). Note that `.scratch/` is
+`sweep35` → `sweep36` (a page's lock, ADR-0048) was **71 of 72 byte-identical**
+and added 4 — the same quiet as the cover, and for the same reason: `menu.png`
+again, this time 8 sampled px in the single column x 414 at y 692..706, the page
+menu's **scrollbar thumb** and nothing else. The popup is already clamped by
+`min(rows*30+8, window-h - menu-y - 20)`, so a twelfth row cannot clip anything
+and has only the thumb to move; reading the box as "the popup shifted" is the
+trap. A lock shows up in no other scene because no other scene refuses anything.
+The four new scenes prove themselves against their own bases rather than against
+the baseline: the pill against `default.png` at 244 px inside x 390..560 /
+y 52..74 — one 24 px band above the title and nothing else on the page moved —
+and the ⋮⋮ menu against `block-menu.png` at 2 101 px, a clean pair because that
+scene copies the overlay arm verbatim (same block, same x 320 / y 300), so what
+differs is eight rows of menu gone and the pill: against `default.png` the locked
+⋮⋮ is 809 px in x 320..560 / y 52..362, where the unlocked one is 2 055 px in
+x 320..494 / y 300..586. The ⋯ scene is the pair to be honest about: `menu.png`
+anchors on page 106's sidebar row (y 522..778, clamped) while the lock scene
+opens the menu on the page the editor is showing, so `page-lock-menu.png` sits
+higher — its own diff against `default.png` is 3 316 px inside x 240..560 /
+y 52..610, i.e. a 12-row popup at y 266..610 plus the pill, and its 4 586 px
+against `menu.png` is two boxes plus a label, not one box changed. `dark-page-lock`
+is the pill in the other theme and repaints the whole frame, as every `dark-*` does.
+The baseline is `.scratch/sweep36` (76 scenes). Note that `.scratch/` is
 gitignored *per worktree*, so a `sweepNN` in one checkout is not the same bytes as
 the same number in another; the name is a convention, not an address.
-The set before it, `.scratch/sweep33`
+The set before it, `.scratch/sweep35`
+(72 scenes), then `.scratch/sweep33`
 (67 scenes), and before that `.scratch/sweep32`
 (64 scenes), and before that `.scratch/sweep10`
 (42 scenes), re-baselined 37 of them for a

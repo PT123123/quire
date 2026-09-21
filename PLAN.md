@@ -2285,3 +2285,93 @@ emoji 盖在封面之上；二、封面不进 Markdown 通道（§二十六 是�
 换回来的是「不用每次开页解一张 JPEG」和一句能证伪的验收；四、Track 1 的迁移优先级（v11–v13）在这里花掉
 了 v12，编号 ≥ 12 的草案要往上挪；五、§三十八 剩下 **lock**、**version history**（仍欠它自己不肯留无限的
 磁盘/内存保留数字）、**templates**。
+
+## M12 锁定 · 门开在漏斗上，而拒绝对用户要能听见（2026-09-22，on `track/1-page-appearance`，ADR-0048）
+
+**缘起**：§三十八 第二组的第一行。「lock：只读开关。TextInput、slash 菜单、拖拽、⋮⋮ 的编辑项全部关闭，
+并且给出可见的锁定状态，**不能静默吞输入**」。前半句是一个星期能做完的东西，后半句是这个仓库到目前为止
+唯一一条**关于失败体验**的验收：一个被吞掉的点击，和用户以为没点到的点击，长得一模一样。
+
+**存成什么形状**：Schema **v13**，一列 `pages.locked INTEGER NOT NULL DEFAULT 0`。可空那件事在 cover 上是
+被 `0` 逼出来的，这里正相反：「没锁」是一个**值**而不是一种缺席，所以 `NOT NULL DEFAULT 0` 让这条 `ADD
+COLUMN` 不需要任何回填语句，一个 v12 的库升上来是每一页都开着——写错方向的默认值会表现为「我打不了字」，
+而这个特性的默认值必须是「什么都不挡」。列加在 `pages` 而不是 `blocks`，因为用户点的那句话是关于整份文档
+的；半锁的文档（三行能改第四行不能）不是 Notion 有的状态，也不是一次迁移能到达的状态。
+
+**门开在哪里**：`exec_editor`，约九十处 `exec_editor` / `exec_on_open_page` 调用点共用这一道。替代方案是那
+九十处各自记得，而「记得」正是这类门会烂掉的地方。但漏斗不是全部：`grep doc.borrow_mut()` 把剩下的入口一个
+一个点出来——四张 bench 场景的造数据、两条 Markdown 导入（写进自己一秒前刚 `create_page` 出来的页，那页
+必然是解锁的，所以锁永远不站在用户和他的文件之间）、两条树操作（`duplicate_page` / `delete_page`，锁不覆盖
+树），以及**三个真入口**。审计在这里抓到两个洞，两个都是同一个形状：
+
+```rust
+let _ = s.exec_on_open_page(Command::SetBlockType { .. });   // 锁：返回 None
+if old_kind == Page || Link { s.clear_block_ref(id); }        // 照写：引用被清掉了
+```
+
+`duplicate_page_block` 更糟：它在命令层看到这块**之前**已经按树造出一个子页，于是「被拒绝的复制」在侧栏里
+留下一个孤儿页。所以这一片立的规则不是「把门设好」，而是**跟着一次命令走的写，必须看那次命令的返回值**；
+三个漏斗外的入口（checkbox 的回调、`clear_block_ref`、`duplicate_page_block`）各自带门，测试除了比块列表
+还比子页计数——一次让树变肥的拒绝仍然是一次写。
+
+**两层门，不是一层**：Rust 那一层拒的是写。.slint 那一层拒的是光标：`EditorBlock.editing` 多出一个
+`!UIState.page-locked` 项。为什么两个地方都要设门：`editing` 是绑在 `UIState.editing-id` 上的，而那个 id 是
+控制器的 `on_block_activate` 设的——只在命令层设门，等于允许一个「按 Enter 才说不」的活输入框在重新加锁之后
+继续存在。大标题那颗 pill 的点击走 `lock-nudge()` 回调回 Rust，因为措辞只能有一份：标题、行、把手、键盘，
+四处说的是同一句话。
+
+**「不能静默吞输入」落成什么**：通知条一句 `This page is locked — ⋯ → Unlock page to edit.`，加上三处像素
+（标题上方的 pill、⋯ 里那一行自己变成 Unlock page、变短的 ⋮⋮）。**去重的依据是屏幕上那一行字**，不是队列
+也不是布尔：bar 是粘的（dismiss 才走），而拖拽的 hover 每个重绘帧都要问一次 `can_move_block_to`，一个手势
+几十帧就是几十次同一句话，那是另一种缺陷。hover 自己**保持安静**——落点线消失本身就是那个手势的反馈，
+紧随其后的那一次 drop 才值得一句；这条不对称是写在两个调用点上的注释，而不只是代码。⋮⋮ 的编辑项是**删掉**
+不是置灰：那个菜单没有 disabled 状态可以说「不行」，而一个谎报自己要干什么的条目比一个短菜单更糟；留下的两
+行是只取的（Copy link to block / Copy block）。
+
+**锁不住的四样东西，各自有理由**：一、`ToggleFold` 仍然执行——§三十七 已经把它登记成唯一持久化的*视图*状
+态，加锁不该让用户失去这页的大纲；门里写着一个具名例外，就得用断言钉住它（其余十条命令返回 `None` 时它必须
+还是 `Some`）。二、页面自己的外观照写——icon / cover / Style / favorite 是 §三十八 前面几段的特性，锁管的是
+文档说什么，不是文档长什么样。三、树操作照做——移动、删除、复制页是结构而不是内容。四、复制页**不**继承这把
+锁，跟继承字体 / icon / 封面正好相反：外观跟着走是因为副本该长成源的样子，锁不跟着走是因为「复制一个 locked
+的页」正是用户想改它又不动原版的动作。撤销与这三条都不同：**拒的不是丢**，锁之前建起来的 undo 栈原样留着，
+解锁之后接着用，测试靠「解锁后往同一批行里再打字」把这句话钉住。
+
+**像素读数**：sweep35 → sweep36，动了 **1 of 72**、新增 **4**。71 张字节相同，唯一动过的 `menu.png` 是
+**8 个采样像素落在单列 x 414 / y 692..706**，即页面菜单为第十二行改形的**滚动条滑块**——弹窗在加这一行之前
+就已按 `min(rows*30+8px, …)` 夹住，多一行剪不掉任何内容，能动的只有滑块（与上一片同一个陷阱，这一次没有再读错）。
+四张新场景每张都另找对照来自证画出了东西，而不是「新文件所以肯定对」：`page-lock` 对
+`default.png` 是 **244 px 落在 x 390..560 / y 52..74**——标题上方那一颗 pill 的精确位置，如果 `page-locked`
+没真的传到 .slint，这个 diff 会是 0，而 0 在这套流程里长得和成功一模一样；`page-lock-block-menu` 对
+`block-menu.png` 是 2 101 px，而且是**干净**的一对（那张场景逐字抄了 overlay 分支：同一个块、同一个 x 320 /
+y 300），差异就只剩「八行没了 + 一颗 pill」——它自己对 `default.png` 809 px，未加锁那张 2 055 px；
+`page-lock-menu` 要记一条老实话：它开的是编辑器当前那页的 ⋯，而 `menu.png` 锚在 106 那一行，两个盒子根本不在
+同一个 y，所以 4 586 px（对 `menu.png`）读的是「两盒 + 一个标签」，对它自己的 `default.png` 才是 3 316 px /
+x 240..560 / y 52..610（12 行的弹窗 + pill）；`dark-page-lock` 是暗色的 pill，和所有 `dark-*` 一样整幅重画。
+
+**没跑 RAM 闸，理由是可测的东西不存在**：一 bool 一页，读它的是 `locked_of`（一次 HashMap 查找，和它旁边的
+`cover_of` 同一个），hover 门是一次比较而不是一次分配，`note_locked` 每次事件最多进队列一条。没有每帧成本
+可量，所以证据是 71 of 72 字节相同——既有场景一张都没多付钱。
+
+**验证**：`cargo check --all-targets` 零警告、`cargo test --all-targets`（**395 passed / 0 failed / 12
+ignored**）、`cargo build --release --all-targets` 零警告、`cargo build --features software --bin
+quire-shot`；`grep -rn "#\[test\]" src tests | wc -l` = **407 = 395 + 12**，树上每个测试在册。四条新测试各钉
+一件事：`the_v13_step_adds_the_page_lock_to_a_v12_database`（先**控制断言**列真的不在——`DROP COLUMN` 之后
+不先证明这一点，NULL 什么也说明不了——再要求它带着 v12 的 cover 与 v10 的两列一起活着，然后往返
+`PageLockedSet` true/false/true 并顺带改名，钉住「锁是页的一列，不是罩在其余列上的影子」）、
+`a_locked_page_refuses_every_edit_and_leaves_the_document_as_it_was`（十五条写入口全部返回 `None`，块列表
+逐字节等于加锁之前，解锁之后同样的调用全部落地）、
+`a_locked_page_refuses_once_per_gesture_and_still_folds`（三十次拒绝只留一句话、hover 一句都不留、
+`ToggleFold` 仍然执行、锁住的页也不是别人的落点）、
+`a_locked_page_stays_a_page_and_a_copy_of_it_is_open`（副本不带锁、源页仍锁着）。
+另外做了一次**变异检查**：把门表达式强行短路成 `false`，两条新测试必须失败（实测失败信息分别是「the editing
+input」和「thirty frames of one gesture, one line on the bar」）。能说「不」的门禁才称上过话——这一条和上一
+片对比度探针的必然失败臂是同一件事。
+
+**未验证 / 已知边界**：一、真人一次都没点过：⋯ → Lock page → 点一行 → 看见 pill 与通知条（连同 cover 那两
+片欠的换封面与 GPU 彩色 emoji 盖图）；二、`locked` 不进 Markdown 通道（§二十六 是内容通道，一页的权限不是
+它的内容），也不进 undo（ADR-0044 那条「长相是属性不是编辑」在这里改成「门是属性」）；三、LAN 服务不需要
+门——它构造 `Page` 值来读和导出，从不写；四、锁不做**密码**：它挡的是用户自己的手，不是别人的手，一列
+`INTEGER` 没有加密，SPEC §三十八 的「只读开关」就是这个意思，别把它当权限写进任何面向第三方的文档；五、
+Track 1 的迁移优先级在这里花掉 v13，`CURRENT_VERSION = 13`，编号 ≥ 13 的草案要往上挪（含 Track 3 那份
+database 草案）；六、§三十八 剩下 **version history**（仍欠它自己不肯留无限的磁盘/内存保留数字）、
+**templates**。

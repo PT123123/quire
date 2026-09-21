@@ -2438,7 +2438,7 @@ synced block：依赖 §四十 的引用基础设施，排在它之后
 
 §十七 的 Page Tree 只管结构，不管页面本身长什么样。本阶段补上。
 
-数据前提：pages 表加列（icon / cover / font / layout / locked），走 §十八 的 migration，schema 版本 +1，旧库必须能无损升上来。—— 2026-09-21 落了 font + layout 两列（schema v10，ADR-0044），2026-09-22 落了 icon 一列（schema v11，ADR-0045），同日落了 cover 一列（schema v12，ADR-0047，可空而不是 `DEFAULT 0`：`0` 是一个合法的 AttachmentId，「没有封面」必须是第三种值）；locked 随自己的竖切加列，同样一步一版本。这些步骤共用一个 `add_page_columns`，所以一个半途的库（有人手工加过列、或从备份恢复到步骤中间）是收敛而不是报错。
+数据前提：pages 表加列（icon / cover / font / layout / locked），走 §十八 的 migration，schema 版本 +1，旧库必须能无损升上来。—— 2026-09-21 落了 font + layout 两列（schema v10，ADR-0044），2026-09-22 落了 icon 一列（schema v11，ADR-0045），同日落了 cover 一列（schema v12，ADR-0047，可空而不是 `DEFAULT 0`：`0` 是一个合法的 AttachmentId，「没有封面」必须是第三种值），同日落了 locked 一列（schema v13，ADR-0048，`NOT NULL DEFAULT 0`）；这些步骤共用一个 `add_page_columns`，所以一个半途的库（有人手工加过列、或从备份恢复到步骤中间）是收敛而不是报错。
 
 ## 图标与封面
 
@@ -2464,7 +2464,13 @@ small text：页级开关 —— 2026-09-21 已交付，ADR-0044（`pages.layout
 
 ## 锁定与版本历史
 
-lock：只读开关。TextInput、slash 菜单、拖拽、⋮⋮ 的编辑项全部关闭，并且给出可见的锁定状态，不能静默吞输入。
+lock：只读开关。TextInput、slash 菜单、拖拽、⋮⋮ 的编辑项全部关闭，并且给出可见的锁定状态，不能静默吞输入。—— 2026-09-22 交付，ADR-0048（`pages.locked`，schema v13，`INTEGER NOT NULL DEFAULT 0`：「没锁」是一个值而不是一种缺席，所以这列不像 cover 那样可空，迁移也就是一条不用回填的 `ADD COLUMN`）。
+
+句子里的四个关闭点读成**两层门**（ADR-0048）：Rust 那一层拒的是写——`exec_editor` 那个所有块命令共用的漏斗，加上漏斗旁边的三个入口（checkbox 的回调直接进命令层；`clear_block_ref`；`duplicate_page_block` 在命令层看到块之前先经树造出一个子页）。.slint 那一层拒的是光标——`EditorBlock.editing` 多出一个 `!UIState.page-locked` 项，因为一个陈旧的 `editing-id` 会在重新加锁之后仍然留着一个活输入框；只在命令层设门，等于允许一个「按 Enter 才说不」的文本框存在。撤销也在锁后面，但**拒的不是丢**：锁之前建起来的 undo 栈原样留着，解锁之后接着用。
+
+「⋮⋮ 的编辑项全部关闭」读成**删掉**而不是置灰，因为那个菜单没有 disabled 状态可以说「不行」；留下的是两行只取的：Copy link to block 与 Copy block。「给出可见的锁定状态」是三处像素：标题上方一颗 pill（"Page locked · ⋯ to unlock"）、⋯ 里那一行自己变成 Unlock page、以及变短的 ⋮⋮。「不能静默吞输入」由通知条承担，而去重的依据是**屏幕上那一行字**（bar 是粘的， dismiss 才走），因为拖拽的 hover 每个重绘帧都要问一次 `can_move_block_to`；hover 自己不说话——落点线消失就是那个手势的反馈，紧随其后的那一次 drop 才值得一句。
+
+不在锁里的：页面自己的外观（icon / cover / Style / favorite 照写，那是 §三十八 前面几段的特性）、树操作（移动 / 删除 / 复制页面）、以及一切**读**（导航、搜索、展开折叠）。`ToggleFold` 因此是锁内唯一仍然执行的命令——§三十七 把它登记成持久化的*视图*状态，加锁不该让用户失去这页的大纲。门里写着一个具名例外，所以它由一条断言钉住：其余十条命令返回 `None` 的同时 `ToggleFold` 必须还是 `Some`。复制页面**不**带上这把锁，与带上字体 / icon / 封面相反——外观跟着走是因为副本该长成源的样子，锁不跟着走是因为「复制一个locked的页」正是用户想改它又不动原版的动作。
 
 version history：
 

@@ -108,7 +108,14 @@ component DocumentRow inherits Rectangle {
             visible: root.first;
             mouse-cursor: MouseCursor.text;
             clicked => {
-                UIState.title-editing = true;
+                // A locked page answers the click instead of eating it
+                // (SPEC §三十八). The cursor still says "text" because the
+                // title is still a title; what it does not do is open a caret.
+                if (UIState.page-locked) {
+                    UIState.lock-nudge();
+                } else {
+                    UIState.title-editing = true;
+                }
             }
         }
         title := Text {
@@ -288,6 +295,40 @@ export component Editor inherits Rectangle {
                     UIState.find-open = false;
                 }
             }
+        }
+    }
+
+    // The lock, said out loud (SPEC §三十八 requires a visible state, and a
+    // lock nobody can see is only a bug with a name). A pill of its own rather
+    // than a dimmed page: nothing here became harder to read, only harder to
+    // change. It rides the viewport like the find bar does — the state belongs
+    // to the page, not to one position in it — and sits left so it never
+    // trades places with that bar at the top-right.
+    if UIState.page-locked : Rectangle {
+        x: root.gutter;
+        y: Theme.spacing-md;
+        height: 24px;
+        width: lock-label.preferred-width + 24px + 3 * Theme.spacing-sm;
+        border-radius: Theme.radius-md;
+        border-width: 1px;
+        border-color: Colors.border;
+        background: Colors.surface-overlay;
+
+        Icon {
+            x: Theme.spacing-sm;
+            y: (parent.height - self.height) / 2;
+            size: 14px;
+            name: "lock";
+            color: Colors.text-secondary;
+        }
+        lock-label := Text {
+            x: Theme.spacing-sm + 14px + Theme.spacing-sm;
+            width: parent.width - self.x - Theme.spacing-sm;
+            text: "Page locked · ⋯ to unlock";
+            font-family: Typography.ui-font;
+            font-size: Typography.size-caption;
+            color: Colors.text-secondary;
+            vertical-alignment: center;
         }
     }
 

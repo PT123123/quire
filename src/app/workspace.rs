@@ -34,6 +34,11 @@ pub struct Page {
     /// title, mirrored from the core page so the editor can be told what to
     /// draw — and so the reclaim can ask, per page, who still points at a file.
     pub cover: Option<crate::core::AttachmentId>,
+    /// The page's read-only switch (SPEC §三十八 "lock"), mirrored from the
+    /// core page so the editor can be told not to open an input, and so the
+    /// one funnel that refuses commands can ask the tree instead of the
+    /// document — the lock is a fact about the page, not about its blocks.
+    pub locked: bool,
     /// Title + block text blob, filled by the app layer; the search source.
     pub search_text: String,
 }
@@ -124,6 +129,7 @@ impl Workspace {
                 small_text: false,
                 icon: String::new(),
                 cover: None,
+                locked: false,
                 search_text: String::new(),
             },
         );
@@ -263,6 +269,11 @@ impl Workspace {
             // reclaim has to be told that before it sweeps the bytes.
             dst.cover = style.4;
         }
+        // The lock deliberately does *not* travel. Font, icon and cover are
+        // parts of what the page looks like, so a copy that dropped them would
+        // open differently from how it looked; the lock is a gate on editing,
+        // and duplicating a locked page is what a user does to edit it without
+        // touching the original. `new_page` hands the copy an unlocked row.
         self.attach(new_root, parent, Some(id));
         self.copy_children(id, new_root);
         Some(new_root)
@@ -419,6 +430,19 @@ impl Workspace {
             .filter_map(|p| p.cover)
             .map(|a| a.as_u64() as i64)
             .collect()
+    }
+
+    /// Set the page's read-only switch and answer with what the page now says
+    /// (`None` for an unknown page, like every other setter here).
+    pub fn set_locked(&mut self, id: i32, locked: bool) -> Option<bool> {
+        self.pages.get_mut(&id).map(|p| {
+            p.locked = locked;
+            p.locked
+        })
+    }
+
+    pub fn locked_of(&self, id: i32) -> bool {
+        self.pages.get(&id).map_or(false, |p| p.locked)
     }
 
     pub fn mark_opened(&mut self, id: i32) {
@@ -610,6 +634,7 @@ impl Workspace {
                     small_text: p.small_text,
                     icon: p.icon.clone(),
                     cover: p.cover,
+                    locked: p.locked,
                     search_text: String::new(),
                 },
             );
@@ -899,6 +924,26 @@ mod tests {
         assert_eq!(w.set_cover(105, None), None);
         assert_eq!(w.cover_ids(), vec![7]);
         assert_eq!(w.set_cover(9999, None), None, "an unknown page stores nothing");
+    }
+
+    #[test]
+    fn a_locked_page_stays_a_page_and_a_copy_of_it_is_open() {
+        let mut w = ws();
+        assert!(!w.locked_of(105), "the sample tree locks nothing");
+        assert_eq!(w.set_locked(105, true), Some(true));
+        assert!(w.locked_of(105));
+        assert_eq!(
+            w.title_of(105),
+            Some("Project Atlas"),
+            "locking is one flag, not a wall around the rest of the row"
+        );
+        assert_eq!(w.set_locked(9999, true), None, "an unknown page stores nothing");
+        // The copy is where the user goes to edit: a look travels with a
+        // duplicate, a gate does not.
+        let copy = w.duplicate(105).expect("duplicate");
+        assert!(!w.locked_of(copy), "and the duplicate is unlocked");
+        assert!(w.locked_of(105), "the source keeps its own state");
+        assert_eq!(w.set_locked(105, false), Some(false), "and unlocks");
     }
 
     #[test]

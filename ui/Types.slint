@@ -211,6 +211,10 @@ export global UIState {
     // for a page that has no cover, and so a cover plus an image row of the same
     // attachment costs the raster cache once.
     in-out property <int> page-cover-id: 0;
+    // The open page's read-only switch (SPEC §三十八 "lock"). Everything the
+    // editor does with it is derived: no row opens a caret, the hero title
+    // cannot be clicked into, and the handle's menu keeps only what reads.
+    in-out property <bool> page-locked: false;
 
     // in-page find (Ctrl+F)
     in-out property <bool> find-open: false;
@@ -306,6 +310,11 @@ export global UIState {
     callback find-close();
     callback title-commit(string);
     callback title-cancel();
+    // Something asked to edit a locked page and was refused. SPEC §三十八 says
+    // a lock must not swallow input silently, so the .slint side reports the
+    // attempt here and Rust answers with the notice bar — one wording for the
+    // title, the rows, the handle and the keyboard.
+    callback lock-nudge();
     // A page with no blocks shows a panel instead of rows, and every insert
     // command is anchored to a block that does not exist yet. This is that
     // panel's front door: make the first paragraph and put the caret in it.

@@ -537,6 +537,30 @@ component IcSmile {
     }
 }
 
+// The page's read-only switch (SPEC §三十八 "lock"): a padlock, shackle over
+// body, so the chip that names the state is not the only thing saying it.
+component IcLock {
+    in property <brush> color: Colors.text-secondary;
+    in property <length> size: 16px;
+    width: size; height: size;
+    Path {
+        width: parent.width; height: parent.height;
+        viewbox-x: 0; viewbox-y: 0; viewbox-width: 24; viewbox-height: 24;
+        stroke: color; stroke-width: 1.8px;
+        stroke-line-cap: round; stroke-line-join: round;
+        fill: transparent;
+        // shackle: up the left leg, over the top, down the right leg
+        MoveTo { x: 8.5; y: 11; } LineTo { x: 8.5; y: 8; }
+        ArcTo { radius-x: 3.5; radius-y: 3.5; x: 15.5; y: 8; }
+        LineTo { x: 15.5; y: 11; }
+        // body
+        MoveTo { x: 5.5; y: 11; } LineTo { x: 18.5; y: 11; }
+        LineTo { x: 18.5; y: 20.5; } LineTo { x: 5.5; y: 20.5; } Close {}
+        // keyhole, one short stroke: at 16px a dot is a printing artefact
+        MoveTo { x: 12; y: 14.5; } LineTo { x: 12; y: 17.5; }
+    }
+}
+
 export component Icon {
     in property <string> name;
     in property <length> size: 16px;
@@ -576,4 +600,5 @@ export component Icon {
     IcArrowRight { visible: root.name == "arrow-right"; size: root.size; color: root.color; }
     IcPalette { visible: root.name == "palette"; size: root.size; color: root.color; }
     IcSmile { visible: root.name == "smile"; size: root.size; color: root.color; }
+    IcLock { visible: root.name == "lock"; size: root.size; color: root.color; }
 }

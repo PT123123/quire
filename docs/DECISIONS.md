@@ -2,6 +2,102 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0048 · A lock is one column on the page, and a refusal has to be heard
+
+Decision: SPEC §三十八's lock is `pages.locked INTEGER NOT NULL DEFAULT 0`
+(schema **v13**) — one bool per page, no table of what is locked within it. It
+covers the document: every block's content and the page's own title. It does not
+cover the page's look (icon, cover, Style, favourite stay offered), the tree
+(move, delete, duplicate), or reading (navigation, search, fold). One command is
+exempt inside a locked page: `ToggleFold`. And a refusal is never silent: the
+notice bar says which switch to flip, and the page says it too in a pill above
+its title, in the ⋯ row that now reads "Unlock page", and in a ⋮⋮ menu left with
+only its two read-only rows.
+
+Why one column and not a flag per block is the shape of the sentence the user
+clicks: "this page is read-only" is a statement about the whole document, and a
+half-locked document — three rows editable, the fourth not — is not a state
+Notion has a word for, and not one a migration could reach. So the gate sits
+where the writes already funnel: `AppState::exec_editor`, which the 77 call
+sites share, rather than 77 places that each have to remember. `NOT NULL
+DEFAULT 0` makes the migration one `ADD COLUMN` with no backfill statement, and
+a v12 library opens with nothing locked — "not locked" is a value, not an
+absence, which is why this column is not nullable where ADR-0047's cover is.
+
+The audit behind "every write": `exec_editor` is the only route to
+`core::command::exec`, and the ninety-odd call sites of it and
+`exec_on_open_page` share that gate. `grep doc.borrow_mut()` lists what is left,
+by name. Four hits are the
+bench scene fixtures, which paint a state rather than accept an edit. Two are the
+Markdown import paths: they write blocks into a page they created a moment
+earlier, and `create_page` hands out an unlocked row, so a lock can never sit
+between a user and their own file. Two more are tree operations the lock
+deliberately does not cover (`duplicate_page`, `delete_page`). And three are real
+entry points beside the funnel: the todo checkbox, whose Slint callback calls the
+command layer directly to update one row; `clear_block_ref`; and
+`duplicate_page_block`, which mints a child page through the tree *before* the
+funnel ever sees the block command.
+
+The last two were holes, and they are the shape worth remembering: both sit
+behind a caller that wrote `let _ = exec(...)`, so the refusal was discarded and
+the follow-up write landed anyway — a locked page whose Page block lost its
+reference, or which quietly gained a second child page. So the rule this slice
+adds is not just "gate the funnel" but **a write that follows a command must be
+conditioned on that command's result**, and the three entry points beside the
+funnel each carry their own gate. The test that pins it asserts the child-page
+count as well as the block list, because a refusal that leaves the tree fatter
+than it found it is still a write.
+
+Why fold is the exception: §三十七 already files it as the one command whose
+result is persisted *view* state, and locking a page must not cost the user its
+outline. A named exception inside a guard is exactly the thing that rots, so it
+is pinned by an assertion that `ToggleFold` still returns `Some` while the ten
+commands beside it return `None`.
+
+Why the notice bar carries the refusal rather than a disabled cursor: the
+section's own words are 不能静默吞输入, and a click that does nothing is
+indistinguishable from a click that missed. The bar is sticky until dismissed,
+so the dedup reads what the bar currently says — the drag-hover path answers
+once per frame of one gesture, and rewriting the same sentence sixty times is
+its own defect. The hover check itself stays silent on purpose: the absence of a
+drop line is that gesture's feedback, and the drop that follows is the moment
+worth a sentence. The ⋮⋮ menu's editing rows are **dropped**, not greyed,
+because that menu has no disabled state to grey them with.
+
+Consequences:
+
+* The lock is a page property, so it is not a Ctrl+Z step (ADR-0044's rule for
+  a look). That is different from *undo being disabled*: the stack built before
+  the lock survives it intact and is refused while it is on, so unlocking hands
+  back exactly the history the user had, which the test asserts by re-typing
+  into the same rows afterwards.
+* A duplicated page does **not** inherit the lock, which is the one place this
+  slice departs from ADR-0047: font, icon and cover are parts of what a page
+  looks like, so a copy that dropped them would open differently from how it
+  looked; the lock is a gate on editing, and duplicating a locked page is what
+  a user does to edit something like it without touching the original.
+* The refusal is therefore two gates, not one. Rust refuses the write;
+  `EditorBlock.editing` carries a `!UIState.page-locked` term so the caret
+  cannot survive a lock/unlock/relock cycle into a row that would otherwise
+  still be typing. A gate on the command layer alone would leave a live input
+  on screen that refused nothing until Enter.
+* Storage stays boring on purpose: `locked` joins the guarded
+  `add_page_columns` list, `insert_page` and the load `SELECT` carry it, and
+  `Change::PageLockedSet` is one `UPDATE`. It reaches neither `cover_ids()` nor
+  the undo vote in the reclaim sweep (ADR-0037/0047), because a lock stores no
+  pointer to any file.
+* It stays out of the Markdown channel (§二十六 carries content; a page's
+  permissions are not its content) and out of the LAN server, which builds
+  `Page` values to read and export and never writes one.
+* Track 1's migration priority is spent again: v13 is the lock, so any draft
+  numbered 13 or higher moves up — Track 3's草案 included.
+* The page ⋯ menu grows a twelfth row. `ContextMenu` height is
+  `min(rows * 30px + 8px, window-h - menu-y - 20px)`, so in the anchored-low
+  baseline scene the popup was already clamped before this row existed — which is
+  why `menu.png` moves as its scrollbar thumb (8 sampled px, one column at
+  x 414) and nowhere else, exactly as it did when the cover added a row. A new
+  menu row cannot clip a command; it can only make the thumb shorter.
+
 ## ADR-0047 · A cover stores the attachment, and the veil's worst case is arithmetic
 
 Decision: SPEC §三十八's cover is stored as `pages.cover INTEGER NULL` (schema
