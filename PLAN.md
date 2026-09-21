@@ -2323,3 +2323,68 @@ PageDeleted]`）与删页面（只有 `PageDeleted`，靠 CASCADE）end in the s
 
 **下一步**：D2 的 property 系统（14 种类型 + 每型往返 + date/number 的数值序），之后 D3 的 table view
 把窗口接到真帧上，并回答上面那个游标问题。
+
+## Track 3 · D2 属性系统（2026-09-22，on `track/3-database`，schema v17，ADR-0068…ADR-0071）
+
+D1 让**通道**从 SQL 里取行，D2 让窗口里的每一格**有意义**：SPEC §三十九 的 14 种属性类型各自的输入
+与渲染规则、两个派生时间列、以及「排序必须在 SQL 侧」这条红线。仍然**没有 UI**（没有 `.slint`，六行
+插入菜单占位仍不可选，D3 才点亮）。
+
+**属性的语义搬进 `core::database_property`（新文件）**：这是这一刀的主体。`PropertyOptions` 读/写
+select / status / multi-select 的 `config`（选项带自己的 id，改名是一处文档编辑、零个值被碰）、
+`NumberFormat` / `DateFormat` 从 config 读（未知设置折回默认），`parse_one` / `parse_many` 是**写入口**
+（每种类型的容忍度逐条成文：数字要有限、日期的**形状**是门而日历不是、`url`/`email`/`phone` **从不改写
+也从不拒绝**、空输入 = 无值、select 不接受列表里没有的名字——选项列表是同一批里的第二个 change），
+`paint` 是**读出口**（选项 id 变名字、数字过格式、文件过附件名、多选拼名字）。core 里还放了**全仓库
+唯一的 JSON 阅读器**（ADR-0061 的选项列表今天用，ADR-0064 的视图文档 D4 用），带深度上限——没有 serde，
+ADR-0001 的「一个进程一个运行时」比省这百来行重要。两种 fold 都写明是**可见的**而不是静默的：未知的
+选项 id 显示它自己，已被删的附件 id 也显示它自己。
+
+**两个派生时间列**（ADR-0068，`db_records.created` / `.edited`，v17）：`YYYY-MM-DDTHH:MM` 本地墙钟、
+定宽、`''` = 未知，**由写路径盖章**（`insert_record` / `set_cell` / 页标题改名里跑 SQLite 自己的
+`strftime`），**永不写进 `db_values`**——读路径对这两种 kind 一眼都不看值表（测试写一行进去，然后看它
+被忽略）。刷新时机是明写的规则：内容是格子与标题，位置（`ord`）与指向哪页是「相框」，拖动一行不算编辑。
+`Record` 结构体**没有**这两个字段：`Change` 里的 record 不能给自己编一个生日。
+
+**排序是语句里的 `ORDER BY`**（ADR-0070）：`RowRequest::sort` 是一个编译好的 `SortSpec`
+（property + 列 + 方向），store 把它写成 SQL —— 全仓库**没有任何地方给 `Vec` 排序**。比哪一列是每类型的
+决定：`number` 比 `db_values.num`（`2` 在 `10` 前）、日期型比定宽文本（字节序就是时间序）、`checkbox`
+比 `flag`、title 走 ADR-0063 的 `COALESCE`、隐藏列自己加一个 join，而 multi-select / files / 计算列
+**没有 `SortSpec`**（「按多选排」是关于选项顺序的问题，不能假装答应）。空值显式排在最后（`ORDER BY
+(v1.num IS NULL) ASC, v1.num ASC, r.ord, r.id`），**升降序都在最后**，末两项是稳定的 tie-break。
+
+**`person` 的降级**（ADR-0071）：没有成员表、没有成员 id、没有账号，值就是 `text` 列里的一个字符串
+（ADR-0061 的折叠原样不动），而**本地成员名单是现算的**：`workspace_people()` 读「存储 kind 为
+`person`」的列的去重非空值。改名就是改一个字符串——这正是降级省下的东西。
+
+**数字**（10 000 条 record × 2 列，release，`benchmarks/results/2026-09-22-track3-d2-sort.jsonl`，三次）：
+
+| 读数 | 值（三次运行） |
+|------|----------------|
+| SQL 排序窗口（顶，`LIMIT 31 OFFSET 0`） | **6.4 / 6.4 / 6.2 ms** |
+| SQL 排序窗口（底，`LIMIT 31 OFFSET 9969`） | 13.1 / 13.2 / 13.1 ms |
+| 同一个底部窗口**不排序**（D1 的读法） | 5.9 / 4.9 / 4.5 ms —— 排序给一次滚动加 **~8 ms** |
+| 排序但不加窗口（全部 10 000 行） | 21.6 / 19.1 / 18.9 ms —— 顺序本身的价钱（临时 B 树） |
+| 对照：取回全部再在内存里排 | 14.0 / 13.3 / 15.5 ms、堆 **1 220 000 B（1.16 MB）** |
+| 排序窗口的堆 | **3 782 B**（全表的 **323×**，三次逐字节相同） |
+| 一次单元格写入（自己一个事务 / 批量） | 2.8–7.4 ms / **10.6–14.9 µs** —— 差值就是 commit |
+| `EXPLAIN QUERY PLAN` | 五次 `SEARCH … USING INDEX` + **`USE TEMP B-TREE FOR ORDER BY`** |
+
+**这一刀量出来的真问题（诚实的一面）**：排序在 SQL 侧赢得**内存**（323×）与**红线**（顺序是数据库的，
+不是副本的），但**时间上只赢 2×**（6.4 ms vs 14.0 ms）——因为 `db_values.num` 上没有索引，SQL 要为
+10 000 行建临时 B 树；Rust 排 10 000 个 f64 只要 0.36 ms，贵的是**取回那 10 000 行**（13 ms）。
+记录在案，D4 的编译器可以据此决定「隐藏列排序要不要加索引」，但窗口与排序的**形状**不能变。
+
+**验证**：`cargo check --all-targets` 干净（0 warning）；`cargo test --all-targets` 全绿（312 + 13 + 53 +
+39 + 14 …，见报告，按 target 分开）；视觉 **changed 0**（67 个既有场景逐字节相同；新出现的 10 个
+`mention` / `date` / `backlinks` / `dangling` 场景是 Track 2 的，不是本刀的）；`cargo build --release`
+零警告。新测试 **33 条 + 1 条打印型探针**（`core::database_property` 20、`core::database` 1、
+`storage::database_store::tests` 10、集成 2）。
+
+**未验证**（诚实清单）：没有 UI 臂——没有任何格子被画出来，`looks_valid` 的阈值没有用户量过；视图文档
+还没被编译成 `SortSpec`（D4），多列排序与分组头的形状未命名；没有过滤的数字（D4）；`workspace_people()`
+的开销没量；**改 kind 不迁移值**仍是 D1 的状态；选项列表的「加一个选项」还没有 `Change` 臂（跟着 D3 的
+选项编辑器一起加）。
+
+**下一步**：D3 的第一个视图（table view）——把窗口接到真帧上，点亮六行占位，回答 D1 留下的游标问题，
+并把单元格编辑器接到 `parse_one` / `paint` 上。

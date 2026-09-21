@@ -453,3 +453,262 @@ plan:
 3. **`.scratch/` 是四条 track 共用的**：本刀的 sweep 用 `.scratch/track3-sweep-d1` 而不是
    `.scratch/sweep34`（后者被别的 track 占着），同理 `.scratch/track3-d1/` 是本刀的日志目录。
 4. **`docs/SPEC.md` 的行数**：本机 `Get-Content` 少算（`\r`），python 读是 2595 行。老坑，再记一次。
+# Track 3 — Database（D2：property 系统）
+
+D1 让窗口真的从 SQL 里取行，D2 让窗口里的每一格有意义：SPEC §三十九 的 **14 种属性类型**各自的
+输入与渲染规则、**两个派生时间列**（不许双写）、以及「**排序必须在 SQL 侧**」这条红线。`person` 按
+ADR-0061 的形态降级。仍然**没有 UI**：没有 `.slint`、没有块种类、插入菜单那六行占位仍不可选（D3）。
+
+## 1 · 本刀改了哪些文件
+
+| 文件 | 为什么 | 关键位置 |
+|------|--------|----------|
+| `src/core/database_property.rs`（**新**，1732 行） | 属性的全部语义：选项列表、格式、输入规则、渲染规则、全仓库唯一的 JSON 阅读器 | `PropertyOptions` L100、`to_config` L148、`option_named` L204、`NumberFormat` L258、`DateFormat` L298、`parse_one` L365、`parse_many` L459、`iso_date` L516、`looks_valid` L557、`AttachmentNames` L610、`paint` L639、`mod json` L725（深度上限、转义、代理对）、测试 L1121 起 20 条 |
+| `src/core/database.rs` | 「两个时间 kind 不是文本值」与「排序是编译好的词」 | `is_derived` L459、`sort_column` L476、`ValueKind::Derived` L508/L527、`SortColumn` L533、`SortSpec` L556、`RecordTimestamps` L583、`RowRequest::sort` L821（+`RowRequest::new`）、`CellValue::display` 的注释改成「值自己的形态」 |
+| `src/storage/migrations.rs` | v17：`db_records` 的两个时间列（一步一个语义单位） | `CURRENT_VERSION` L14（**16 → 17**）、v17 步 L344、`add_record_timestamp_columns` L402（「缺哪列补哪列」的范式） |
+| `src/storage/database_store.rs` | SQL 侧的三件事：派生列、排序、渲染 | `NOW` L67、`read_record_timestamps` L405、`derived_cell` L426、`cell` 的派生分支 L265、`workspace_people` L334、`row_query_plan` L510、`sort_expression` L591、`read_attachment_names` L767、`insert_record` 盖章 L990、`touch_record` L1019、`touch_edited_by_page` L1034、`set_cell` 末尾的 bump L1087、快照/恢复带上两列 L1252 起、测试 L1425 起 10 条、探针 L3555 |
+| `src/storage/repository.rs` | 页标题改名要动 record 的 `edited`（跨模块的唯一一处） | `PageTitleSet` 臂里的 `database_store::touch_edited_by_page` L608 |
+| `tests/integration/storage_test.rs` | v17 迁移测试 + 批量路径的生日 + D1 那两处 `RowRequest` 字面量 | `mod database_property_layer` L2341（**末尾新增模块**，不碰 D1 与 Track 2 的 `database_layer`）；两处 `RowRequest::new(...)` |
+| `docs/DECISIONS.md` | ADR-0068…ADR-0071（文件末尾，217 行） | 时间列 / 输入与渲染 / 排序 / person |
+| `docs/SPEC.md` | §三十九「属性类型」小节标注已交付 + ADR 号 | 三处 hunk（属性类型段、person 降级行、created/last edited 的来源那句） |
+| `PLAN.md` | 末尾追加 `## Track 3 · D2 属性系统` | 文件末尾 |
+| `benchmarks/results/2026-09-22-track3-d2-sort.jsonl`（**新**） | 探针的原始 JSON 行（三次运行） | 3 行 |
+
+**没碰**：`CHANGELOG.md`、`docs/ROADMAP.md`、`docs/PERFORMANCE.md`、`Cargo.toml`、`[profile.release]`、
+任何 `ui/*.slint`、任何 Track 1/2/4 的功能文件。**零新依赖**（`Cargo.toml` 一个字没改）。
+
+## 2 · 迁移号（串行接缝）
+
+* 动手前读 `src/storage/migrations.rs`：`CURRENT_VERSION = 16`（Track 2 的 `reference lookup` 步）。
+* 本刀采用 **v17**（`db_records.created` / `.edited`）。
+* **提交树里这一步仍是 v17，而数组里 16 是缺的**：本刀的提交 blob 建在 HEAD（v15 收尾）之上，Track 2 的
+  v16 还没提交，所以 blob 的数组是 `[…12…15, 17]` 且 `CURRENT_VERSION = 17`。这不是重号——迁移 runner
+  （`ensure_current`）只按数组顺序应用「version > 文件当前版本」的步，**跳号是允许的**，全新库走完
+  1…15 再到 17 即 `CURRENT_VERSION`，v16 库（Track 2 写的）打开时 `16 > 17` 为假、只会补应用 v17。两个
+  分支合并后就是连续的 12…17。**没有把 v17 改成 v16**：那会让 master 上出现两个 v16 步，第二个会被
+  runner 的 `version <= from` 静默跳过——那才是真的数据损坏。
+* 本步是 `sql: ""` + `backfill`（`add_record_timestamp_columns`），照 v10/v11 立的范式「缺哪列补哪列」，
+  所以半途的库收敛而不是报错；v17 的库**不发明生日**（旧行两列是 `''`，读出来是空格子）。
+
+## 3 · 命令与门槛结果（**工作树**）
+
+```
+cargo check --all-targets   → Finished，0 warning
+cargo test --all-targets    → 全绿，按 target 分开：
+  unittests src/lib.rs                312 passed / 0 failed / 13 ignored
+  unittests src/main.rs                 0 / 0 / 0
+  unittests src/bin/quire_typing        0 / 0 / 0
+  tests/integration/backup_test        13 / 0 / 1
+  tests/integration/find_test           9 / 0 / 0
+  tests/integration/markdown_test      69 / 0 / 0
+  tests/integration/persistence_test    5 / 0 / 0
+  tests/integration/search_test        17 / 0 / 0
+  tests/integration/storage_test       39 / 0 / 2
+  tests/integration/workspace_test     14 / 0 / 0
+  ── 10 个 target 合计 478 passed / 0 failed / 16 ignored
+cargo build --release       → Finished，**0 warning**
+```
+
+**提交的树单独跑过一遍**（本刀提交时把别人的 hunk 排除在外，所以「提交树能不能编、测试过不过」不是
+推论题）：独立 worktree（`git worktree add .scratch/track3-d2/verify HEAD --detach`，共用 `target` 目录，
+不动共享工作树），把 `.scratch/track3-d2/stage/` 里**将要提交的那 12 个 blob** 覆盖进去再跑：
+
+```
+cargo check --all-targets → Finished，0 warning
+cargo test --all-targets  → 全绿，按 target 分开：
+  unittests src/lib.rs   295 passed / 0 failed / 12 ignored
+  backup 13 / find 9 / markdown 62 / persistence 5 / search 17 / storage 36 / workspace 14
+  ── 10 个 target 合计 451 passed / 0 failed / 15 ignored
+cargo build --release     → Finished，**0 warning**
+```
+
+（比工作树少是因为那棵树里没有 Track 2 / Track 4 的未提交测试：478 − 451 = 27。lib 由 D1 提交树的 264
+涨到 295 = **+31**，正好是本刀新增的 31 条；storage 由 34 涨到 36 = 本刀的 2 条集成测试。）
+
+**这一步又抓到一个真错误，值得记下来**（D1 那次抓到的是 `E0583`，这次是另一类，方向相反）：第一次提交树
+检查在 `tests/integration/storage_test.rs:1902 / 1993` 报 `E0063: missing field sort` —— 那两处
+`RowRequest { … }` 字面量是 **D1 自己的两条测试**写的，在 HEAD 的文本里是旧形状；本刀给 `RowRequest`
+加了 `sort` 字段，而我的 blob 是「HEAD 的文本 + 我新加的模块」，于是**旧字面量留在了提交树里**。
+修法是把那两行（`RowRequest::new(db.id, PropertyId(1), &columns)` 与
+`&RowRequest::new(db.id, PropertyId(1), &[])`）也算进本刀的 diff。教训与 D1 那条同源：**排除了别人的
+hunk 之后，HEAD 的旧代码要一起面对新 API**——「提交树单独跑一遍」是唯一能发现它的地方。给整合者：
+任何在 `RowRequest { … }` 字面量上构造请求的测试（Track 2 若在自己的测试里也写了）合并后都要改这一行。
+
+本刀新增 **33 条测试 + 1 条打印型探针**（31 条在 lib 里，2 条在 storage 集成里）：
+
+* `core::database_property::tests` **20 条**：JSON 阅读器（写出-读回、转义与代理对、拒绝非文档、深度上限、
+  id 语义）、选项列表（ADR-0061 的文档往返、按 id 改名不动值、get-or-add 不复用 id、坏文档折成空表、
+  重复 id 取第一个）、两种格式（整数/百分比/未知格式折默认、日期的两个默认值、不发明时间）、输入规则
+  （空输入 = 无值、文本逐字、数字的接受与拒绝名单、日期的形状 vs 日历、勾选词表、三个字符串 kind 的
+  **不改写**、select 的 id 与名字、列表两种入口、存储型 kind 拒绝一切写入）、渲染（选项名/未知 id 显示
+  自己/文件名字与回退/格式）。
+* `core::database::tests` **+1**：`sort_column` 每种 kind 落哪一列 + 哪五种没有 `SortSpec`。
+* `storage::database_store::tests` **+10**：每型往返（含 paint）、边界（负数/小数/0/空串/5 万字符/非法
+  email·url·phone/日期形状/列表重复项）、**数字序 vs 字节序的对照**（同一对 `2`/`10` 排两种序）、
+  **日期序依赖定宽**（写一个不合形的 `2026-9-2` 进去看顺序坏掉）、隐藏列排序（多一个 join + 计划里有
+  `TEMP B-TREE`、没有 `SCAN db_values`）、派生列是 record 自己的（含「偷写的值没人读」）、files 渲染名字与
+  无名回退、改名选项不动值、person 的折叠与派生名单（并检查没有成员表）、批量路径保住生日。
+* `tests/integration/storage_test.rs` 的 `mod database_property_layer` **2 条**：
+  `the_v17_step_adds_the_record_timestamps_to_a_v16_database`（真 v16 文件：DROP COLUMN + 版本回退，
+  升上来后旧行逐字段没变、新行有章、旧行空格子）、
+  `a_bulk_replace_keeps_the_birthday_of_the_records_it_keeps`（端到端 `replace_all`）。
+
+**视觉**：本刀是纯数据层，预期 changed 0，实测 changed 0：
+
+```
+pwsh benchmarks/scripts/sweep.ps1 -OutDir .scratch/track3-sweep-d2 -Baseline .scratch/sweep33
+  sweep at commit: d65ad3e
+  vs baseline .scratch/sweep33 (67 scenes):
+    changed    0:
+    identical  67: default.png … dark-page-icon.png（全部 67 张逐字节相同）
+    new        10: mention.png date.png backlinks.png backlinks-open.png backlinks-small.png
+                  dangling.png dark-mention.png dark-date.png dark-backlinks.png dark-dangling.png
+```
+
+那 10 个 `new` **不是本刀的场景**：它们是 Track 2 未提交的 mention/date/backlinks 场景，出现在我的
+sweep 目录里是因为我编的 `quire-shot` 里带着他们的代码（基线 `.scratch/sweep33` 早于它们）。67 个既有
+场景逐字节相同 = 本刀一个像素都没动。
+
+## 4 · 性能数字（本刀欠的）
+
+10 000 条 record × 2 列（一个 number、一个 date，数值是 `(i × 7919) mod 10007`，插入序与值序都不是答案），
+`cargo test --release --lib -- --ignored --nocapture a_sorted_window_costs`，原始行
+`benchmarks/results/2026-09-22-track3-d2-sort.jsonl`（三次运行）：
+
+| 读数 | 三次 |
+|------|------|
+| 落库 10 000 行 + 30 000 格 | 422.0 / 494.5 / 492.6 ms |
+| **SQL 排序窗口（顶，`LIMIT 31 OFFSET 0`）** | **6360 / 6161 / 6656 µs** |
+| SQL 排序窗口（底，`LIMIT 31 OFFSET 9969`） | 13 209 / 13 148 / 13 586 µs |
+| 同一个底部窗口**不排序** | 4944 / 4501 / 4766 µs（**排序给一次滚动加 ~8 ms**） |
+| 排序但取全部 10 000 行（顺序本身的价钱） | 19.1 / 18.9 / 19.8 ms |
+| 日期降序窗口（顶） | 7796 / 6757 / 6445 µs |
+| **对照：取回全部再在内存里排** | 13.3 / 15.5 / 13.5 ms，堆 **1 220 000 B** |
+| 排序窗口那 31 行的堆 | **3 782 B**（三次逐字节相同，全表的 **323×**） |
+| 一次单元格写入（自己一个事务 / 批量） | 5489 / 7395 / 6931 µs · **10.7 / 14.9 / 10.6 µs** |
+
+**证据（每次运行都打印）**：被交给 SQLite 的原文、绑定的值、以及它选的计划——
+
+```
+SELECT r.id, COALESCE(p.title, t.text), v0.text, v0.num, v0.flag, v1.text, v1.num, v1.flag
+FROM db_records r
+  LEFT JOIN pages p ON p.id = r.page
+  LEFT JOIN db_values t ON t.record = r.id AND t.property = ?1
+  LEFT JOIN db_values v0 ON v0.record = r.id AND v0.property = ?2
+  LEFT JOIN db_values v1 ON v1.record = r.id AND v1.property = ?3
+WHERE r.db = ?4 ORDER BY (v0.num IS NULL) ASC, v0.num ASC, r.ord, r.id LIMIT ?5 OFFSET ?6
+binds: [1, 2, 3, 1, 31, 0]
+plan:
+  SEARCH r USING INDEX idx_db_records_db_ord (db=?)
+  SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+  SEARCH t / v0 / v1 USING INDEX sqlite_autoindex_db_values_1 (record=? AND property=?) LEFT-JOIN
+  USE TEMP B-TREE FOR ORDER BY
+```
+
+**读法（诚实的一面）**：排序在 SQL 侧赢得的是**内存**（323×）与**红线**（顺序是数据库的，不是副本的），
+但**时间上只赢 2×**（6.4 ms vs 14.0 ms）：因为 `db_values.num` 上没有索引，SQL 必须为 10 000 行建临时
+B 树（`USE TEMP B-TREE FOR ORDER BY` 就是它），而 Rust 排 10 000 个 f64 只要 0.36 ms——贵的是**取回那
+10 000 行**（13 ms）。D1 量出的「底部 `OFFSET` 12.9 ms」在本刀里变成「排序 + 底部 = 13.2 ms」（同会话
+的不排序底部才 4.9 ms），这两个数一起说明：**红利在行数与内存上，不在 CPU 上**；D4 若要更快，第一嫌疑
+是给 `db_values(property, num)` 加索引与换游标读，而不是把排序挪回 Rust。
+
+**一次单元格写入**（D6 的欠账先还一半）：自己一个事务是 **5.5–7.4 ms**，批量（一个事务包 10 000 次）
+**10.6–14.9 µs** —— 差值几乎全是 commit/fsync，而 ADR-0068 给每次写入多加的那一条
+`UPDATE db_records SET edited = …` 就含在 10.7 µs 里。
+
+## 5 · 15 种类型各自的落库形态（一句话一个）
+
+| kind | 存哪 | 读回来是什么 |
+|------|------|--------------|
+| `title` | `db_values.text`；record 有页时读的是 `pages.title`（ADR-0063 的 `COALESCE`，两个家只有一个真值） | 字符串，原样 |
+| `text` | `db_values.text` | 原样：不裁剪、不折叠大小写、没有长度上限（5 万字符的测试） |
+| `number` | `db_values.num`（REAL，可索引、可按数值比较） | 有限浮点；无行 = 无值，**不是 0** |
+| `select` | `db_values.text` = **选项 id** | 按 `config` 的选项表渲染成选项**名字**；名单里没有这个 id 就显示 id 自己 |
+| `multi-select` | `db_value_items` 每项一行 = 选项 id（显示顺序 = 行序） | 选项名字用 `", "` 拼起来；重复项保留 |
+| `status` | 与 select 同形（三组语义是 D5 的 board 的事） | 同上 |
+| `date` | `db_values.text` = `YYYY-MM-DD` 或 `YYYY-MM-DDTHH:MM`（定宽，字节序即时间序） | 按 `DateFormat` 决定显示几天/几分；存的是日期就绝不发明 `00:00` |
+| `checkbox` | `db_values.flag`（`Flag(false)` 是一行真值，`Empty` 才是没勾过） | `Yes` / `No`（ADR-0065 的词，导出表格同词） |
+| `url` / `email` / `phone` | `db_values.text`，**逐字** | 原样；`looks_valid` 只给编辑器一个提示，从不拒绝也从不改写 |
+| `files` | `db_value_items` = `attachments.id`（ADR-0029/0030 的**同一套**附件通道，没有第二套落盘） | `attachments.name`；附件行没了就显示 id 自己 |
+| `created time` | `db_records.created`（ADR-0068，v17），**不进 `db_values`** | 记录出生那一刻（`YYYY-MM-DDTHH:MM`），改名/编辑都不动它 |
+| `last edited time` | `db_records.edited`，**不进 `db_values`** | 内容变更时随写路径走到「现在」（格与页标题算内容，拖行/挂页签不算） |
+| `person`（降级） | `db_values.text` = 一个名字（kind 在装载时折成 `text`） | 字符串；成员名单是 `workspace_people()` 从值里现算的去重名字，**没有成员表、没有 id、没有账号** |
+
+## 6 · 偏离与原因
+
+1. **`parse_many` 为 multi-select 拒绝了「列表里没有的名字」**（不自动新建选项）：自动新建需要同时改
+   `config`，那是同一批里的第二个 change，而 `Change` 里**还没有**写 config 的臂。`PropertyOptions::option_named`
+   已经给了 get-or-add 的形状，臂跟着 D3 的选项编辑器一起加（已写进 ADR-0070 的未验证条）。
+2. **`Record` 结构体没有加 `created` / `edited` 字段**：加了就意味着一份 `Change` 能带一个「生日」进库
+   （ADR-0068 明确禁止），而且会把 Track 2 写在 `database_layer` 里的 `Record { … }` 字面量全部弄红。
+   两个时间戳只能经 `record_timestamps()` 读、只能由写路径盖。
+3. **`ValueKind::Derived` 是新变体**，把 D1 的 `each_kind_names_the_column_or_table_its_value_lives_in`
+   里那两条断言（created/last edited 曾是 `Text`）改成 `Derived`：ADR-0062 原话就是「这两个 §三十九 类型
+   本 ADR **不落**、由 D2 带自己的 ADR 落」，所以这是落地不是改口径。
+4. **`cell()` 不再自己调 `self.record_timestamps()`**：那会在持有连接锁时再锁一次（本项目用的是非可重入
+   `Mutex`）。SQL 移到自由函数 `read_record_timestamps(&Connection, …)`，方法只是「加锁 + 调用」。
+   这个坑是**跑测试跑出来的**（两条测试挂死 > 60 s），不是读出来的——写进 ADR-0068 的注释里了。
+5. **`sort` 进了 `RowRequest`**（而不是另开一个 `window_rows_sorted`）：一次读 = 一个完整的问题，SQL
+   也只有一处能长出 `ORDER BY`；`RowRequest::new()` 让「不排序」的调用点比原来短。代价见 §3 的提交树
+   教训：字段一旦加上，所有 `RowRequest { … }` 字面量都要改。
+6. **`sql: ""` + backfill 而不是一步 `ALTER TABLE`**：照 v10/v11 的收敛范式（半途的库不报错）；代价是
+   v17 的库升级时多一次 `pragma_table_info`。
+7. **批量路径的快照/恢复带上两列**（`DatabaseSnapshot` 的 record 元组从 4 个元素变 6 个）：不加的话
+   检查点/修复/LAN pull 会把每个 record 的生日重置——D1 的 ADR-0066 就是为这类「顺手弄丢」写的。
+
+## 7 · 未验证（诚实清单）
+
+1. **没有任何帧**：本刀没有 `.slint`，没有任何格子被画出来；`looks_valid` 的阈值（几个数字算电话、
+   域名要不要点）是作者定的，没有一个用户量过；`bench.ps1` 没有数据库臂（D3 的欠账）。
+2. **视图文档还没被编译成 `SortSpec`**：ADR-0064 的 JSON → `Option<SortSpec>` 的编译（多列排序、分组头
+   在窗口里的位置）是 D4 的；本刀只给了**编译结果**的形状与 SQL。
+3. **没有过滤的数字**（D4 的）；**没有 `DISTINCT` 名单的开销**（`workspace_people()` 没量）。
+4. **排序只在本机、与本刀自己的对照臂比过**：三次运行的绝对数漂 1.08×（同一棵树、同一台机器，另有别的
+   track 在编），比值稳定（323× 逐字节相同）。
+5. **改 kind 不迁移值**仍是 D1 的状态（`PropertyKindSet` 只改类型），本刀没有加逐类型转换——它需要每对
+   类型的规则，D6/D7 之前没有用户能触发。
+6. **选项列表的写入还没有 `Change` 臂**（见偏离 1）：`PropertyOptions::to_config()` 今天只有测试在调。
+7. **`created` / `last edited` 的「刷新时机」表全部由测试断言**，但没有一条路径来自 UI 写入（没有 UI）。
+8. **时区**：两个时间戳是**本机本地墙钟**（ADR-0062 给日期定的规矩），而 Track 2 的日期 atom 用的是 UTC
+   （`core::date::today_iso`）。两处口径不同，本刀**不改他们的文件**，写进 ADR-0068 的未验证条请整合者
+   仲裁。
+9. **本报告与 PLAN / DECISIONS / SPEC 的最后几个 blob 是在提交树验证之后改的**（只有文档变，代码与测试
+   的 blob 一个字节没动）——§3 里那套读数仍然对应提交的代码；文档改完又跑了一次
+   `cargo check --all-targets` 确认干净。
+
+## 8 · 给整合者的注意事项
+
+1. **共享工作树里，本刀的 commit 仍然用「只暂存自己那一段」的做法**（D0/D1 的方法，这次靠
+   `.scratch/track3-d2/base/` 里开工前对共享文件的快照 + 按名字排除）：
+   `src/core/mod.rs`（排除 Track 2 的 `pub mod date;` / `pub mod reference;`）、
+   `src/storage/migrations.rs`（排除 Track 2 的 v16；**本刀 blob 里 `CURRENT_VERSION = 17`、数组里缺 16**）、
+   `src/storage/repository.rs`（排除 Track 2 的 `references` 等）、`docs/DECISIONS.md`（排除 Track 2 的
+   ADR-0050/0051 与 Track 4 的 ADR-0080/0081）、`docs/SPEC.md`（排除 Track 2 的 §三十七/§四十 hunk）、
+   `PLAN.md`（排除 Track 2 的 `## M13`）、`tests/integration/storage_test.rs`（本刀**追加**一个新模块 +
+   改 D1 那两处 `RowRequest` 字面量，Track 2 与 D1 的 `database_layer` 其余一字不动）。**提交后这些文件
+   在工作树里仍是 modified**（那是别人的改动），不是脏数据。
+2. **迁移号**：合并后 master 应当是连续的 v12–v17（12–15 D1、16 Track 2、17 本刀）。**不要在合并时把
+   v17 改成 v16**，理由见 §2。
+3. **ADR-0068…ADR-0071 需要进 `docs/DECISIONS.md` 的收口**（全文已按文件既有风格追加在末尾）。
+4. **CHANGELOG**：本刀**没有用户可见变化**（没有 UI、没有点亮任何占位），既有那句仍然为真、不要改。
+   若要为状态留一笔，属于 Known limitations：
+   > - The property system is stored but not drawn: all fourteen kinds round-trip through the store
+   >   (with `created time` / `last edited time` derived from the record's own two columns, and sorts
+   >   compiled into SQL), but no view exists yet and the six insert-menu placeholders are still muted.
+5. **`docs/PERFORMANCE.md` 本刀没动**：§Method 要的是「release 二进制 + 对照构建」，本刀只有 release 探针
+   与本刀自己的两个臂（有对照，但不是「前一刀的提交编出来」那种）。数字落在
+   `benchmarks/results/2026-09-22-track3-d2-sort.jsonl`，D3/D8 收口。
+6. **Track 4 的 `Cargo.toml` 仍然只有他们的 `hayro`**：本刀零新依赖，所以 `Cargo.toml` 本刀没改
+   （提交里也不含它）。
+7. **`docs/SPEC.md` 的行数与 `\r`**：老坑，SPEC.md 在树里是 CRLF，追加/替换时按文件原有行尾写。
+
+## 9 · 我注意到、但没碰的别人 territory 的问题
+
+1. **Track 2 的测试写在 D1 的 `mod database_layer` 里面**（为了复用 `migrated` / `roll_back`）：
+   D1 的报告已经记过一次（那次导致 E0583）。本刀因此把集成测试放进**自己的新模块**，代价是
+   `roll_back` 那套 helper 没有复用（我自己写了 `migrated` / `roll_back_timestamps` 十来行）。若整合者要
+   统一，建议把 `roll_back` 挪成一个共享 helper 模块，而不是继续往 `database_layer` 里塞。
+2. **`CURRENT_VERSION` 在四条 track 之间是纯串行接缝**，而本刀的提交树必然带一处跳号（§2）。这不是
+   本刀的选择，是「谁的提交先落地」决定的；合并顺序若先合 Track 2，本刀那步会自动接在 v16 之后。
+3. **`quire-shot`（debug）与 `quire`（release）用同一棵源码树**：本刀的 sweep 因此采到了 Track 2 的 10 个
+   新场景（见 §3 结尾），读数要按「67 个既有场景逐字节相同」来看，而不是「10 个 new」。

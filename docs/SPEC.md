@@ -2504,13 +2504,13 @@ record 与 page 的关系必须可逆：删 record 与删页面的行为都要�
 
 ## 属性类型
 
-必做：title / text / number / select / multi-select / status / date / checkbox / url / email / phone / files / created time / last edited time —— 2026-09-22 存储形状定于 ADR-0061（列定义是 `db_properties` 行表，只有 select 的选项列表是行内 JSON）与 ADR-0062（值是 `db_values` 一行一列，`text`/`num`/`flag` 三列 + `db_value_items` 给列表型）—— 2026-09-22 D1 落了**存储**：每种形状都有往返测试，「空」= 没有行（不是空串、不是 0），select 的选项 config 原样存 JSON。逐类型的渲染与语义（选项名、日期格式、附件显示）仍是 D2。
+必做：title / text / number / select / multi-select / status / date / checkbox / url / email / phone / files / created time / last edited time —— 2026-09-22 存储形状定于 ADR-0061（列定义是 `db_properties` 行表，只有 select 的选项列表是行内 JSON）与 ADR-0062（值是 `db_values` 一行一列，`text`/`num`/`flag` 三列 + `db_value_items` 给列表型）—— 2026-09-22 D1 落了**存储**：每种形状都有往返测试，「空」= 没有行（不是空串、不是 0），select 的选项 config 原样存 JSON。逐类型的渲染与语义（选项名、日期格式、附件显示）仍是 D2。—— 2026-09-22 **D2 交付**（ADR-0068…ADR-0071）：14 种属性的**输入与渲染规则**落在 `core::database_property`（数字/日期/勾选的接受与拒绝逐条成文，url / email / phone **只提示不改写**，选项存 id 不存标签，附件显示名字，未知的选项 id 与已删的文件 id 各自显示自己），`created time` / `last edited time` 由 `db_records.created` / `.edited` 两列投影（v17，写路径盖章，永不写进 `db_values`），排序由 `SortSpec` 编译进 SQL 的 `ORDER BY`（数字按 `num` 排、日期按定宽文本排、空值显式排在最后，`EXPLAIN QUERY PLAN` 为证）。
 
-降级处理：person —— 没有账号体系，退化为工作区内本地成员名单，纯字符串
+降级处理：person —— 没有账号体系，退化为工作区内本地成员名单，纯字符串—— 2026-09-22 落于 ADR-0071：仍然没有成员表、没有成员 id、没有账号（ADR-0061 的折叠不动），名单由 `SqliteRepository::workspace_people()` 从值里现算（存储 kind 为 `person` 的列的去重非空值），改名就是改一个字符串。
 
 需计算：formula / rollup / relation（含双向关系）
 
-公式引擎的限制：纯词法 + 自写解释器，不引入 JS / WASM 运行时；表达式必须有限求值；relation 环检测在保存时做，不在渲染时做。—— 未交付（D6）。ADR-0062 记下了一条：formula / rollup / relation **不存值**，投影时现算，`created time` / `last edited time` 的来源（今天 `pages`/`db_records` 都没有时间戳列）留 D2 出 ADR，不写进 `db_values`（否则就是 ADR-0039 禁止的双写）。
+公式引擎的限制：纯词法 + 自写解释器，不引入 JS / WASM 运行时；表达式必须有限求值；relation 环检测在保存时做，不在渲染时做。—— 未交付（D6）。ADR-0062 记下了一条：formula / rollup / relation **不存值**，投影时现算，`created time` / `last edited time` 的来源（今天 `pages`/`db_records` 都没有时间戳列）`created time` / `last edited time` 的来源（当时 `pages`/`db_records` 都没有时间戳列）留 D2 出 ADR，不写进 `db_values`（否则就是 ADR-0039 禁止的双写）—— 2026-09-22 D2 交付：ADR-0068 给 `db_records` 加 `created` / `edited` 两列（v17，`YYYY-MM-DDTHH:MM` 本地墙钟，由 SQLite 的 `strftime` 在写路径盖章），读路径对这两种 kind 从不查 `db_values`。
 
 ## 视图
 

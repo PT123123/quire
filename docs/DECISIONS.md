@@ -2468,3 +2468,220 @@ Consequences:
   written, so nothing yet proves that an export of a 10 000-row database is
   acceptable; and the count's cost is measured on an unfiltered database only
   (D4 owns the filtered number).
+
+## ADR-0068 · A record's two instants are columns of the record, and no cell is ever written for them
+
+Decision: `created time` and `last edited time` — SPEC §三十九's last two kinds —
+are projected from two columns of the row itself, and those columns are the
+**only** source of those cells:
+
+```sql
+ALTER TABLE db_records ADD COLUMN created TEXT NOT NULL DEFAULT '';  -- step 17
+ALTER TABLE db_records ADD COLUMN edited  TEXT NOT NULL DEFAULT '';
+```
+
+The shape is ADR-0062's stored date: `YYYY-MM-DDTHH:MM`, local wall time,
+sixteen bytes of ASCII, `''` for "not known". Fixed width is what makes these two
+kinds sort by the same rule every other date-shaped value does (bytes are
+chronological bytes), and it keeps a calendar out of Rust entirely. **The write
+path stamps them, and it is the only thing that does**: `insert_record` runs
+SQLite's `strftime('%Y-%m-%dT%H:%M','now','localtime')` inside the `INSERT`
+itself, and `set_cell` / a page rename move `edited` with the same expression.
+Nothing takes a time from a caller, and `Record` — the struct a `Change` carries
+— has no field for either instant, so no change can name a birthday it invented.
+
+Refresh timing, which is the whole of the rule:
+
+| write | `created` | `edited` |
+|-------|-----------|----------|
+| a new record (`RecordCreated`) | stamped, once | stamped, the same instant |
+| a cell (`CellSet`), including a write that clears one | untouched | moved to now |
+| the title of the page it owns (`PageTitleSet`) | untouched | moved to now — a page-backed record's title *is* `pages.title` (ADR-0063), which is why `repository::apply_one` calls back into the store for this one |
+| its place in the listing (`RecordOrdSet`) | untouched | untouched |
+| pointing it at a page (`RecordPageSet`) | untouched | untouched |
+| any read | untouched | untouched |
+
+"Content" is the rule behind that table: a record's content is its cells and its
+title; its place in a listing and which page it points at are its *frame*.
+Dragging a row is not editing it, and Notion's own behaviour agrees.
+
+Why not a `db_values` row (which ADR-0039 forbids for derived data, and which
+ADR-0062 predicted would not be where these land): "last edited" cached as a cell
+would have to be *noticed* by the same write path that changes the cells it
+describes, and the first write path that forgot would leave a stamp that lies —
+the classic double write. So the read path never consults `db_values` for these
+two kinds at all: `cell()` and the window query read `db_records`, and a row
+written at a derived column by a caller that ignored the contract is simply not a
+value any read consults. The D2 test writes such a row and watches it be ignored,
+rather than pretending the write is impossible.
+
+Consequences:
+
+* Two `TEXT` columns on `db_records`, and one extra `UPDATE` per cell write: D8's
+  "cost of editing one cell" number carries it.
+* A step of its own (v17) rather than a line added to v14, because a v14 file in
+  the wild must keep meaning what it meant; a v17 file with no stamps shows empty
+  cells rather than 1970, and no upgrade invents a birthday.
+* `SELECT`s and the bulk path carry them: `snapshot_tables` / `restore_tables`
+  keep both columns, so a checkpoint, a repair or a LAN pull that keeps a record
+  keeps its birthday (ADR-0066's rule applied to two more columns).
+* Minute resolution, and a *redo* of a creation stamps a new moment — the row
+  really was made again.
+* Still unverified: no view draws these, so "it moves when a user expects it to"
+  is a statement about statements and tests (every row of the table above is
+  asserted); and the stamps are one machine's local wall time, so a file carried
+  across time zones reads the strings it was written with — ADR-0062's rule for
+  dates, and *not* what Track 2's UTC date *atoms* do (`core::date`). The
+  integrator may want one answer for both.
+
+## ADR-0069 · A cell is typed on the way in and painted on the way out, and the three string kinds are never rewritten
+
+Decision: every one of the fourteen kinds gets its input rule and its paint rule
+written as code (`core::database_property`), and no other module decides what a
+cell means:
+
+* **Empty input is the absence of a value**, for every kind: `parse_one` answers
+  `CellValue::Empty`, which is the absence of a row (ADR-0062). `Text("")` stays
+  reachable for a writer that says so on purpose; the two paint the same.
+* **Text is stored verbatim** — no trim, no length cap, no case folding — because
+  a space can be the content. Every other kind trims before it parses, because
+  `" 2 "` is a number someone typed.
+* **`url` / `email` / `phone` are never rewritten and never refused.** Nothing is
+  normalised (`HTTP://Example.COM` stays), nothing is rejected (`not a url`
+  stays), and `looks_valid` is a *hint* a cell editor may dot a cell with. The
+  alternative — a gate — turns a notebook into a form, and this app has no web
+  runtime to make a link mean anything anyway (ADR-0001).
+* **`number` is parsed or refused by name**: finite decimals, either sign,
+  `e`-notation; `inf`, `NaN`, `2,5` and prose are refused with the text they came
+  from. `f64::from_str` accepts the first three, and a NaN in the `num` column
+  would sort by bit pattern and compare as nothing.
+* **A date's gate is the stored *shape*, not the calendar**: `YYYY-MM-DD` or
+  `YYYY-MM-DDTHH:MM`, zero-padded, month/day/hour/minute in range. `2026-02-30`
+  is stored as typed (this is a notebook, not a scheduler); `2026-9-2` is
+  refused, because a date column whose bytes are not fixed width sorts wrong —
+  the one thing ADR-0062 buys with the ISO form, and the D2 test writes an
+  unpadded date past the parser to watch the order break.
+* **A select/status cell stores an option's id**, never its label (ADR-0061), and
+  a name the column does not list is *refused* rather than invented: an option
+  list is a second change in the same batch, and `PropertyOptions::option_named`
+  is the get-or-add the caller wants. Renaming an option is then one edit of the
+  document that touches no value — the D2 test renames one and shows the stored
+  value untouched.
+* **`files` stores attachment ids** — ADR-0029/ADR-0030's one attachment channel,
+  never a second copy of the bytes — and paints the *name* out of `attachments`.
+* **Two folds, both visible rather than silent**: an option id the column no
+  longer lists paints **itself**, and a file id whose attachment row is gone
+  paints **itself**. A blank cell would say the value was never there.
+* **Settings are read from `config`, and an unknown setting folds to the
+  default**: `NumberFormat` (`plain` / `integer` / `percent`) and `DateFormat`
+  (`date` / `datetime`, whose default depends on the kind — a stamp shows its
+  minute, since two rows written the same day must not look identical). The
+  stored text is the truth either way: a `datetime` cell holding a date prints
+  ten bytes rather than inventing `00:00`.
+
+Consequences:
+
+* `CellValue::display` stays as the *value's* own form, and `paint` falls back to
+  it, so the two can never disagree about a number; a kind with settings goes
+  through the column.
+* A cell's value is checked where it is *written* (the input path), not inside
+  `set_cell`: ADR-0062's typed columns are chosen by the caller's shape, and
+  putting a `SELECT` on the cell-write path is the cost D1 refused and D6 will
+  measure. The store's tests therefore include writing a value of the wrong shape
+  and reading the empty cell that results — the contract is a test and not a hope
+  (D1's ADR-0062, restated here because D2 is where it can bite).
+* Still unverified: no cell editor exists, so these rules have no UI caller yet,
+  and `looks_valid`'s thresholds are the author's — nothing measures how often
+  they disagree with what a user meant.
+
+## ADR-0070 · A sort is an `ORDER BY` in the statement, and the blanks are placed by a term of their own
+
+Decision: §三十九's "filter and sort happen in SQL, not in the UI" is a *shape*
+here and not a discipline: `RowRequest::sort` is a compiled term
+(`SortSpec { property, column, descending }`) that the row query turns into its
+`ORDER BY`, and **nothing in this crate sorts a `Vec` of rows.** This slice
+compiles one term; D4's view document may name several, and that is the slice
+that grows the term into a list.
+
+Which column the comparison runs in is a decision per kind, and the decision is
+the point:
+
+| kind | column | what that buys |
+|------|--------|----------------|
+| `number` | `db_values.num` (`REAL`) | `2` sorts before `10`; a text column sorts `10` first, and the D2 test shows both orders side by side |
+| `date`, `created time`, `last edited time` | `text` / `db_records.created` | bytes are chronological *because* the stored shape is fixed width (ADR-0062) |
+| `title` | ADR-0063's `COALESCE(p.title, t.text)` | a page-backed row's title is the page's, value row or not |
+| `checkbox` | `flag` | `false` before `true` |
+| everything text-shaped | `text` | bytes — the order a user sees in a sorted list of words |
+| `multi-select`, `files`, `formula`, `rollup`, `relation` | — | `SortSpec::of` answers `None`: "sort by a multi-select" is a question about the column's *options*, and no fallback would be honest. Silently ordering by row position would look like it worked |
+
+The blank rows are placed explicitly, always last, in both directions:
+
+```sql
+ORDER BY (v1.num IS NULL) ASC, v1.num ASC, r.ord, r.id
+```
+
+for the nullness kinds, `(v1.text IS NULL OR v1.text = '')` for the text ones (a
+`Text("")` the user blanked is as blank as an absent row), and `r.created = ''`
+for the two stamps. SQLite puts NULLs first, and "the rows with no number floated
+to the top" is not what anyone means by "sort by number" (ADR-0062's rule); the
+nullness term is always ascending, so a descending sort turns the values around
+and leaves the blanks where they were. The last two terms are the tie-break: the
+database's own listing order, ascending, so equal rows always come back in one
+order and a re-read of the same window is the same rows.
+
+A column the view *hides* gets a join of its own (`s0`) rather than being
+unsortable: a view document may sort by one (ADR-0064), and one extra index probe
+per row is the price.
+
+Consequences:
+
+* A window is a **slice of the order**: `LIMIT`/`OFFSET` apply to the sorted
+  result, so the second page of a sorted read is the second page of that order.
+  Slicing in Rust and sorting afterwards would be the wrong rows; the D2 test
+  asserts the slice is the sorted slice.
+* The order costs one temp B-tree per read (no index serves a `LEFT JOIN`'s order
+  for every row), and the plan says so: `EXPLAIN QUERY PLAN` is the evidence, the
+  D2 test asserts the temp B-tree while no `db_values` scan appears, and the D2
+  probe prints the plan beside its timings.
+* A sort by a hidden column also costs a join per row that the visible read did
+  not have — which D4's compiler may weigh when a view offers both, a decision it
+  can make because the term is data.
+* Still unverified: no view compiles a `SortSpec` from ADR-0064's JSON yet, so
+  the multi-term and group-header shapes are unnamed; and nothing yet measures a
+  *filtered* sorted read (D4's number).
+
+## ADR-0071 · `person` is a name in a text cell, and the member list is those values
+
+Decision: SPEC §三十九's 降级 for `person` is taken literally and kept small:
+
+* **There is no member table, no member id, and no account.** A person is a
+  string in the `text` column, exactly as ADR-0061 folded it: `PropertyKind` has
+  no `Person` variant, and `from_stored("person")` answers `Text`, so a library
+  written by a build that knows `person` opens here with the column drawing as
+  text.
+* **The workspace's local member list is derived, not stored**:
+  `SqliteRepository::workspace_people()` reads the distinct non-empty values of
+  the columns whose *stored* kind is `person`, in `NOCASE` order. The predicate
+  is the stored string precisely because the fold happens at load: SQL still sees
+  the word the file was written with, and the Rust side has no variant to hang
+  behaviour on. Nothing is copied, so nothing goes stale, and nothing needs
+  merging when two spellings of one person appear — they are two names, which is
+  what a plain string means.
+* **Renaming a person is editing a string.** There are no ids to reconcile and no
+  cascade to run, which is the whole argument for the degradation: an account
+  model would bring a table, a picker with state of its own, merge rules for
+  duplicates and a permission question, for zero extra data.
+
+Consequences:
+
+* A file this build creates has no `person` column at all (nothing here can write
+  the kind), so `workspace_people()` answers empty for it until a later build
+  grows the variant — and the day it does, the same query answers for its cells.
+  The D2 test writes the column the way such a build would leave it, pinning the
+  fold and the list together.
+* The list is one string per cell, so it reads `db_values` and not
+  `db_value_items`; a multi-person kind would add a `UNION` and nothing else.
+* Still unverified: no picker consumes the list, so its cost (one `DISTINCT` over
+  the file) is unmeasured; and "two spellings are two people" is a decision a UI
+  may soften with a case-insensitive match — a UI decision, not this one.
