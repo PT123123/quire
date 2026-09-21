@@ -4,7 +4,9 @@ param(
     [int]$IdleSeconds = 8,
     [string]$Label = "run",
     [switch]$Scroll,          # scene F: programmatic continuous scroll
+    [double]$ScrollStep = 0,  # scene F: px per frame (0 = the app's own 8 px)
     [int]$PageSwitch = 0,     # scene G: switch between N bench pages
+    [int]$Pictures = 0,       # scene D/F with media: image rows on the page
     [switch]$Typing,          # scene E: run quire-typing against $Exe
     [double]$Rate = 30,       # scene E: keystrokes per second
     [int]$SearchEvery = 0,    # scene E: one full-text query every N strokes
@@ -34,18 +36,29 @@ if ($Typing) {
     $childArgs = @("--auto-exit", "$($IdleSeconds + 6)")
     if ($Blocks -gt 0) { $childArgs += @("--blocks", "$Blocks") }
     if ($Scroll) { $childArgs += @("--scroll") }
+    if ($ScrollStep -gt 0) { $childArgs += @("--scroll-step", "$ScrollStep") }
     if ($PageSwitch -gt 0) { $childArgs += @("--page-switch", "$PageSwitch") }
+    # A media scene has one more number than the process counters can show, so
+    # the app prints its decode cache itself and `--dump-state` is the switch
+    # that asks for it.
+    if ($Pictures -gt 0) { $childArgs += @("--pictures", "$Pictures", "--dump-state") }
     # A pinned file keeps the run out of the app's real library, and a pinned
     # *empty* file is what makes the second pass a load rather than a seed.
     if ($PinnedDb -ne "") { $childArgs += @("--db", $PinnedDb) }
 }
 
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
-if ($reportFile -ne "") {
-    $p = Start-Process -FilePath $Exe -ArgumentList $childArgs -PassThru -RedirectStandardOutput $reportFile
-} else {
-    $p = Start-Process -FilePath $Exe -ArgumentList $childArgs -PassThru
+# The app's own report lines go to stderr; only a media scene asks for one, so
+# only a media scene takes the handle.
+$cacheFile = ""
+if ($Pictures -gt 0) {
+    $cacheFile = Join-Path $env:TEMP "quire-cache-$Label.txt"
+    if (Test-Path $cacheFile) { Remove-Item $cacheFile }
 }
+$run = @{ FilePath = $Exe; ArgumentList = $childArgs; PassThru = $true }
+if ($reportFile -ne "") { $run.RedirectStandardOutput = $reportFile }
+if ($cacheFile -ne "") { $run.RedirectStandardError = $cacheFile }
+$p = Start-Process @run
 # without event raising the .NET Process object never caches ExitCode (PS 5.1)
 $p.EnableRaisingEvents = $true
 
@@ -83,6 +96,14 @@ if ($reportFile -ne "" -and (Test-Path $reportFile)) {
     $line = (Get-Content $reportFile | Where-Object { $_ -like '{*"scene"*' } | Select-Object -Last 1)
     if ($line) { $typingReport = $line.Trim() }
 }
+$cacheReport = "null"
+if ($cacheFile -ne "") {
+    if (Test-Path $cacheFile) {
+        $line = (Get-Content $cacheFile | Where-Object { $_ -like '*"event":"attachment_cache"*' } | Select-Object -Last 1)
+        if ($line) { $cacheReport = $line.Trim() }
+        Remove-Item -Path $cacheFile -Force
+    }
+}
 # Scene E's scratch database and its report are both this script's mess, so
 # this script cleans it. Only the `.db` used to be purged, and only before the
 # run, so every label left its startup `.bak1` snapshot plus the wal/shm
@@ -96,4 +117,4 @@ $jsonLabel = $Label -replace '\\', '\\'
 $jsonDb = $PinnedDb
 if ($dbFile -ne "") { $jsonDb = $dbFile }
 $jsonDb = $jsonDb -replace '\\', '\\'
-"{`"label`":`"$jsonLabel`",`"exe`":`"$jsonExe`",`"db`":`"$jsonDb`",`"blocks`":$Blocks,`"startup_ms`":$startupMs,`"idle_cpu_pct`":$cpuPct,`"ram_workingset_mb`":$ramMB,`"ram_private_mb`":$privMB,`"exit_code`":$ec,`"typing`":$typingReport}"
+"{`"label`":`"$jsonLabel`",`"exe`":`"$jsonExe`",`"db`":`"$jsonDb`",`"blocks`":$Blocks,`"startup_ms`":$startupMs,`"idle_cpu_pct`":$cpuPct,`"ram_workingset_mb`":$ramMB,`"ram_private_mb`":$privMB,`"exit_code`":$ec,`"typing`":$typingReport,`"attachment_cache`":$cacheReport}"

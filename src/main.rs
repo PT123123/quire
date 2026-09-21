@@ -16,8 +16,14 @@ pub struct LaunchArgs {
     pub auto_exit_secs: f64,
     /// Scene G: extra flat pages to switch between (--page-switch N).
     pub bench_pages: usize,
+    /// Scene D/F with media: image rows on the bench page (--pictures N).
+    pub pictures: usize,
     /// Scene F: programmatic continuous scroll (--scroll).
     pub scroll: bool,
+    /// Scene F: how far one frame advances (--scroll-step, default 8 px). A
+    /// page of tall image rows needs a wheel-flick-sized step to cross a
+    /// picture at all, so the harness can ask.
+    pub scroll_step: f32,
     /// Headless state setup for screenshots (--scene <name>).
     pub scene: Option<String>,
     /// Database file (--db <path>; default appdata/quire.db).
@@ -48,7 +54,9 @@ fn parse_launch_args() -> LaunchArgs {
         blocks: 0,
         auto_exit_secs: 0.0,
         bench_pages: 0,
+        pictures: 0,
         scroll: false,
+        scroll_step: 8.0,
         scene: None,
         db: None,
         portable: false,
@@ -73,8 +81,16 @@ fn parse_launch_args() -> LaunchArgs {
                 a.bench_pages = v.parse().unwrap_or(0);
                 i += 1;
             }
+            ("--pictures", Some(v)) => {
+                a.pictures = v.parse().unwrap_or(0);
+                i += 1;
+            }
             ("--scroll", _) => {
                 a.scroll = true;
+            }
+            ("--scroll-step", Some(v)) => {
+                a.scroll_step = v.parse().unwrap_or(8.0f32).max(1.0);
+                i += 1;
             }
             ("--scene", Some(v)) => {
                 a.scene = Some(v.clone());
@@ -322,6 +338,7 @@ fn real_main(start: std::time::Instant) -> Result<(), String> {
         blocks: launch.blocks,
         auto_exit_secs: launch.auto_exit_secs,
         bench_pages: launch.bench_pages,
+        pictures: launch.pictures,
     };
     let ui = AppWindow::new().map_err(|e| e.to_string())?;
     mark("appwindow_new");
@@ -418,10 +435,19 @@ fn real_main(start: std::time::Instant) -> Result<(), String> {
 
     if args.auto_exit_secs > 0.0 {
         let t = Timer::default();
+        // The bench harness reads the decode cache's high-water mark off
+        // stderr here; a normal run has no reason to ask for it.
+        let state_w = std::rc::Rc::downgrade(&state);
+        let report_cache = launch.dump_state;
         t.start(
             slint::TimerMode::SingleShot,
             std::time::Duration::from_secs_f64(args.auto_exit_secs),
-            || {
+            move || {
+                if report_cache {
+                    if let Some(state) = state_w.upgrade() {
+                        eprint!("{}", state.attachment_cache_report());
+                    }
+                }
                 let _ = slint::quit_event_loop();
             },
         );
@@ -429,13 +455,20 @@ fn real_main(start: std::time::Instant) -> Result<(), String> {
     }
 
     if launch.scroll {
-        // Scene F: programmatic continuous scroll. The editor's viewport-y
-        // is two-way bound to UIState.editor-scroll-y, so advancing the
-        // property drives the same repaint path a mouse wheel would. The
-        // wrap detection (position stopped moving = bottom reached) keeps
-        // the scroll going for the whole sampling window.
+        // Scene F: programmatic continuous scroll. The editor's viewport-y is
+        // two-way bound to UIState.editor-scroll-y, so advancing the property
+        // drives the same repaint path a mouse wheel would — and Slint's
+        // viewport-y is *negative* the way down, so the step subtracts.
+        //
+        // A ListView only knows the height of the rows it has realized, so the
+        // clamp grows a frame behind the scroll and the position stalls for a
+        // tick or two without the bottom being near. One stalled tick used to
+        // mean "wrap to top"; now a wrap needs the position to sit still for a
+        // whole second of ticks.
         let ui_w = ui.as_weak();
         let state_w = std::rc::Rc::downgrade(&state);
+        let step = launch.scroll_step;
+        let stalls = std::rc::Rc::new(std::cell::Cell::new(0u32));
         let t = Timer::default();
         t.start(
             slint::TimerMode::Repeated,
@@ -446,14 +479,23 @@ fn real_main(start: std::time::Instant) -> Result<(), String> {
                 };
                 let g = ui.global::<quire::UIState>();
                 let cur = g.get_editor_scroll_y();
-                if cur == state.last_scroll_y() && cur > 0.0 {
-                    // bottom reached: wrap to top
-                    state.set_last_scroll_y(0.0);
+                // A ListView that has not measured its rows yet reports a
+                // shorter content height, so the clamp moves under the scroll
+                // and the read-back differs from what was set for a tick. Only
+                // a position that was actually *put* there counts as stuck.
+                let stuck = cur == state.last_scroll_y();
+                state.set_last_scroll_y(cur);
+                if stuck && cur < 0.0 {
+                    stalls.set(stalls.get() + 1);
+                    if stalls.get() < 60 {
+                        return; // the ListView is still catching up
+                    }
+                    // bottom reached and held: wrap to top
+                    stalls.set(0);
                     g.set_editor_scroll_y(0.0);
                 } else {
-                    let next = cur + 8.0;
-                    state.set_last_scroll_y(cur);
-                    g.set_editor_scroll_y(next);
+                    stalls.set(0);
+                    g.set_editor_scroll_y(cur - step);
                 }
             },
         );

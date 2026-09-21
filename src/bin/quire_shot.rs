@@ -159,12 +159,20 @@ fn run() -> Result<(), String> {
     let ui = AppWindow::new().map_err(|e| e.to_string())?;
     ui.window().set_size(PhysicalSize::new(w, h));
 
-    let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0 };
+    let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0, pictures: 0 };
     let state = AppState::new(&args, None);
     controller::bind(&ui, &state);
     controller::wire(&ui, &state);
     if let Some(scene) = &scene {
         controller::apply_scene(&ui, &state, scene);
+    }
+    // --scroll-y drives the same viewport mirror scene F uses. It exists
+    // because a scroll that moves nothing still burns CPU, and the bench
+    // harness shipped with that bug: a run at 0 and a run at ±2000 have to
+    // give different pixels before either number means anything.
+    if let Some(spec) = parse(&argv, "--scroll-y") {
+        let v: f32 = spec.parse().unwrap_or(0.0);
+        ui.global::<UIState>().set_editor_scroll_y(v);
     }
     ui.show().map_err(|e| e.to_string())?;
 

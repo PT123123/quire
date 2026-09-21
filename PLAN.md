@@ -1286,3 +1286,75 @@ UI 都没改，这条 0/44 就是那句话的读数而不是断言。行为不�
 这个顺序走：先补媒体滚动的 bench scene（把那笔三次点名的欠账变成读数），再收孤立附
 件回收，然后进批次 C——批次 C 六条里只有 math 不撞平台墙（高亮要单行 runs 通道、TOC
 要跳转、bookmark / embed 要有 TLS 客户端），开工前再确认一次。
+
+## M10 · 媒体 bench scene，和那条从来没滚动的 scene F（2026-09-21，on `master`，ADR-0036）
+
+这批交付的是**量具**，不是功能。写它之前，从 image 那批起的每一批结尾都留了同一句话：
+一页图片被滚动时的代价没测，32 MiB 解码上限只是「构造加上
+一条单测」而不是读数。这批把它变成读数——然后发现那个读数本来就不成立。
+
+**改动面**：`HandleArgs` 多一个 `pictures`，`AppState::new` 在**空库**时用
+`create_fixture` 播 200 张 1280×720 的 PNG 进 `attachments/`，`bench_pictures` 把 bench
+页每 `stride` 行变成 image 块；`attachment_cache_peak` + `attachment_cache_report()`
+让应用自己在 `--dump-state` 时往 stderr 打一行 JSON（`bytes` / `peak_bytes` /
+`entries` / `budget` / `scroll_y`），`bench.ps1` 把它内联成 jsonl 的
+`attachment_cache` 字段；`main.rs` 多 `--pictures` 与 `--scroll-step`，
+`quire_shot` 多 `--scroll-y`；`bench_matrix.ps1` 加四个 D+F·P scene，跑前清掉
+`attachments`。零 UI 改动，零 schema 改动。
+
+**四条决定**：
+
+1. **缓存由应用自己报，不由进程计数器猜**。工作集看得见 Slint 的路径缓存和纹理上传，
+   看不见我们那个以「一张栅格」为单位键的 LRU；一个看不见的上限不可能被读数否定。
+2. **fixture 只在库是空的时候写**。否则 measured pass 计的是 PNG 编码而不是图片。
+   这条不是靠注释保证的：`the_pictures_scene_seeds_its_pool_once_and_then_only_loads_it`
+   在两次 `AppState::new` 之间**删掉一个文件**，如果第二次把它写回来，那条断言就是为
+   错误的原因通过——所以它测的是加载路径而不是计数。
+3. **池上限 200，不是每张一个文件**。5 000 张各不相同的 1280×720 PNG 会让 seed pass
+   变成磁盘与预热的人质，而缓存分辨不出区别——它按字节权重淘汰，不按身份。图片行 k
+   取 fixture `k % 200`，相邻图片行仍是不同栅格，这正是缓存要按之定容的东西。
+4. **stride 和 pool 只有一个来源**（`bench_picture_plan`），建行的和解种的都是问它，
+   两处不会漂。
+
+**真正的发现：scene F 从 M2 起就没滚过。**先不当它是坏仪器、也不当它是阴性读数——
+前两批跑出「5 000 张图的 10 000 行页，8 秒后缓存没动、`scroll_y` +840」，把步长从
+8 调到 200 反而**每秒移动得更少**，一个慢渲染器不会这样。于是报告里加 `scroll_y`，
+`quire-shot` 里加 `--scroll-y`，用像素把它钉死：`--scroll-y 0` 和 `--scroll-y 2000`
+产出**逐字节相同**的 PNG，只有 `-2000` 不同。Slint 的列表 content offset 向下为负
+（它自己按 `round(-content-y / item-height)` 算首个可见行），而 M2 装的定时器一直在
+**加**。这就是为什么之前两批 36 行里凡是 F 的行都不作数：删掉、在修好的二进制上整批
+重跑成 27 行；污染的那份留在 `%TEMP%\media-ram-pre-fix.jsonl`，作为「错的是仪器不是
+应用」的记录。修法除符号之外还要一个 stall 计数——ListView 只知道自己已经 realized
+的行有多高，所以 clamp 比滚动慢一帧，一个卡住的 tick 不等于到底了。
+
+**读数**（`benchmarks/results/2026-09-21-m10-media-ram.jsonl`，九个 scene 一个 sitting，
+详见 `docs/PERFORMANCE.md` 末节）：32 MiB 预算**按字节权重停在 9 张栅格**，
+33 177 600 / 33 554 432 = 98.9 %，而且 500 张、5 000 张、1 000 行、10 000 行四个形状
+停在同一个数字上——上限在视口能显示第十张之前就已经用完，所以它不需要抬；一页你没滚
+过去的图片和没有图片无法区分（0 次解码，D+500 = D）；而**屏幕上**一张图片约值 9 MB
+进程内存，不是它栅格的 3.7 MB——所以约束照片页的是视口不是缓存，这条进了 §二十二
+该带的算术。gate 本身同一 session 重跑：D 1.12× / A 1.10×，媒体臂**故意**留在 gate 外。
+
+**验证**：`cargo check --all-targets` 干净；`cargo test --all-targets` **305 passed /
+0 failed / 7 ignored**（比上批 302 多三条）；`cargo build --release --all-targets`
+零警告。新测试：plan 的四点（0 行、`--pictures 0`、两个真实 scene 的 stride、要的比行
+数还多不能凭空造行）、250 张图落在 1 000 行上的形状（stride 不是 off-by-one、图片行
+是唯一带附件的行、栅格互不相同、池耗尽才 wrap、图片行没有文字可排）、上面第 2 条那条
+种子/加载。全程 headless：真进程 bench + `quire-shot`，没有伪造按键、没有抢前台。
+
+**像素**：`.scratch/sweep16` 对 `.scratch/sweep15`，**44 张全部字节相同**——这批一行
+UI 都没动。但这批真正的像素证据是 `--scroll-y` 那两张：同一份代码、两个都「合法」的
+偏移、一张图都不同才叫滚动。绿门只证明没画坏，不证明量具在量。
+
+**未验证 / 欠账**：修好的 scene F 的 **skia 臂**没跑（另开 target dir，约 15 分钟；
+renderer verdict 里唯一偏 skia 的那句话现在标了「未证」，等的就是它）；真实照片的熵
+（fixture 是渐变，是最便宜的 PNG，所以这里的解码数字全是地板）、HiDPI、图片夹在段落
+之间而不是等距排布；孤立附件回收仍欠；批次 B 欠的**同 session control build**——这批
+在同一 sitting 里对照了 A/D/媒体三个形状，但那不是「切片前一版编译出来对照」，仍然欠
+到下一条 kind 头上。
+
+**下一步**：请用户手测两件事——截图后 Ctrl+V 进 Quire，以及现在这台机器上真实滚动的
+顺不顺（scene F 修好之后，长页滚动第一次有了诚实的 CPU 数：8 px/帧约 37 %，
+200 px/帧约 85 % 单核，这不是一个可以宣布修完的数字，只是一个起点）。然后二选一：
+补 skia 的 F 臂，或进批次 C 的 math。
+

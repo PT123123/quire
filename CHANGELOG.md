@@ -204,6 +204,21 @@ First functional release: a local, single-file-database notes workspace.
   every row resolves to its own distinct action — the class of bug that once
   shipped with every palette row from id 9 up running one action, green tests
   and all (ADR-0034)
+- `--pictures N` makes a bench scene of media: every `rows/N`-th row of the
+  bench page becomes an image block, backed by a generated 1280×720 PNG from a
+  pool of 200 files written when the library is first built. The fixtures are
+  not re-encoded during the measured passes — a run that timed PNG encoding
+  would not be measuring pictures — and the app prints its own decode cache
+  figures (`--dump-state`, one JSON line on stderr) because a process memory
+  counter cannot see a cache whose unit is one raster
+- Scene F — continuous scroll — had never scrolled. Slint measures a list's
+  content offset *negative* going down, and the harness timer was adding, so
+  every frame wrote a value the clamp rounded straight back to zero: the scroll
+  numbers recorded since M2 describe a repaint loop at the top of the page, not
+  a scroll. `quire-shot --scroll-y` is now the control that catches this class
+  of thing — two offsets that are real must produce two different PNGs — and
+  `--scroll-step` sets how far a frame moves, so a flick and a wheel tick are
+  separate measurements (ADR-0036)
 
 ### Known limitations
 - Switching directly from one open menu to another (e.g. ⋮⋮ on a different
@@ -219,10 +234,13 @@ First functional release: a local, single-file-database notes workspace.
 - Inline-mark paragraphs render runs on one line (no cross-run reflow —
   Slint `Text` has no inline formatting yet)
 - Pictures: replacing a stored file on disk in place needs a
-  restart to show up, and a page of pictures is not yet measured in the
-  benchmark scenes — the decode cache is capped by construction, not by
-  a reading. A clipboard picture other than a bitmap (a `file://` HTML image,
-  an SVG) is not read — only `CF_DIB`/`CF_DIBV5`
+  restart to show up. A page of pictures is now measured while it scrolls — the
+  decode cache holds nine 1280×720 rasters and stops there by weight, and an
+  on-screen picture costs the process roughly three times the raster — but the
+  fixtures are generated gradients, so the disk footprint and any decode-time
+  arm are optimistic against a real camera original. A clipboard picture other
+  than a bitmap (a `file://` HTML image, an SVG) is not read — only
+  `CF_DIB`/`CF_DIBV5`
 - Attachments are never garbage-collected: deleting the last block that
   points at a stored file leaves the bytes in the `attachments` folder.
   Same for pictures and files, and it is deliberate for now — undo has to

@@ -57,6 +57,9 @@ pub struct AppState {
     /// so scrolling a photo page through it re-decodes on every frame.
     attachment_images: RefCell<BTreeMap<i64, CachedImage>>,
     attachment_cache_bytes: Cell<usize>,
+    /// Highest the cache has ever been this session — what the bench harness
+    /// prints, because a ceiling nobody reads is only a promise.
+    attachment_cache_peak: Cell<usize>,
     attachment_tick: Cell<u64>,
     /// Next attachment id: one past the highest row this session loaded.
     next_attachment_id: Cell<i64>,
@@ -172,6 +175,9 @@ pub struct HandleArgs {
     pub auto_exit_secs: f64,
     /// Scene G: number of extra flat pages to switch between.
     pub bench_pages: usize,
+    /// Scene D/F with media: how many of the bench page's rows are pictures
+    /// (SPEC §三十七's gate for a page of images being scrolled).
+    pub pictures: usize,
 }
 
 /// Build the mock/bench session (fresh database or no persistence).
@@ -290,7 +296,8 @@ impl AppState {
         if args.blocks > 0 {
             let title = workspace.title_of(PAGE_ATLAS).unwrap_or("").to_string();
             let rows = mock_blocks_bench(args.blocks);
-            let core_blocks = rows_to_blocks(PAGE_ATLAS, rows, &mut doc);
+            let mut core_blocks = rows_to_blocks(PAGE_ATLAS, rows, &mut doc);
+            bench_pictures(&mut core_blocks, args.pictures);
             doc.set_page_blocks(core_page_id(PAGE_ATLAS), core_blocks);
             let _ = title;
         }
@@ -367,6 +374,22 @@ impl AppState {
             }
         }
 
+        // The media scene's fixtures (SPEC §三十七's "a page of pictures being
+        // scrolled"): write the pool the bench page points at, on a fresh
+        // library only. The measured pass of a bench run then loads pictures
+        // instead of paying for them twice, and `--pictures` with nothing to
+        // persist costs the shot tool no files.
+        let media_scene = args.pictures > 0 && args.blocks > 0;
+        if media_scene && persisted.is_none() && repo_for_state.is_some() {
+            let (_, pool) = bench_picture_plan(args.blocks, args.pictures);
+            for k in 1..=pool as i64 {
+                if let Some(att) = store.create_fixture(AttachmentId(k as u64), 1280, 720) {
+                    attachments.insert(k, att);
+                    next_attachment_id = next_attachment_id.max(k + 1);
+                }
+            }
+        }
+
         // fresh database: record the whole session once so a restart
         // reproduces exactly this state
         if let (Some(p), true) = (&persistence, persisted.is_none()) {
@@ -380,6 +403,10 @@ impl AppState {
                     favorite,
                     expanded,
                 }));
+            }
+            // rows before the blocks that point at them
+            for a in attachments.values() {
+                batch.push(Change::AttachmentAdded(a.clone()));
             }
             for id in workspace.dfs_order() {
                 for b in doc.page_blocks(core_page_id(id)) {
@@ -430,6 +457,7 @@ impl AppState {
             attachments: RefCell::new(attachments),
             attachment_images: RefCell::new(BTreeMap::new()),
             attachment_cache_bytes: Cell::new(0),
+            attachment_cache_peak: Cell::new(0),
             attachment_tick: Cell::new(0),
             next_attachment_id: Cell::new(next_attachment_id),
             pending_search: RefCell::new(None),
@@ -1746,6 +1774,23 @@ impl AppState {
             total -= cache.remove(&oldest).unwrap().bytes;
         }
         self.attachment_cache_bytes.set(total);
+        self.attachment_cache_peak
+            .set(self.attachment_cache_peak.get().max(total));
+    }
+
+    /// One line the bench harness reads from stderr: what the decode cache
+    /// holds now and the high-water mark it reached, plus where the scroll got
+    /// to — a picture cache that never grew is only a finding if the page
+    /// really moved. A constructed ceiling without a reading is a promise.
+    pub fn attachment_cache_report(&self) -> String {
+        format!(
+            "{{\"event\":\"attachment_cache\",\"bytes\":{},\"peak_bytes\":{},\"entries\":{},\"budget\":{},\"scroll_y\":{:.0}}}\n",
+            self.attachment_cache_bytes.get(),
+            self.attachment_cache_peak.get(),
+            self.attachment_images.borrow().len(),
+            MAX_ATTACHMENT_CACHE_BYTES,
+            self.last_scroll_y.get(),
+        )
     }
 
     /// height / width of the raster `image_for` returns, 0 when there is
@@ -3455,6 +3500,40 @@ fn mock_blocks_bench(count: usize) -> Vec<BlockRow> {
     )
 }
 
+/// How many distinct pictures a bench page of `--pictures N` stores. Rows
+/// reuse the pool *spread across the page* (image row k takes fixture
+/// `k % pool`), so consecutive picture rows still carry different rasters —
+/// which is what a photo page does, and what the decode cache is sized for —
+/// while the seed pass stays short and the folder stays under ~40 MB.
+const BENCH_FIXTURE_POOL: usize = 200;
+
+/// `(stride, pool)` for a bench page: one picture row every `stride` blocks,
+/// drawn from `pool` fixtures. Both the row builder and the seeder ask, so
+/// neither can drift from the other.
+fn bench_picture_plan(rows: usize, pictures: usize) -> (usize, usize) {
+    if pictures == 0 || rows == 0 {
+        return (0, 0);
+    }
+    let n = pictures.min(rows);
+    ((rows / n).max(1), n.min(BENCH_FIXTURE_POOL))
+}
+
+/// Turn every `stride`-th row of the bench page into an image block.
+fn bench_pictures(blocks: &mut [Block], pictures: usize) {
+    let (stride, pool) = bench_picture_plan(blocks.len(), pictures);
+    if stride == 0 {
+        return;
+    }
+    for (i, b) in blocks.iter_mut().enumerate() {
+        if i % stride != stride - 1 {
+            continue;
+        }
+        b.kind = BlockKind::Image;
+        b.text = String::new();
+        b.attachment = Some(AttachmentId(((i / stride) % pool) as u64 + 1));
+    }
+}
+
 /// Title + block texts, the blob the search scans.
 fn block_search_blob(title: &str, blocks: &[BlockRow]) -> String {
     let mut blob = String::from(title);
@@ -3830,7 +3909,7 @@ mod tests {
         use crate::core::AttachmentId;
 
         let state = AppState::new(
-            &HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0 },
+            &HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0, pictures: 0 },
             None,
         );
         // No database, so the store is the temp fallback; the high id range
@@ -3885,6 +3964,119 @@ mod tests {
             std::fs::remove_file(state.store.dir().join(format!("{id}.png"))).ok();
             std::fs::remove_file(state.store.dir().join(format!("{id}.cache.png"))).ok();
         }
+    }
+
+    /// The plan is shared by the row builder and the seeder so neither can
+    /// drift: `stride` is how far apart the picture rows sit, `pool` how many
+    /// fixtures back them.
+    #[test]
+    fn a_pictures_plan_spaces_the_rows_and_caps_the_pool() {
+        use super::{bench_picture_plan, BENCH_FIXTURE_POOL};
+        assert_eq!(bench_picture_plan(0, 500), (0, 0), "a page with no rows");
+        assert_eq!(bench_picture_plan(1000, 0), (0, 0), "--pictures 0 is off");
+        // the two scenes the matrix runs
+        assert_eq!(bench_picture_plan(10_000, 500), (20, BENCH_FIXTURE_POOL));
+        assert_eq!(bench_picture_plan(10_000, 5_000), (2, BENCH_FIXTURE_POOL));
+        // more pictures asked for than rows available cannot invent rows
+        assert_eq!(bench_picture_plan(100, 1_000), (1, 100));
+    }
+
+    #[test]
+    fn a_pictures_page_turns_every_stride_row_into_an_image() {
+        use super::{bench_pictures, BENCH_FIXTURE_POOL, BLOCK_IMAGE, BLOCK_PARAGRAPH};
+        use crate::core::{Block, BlockId, BlockKind, ColorKind, OrderKey, PageId};
+        let mut blocks: Vec<Block> = (0..1000u64)
+            .map(|i| Block {
+                id: BlockId(i + 1),
+                page: PageId(1),
+                parent: None,
+                order: OrderKey(0),
+                kind: BlockKind::Paragraph,
+                text: format!("row {i}"),
+                checked: false,
+                marks: Vec::new(),
+                color: ColorKind::Default,
+                background: ColorKind::Default,
+                page_ref: None,
+                folded: false,
+                attachment: None,
+                img_percent: 100,
+                columns: 0,
+            })
+            .collect();
+        bench_pictures(&mut blocks, 250);
+
+        let picture_rows: Vec<(usize, u64)> = blocks
+            .iter()
+            .enumerate()
+            .filter_map(|(i, b)| b.attachment.map(|a| (i, a.as_u64())))
+            .collect();
+        assert_eq!(picture_rows.len(), 250, "one row every four");
+        assert!(
+            blocks
+                .iter()
+                .all(|b| (b.kind == BlockKind::Image) == (b.attachment.is_some())),
+            "an image row is the only row that carries an attachment"
+        );
+        assert_eq!(picture_rows[0], (3, 1), "the stride, not an off-by-one");
+        // consecutive picture rows draw different fixtures — that is what a
+        // photo page does and what the decode cache is sized for...
+        assert_eq!(picture_rows[1], (7, 2));
+        // ...and the pool wraps only after it is exhausted.
+        assert_eq!(picture_rows[BENCH_FIXTURE_POOL].0, 3 + 4 * BENCH_FIXTURE_POOL);
+        assert_eq!(picture_rows[BENCH_FIXTURE_POOL].1, 1, "the pool wrapped");
+        assert_eq!(super::kind_to_int(blocks[0].kind), BLOCK_PARAGRAPH);
+        assert_eq!(super::kind_to_int(blocks[3].kind), BLOCK_IMAGE);
+        assert_eq!(blocks[3].text, "", "a picture row has no text to lay out");
+    }
+
+    /// The bench scene has to survive from its seed pass to its measured pass
+    /// the way a real session survives a restart: the first `AppState::new`
+    /// writes the pool and its rows, the second loads them. If the second one
+    /// regenerated anything, the measured pass would be timing a write.
+    #[test]
+    fn the_pictures_scene_seeds_its_pool_once_and_then_only_loads_it() {
+        use super::{AppState, HandleArgs, BLOCK_IMAGE};
+        use crate::testing::ScratchDir;
+        use slint::Model;
+
+        let dir = ScratchDir::new("pictures");
+        let db = dir.path().join("library.db");
+        let args = HandleArgs { blocks: 60, auto_exit_secs: 0.0, bench_pages: 0, pictures: 20 };
+
+        let first = AppState::new(&args, Some(std::sync::Arc::new(
+            crate::storage::SqliteRepository::open(&db).unwrap(),
+        )));
+        let seeded: Vec<String> = {
+            let book = first.attachments.borrow();
+            assert_eq!(book.len(), 20, "one fixture per picture row");
+            (1..=20i64)
+                .map(|k| book.get(&k).expect("fixture id").file.clone())
+                .collect()
+        };
+        assert!(
+            seeded.iter().all(|f| dir.path().join("attachments").join(f).is_file()),
+            "the bytes are on disk, not just in the map"
+        );
+        let rows: Vec<i32> = (0..first.blocks.row_count())
+            .filter_map(|i| first.blocks.row_data(i).map(|r| r.kind))
+            .collect();
+        assert_eq!(rows.iter().filter(|k| **k == BLOCK_IMAGE).count(), 20);
+
+        // One fixture goes away between the passes. A second `AppState::new`
+        // that re-seeded would silently write it back and the assertion below
+        // would pass for the wrong reason, so the load path is what is being
+        // checked here, not the count.
+        std::fs::remove_file(dir.path().join("attachments").join(&seeded[0])).unwrap();
+
+        let second = AppState::new(&args, Some(std::sync::Arc::new(
+            crate::storage::SqliteRepository::open(&db).unwrap(),
+        )));
+        assert_eq!(second.attachments.borrow().len(), 20, "the rows loaded back");
+        assert!(
+            !dir.path().join("attachments").join(&seeded[0]).exists(),
+            "the measured pass must not re-write the pool"
+        );
     }
 
     /// A 3x2 grid between two paragraphs, in display order. Cell "A1" is bold.
@@ -4012,7 +4204,7 @@ mod tests {
             crate::storage::SqliteRepository::open(&dir.path().join("library.db")).unwrap(),
         );
         let state =
-            AppState::new(&HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0 }, Some(repo));
+            AppState::new(&HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0, pictures: 0 }, Some(repo));
 
         state.create_page(None);
         let empty = state.start_page().expect("an empty page takes a paragraph");

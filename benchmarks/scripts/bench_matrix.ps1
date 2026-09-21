@@ -19,7 +19,8 @@ if ($TypingExe -eq "") {
 # docs/PERFORMANCE.md records them. Every row carries the `command` and the
 # `db` it ran with, so a number can be re-derived from the line that holds it.
 #   A empty shell · B/C/D 100 / 1 000 / 5 000 / 10 000 blocks
-#   F continuous scroll · G 100-page switching
+#   F continuous scroll · D/F with --pictures N: the same page, photo rows
+#   G 100-page switching
 #   E typing (30 strokes/s, plus the 120/s and no-search comparisons)
 #
 # Idle scenes run twice against the same pinned database file: the first pass
@@ -35,6 +36,17 @@ $scenes = @(
     @{ label = "$Tag-C5000"; command = "--blocks 5000"; args = @{ Blocks = 5000 } },
     @{ label = "$Tag-D10000"; command = "--blocks 10000"; args = @{ Blocks = 10000 } },
     @{ label = "$Tag-F10000"; command = "--blocks 10000 --scroll"; args = @{ Blocks = 10000; Scroll = $true } },
+    # SPEC §三十七's unmeasured shape: the same page with pictures on it. The
+    # pool is capped, so P500 and P5000 differ in how often a row re-enters the
+    # viewport, not in how many rasters exist on disk.
+    @{ label = "$Tag-D10000-P500"; command = "--blocks 10000 --pictures 500"; args = @{ Blocks = 10000; Pictures = 500 } },
+    # A picture row is ~400 px tall and the default 8 px/frame reaches one only
+    # after half a second of nothing else, so the scrolled media scenes ask for
+    # a flick-sized step: 200 px per frame crosses picture rows inside a
+    # sampling window, which is the whole point of the scene.
+    @{ label = "$Tag-F10000-P500"; command = "--blocks 10000 --scroll --scroll-step 200 --pictures 500"; args = @{ Blocks = 10000; Scroll = $true; ScrollStep = 200; Pictures = 500 } },
+    @{ label = "$Tag-D10000-P5000"; command = "--blocks 10000 --pictures 5000"; args = @{ Blocks = 10000; Pictures = 5000 } },
+    @{ label = "$Tag-F10000-P5000"; command = "--blocks 10000 --scroll --scroll-step 200 --pictures 5000"; args = @{ Blocks = 10000; Scroll = $true; ScrollStep = 200; Pictures = 5000 } },
     @{ label = "$Tag-G100"; command = "--page-switch 100"; args = @{ PageSwitch = 100 } },
     @{ label = "$Tag-E1000"; command = "typing 1000 blocks, 30/s, search every 100"; args = @{ Typing = $true; Blocks = 1000; Rate = 30; SearchEvery = 100 } },
     @{ label = "$Tag-E10000"; command = "typing 10000 blocks, 30/s, search every 100"; args = @{ Typing = $true; Blocks = 10000; Rate = 30; SearchEvery = 100 } },
@@ -63,6 +75,14 @@ foreach ($scene in $scenes) {
     } else {
         $db = Join-Path $Root "$($scene.label).db"
         Clear-Database $db
+        # A media scene's fixtures sit beside the pinned databases, so all four
+        # share one folder. Clearing it before the seed pass is what keeps that
+        # pass a write and the measured pass a load — a pool left from the
+        # previous scene would be measured re-using files it never made.
+        if ($scene.args.ContainsKey("Pictures")) {
+            $att = Join-Path $Root "attachments"
+            if (Test-Path $att) { Remove-Item -Path $att -Recurse -Force }
+        }
         $rows = @(
             ($base + @{ Label = "$($scene.label)-seed"; PinnedDb = $db }),
             ($base + @{ Label = $scene.label; PinnedDb = $db })

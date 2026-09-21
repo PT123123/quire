@@ -230,7 +230,7 @@ fn settings_storage_row_reports_the_folder_and_snapshots_on_demand() {
 
     let (_dir, path) = temp_db("settings-storage-row");
     let repo = seeded(&path);
-    let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0 };
+    let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0, pictures: 0 };
     let state = AppState::new(&args, Some(repo.clone()));
 
     // the storage row shows the database's parent directory

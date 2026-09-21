@@ -175,6 +175,7 @@ fn run() -> Result<(), String> {
         blocks: args.blocks,
         auto_exit_secs: 0.0,
         bench_pages: 0,
+        pictures: 0,
     };
     let state = AppState::new(&handle, Some(repo.clone()));
     controller::bind(&ui, &state);

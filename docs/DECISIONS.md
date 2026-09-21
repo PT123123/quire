@@ -2,6 +2,68 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0036 · A picture page is measured by scrolling it, and the scroll had the wrong sign
+
+Decision: give the media benchmark a real scene instead of another deferred
+bullet. `--pictures N` turns every `rows/N`-th row of the bench page into an
+`image` block; the fixtures behind them are `create_fixture`-generated 1280×720
+gradient PNGs, written **only when the library is fresh**, so the measured passes
+load a page that already exists rather than re-encoding one. `bench_picture_plan`
+is the single source of the stride and the 200-file pool, which is why the row
+builder and the seeder cannot drift apart. The app reports its own decode-cache
+state — `attachment_cache_report()` prints one JSON line to stderr, and `--dump-state`
+is what makes the bench harness read it — because a process working-set counter
+cannot see a cache the size of a raster. `docs/PERFORMANCE.md` carries the nine
+scenes.
+
+Why: four consecutive batches ended with the same sentence — *a page of pictures
+being scrolled is unmeasured, and the 32 MiB ceiling is a construction bound plus
+a unit test, not a reading* — and a unit test is exactly the wrong instrument for
+a claim about a ListView, a frame clock and a GPU texture upload. The seeding rule
+is the honest half of the design: if the fixtures were built inside the timed
+window, the arm would measure PNG encoding. The pool is capped at 200 rather than
+one file per picture row because 5 000 rasters of distinct 1280×720 PNGs would be
+a disk and warm-up artefact, not a memory measurement — and the cache cannot tell
+the difference anyway, since it bounds bytes, not identities.
+
+Consequences:
+- **Scene F had been scrolling nowhere since M2.** `ListView`'s `viewport-y` is
+  negative downward; the timer did `cur + 8.0`, so every 16 ms tick wrote a value
+  the clamp immediately rounded back to 0, and the "continuous scroll" arm measured
+  a stationary page. This is not a reading to reinterpret — it is every scroll
+  number in this document taken before today. The fix is `cur - step`, plus a stall
+  counter that only wraps when a position the app actually *put* there is the one
+  that comes back.
+- **A null reading was the bug, and pixels were the only proof.** The batch's first
+  two runs printed an unchanged cache and the same CPU as the static scene. Rather
+  than conclude "images are cheap", `--scroll-y` was added to `quire-shot` as a
+  pixel control: at `0` and `+2000` it wrote **byte-identical PNGs**, and only
+  `−2000` differed. That is the harness defect, photographed. It also means the
+  contaminated rows were deleted and the whole batch re-run on the fixed binary;
+  the pre-fix file is kept out of the repo (`%TEMP%\media-ram-pre-fix.jsonl`) as
+  the record that the instrument, not the app, was wrong.
+- **Scroll tests now need a direction test.** "The property changed" is not
+  evidence of motion. `--scroll-step` exists so a flick can be measured separately
+  from a wheel tick (83–88 % vs 36–38 % of a core), and `--scroll-y` stays as the
+  control any future scroll arm should run before quoting its CPU.
+- **The readings, briefly.** The cache stops at 9 rasters / 33 177 600 of
+  33 554 432 bytes (98.9 %) in every scrolled media arm, at 500 or 5 000 pictures
+  and on 1 000 or 10 000 rows — the ceiling is reached before the viewport could
+  show a tenth frame, so it needs no raising. 500 pictures on a page you never
+  scroll to is indistinguishable from no pictures. And an on-screen picture costs
+  ≈9 MB of process memory, not the 3.7 MB of its raster: **the viewport, not the
+  32 MiB cache, is what constrains a photo page**, which is the number §二十二's
+  arithmetic now has to carry.
+- `MUST NOT` the media arms into the §三十七 ≤1.2× gate. They are reported outside
+  it deliberately — that gate's job is to catch a per-row projection regression on
+  an ordinary page, and a scene that adds GPU textures would fail it for the wrong
+  reason. ADOPT the same-session control for the batch's own arms (A, D and the
+  media shapes all ran in one sitting), which is what the layout batch asked for.
+- `create_fixture` writes a gradient, which compresses well and is therefore not a
+  photo; the RAM arms above are unaffected (weight is `w·h·4` regardless) but the
+  disk footprint and any future decode-time arm are optimistic. Recorded as a
+  limitation, not fixed here.
+
 ## ADR-0035 · A screenshot decodes in a file that has never seen the clipboard
 
 Decision: 批次 A's last open code item — paste a picture from the clipboard with

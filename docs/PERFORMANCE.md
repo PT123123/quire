@@ -26,6 +26,13 @@ Task Manager's "GPU Memory" column / pdh counters and say so.
 Startup latency has two measurements, not one: `bench.ps1`'s `startup_ms` is
 window-handle-up, and `startup_bench.ps1`'s `first_paint_ms` is the first
 painted frame (see the A2 section at the end — they differ by ~4×).
+A scene with pictures carries one number the process counters cannot see, so
+the app prints it: `--dump-state` makes the exit write
+`{"event":"attachment_cache","bytes":…,"peak_bytes":…,"entries":…,"budget":…,"scroll_y":…}`
+to stderr, and `bench.ps1` inlines it as the row's `attachment_cache` field.
+`peak_bytes` is a high-water mark recorded on every cache insert, and `scroll_y`
+is where the programmatic scroll got to — the field is there because a cache
+that never grew is only a finding if the page really moved.
 
 ## Scenes
 | id | scene | command |
@@ -37,6 +44,7 @@ painted frame (see the A2 section at the end — they differ by ~4×).
 | E | typing | `bench.ps1 -Typing -Blocks N` (`quire-typing`, see below) |
 | F | continuous scroll | `bench.ps1 -Scroll` (programmatic proxy, below) |
 | G | switch 100 pages | `bench.ps1 -PageSwitch 100` |
+| D+F·P | the same pages with N picture rows | `bench.ps1 -Blocks 10000 -Pictures N [-Scroll -ScrollStep 200]` |
 
 ## Baseline — M2 (Release, idle ≈ 5 s after window appears)
 
@@ -59,6 +67,12 @@ Reading:
   driving the same path as wheel input (real input injection stays a
   manual pass). 19.5 % of one core for 60 fps is acceptable; revisit if
   M7 comparisons regress.
+  **Corrected 2026-09-21, and this row is the one to re-read:** the timer was
+  adding to `content-y`, which Slint measures *negative* going down, so scene F
+  never moved the viewport. What this row measures is 60 property writes a
+  second at scroll 0 — a repaint loop, not a scroll. The same-session re-run of
+  the real thing is in "M10 · the media bench scene" at the end, along with the
+  pixel control that proves the direction.
 - Scene G opens one of 100 mock pages every 120 ms (model swap + sidebar
   rebuild + editor delegate churn): 0.39 % of one core, no memory drift
   over the sampling window.
@@ -226,7 +240,7 @@ skia run showed WS 320.9 MB, a one-off worth watching, see follow-ups.)
 | idle CPU ≈ 0 | ✓ 0.58% vg / 0.98% sk of one core, no animation loops |
 | 10 000-block memory delta | ✓ +9 MB private over the empty shell (vg) / +9 MB (sk) — single digits, met |
 | typing smoothness | ✓ 30 keystrokes/s sustained at 1k and 10k blocks, zero dropped; key handler median 47–66 µs, p95 ≤ 122 µs; 120 keystrokes/s also holds (118/s achieved) |
-| scrolling smoothness | ✓ continuous scroll of a 10 000-block page: 27.7% (vg) / 18.2% (sk) of one core, no hitching observed |
+| scrolling smoothness | ⚠ re-derive before quoting — "continuous scroll of a 10 000-block page: 27.7% (vg) / 18.2% (sk) of one core, no hitching observed" was measured on a scene F that never scrolled (see the M2 reading above and the media batch at the end): both arms are a pinned-at-top repaint loop. femtovg's real arm is now 36.5–38.4%; the skia arm is owed the same re-run |
 | in-page search cost | ✓ FTS query median 0.5 ms @1k blocks, 1.7 ms @10k — sub-frame |
 | page switching | ✓ 100 switches at 0.19–0.20% of one core |
 | no idle work | ✓ idle scenes show 0.0–0.6% with no timers running |
@@ -247,6 +261,12 @@ SPEC priority order (memory above everything but UI quality), **femtovg stays
 the default**; skia remains one `--no-default-features --features skia` away
 for scroll-heavy use — plain `--features skia` leaves the femtovg default
 compiled in too, and then it renders with femtovg.
+
+*(2026-09-21: the one arm of this verdict that argues for skia is the scroll
+number, and scene F was not scrolling — see the M2 reading and the media batch
+at the end. femtovg's memory lead is untouched, so the default stands on the
+stronger half of the argument; "skia for scroll-heavy use" is unproven until
+that arm is re-run.)*
 
 ### M7 follow-ups, ranked by value
 
@@ -835,3 +855,112 @@ named: **a page of pictures being scrolled**. The store leg above is one picture
 one moment; the ceiling that protects a scroll is
 `MAX_ATTACHMENT_CACHE_BYTES = 32 MiB`, still a construction bound plus a unit test
 rather than a reading.
+
+## M10 · the media bench scene, and the scroll that never scrolled (2026-09-21, ADR-0036)
+
+Four batches in a row ended with the same paragraph: *a page of pictures being
+scrolled is still unmeasured, and the 32 MiB decode ceiling is a construction
+bound plus a unit test, not a reading.* This batch exists to turn that sentence
+into a number. It produced a different one first.
+
+Release `quire.exe` built at this commit, `benchmarks/scripts/bench.ps1`, every
+scene one fresh-DB seed pass plus two measured passes against its own pinned
+`%TEMP%\quire-matrix\<label>.db`, all nine scenes in one sitting (the
+same-session control the layout batch asked for, as far as a scene that adds no
+kind can use it). Raw rows:
+`benchmarks/results/2026-09-21-m10-media-ram.jsonl`. `entries` / `peak` are the
+app's own line, not a process counter.
+
+| scene | WS MB | private MB | idle CPU % | rasters | cache peak |
+|-------|------:|-----------:|-----------:|--------:|-----------:|
+| A empty shell | 125.7 – 126.1 | 99.1 – 99.5 | 0.00 | — | — |
+| D 10 000 blocks | 135.7 – 136.1 | 111.3 – 112.2 | 0.00 – 0.20 | — | — |
+| D + 500 pictures | 135.4 – 136.1 | 110.9 – 112.4 | 0.20 – 0.39 | 0 | 0 |
+| D + 5 000 pictures | 153.3 – 153.9 | 118.7 – 119.7 | 0.00 – 0.20 | 2 | 7.03 MB |
+| F 8 px/frame (wheel) | 150.0 – 150.8 | 121.4 – 122.6 | 36.5 – 38.4 | — | — |
+| F 200 px/frame (flick) | 156.3 – 156.4 | 133.1 – 134.9 | 83.1 – 87.5 | — | — |
+| F + 500 pictures, flick | 191.1 – 193.0 | 165.6 – 166.3 | 77.4 – 78.6 | 9 | 31.64 MB |
+| F + 5 000 pictures, flick | 190.3 – 190.8 | 149.0 – 149.8 | 61.4 – 62.3 | 9 | 31.64 MB |
+| F · 1 000 rows, 500 pictures, flick | 183.3 – 184.4 | 143.8 – 145.2 | 58.2 – 65.4 | 9 | 31.64 MB |
+
+**The ceiling binds, at nine.** Every scrolled media arm landed on the same
+number: 9 rasters, `peak_bytes` 33 177 600 against a 33 554 432 budget — 98.9 %
+of it, and a tenth 1280×720 frame would be 36 864 000. Nine is
+`floor(32 MiB ÷ 3 686 400)`, so what stops the cache is its byte weight and not
+an entry count, and it stops in exactly the same place whether the page holds
+500 pictures or 5 000 or whether it is 10 000 rows or 1 000. That spread of
+zero across three shapes is the reading `the_picture_cache_spends_its_budget…`
+asserts in a unit test; the bench says it happens through Slint's real
+ListView, with real paints, on a real frame clock.
+
+**A picture costs nothing until it is on screen.** D + 500 is D — 135.4 – 136.1
+against 135.7 – 136.1, inside the spread of the passes themselves — with 0
+rasters decoded and 0 bytes of cache. The first picture row on that page sits at
+index 19 and the initial viewport does not reach it. A `BlockRow` carries an
+attachment as one i32, so 500 pictures on a page you never scroll to cost half a
+megabyte and no decodes at all: §三十七's "cost tracks the viewport, not the
+document" is now a measured claim rather than a description of the callback.
+
+**And a picture on screen costs about three times its raster.** D + 5 000 is
++17.6 MB WS over the same page without them, and the cache holds 7.03 MB of it —
+two frames. The other ≈10 MB is Slint's own 5 MiB path cache plus the texture
+upload for a 1280-wide RGBA raster on the iGPU, neither of which the LRU sees.
+The scrolled arms say the same thing bigger: +35 MB WS / +32 MB private over the
+same page flicked with no pictures on it, for a cache holding 31.64 MB. So
+§二十二's arithmetic must budget roughly **9 MB of process memory per on-screen
+picture, not the 3.7 MB of its raster** — and the corollary is that the 32 MiB
+cache is not the binding constraint on a photo page; the viewport is. Nothing
+about the ceiling needs raising: at 9 frames it is reached before the screen can
+show a tenth.
+
+**Where the gate stands.** The §三十七 arm is D 10 000 blocks, and here it is
+135.7 / 111.3 = 1.12× / 1.14× the M7 matrix rows (121.5 / 97.4), with A at
+1.10× / 1.13× — the same session, so the two arms' spread is this machine today
+rather than a diff. The media arms are *outside that gate on purpose*: they
+exceed 1.2× the baseline (193 / 121.5 = 1.59×) because their content is
+photographs, which is what the gate was written to price and not what it was
+written to forbid. A kind that added per-row state would show up in the D + 500
+row, which is flat.
+
+**The finding the batch was not looking for: scene F never scrolled.** The
+instrument was believed broken before it was believed wrong — a 10 000-row page
+with 5 000 pictures, driven for 8 s, reported 2 rasters and a `scroll_y` of
++840. Doubling the step to 200 px made the page move *less* per second, which is
+not what a slow renderer does. So the report grew a `scroll_y`, and the shot tool
+grew a `--scroll-y`, and the pixel control settled it: `--scroll-y 0` and
+`--scroll-y 2000` produce **byte-identical PNGs** while `--scroll-y -2000`
+differs. Slint's `content-y` is negative going down — its own ListView computes
+the first visible index as `round(-content-y / item-height)` — and the timer
+installed in M2 had been *adding* ever since. Every F row in this file predates
+the fix: the M2 baseline's 19.49 %, the M7 matrix's 27.7 % / 18.2 %, and the D11
+checklist's "continuous scroll … ✓ no hitching observed" all measured sixty
+property writes a second against a viewport sitting at the top of the page.
+They are still what they say they are — a repaint loop with the visible band
+invalidated — but they are not a scroll, and the two lines that leaned on them
+are now marked in place.
+
+With the direction fixed and the wrap given a second of patience (a ListView
+that has not measured its rows yet reports a shorter content height, so the
+clamp moves under the scroll; one stalled tick used to mean "bottom reached"),
+the scene walked 138 000 – 162 000 px in the sampling window — a 1 000-row page
+of pictures, top to bottom and past the wrap, at 58 – 65 % of one core.
+
+**What the real scroll says about the product.** 8 px/frame, a wheel: 36.5 –
+38.4 % of one core on 10 000 rows, against the 19.5 – 27.7 % on file, so the
+cost of scrolling a long page was under-reported by roughly 1.4×. 200 px/frame,
+a hard flick: 83 – 88 % — more than double, and it is a single thread redrawing
+the visible band plus whatever the ListView realizes for the new offset. No fix
+is claimed here; this is the first honest number for the follow-up that the M7
+list ranked second, and that follow-up now has a baseline to argue against.
+
+**What this batch does not measure.** The skia arm of the new scroll numbers (a
+second target dir and ~15 min; it is what the renderer verdict's one skia-favouring
+line needs, and it is owed there). A real photo library: the fixtures are
+1280×720 gradients, and a flat gradient is the *cheapest* PNG there is to
+decode, so every decode figure here is a floor — a phone photo's entropy costs
+more per frame, and the 200-fixture pool is 200 names for the same raster
+because the cache is keyed by path, which is what makes the floor reachable in
+a seed pass. The camera-original case (a 12 MP file whose `MAX_EDGE` display
+copy is the same 1280-wide raster, so it costs this and buys nothing extra).
+A page of pictures on a HiDPI scale, and a page where the pictures are
+*between* paragraphs the way a real page has them, rather than on a stride.
