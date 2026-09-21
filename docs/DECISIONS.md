@@ -2,6 +2,49 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0046 · A page's icon is an emoji, and a picture goes on the cover instead
+
+Decision: SPEC §三十八 asks for "icon：emoji 选择器 **+ 本地图片**". The emoji half
+shipped as ADR-0045; the local-image half is **decided against, here, for this
+slot** — `pages.icon` holds an emoji or nothing, and a page's picture lives in
+**cover**, the next group in the same section. This is the "write the cost down
+rather than leave the line open" branch of the choice.
+
+The cost is not the picker, it is ownership and the one tier that exists.
+Attachments (ADR-0029/0030) keep one file plus **one** downscaled copy at
+`MAX_EDGE = 1280` — sized for the ~780 px editor column, 6.5 MB of RGBA at
+full size — and `display_path` hands the UI that copy. An icon slot is 16 px in
+the sidebar and 46 px in the hero. Riding the existing channel means either
+painting a 1280-edge raster into a 16 px box on every sidebar row (the tree
+rebuilds on every mutation, so that working set is paid per rebuild for a mark
+the size of a letter), or adding a second tier — a second file per attachment,
+a second entry in `remove`, and a second thing the M10 reclaim has to know about.
+That last one is the real price: reclaim deletes "the attachments nothing points
+at" by walking block references, and an icon is a **page** pointer, so a page's
+icon is exactly the kind of file that gets reclaimed as garbage by a scanner that
+only knows the referencer it was written against. Making that safe is a
+referencer list, not a flag.
+
+The column would change shape too. `pages.icon` today is a glyph, and `""` means
+unset; a file reference makes it "either an emoji or an attachment id", which is
+the tagged union this schema has avoided everywhere it has a choice (`kind` and
+`lang` are strings for that reason). And the value is thin: a photograph reduced
+to 16 px is the least legible version of the picture the user just put on the
+page, and Notion itself keeps its icon picker emoji-only with uploads on the
+cover — so this is not a parity gap being papered over.
+
+Consequences:
+
+* §三十八's icon line now says emoji, and points here; the picture requirement is
+  carried by the cover line, which already asks for 换图 / 移除 and a contrast
+  check — a raster with somewhere to be legible.
+* The reopen trigger is concrete: if a raster ever has to live in the 16 px slot
+  for another reason (a workspace mark, an avatar), then the second downsample
+  tier and the reclaim referencer list get built **together**, and this ADR is
+  where the cost was already written down.
+* ADR-0045's "local image belongs to slice 3" is superseded by this line — slice
+  3 is cover, and it inherits the picture half of the requirement.
+
 ## ADR-0045 · A page's icon is the emoji itself, and the placeholder is read three ways
 
 Decision: SPEC §三十八's icon is stored as `pages.icon TEXT NOT NULL DEFAULT ''`
@@ -83,10 +126,13 @@ Consequences:
 * Sweep 64 → **67** scenes (baseline `.scratch/sweep33`): `page-icon`, `icon-picker`
   and a dark arm. The picker scene deliberately opens on an iconless page, since
   that is the state a user is in when they reach for it.
-* Remaining §三十八 groups: **cover**, the **local-image** half of icon, **lock**,
-  **version history** (still owes the disk-and-RAM retention numbers), **templates**.
-  The hero icon is display-only this slice — the hover "Add icon" affordance and
-  a cover behind the title belong to the next one.
+* The hero icon is display-only this slice: there is no hover "Add icon" strip
+  above the title, so the menu is the only way in. That affordance and the cover
+  behind the title are the next slice's, and they want the same seam.
+* Remaining §三十八 groups: **cover**, **lock**, **version history** (still owes
+  the disk-and-RAM retention numbers), **templates**. The local-image half of
+  icon is not on that list — ADR-0046 decided against it the same day, and the
+  picture requirement now sits on cover.
 
 ## ADR-0044 · A page's look is derived, so no block ever holds a size
 
