@@ -2,6 +2,79 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0039 · A contents block stores that it is one, and reads its list off the page
+
+Decision: `BlockKind::Toc` (row id 21, database string `"toc"`) holds no
+content. Its body is the page's own headings, collected in `project_blocks` by
+`toc_entries(blocks, shown)`, which walks the very list of visible indices the
+projection just computed and keeps the rows whose kind answers
+`BlockKind::heading_level()`. The row carries them as
+`toc-entries: [TocEntry]` — `{ block, label, level }` — and the delegate paints
+one line each, indented `(level - 1) * 16px`. Clicking a line fires
+`callback toc-jump(int)`, and Rust walks the path a `quire://block/` anchor
+already walked: `flush_pending_edit` → `set_editing_id(-1)` (recreate the
+delegate so the input takes over) → `focus_block`. Markdown writes one marker
+line, `<!-- quire:toc -->`, and reads that line back as the block.
+
+Why: SPEC §三十七 批次 C says 派生数据不入库, and a copy of the headings is the
+one derived thing in this app that is guaranteed to go stale — renaming a
+heading would leave a directory listing the old name, with no edit that fixes
+it. Deriving at projection time makes the copy impossible by construction and
+costs no migration, because kinds are strings in the database (ADR-0030's
+argument, now on its fourth kind). Reusing `shown` rather than re-walking the
+page is the same argument one level down: a heading behind a fold or inside a
+container has no row to scroll to, so a contents list built from a second,
+independent walk would advertise links that go nowhere — and the two walks
+would eventually disagree.
+
+Consequences:
+- **No migration, as a checked fact.** `user_version` stays 8. There are 22
+  block kinds, `BlockKind::ALL` lists them, and an unknown kind is still
+  corruption-on-load, so an older build opening a library containing a TOC
+  fails loudly instead of dropping the row.
+- **The walk is guarded by kind on the Rust side.** `toc_entries` runs only for
+  a row whose kind is `Toc`, so a page with no contents block pays nothing for
+  the feature and a page with one pays exactly one page scan per projection —
+  the lesson ADR-0038 learned for the math binding, applied where the cost
+  would be a scan rather than a string conversion.
+- **Not editable, still selectable.** `editing` excludes kind 21 the way it
+  excludes a divider, a picture and a page block: the row has no text to hold a
+  caret, and the live TextEdit would show a source string the block does not
+  have. Its TouchArea reports `MouseCursor.pointer`, because a contents line is
+  a target rather than a place to type.
+- **A converted line keeps its words, unpainted.** `SetBlockType` into `Toc`
+  leaves `blocks.text` alone (the same precedent `Divider` set), so a paragraph
+  turned into a contents block keeps its text in storage and in the FTS index
+  while nothing draws it. That is inherited, not new, and it is why export
+  writes the marker rather than the text: the marker is the only part of the
+  block that means something outside this library.
+- **The click moves the caret and does not scroll.** Slint 1.18's plain
+  `ListView` has no `bring-into-view` — that function lives on
+  `StandardListViewBase`, the fixed-row-height list a `ListView` gets its
+  scrolling from — and nothing in `i-slint-core` moves a Flickable's viewport
+  when a child takes focus. So a jump to an off-screen heading selects it
+  without revealing it. `quire://block/` anchors from M8 have always behaved
+  this way; the TOC inherits the limitation rather than hiding it, and a
+  variable-height `reveal` is its own slice (it would fix both).
+- **The gate ran against a same-session control and this time found nothing.**
+  Control `cc7ccf0` from a clean worktree (md5 `a81ce6df…`, 21 928 960 B) versus
+  this tree (md5 `f6d9a576…`, 22 017 024 B), scene D, arms alternating, one
+  pinned database each (raw rows
+  `benchmarks/results/2026-09-21-m11-toc-ram.jsonl`). Steady-state private
+  bytes: control 110.5 / 112.1, this tree 112.5 / 111.6 — **1.007×**, inside the
+  ≤1.2× gate, and the 0.75 MB gap is smaller than the 1.6 MB spread inside the
+  control arm alone, so the honest reading is *no measurable cost* rather than a
+  small one. Each arm's first run (112.7 / 110.0) is the pass that seeds its
+  database and is excluded. The exe grew 88 KB: one enum arm, one struct, one
+  callback and the delegate's contents list.
+- **Pixels.** `sweep21` → `sweep22`, 47 scenes: 3 moved, 1 new (`toc`), 43
+  byte-identical. The three are the menus that gained a row — see
+  `docs/UI_ARCHITECTURE.md` for the boxes.
+- **Still needs a human window.** No headless scene clicks a contents line, so
+  hover feedback, the caret landing in the heading, and a contents block on a
+  page with no headings yet (it paints "No headings on this page yet") are
+  unverified by this build.
+
 ## ADR-0038 · A formula is stored as source, and its picture is derived on the way out
 
 Decision: math is two surfaces over one renderer. `BlockKind::Math` (row id 20)

@@ -818,6 +818,31 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         });
     }
 
+    // toc (SPEC §三十七 批次 C): a contents line names a block on this page,
+    // so the click walks the same path a `quire://block/` link walks — minus
+    // the url parse and the page open, since the list is built from the page
+    // that is already showing.
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_toc_jump(move |id| {
+            let g = gw.upgrade().unwrap();
+            if id <= 0 {
+                return;
+            }
+            let len = {
+                let d = s.doc.borrow();
+                d.block(BlockId(id as u64))
+                    .map(|b| b.text.len() as i32)
+                    .unwrap_or(0)
+            };
+            flush_pending_edit(&g, &s);
+            // -1 first: recreate the delegate so the input takes over
+            g.set_editing_id(-1);
+            focus_block(&g, &s, id, len);
+        });
+    }
+
     // rich paste (SPEC §二十七): the clipboard's markdown structure lands
     // as blocks. The clipboard read is direct Win32 FFI (microseconds — a
     // Get-Clipboard subprocess measured 7-10 s on the dev desktop); a false
@@ -2837,6 +2862,26 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
                     .borrow_mut()
                     .apply(&[crate::core::Change::BlockMarksSet { id, marks }]);
             }
+            state.reproject_blocks();
+        }
+        // SPEC §三十七 批次 C: the page's own contents. Built the way the
+        // insert menu builds one — the intro line becomes the block, so the
+        // list sits above every heading it lists, and the headings are the
+        // fixture's own (three H2s and an H3, so the indent has two steps).
+        "toc" => {
+            let page = core_page_id(state.open_page.get());
+            let target = {
+                let d = state.doc.borrow();
+                d.page_blocks(page)
+                    .iter()
+                    .find(|b| b.kind == crate::core::BlockKind::Paragraph && !b.text.is_empty())
+                    .map(|b| b.id)
+            };
+            let Some(id) = target else { return };
+            let _ = state.exec_on_open_page(Command::SetBlockType {
+                id,
+                kind: crate::core::BlockKind::Toc,
+            });
             state.reproject_blocks();
         }
         "find" => {

@@ -95,11 +95,11 @@ the overlay half so headless two-pass renders see their transitions.
 Current set: default, dark, palette, search-notes, menu, rename, settings,
 dialog, empty, edit, slash, block-menu, marks, link, find, nest, toggle,
 toggle-fold, image, image-half, file, recovered, title-edit, table, table-edit,
-columns, columns-3, math, math-inline,
+columns, columns-3, math, math-inline, toc,
 plus dark combos (dark-slash, dark-find, dark-marks, dark-link, dark-block-menu,
 dark-title-edit).
-`benchmarks/scripts/sweep.ps1` holds the authoritative list — 46 scenes as of
-ADR-0038 — and this prose is the summary, so when the two disagree trust the
+`benchmarks/scripts/sweep.ps1` holds the authoritative list — 47 scenes as of
+ADR-0039 — and this prose is the summary, so when the two disagree trust the
 script. Every visual change ships with re-shot
 scenes; the judge-reviewed set is the regression baseline. `toggle` and
 `toggle-fold` are a pair on purpose: the same section open and closed, so a
@@ -134,7 +134,18 @@ the first marked line in the set short enough to leave slack inside its frame,
 and the slack is what exposed the stretch-alignment defect above. Neither scene
 shows the editing state (`quire-shot` never focuses a row), so a math block under
 a caret and Ctrl+M over a selection stay human-verified.
-The baseline is `.scratch/sweep21` (46 scenes). The set before it, `.scratch/sweep10`
+`toc` is the derived-list scene (ADR-0039): the intro paragraph of the sample
+page converted into a contents block, so the box sits above every heading it
+lists and lists four of them — three at level 2 and `Principles` at level 3,
+which is what makes the indent two steps rather than one thing repeated. The
+scene converts a block instead of seeding a `Toc` row into the fixture on
+purpose: ~30 scenes render that page, and a fixture edit would have moved every
+one of them for a reason that has nothing to do with the change under test. What
+the scene cannot show is the click — `quire-shot` does not hit TouchAreas — so
+hover feedback and the caret landing in the listed heading are human-verified,
+and so is the jump's known limit: it selects the heading without scrolling the
+viewport (see ADR-0039).
+The baseline is `.scratch/sweep22` (47 scenes). The set before it, `.scratch/sweep10`
 (42 scenes), re-baselined 37 of them for a
 reason unrelated to tables: `DocumentRow.head` bound `height` without `y` and so
 was centred in its delegate, which had been sitting the page title ~34 px below
@@ -153,6 +164,14 @@ inside `x 548..724 / y 490..500` (the shortcut row now reads
 "Ctrl+B / I / E / M"). `marks`, `table-edit` and the two `columns` scenes came
 through the `alignment: start` change byte-identical, which is the control that
 says it only touches lines with slack to waste.
+`sweep21` → `sweep22` (contents block) moved 3 of those 46 and added 1: `slash`
+and `dark-slash` at 683 / 2 574 px inside the same `x 340..618 / y 564..618`
+(the menu gained its "Table of contents" row above Divider), `plus` at 1 249 px
+inside `x 612..864 / y 624..792` (the insert menu's own band, ending where the
+list does). Nothing else moved — `settings` in particular, whose shortcut row
+this slice did not touch — and the two `EditorBlock` edits that ride along (the
+box's top margin, the pointer cursor) changed no scene because both are guarded
+by `block.kind == 21`, which is the whole point of the new scene.
 A re-sweep after a
 layout change is judged by diffing, not by looking:
 `benchmarks/scripts/diffbbox.ps1 -OldDir A -NewDir B` reports the bounding box

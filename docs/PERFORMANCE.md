@@ -1152,3 +1152,58 @@ passed off as the other.
 where the media batch read 0.0–0.2 % on the same scene. Nothing in this slice
 adds per-frame work, so the likeliest reading is session state, and it is the
 reason the gate is quoted as a ratio between the arms and never as an absolute.
+
+## M11 · a contents block is free at the gate, and the projection it lives in is finally on record (2026-09-21, ADR-0039)
+
+A `Toc` row costs the document one string — `"toc"` in `blocks.kind` — and costs
+the UI a list the projection builds on the spot. Two numbers say what that buys
+and what it charges.
+
+**The gate, run the way the last batch said to.** Scene D (10 000 blocks, no
+contents block anywhere in it), a pinned database per arm, arms alternating, one
+sitting, both exes identified by md5 and size first (raw rows
+`benchmarks/results/2026-09-21-m11-toc-ram.jsonl`):
+
+| arm | exe | steady WS MB | steady private MB |
+|-----|-----|-------------:|------------------:|
+| control `cc7ccf0` | md5 `a81ce6df…`, 21 928 960 B | 135.9 / 137.0 | 110.5 / 112.1 |
+| toc (this tree) | md5 `f6d9a576…`, 22 017 024 B | 137.0 / 137.3 | 111.6 / 112.5 |
+
+**1.007× the control's private bytes** — and unlike the math batch, the 0.75 MB
+gap between the two means is *smaller than the 1.6 MB spread inside the control
+arm alone*, so this sitting cannot separate the contents block from noise at
+all. That is the honest reading: no measurable cost, not a small one. Each arm's
+first run (112.7 / 110.0 private) is the pass that seeds its database and is
+excluded. The exe grew 88 064 B for one enum arm, one struct, one callback and
+one delegate.
+
+**What the gate cannot see, and so what got measured separately.** Scene D has
+no contents block, which makes the RAM ratio a statement about the *kind* and
+none about the *list*. `app::state::tests::cost_of_one_contents_block_on_a_ten_thousand_row_page`
+(`#[ignore]`, prints, release) times `project_blocks` over 10 000 rows with a
+heading every tenth line, once with row 0 as a paragraph and once with it as a
+`Toc` listing those 1 000 headings — three rounds, ms per projection:
+
+| round | no contents block | one contents block, 1 000 entries |
+|-------|------------------:|----------------------------------:|
+| 0 | 39.12 | 37.71 |
+| 1 | 37.40 | 37.85 |
+| 2 | 37.17 | 38.18 |
+
+The delta is −1.42 / +0.45 / +1.01 ms: **not separable from the run-to-run
+spread of the arm that pays it**. The ceiling this sitting can put on 1 000
+derived entries is ≈1 ms, against the ≈38 ms the same projection costs without
+them. A real page lists a handful of headings, so the walk is some thousands of
+times smaller than the noise floor here.
+
+**And that ≈38 ms is the first whole-page projection on record**, which the math
+batch had to do without: ADR-0038 quoted ≈6 ms for a formula on every line as
+arithmetic precisely because nothing had ever measured the projection those
+formulas would land in. Read the two together and the shape of the problem
+changes — a per-formula cost is a percentage of a projection, and a projection
+is not a frame. This is a Rust-side measurement (blocks in, `BlockRow` values
+out, no delegate realized, no repaint, no window), so it says nothing about what
+a 10 000-row page costs to *draw* — the published UI numbers stay what they
+were: the typing row's key-handler median 47–66 µs and the storage row's
+debounced 32-change `apply` median 3.42 ms. What it does settle is that the
+contents block's own work is not where the time goes.

@@ -32,7 +32,7 @@ First functional release: a local, single-file-database notes workspace.
 - "+" handle opens Notion's insert menu: it creates the empty line below
   and shows the full block list (Text, Page, To-do, Headings, Bulleted /
   Numbered, Quote, Divider, Callout, Code, Toggle list, Image, File, Table,
-  Columns, Math) — picking a
+  Columns, Math, Table of contents) — picking a
   row converts the new line, clicking away or Escape keeps the empty line,
   typing filters the menu. The database views (Table view, Board, Gallery,
   List, Calendar, Timeline) appear as muted "later" placeholders and
@@ -93,6 +93,15 @@ First functional release: a local, single-file-database notes workspace.
   comes back as its own source, so the worst case reads "that did not render"
   rather than "that vanished". Click the block and the source is what you edit.
   Markdown writes and reads a `$$ … $$` fence, verbatim inside like a code fence
+- Contents block: a page's own table of contents, from the insert menu, the slash
+  menu or Turn into. The list is not stored — every line is read off the page each
+  time the page is projected — so renaming a heading renames its line, deleting one
+  removes it, and a heading a folded toggle hides leaves the list until the toggle
+  opens again. Lines indent by heading level, an untitled heading reads "Untitled",
+  and clicking a line puts the caret at the end of that heading. The block has no
+  text of its own; converting a line into one keeps that line's words stored but
+  unpainted, the way a divider does, so turning it back gives them back. Markdown
+  writes and reads a single `<!-- quire:toc -->` marker line
 - Fixed a marked line with room to spare painting its runs apart. A paragraph's
   inline marks render as side-by-side runs, and the row laid them out with
   Slint's default `alignment: stretch`, so any leftover width was divided among
@@ -267,6 +276,12 @@ First functional release: a local, single-file-database notes workspace.
   first proving which build it is (md5, and the control tree has no math source
   file). The worktree goes once the number is in; the next kind that claims a
   per-row cost repeats the run against its own predecessor commit
+- The contents block repeated that run against the commit before it (`cc7ccf0`) and
+  came in at 1.007× on private bytes. It also bought the first whole-page projection
+  number: the gate's scene has no contents block in it, so a green gate alone says
+  nothing about a row that walks the page every time it is projected. Measured
+  separately — 10 000 rows project in ≈38 ms with or without a 1 000-line list —
+  and the delta is inside the noise of its own control
 
 ### Known limitations
 - Switching directly from one open menu to another (e.g. ⋮⋮ on a different
@@ -316,6 +331,11 @@ First functional release: a local, single-file-database notes workspace.
   wherever the alphabet has no glyph for it. Unknown commands come back as
   their own source. A Math mark and the other marks do not stack — a formula
   inside bold text keeps the formula and drops the bold on export
+- A contents block lists the headings of the page it sits on, and nothing more: no
+  collection across pages, no "show levels 1–2" setting, no compact or inline
+  option, and a long heading is elided to one line rather than wrapped. Clicking a
+  line moves the caret, not the scrollbar — a heading below the fold still needs a
+  wheel turn first, which is the same limit a `quire://block/` anchor has
 - Markdown reads tables as plain text: export writes GitHub-flavoured
   tables, and importing one back gives a paragraph per row. Deliberate and
   pinned by a test — the importer is line-at-a-time and a table needs

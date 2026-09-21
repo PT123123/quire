@@ -1565,3 +1565,98 @@ WS · 109.8 / 110.7 private，math 136.6 / 136.7 · 111.7 / 112.4，**1.016×**�
 run 走的就是那条道）；bookmark / embed 仍然要有 TLS 客户端，而 SPEC §二/§三十三 禁 WebView 与
 JS 运行时，所以它们需要一条不含网络的形状（embed 至少要能画一张占位卡）。建议顺序：TOC → 代码
 高亮 → embed 占位卡 → bookmark → synced block。
+
+## M11 批次 C · slice 2 — TOC：目录不存内容，每次投影从页面上现算（2026-09-21，on `master`，ADR-0039）
+
+批次 C 六条里的第二条。上一条结尾那句判断（「TOC 的墙已经不在了」）这次得到验证：它确实
+只是「收集标题 + 在投影里出一份列表」，`user_version` 依旧停在 **8**，一行文档代价是
+`blocks.kind` 里的一个字符串 `"toc"`。
+
+**改动面**：`core/types.rs` 加 `BlockKind::Toc`（int 21、库里 `"toc"`、`ALL` 21→22）；
+`ui/Types.slint` 加 `struct TocEntry { block, label, level }`、`BlockRow.toc-entries` 一条
+列表字段、`callback toc-jump(int)`；`app/state.rs` 的 kind↔int 两个 arm、`BLOCK_TOC`、slash
+与 insert 菜单各一行、`project_blocks` 把 `visible_block_indices(blocks)` 提到函数开头（原来
+只在一处用）、新增 `fn toc_entries(blocks, shown)`，以及 mock `block()` 补字段；
+`app/controller.rs` 注册 `on_toc_jump` 与 `"toc"` bench scene；`EditorBlock.slint` 的
+`is-toc`、可编辑集合排除、上边距、`body-height`、指针光标，和那个 `toc-list` 委托；
+`services/export_service.rs` / `import_service.rs` 的标记行；`benchmarks/scripts/sweep.ps1`
+多一张 scene。**没有迁移**，论证同 math 那批（kind 在库里是字符串，未知 kind 是「读到就报
+损坏」，所以旧构建打开带目录的库响亮地失败，不是悄悄少一行）。
+
+**六条决定**：
+
+1. **目录是派生的，一行都不存**。列表每次投影现算，于是改标题就改目录、删标题就少一行、
+   折叠起来的标题自动不在目录里——不是「同步」出来的，是同一份数据。反过来若存快照，就要
+   发明刷新时机，而那一时刻一到，目录和正文必然有不一致的时候。
+2. **可见集合是借来的，不是自己算的**。`toc_entries` 走的是投影自己已经算出来的
+   `visible_block_indices`，所以「折叠的标题不进目录」不是加的一条过滤，而是复用同一份
+   「这一页现在能显示哪些行」。同一函数顺带把 block-tree 与容器两种隐藏一起解决了。
+3. **Markdown 只写一行 `<!-- quire:toc -->`**。把 1 000 条目录行导进文档，等于把派生数据
+   连同本库内部的 block id 一起塞进一个跨库交换格式——导到别的工具里是死字，导回来还会
+   造出一批指向不存在 block 的链接。
+4. **目录行可选、不可编辑；转换进来的那行文字留着不画**。前者因为它没有自己的文字可改，
+   点它是选那一块；后者走 divider 的先例，所以 Turn into 来回不丢字。空标题给 `"Untitled"`
+   而不给空行：空行没有可点的东西，但那一行仍然是个落点。
+5. **点击只移动光标，不滚视口**——这条是先查证再写的。Slint 1.18 的裸 `ListView` 没有
+   bring-into-view（只有 `StandardListViewBase` 有，见
+   `i-slint-compiler-1.18.0/widgets/common/listview.slint`），而 `i-slint-core` 里没有任何
+   代码在焦点变化时挪动 `Flickable` 的 viewport。M8 的 `quire://block/` 锚点早就带着同一个
+   限制，所以这是已知边界，不是这里新造的坑；`reveal`（把目标行滚进视口）单独排成一条
+   slice，两个入口一起受益。不在这次偷偷塞一个靠估算的滚动条位置。
+6. **`toc-jump` 不走 `open-link`**。目录行标的就是本页的 block，id 已经在行数据里是个
+   int；套 `quire://block/` 那条链要先拼字符串再解析回来，还顺带过一次页面查找。路径复用
+   `flush_pending_edit` → `set_editing_id(-1)`（重建委托，让 TextEdit 接管）→ `focus_block`。
+
+**顺带修的两处 UI 形状**：目录块的 `top-margin` 组里漏了 kind 21（跟在其他非文本块后面补
+上），以及 `toc-jump` 之后 `body-height` 得由 `toc-list.preferred-height` 给——一个
+`Rectangle` 不能拿子 `Text` 的高度来定尺寸（和 Rectangle 默认 100 % 宽度互为循环），所以每
+行高度用的是字体度量加 `overflow: elide`。
+
+**验证**：`cargo check --all-targets` 干净；`cargo test --all-targets -- --skip
+clipboard_write_and_read_round_trip_unicode` → **340 passed / 0 failed / 10 ignored**（比上一
+批的 335 / 9 正好多这次的 5 条 + 1 条打印型计时；跳掉的那条是本 session 环境的剪贴板独占，
+见上一批的记录）；`cargo build --release` 零警告。新测试：`state.rs` 2 条（一页里有 H1/
+折叠 H2/H3/空标题，目录读出 `(2,"Top",1) (5,"Second",2) (6,"Untitled",3)`——**控制断言是
+那个折叠的 H2 不在里面**，同时每一条非目录行的列表都得是空的，否则派生就漏到了别的块上；
+另一条改标题后目录跟着改，证明确实没有拷贝）、`markdown_test.rs` 3 条（导出只有标记行、
+标记行不吞邻行、往返之后不带目录的副本）。
+
+**性能**：RAM 闸按上一批立的规矩重跑了一遍——前一个 commit `cc7ccf0` 在 `git worktree` 里
+编出来（`git status --short` 为空），两个 exe 同一 sitting 交替跑 scene D，各自先用 md5 +
+大小自证身份（control md5 `a81ce6df…` 21 928 960 B，本树 `f6d9a576…` 22 017 024 B）：
+control 稳态 135.9 / 137.0 WS · 110.5 / 112.1 private，toc 137.0 / 137.3 · 111.6 / 112.5 ⇒
+**1.007×**。而且和 math 那批不同：两臂均值之差 0.75 MB **小于 control 臂内部的 1.6 MB
+散布**，所以这次连「小成本」都不能说，只能说量不出来。种子那次（112.7 / 110.0）不进稳态。
+exe 大了 88 064 B：一个 enum arm、一个 struct、一个 callback、一个委托。
+闸看不见的那半单独量了：**scene D 里没有目录块**，所以 RAM 比值讲的是「多一个 kind」的
+账，不是「多一条列表」的账。`cost_of_one_contents_block_on_a_ten_thousand_row_page`
+（`#[ignore]`，release）对 10 000 行、每十行一个标题的页面计时 `project_blocks`，行 0 分别
+当段落和当目录（1 000 条），三轮 39.12 / 37.40 / 37.17 vs 37.71 / 37.85 / 38.18 ms ⇒
+差值 −1.42 / +0.45 / +1.01 ms，**和付账那一臂自己的轮间散布分不开**；能给 1 000 条派生
+条目设的上界是 ≈1 ms，基数是同一投影本身的 ≈38 ms。顺带说一句：**≈38 ms 是仓库里第一条
+整页投影的读数**——上一批引 ≈6 ms 时明说那是算术不是量出来的，因为从来没人量过公式落进
+哪次投影；两个数一起读，问题的形状变了：每条公式的成本是一次投影的百分比，而一次投影不是
+一帧。这条是 Rust 侧数字（block 进、`BlockRow` 出，不 realize 委托、不重绘），对「10 000
+行画出来要多少」一个字没说，已公布的 UI 数字照旧（按键处理中位数 47–66 µs、32 变更去抖
+`apply` 中位数 3.42 ms）。数据 `benchmarks/results/2026-09-21-m11-toc-ram.jsonl`，论证在
+`docs/PERFORMANCE.md`。
+
+**像素**：`.scratch/sweep21` → `.scratch/sweep22`，46 张里动 3 张、新增 1 张（`toc`），43
+张 byte-identical。三个 bbox 全在改动能解释的带内：`slash` 683 px 与 `dark-slash` 2 574 px
+同在 `x 340..618 / y 564..618`（菜单多了「Table of contents」那一行）、`plus` 1 249 px 在
+`x 612..864 / y 624..792`（插入菜单多一行）。`settings` 这次没动——快捷键没加。47 张是新
+基线。新 scene 走的是**把样例页第一段转换成交集块**，而不是往 `mock_blocks_sample()` 里加
+一行：那样 ~30 张默认页的 scene 才会原样不动，而「43 张 byte-identical」就是这句话的控制
+断言。这一批同样不是肉眼判的：先算 manifest 哈希、只重看变化的 4 张。
+
+**未验证**：①**人眼**点一次目录行——hover 变色、光标落到目标标题末尾、以及「不滚动」在真实
+长页上的观感，`quire_shot` 从不聚焦某一行，所以点击路径一个像素都没有。②`reveal`（把目标
+滚进视口）没有实现，这条限制只是被复述、没有被解除。③中文长标题 elide 成一行后的读感。
+④一页几百个标题时目录块自己的高度（列表用 `preferred-height`，会顶开整块，但没在真实语料
+上看过）。
+
+**批次 C 还剩**：embed / highlight / bookmark / synced block。建议顺序仍是 embed 占位卡 →
+代码高亮 → bookmark → synced block：embed 只需要一张不含网络的卡（SPEC §二/§三十三 禁
+WebView 与 JS 运行时），而高亮那条硬要求（长代码块打字延迟不可测）大概会复用 math 与这次
+的同一份 runs 通道。`reveal` 不属于批次 C 的任何一条，但 TOC 和 `quire://block` 锚点现在都
+在等它，谁做谁受益。

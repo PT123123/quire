@@ -32,6 +32,7 @@ $all = @(
     "find", "marks", "block-colors", "page-block", "link-block", "image", "image-half", "file",
     "table", "table-edit",
     "math", "math-inline",
+    "toc",
     "columns", "columns-3",
     "slash", "plus", "block-menu", "move-to", "page-move-to", "text-color",
     "bg-color", "link", "menu", "palette", "palette-nav", "search", "search-notes",

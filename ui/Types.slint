@@ -61,9 +61,17 @@ export struct ColumnBox {
     size: int,   // how many items it holds; 0 = nothing to draw yet
 }
 
+// One line of a `Toc` block's contents (21): derived from the page's headings
+// at projection time, never stored, so it cannot go stale.
+export struct TocEntry {
+    block: int, // the heading's id; clicking the entry jumps there
+    label: string, // the heading's text
+    level: int, // 1..3 from the heading's kind, which is the indent
+}
+
 export struct BlockRow {
     id: int,
-    kind: int, // 0 para, 1 h1, 2 h2, 3 h3, 4 bullet, 5 numbered, 6 todo, 7 quote, 8 code, 9 divider, 10 callout, 11 page, 12 link, 13 toggle, 14 image, 15 file, 16 table, 18 columns (17 = table_cell, 19 = column: containers' children, never a row)
+    kind: int, // 0 para, 1 h1, 2 h2, 3 h3, 4 bullet, 5 numbered, 6 todo, 7 quote, 8 code, 9 divider, 10 callout, 11 page, 12 link, 13 toggle, 14 image, 15 file, 16 table, 18 columns, 20 math, 21 toc (17 = table_cell, 19 = column: containers' children, never a row)
     text: string,
     checked: bool,
     number: int,
@@ -84,6 +92,8 @@ export struct BlockRow {
     column-items: [ColumnItem],
     // and its boxes, left to right: the layout reads its own shape from these
     column-boxes: [ColumnBox],
+    // a toc (21) block's lines: this page's headings, derived every projection
+    toc-entries: [TocEntry],
 }
 
 export struct CommandRow {
@@ -294,6 +304,10 @@ export global UIState {
     callback attachment-opened(int);
     callback attachment-saved(int);
     callback block-activate(int);
+    // toc (SPEC §三十七 批次 C): the id of the heading a contents line names.
+    // It is not a link the user typed, so it does not go through `open-link`
+    // and a url string; the row already holds the id as an int.
+    callback toc-jump(int);
     // table grid (SPEC §三十七 批次 B): the cells are child blocks the
     // projection hides, so they ride on their table's row and reach Rust
     // through these. Tab walks the grid row-major; the delete ops act on the

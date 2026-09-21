@@ -17,7 +17,7 @@ use crate::services::persistence::PersistenceService;
 use crate::services::search_service::SearchService;
 use crate::storage::search_index::SearchRequest;
 use crate::storage::SqliteRepository;
-use crate::{BlockRow, ColumnBox, ColumnItem, TableCell, CommandRow, MenuRow, SearchRow, SidebarNode, SlashRow, TextRun};
+use crate::{BlockRow, ColumnBox, ColumnItem, TableCell, CommandRow, MenuRow, SearchRow, SidebarNode, SlashRow, TextRun, TocEntry};
 use slint::{Model, ModelRc, VecModel};
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
@@ -2832,6 +2832,11 @@ const SLASH_ITEMS: &[(BlockKind, &str, &str)] = &[
     (BlockKind::Callout, "Callout", "Highlighted box with an emoji"),
     (BlockKind::Code, "Code", "Monospaced block — or type ```"),
     (BlockKind::Math, "Math", "LaTeX formula — or type $$"),
+    (
+        BlockKind::Toc,
+        "Table of contents",
+        "Links to this page's headings",
+    ),
     (BlockKind::Divider, "Divider", "Visual separator — or type ---"),
 ];
 
@@ -2864,6 +2869,11 @@ const INSERT_ITEMS: &[(i32, &str, &str)] = &[
     (kind_to_int(BlockKind::Callout), "Callout", "Highlighted box with an emoji"),
     (kind_to_int(BlockKind::Code), "Code", "Monospaced block"),
     (kind_to_int(BlockKind::Math), "Math", "LaTeX formula, rendered as Unicode"),
+    (
+        kind_to_int(BlockKind::Toc),
+        "Table of contents",
+        "Links to this page's headings",
+    ),
     (-1, "Table view", "Database table · later"),
     (-1, "Board", "Board view · later"),
     (-1, "Gallery", "Gallery view · later"),
@@ -2924,6 +2934,7 @@ pub fn kind_from_int(kind: i32) -> BlockKind {
         18 => BlockKind::Columns,
         19 => BlockKind::Column,
         20 => BlockKind::Math,
+        21 => BlockKind::Toc,
         _ => BlockKind::Paragraph,
     }
 }
@@ -2950,6 +2961,7 @@ const fn kind_to_int(kind: BlockKind) -> i32 {
         BlockKind::Columns => 18,
         BlockKind::Column => 19,
         BlockKind::Math => 20,
+        BlockKind::Toc => 21,
         BlockKind::Paragraph => 0,
     }
 }
@@ -3184,6 +3196,31 @@ fn grid_blocks<'a>(blocks: &'a [Block], table: &Block) -> Vec<&'a Block> {
     cells
 }
 
+/// The page's headings, as one `Toc` row's data. `shown` is the row list the
+/// projection itself just built, so a heading hidden by a fold or by a
+/// container's delegate stays out of the contents too — a link you cannot
+/// scroll to is worse than no link. Reading order is the page's own.
+fn toc_entries(blocks: &[Block], shown: &[usize]) -> Vec<TocEntry> {
+    shown
+        .iter()
+        .filter_map(|&i| {
+            let b = &blocks[i];
+            let level = b.kind.heading_level()?;
+            Some(TocEntry {
+                block: b.id.0 as i32,
+                // an empty heading still has a row to land on, so it still gets
+                // an entry; a blank line is nothing to click
+                label: if b.text.is_empty() {
+                    "Untitled".into()
+                } else {
+                    b.text.clone().into()
+                },
+                level: level as i32,
+            })
+        })
+        .collect()
+}
+
 /// The cells of one table, as the row's data.
 fn table_cells(blocks: &[Block], table: &Block) -> Vec<TableCell> {
     grid_blocks(blocks, table)
@@ -3342,9 +3379,10 @@ fn column_projection(
 /// position, the last row flagged as the tail spacer carrier. Folded
 /// subtrees are left out entirely.
 pub fn project_blocks(blocks: &[Block]) -> Vec<BlockRow> {
-    let mut out: Vec<BlockRow> = visible_block_indices(blocks)
-        .into_iter()
-        .map(|i| {
+    let shown = visible_block_indices(blocks);
+    let mut out: Vec<BlockRow> = shown
+        .iter()
+        .map(|&i| {
             let b = &blocks[i];
             // one walk per layout row, at most: the pair is built together
             let (column_items, column_boxes) = if b.kind == BlockKind::Columns {
@@ -3386,6 +3424,13 @@ pub fn project_blocks(blocks: &[Block]) -> Vec<BlockRow> {
                 } else {
                     ModelRc::default()
                 },
+                // the same guard as above: a contents walk is a page scan, and
+                // a page with one TOC block has exactly one row that wants it
+                toc_entries: if b.kind == BlockKind::Toc {
+                    slint::ModelRc::from(Rc::new(VecModel::from(toc_entries(blocks, &shown))))
+                } else {
+                    ModelRc::default()
+                },
                 column_items, column_boxes,
             }
         })
@@ -3424,6 +3469,7 @@ pub const BLOCK_TABLE_CELL: i32 = 17;
 pub const BLOCK_COLUMNS: i32 = 18;
 pub const BLOCK_COLUMN: i32 = 19;
 pub const BLOCK_MATH: i32 = 20;
+pub const BLOCK_TOC: i32 = 21;
 
 fn block(kind: i32, text: &str) -> BlockRow {
     BlockRow {
@@ -3446,6 +3492,7 @@ fn block(kind: i32, text: &str) -> BlockRow {
         table_cells: ModelRc::from(Rc::new(VecModel::from(Vec::new()))),
         column_items: ModelRc::from(Rc::new(VecModel::from(Vec::new()))),
         column_boxes: ModelRc::from(Rc::new(VecModel::from(Vec::new()))),
+        toc_entries: ModelRc::from(Rc::new(VecModel::from(Vec::new()))),
     }
 }
 
@@ -3811,19 +3858,20 @@ mod tests {
     };
     use crate::app::workspace::Workspace;
 
-    /// A page's blocks in display order: a folded toggle with two children
-    /// (one of them a grandchild of the other) and a trailing paragraph.
-    fn fold_scene() -> Vec<crate::core::Block> {
-        use crate::core::{Block, BlockId, BlockKind, ColorKind, OrderKey, PageId};
-        let page = PageId(1);
-        let mk = |id: u64,
-                  parent: Option<u64>,
-                  order: u64,
-                  kind: BlockKind,
-                  folded: bool,
-                  text: &str| Block {
+    /// A block in display order, page 1, no marks — the shape the projections
+    /// below read.
+    fn blk(
+        id: u64,
+        parent: Option<u64>,
+        order: u64,
+        kind: crate::core::BlockKind,
+        folded: bool,
+        text: &str,
+    ) -> crate::core::Block {
+        use crate::core::{Block, BlockId, ColorKind, OrderKey, PageId};
+        Block {
             id: BlockId(id),
-            page,
+            page: PageId(1),
             parent: parent.map(|p| BlockId(p)),
             order: OrderKey(order),
             kind,
@@ -3837,15 +3885,32 @@ mod tests {
             attachment: None,
             img_percent: 100,
             columns: 0,
-        };
+        }
+    }
+
+    /// A page's blocks in display order: a folded toggle with two children
+    /// (one of them a grandchild of the other) and a trailing paragraph.
+    fn fold_scene() -> Vec<crate::core::Block> {
+        use crate::core::BlockKind;
         vec![
-            mk(1, None, 10, BlockKind::Toggle, true, "section"),
-            mk(2, Some(1), 11, BlockKind::Paragraph, false, "a"),
-            mk(3, Some(2), 12, BlockKind::Bullet, false, "a/1"),
-            mk(4, None, 13, BlockKind::Toggle, false, "open section"),
-            mk(5, Some(4), 14, BlockKind::Paragraph, false, "b"),
-            mk(6, None, 15, BlockKind::Paragraph, false, "tail"),
+            blk(1, None, 10, BlockKind::Toggle, true, "section"),
+            blk(2, Some(1), 11, BlockKind::Paragraph, false, "a"),
+            blk(3, Some(2), 12, BlockKind::Bullet, false, "a/1"),
+            blk(4, None, 13, BlockKind::Toggle, false, "open section"),
+            blk(5, Some(4), 14, BlockKind::Paragraph, false, "b"),
+            blk(6, None, 15, BlockKind::Paragraph, false, "tail"),
         ]
+    }
+
+    /// What a `Toc` row's list currently says, as (block, label, indent).
+    fn toc_of(row: &crate::BlockRow) -> Vec<(i32, String, i32)> {
+        use slint::Model as _;
+        (0..row.toc_entries.row_count())
+            .map(|i| {
+                let e = row.toc_entries.row_data(i).unwrap();
+                (e.block, e.label.to_string(), e.level)
+            })
+            .collect()
     }
 
     #[test]
@@ -3904,6 +3969,96 @@ mod tests {
     /// Pages 1..=9 are alive; anything else was deleted.
     fn live(id: i32) -> bool {
         (1..=9).contains(&id)
+    }
+
+    #[test]
+    fn a_contents_row_lists_the_headings_the_page_can_show() {
+        use crate::core::BlockKind;
+        let blocks = vec![
+            blk(1, None, 10, BlockKind::Toc, false, ""),
+            blk(2, None, 11, BlockKind::Heading1, false, "Top"),
+            blk(3, None, 12, BlockKind::Toggle, true, "Hidden section"),
+            blk(4, Some(3), 13, BlockKind::Heading2, false, "Inside the fold"),
+            blk(5, None, 14, BlockKind::Heading2, false, "Second"),
+            blk(6, None, 15, BlockKind::Heading3, false, ""),
+            blk(7, None, 16, BlockKind::Paragraph, false, "prose"),
+        ];
+        let rows = super::project_blocks(&blocks);
+        let toc = rows
+            .iter()
+            .find(|r| r.kind == super::BLOCK_TOC)
+            .expect("a toc row");
+        // 4 is behind its folded parent: the list is built from the rows the
+        // projection itself made, so a heading nobody can reach is not here.
+        // An untitled heading still gets a line, the same word a tab shows.
+        assert_eq!(
+            toc_of(toc),
+            vec![
+                (2, "Top".into(), 1),
+                (5, "Second".into(), 2),
+                (6, "Untitled".into(), 3),
+            ]
+        );
+        // …and the walk runs for the one row that asks for it
+        assert!(
+            rows.iter()
+                .filter(|r| r.kind != super::BLOCK_TOC)
+                .all(|r| toc_of(r).is_empty()),
+            "a paragraph carries a contents list"
+        );
+    }
+
+    #[test]
+    fn renaming_a_heading_renames_its_line_because_nothing_was_copied() {
+        use crate::core::BlockKind;
+        let mut blocks = vec![
+            blk(1, None, 10, BlockKind::Toc, false, ""),
+            blk(2, None, 11, BlockKind::Heading2, false, "Before"),
+        ];
+        assert_eq!(toc_of(&super::project_blocks(&blocks)[0])[0].1, "Before");
+        blocks[1].text = "After".into();
+        assert_eq!(toc_of(&super::project_blocks(&blocks)[0])[0].1, "After");
+        // the block's own row keeps whatever text it was made from, like a
+        // divider does — painted by no one, and the list never read it
+        blocks[0].text = "stale".into();
+        assert_eq!(toc_of(&super::project_blocks(&blocks)[0])[0].1, "After");
+    }
+
+    /// What one contents block adds to a projection, on the shape the RAM gate
+    /// measures: 10 000 rows, a heading every tenth, release profile.
+    #[test]
+    #[ignore = "prints a timing; run with --release"]
+    fn cost_of_one_contents_block_on_a_ten_thousand_row_page() {
+        use crate::core::BlockKind;
+        use std::time::Instant;
+        let rounds = 50u32;
+        let build = |toc: bool| -> Vec<crate::core::Block> {
+            (0..10_000u64)
+                .map(|i| {
+                    let kind = if toc && i == 0 {
+                        BlockKind::Toc
+                    } else if i % 10 == 5 {
+                        BlockKind::Heading2
+                    } else {
+                        BlockKind::Paragraph
+                    };
+                    blk(i + 2, None, i, kind, false, "a line of the bench page")
+                })
+                .collect()
+        };
+        let time = |blocks: &[crate::core::Block]| {
+            let t = Instant::now();
+            for _ in 0..rounds {
+                std::hint::black_box(super::project_blocks(blocks).len());
+            }
+            t.elapsed().as_secs_f64() * 1e3 / rounds as f64
+        };
+        let (without, with) = (time(&build(false)), time(&build(true)));
+        println!(
+            "projection: no contents block {without:.3} ms, one on 10 000 rows {with:.3} ms \
+             (+{:.3} ms, 1 000 headings)",
+            with - without
+        );
     }
 
     /// SPEC §十六 names these two as palette commands, and the id a row

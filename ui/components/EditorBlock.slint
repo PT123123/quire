@@ -32,6 +32,7 @@ export component EditorBlock inherits Rectangle {
     property <bool> is-table: block.kind == 16;
     property <bool> is-columns: block.kind == 18;
     property <bool> is-math: block.kind == 20;
+    property <bool> is-toc: block.kind == 21;
     // picture (kind 14): the row's height comes from the raster's ratio, which
     // Rust knows from the attachments row. 0 means there is no picture to
     // show — a missing file or an attachment from another library — and the
@@ -48,7 +49,7 @@ export component EditorBlock inherits Rectangle {
     property <bool> editing: UIState.editing-id == block.id
         && block.kind != 9 && block.kind != 11 && block.kind != 12
         && block.kind != 14 && block.kind != 15 && block.kind != 16
-        && block.kind != 18;
+        && block.kind != 18 && !is-toc;
 
     // toggle (kind 13) keeps a gutter for its chevron even when the block
     // has no children yet, so the text does not jump as the section grows
@@ -75,7 +76,7 @@ export component EditorBlock inherits Rectangle {
         : block.kind == 2 ? Theme.spacing-lg + Theme.spacing-xs
         : block.kind == 3 || block.kind == 9 || block.kind == 10
             || block.kind == 14 || block.kind == 15 || block.kind == 16
-            || block.kind == 18 || block.kind == 20
+            || block.kind == 18 || block.kind == 20 || block.kind == 21
             ? Theme.spacing-md
         : 0px;
 
@@ -103,6 +104,7 @@ export component EditorBlock inherits Rectangle {
         : block.kind == 8 ? code-text.height + 2 * Theme.spacing-md
         : block.kind == 10 ? callout-text.height + 2 * Theme.spacing-sm
         : block.kind == 20 ? math-text.height + 2 * Theme.spacing-sm
+        : block.kind == 21 ? toc-list.preferred-height + 2 * Theme.spacing-sm
         : block.kind == 9 ? 20px
         : block.kind == 14 ? (pic-aspect > 0 ? pic-height : missing-text.height)
         : block.kind == 15 ? root.file-height
@@ -118,7 +120,8 @@ export component EditorBlock inherits Rectangle {
         height: parent.height;
         // stays enabled while editing so hover (and the handle) keep working;
         // only the click is suppressed — the live input sits on top for text
-        mouse-cursor: is-page-ish || is-image ? MouseCursor.pointer : MouseCursor.text;
+        // a contents line is a target, not a place to type
+        mouse-cursor: is-page-ish || is-image || is-toc ? MouseCursor.pointer : MouseCursor.text;
         clicked => {
             // one TouchArea for the row: a second one over the picture would
             // have taken the hover the block handle depends on
@@ -583,6 +586,72 @@ export component EditorBlock inherits Rectangle {
         color: block-text-color;
         line-height-factor: Typography.line-body;
         wrap: word-wrap;
+    }
+
+    // toc (kind 21): the page's own contents. The block stores nothing here —
+    // `toc-entries` is this page's headings, re-read by the projection, so
+    // renaming a heading renames its line and no copy can go stale. Clicking a
+    // line walks the same path a `quire://block/` link walks.
+    Rectangle {
+        x: content-x;
+        y: top-margin;
+        width: content-width;
+        height: root.body-height;
+        visible: is-toc;
+        border-radius: Theme.radius-md;
+        border-width: 1px;
+        border-color: Colors.border;
+        background: block.bg > 0 ? block-bg-color : Colors.code-background;
+    }
+    toc-list := VerticalLayout {
+        x: content-x + Theme.spacing-md;
+        y: top-margin + Theme.spacing-sm;
+        width: content-width - 2 * Theme.spacing-md;
+        visible: is-toc;
+        // start, not the layout's default stretch: the entries want their own
+        // height and the leftover goes below the list, not between the lines
+        alignment: start;
+        spacing: 2px;
+
+        Text {
+            text: "Table of contents";
+            font-family: Typography.ui-font;
+            font-size: Typography.size-caption;
+            font-weight: Typography.weight-semibold;
+            color: Colors.text-muted;
+        }
+        for entry in block.toc-entries : Rectangle {
+            // one line tall by the font's own metrics, and elided: a heading
+            // that does not fit is a long heading, not a second line — the
+            // row's height cannot come from the Text inside it, either, because
+            // a child of a Rectangle is 100 % of it by default
+            height: Typography.size-body * Typography.line-body + 4px;
+            toc-entry-touch := TouchArea {
+                clicked => {
+                    UIState.toc-jump(entry.block);
+                }
+            }
+            Rectangle {
+                border-radius: Theme.radius-xs;
+                background: toc-entry-touch.has-hover ? Colors.hover-fill : transparent;
+            }
+            Text {
+                x: (entry.level - 1) * 16px;
+                width: parent.width - self.x;
+                text: entry.label;
+                font-family: Typography.ui-font;
+                font-size: Typography.size-body;
+                color: Colors.text-primary;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+        if block.toc-entries.length == 0 : Text {
+            text: "No headings on this page yet";
+            font-family: Typography.ui-font;
+            font-size: Typography.size-body;
+            color: Colors.text-muted;
+        }
     }
 
     Rectangle {
