@@ -2,6 +2,154 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0049 · A template is a page nobody can open, and that costs one column
+
+Decision: SPEC §三十八's template is `pages.template INTEGER NOT NULL DEFAULT 0`
+(schema **v14**) on an ordinary page row. There is no `templates` table, no
+`template_blocks` table, and no template file format: a template *is* a page
+whose block sequence is a body to copy from, and the one column is the only fact
+that page carries which an ordinary page does not. It is invisible everywhere a
+page shows up — tree, sidebar, palette, Move-to, recents, search, the LAN share —
+and it is reachable from exactly two surfaces: the slash / "+"-menu tail that
+inserts it into the page being typed in, and ⋯ → **Templates**, whose six rows
+insert, start a page from, save, export, import and delete. Five built-ins
+(`core::template::PRESETS`) land on a library's first start through the same
+import path the menu's Import row uses.
+
+Why one column is the whole representation: §三十八's hard line is 模板的表示必须是
+「块序列的副本」，不得引入第二套内容格式. The cheapest way to obey a prohibition is to
+have nothing to violate — a template's body is `Block` rows in the same table, so
+every field a block can carry (marks, colors, `lang`, `columns`, `img_percent`, a
+`Page` reference) rides along in a copy without a single line of new mapping code.
+`fill_template` is twenty lines because it clones rows, mints fresh ids from the
+document's own allocator so a copy can never collide with its source, keeps the
+order keys (a key only means something inside one page, and a new template has
+nothing to collide with), and remaps parent links onto the copies — which is what
+holds a table's grid and a toggle's children together. The alternative, a
+`templates(id, body_json)` column, would have needed a serializer, a deserializer,
+a migration for its own inner format, and a rule about which of the two bodies
+wins when they disagree.
+
+Why the flag has one write path: `PageCreated` carries a whole `Page`, so
+`create_template` records the flag with no change variant of its own, and there is
+deliberally **no** `Change::PageTemplateSet`. A page you can open is not a body to
+copy from, and a row that flipped the flag on an existing page would need the
+whole invisibility apparatus to follow it in both directions. The way to change a
+template is the way the menu says: start a page from it, edit that, save it as a
+template, delete the older one — which is also why there is no "edit template"
+row. The cost of that choice is written down rather than hidden: saving never
+overwrites, so the older copy stays in the library until the user deletes it, and
+two templates may share a name because the library sorts by age, not title.
+
+Why invisibility is non-attachment: `Workspace::create_template` makes a page and
+flips its flag, and never puts it in `roots` or any parent's `children`. So every
+enumerator that walks the tree skips a template for free — there is no list here
+to remember to filter, which is the property that makes the feature safe to grow.
+Four doors do not walk the tree, and each got its own term: `open_page` returns
+before `mark_opened`, because opening would write `recents` and the `current-page`
+meta — two more places a template must not appear; `search_index::matches` gained
+`AND p.template = 0` in its join; and the LAN share filters its page list, its
+child walk, and answers **404** rather than the Markdown for a template id, since
+the other machine has no way to say "template" and would land it as an ordinary
+page. A fifth door was considered and rejected: not indexing a template's rows.
+That would make `insert_block` ask whether the page it is filing under is a
+template — a second source of truth about a fact one join already has — and
+`rebuild` would have to disagree with `insert` about which rows belong, so a
+template would start appearing in search after a rebuild. The read-side term keeps
+a template unfindable from both doors, and the test that pins it asserts the raw
+`search_blocks` count as well as the empty hit list, so the exclusion cannot be
+explained by missing data.
+
+Why the built-ins are seeded and not migrated: migration 14 is `sql: ""` plus one
+guarded `ADD COLUMN` through the shared `add_page_columns`, shaped exactly like
+migration 13's for the same reason — "not a template" is a value, so no backfill
+statement is needed and a v13 library opens with none. Writing the five preset
+bodies there would mean hand-keeping order keys, `block_children` rows and both
+FTS indexes in step, when `import_template` — the very function the menu's Import
+row calls — already does all three. So the built-ins are imported, not invented,
+and one code path can be wrong instead of two. Two guards make it once-per-library:
+a settings flag (`builtin-templates-seeded`), without which deleting all five and
+restarting would resurrect them and the menu's Delete row would be a lie; and a
+name check, without which a session that died halfway through the seed lands the
+library twice. The flag is recorded *after* the bodies, so a session that flushed
+nothing retries rather than records a lie. It refuses outright when there is no
+library to seed — which is also why the headless bench scenes and the visual
+captures paint their own library instead of seeing these five.
+
+Why insert is one command: `Command::InsertForest` lands a whole forest in one
+`Ctrl+Z` step, so undoing a template removes eleven blocks rather than leaving
+nine of them on the page, and the change list it produces is ordinary
+`BlockInserted`s — the flush, the FTS index and a restart all see a page that
+simply grew. An empty paragraph at the anchor is *replaced* in the same batch,
+because the "+" line and a brand-new page's first row are both empty and a
+template that arrives one row below the caret reads as a miss; that is legal only
+because `exec_all` plans every command against the pre-state. It returns the first
+inserted id so the caret can follow the copy, and `fill_template` records no undo
+step at all, because the history stack belongs to the page the user is typing in
+and a template page is never open.
+
+Why the menu is one row, and why its labels are short: the page ⋯ menu gained
+**Templates** rather than six entries, because the row's label is the feature's
+name and the choices belong in the submenu. The submenu's labels then had to fit
+the popup every menu in the app shares — `ContextMenu` is 184px wide and its rows
+elide instead of wrapping — so they read "Use as new page", "Save as template",
+"Export Markdown", "Import Markdown". That is a real loss of explicitness, and the
+first render of the scene showed four of six rows ending in an ellipsis. The
+judgement: the object is already named twice over, by the submenu the user is
+standing in and by the library picker that follows, so the row that survives is
+the one a user can read at a glance. Widening the popup was not on the table: it
+moves every menu in the app and re-judges most of the baseline for one submenu's
+wording.
+
+What the round trip caught, in someone else's feature: the test that exports a
+template and reads it back failed, and the defect was in §二十六's channel, not in
+templates — `export_page` dropped an **empty** list item, so the row a template
+leaves open for somebody to fill in vanished on the way out and came back as
+nothing. `prefix_lines` now writes a marker for an empty block (`-`, `1.`, `>`,
+`#`) and the numbered arm keeps its count without a trailing space. This changes
+ordinary page exports too: a page with an empty bullet now round-trips through its
+own Markdown instead of silently losing the line, which is the same deal an empty
+heading already made. The rule is now stated in the export header's layout list,
+and `an_empty_block_exports_its_bare_marker_and_comes_back_as_itself` walks all
+five kinds that can be empty.
+
+Consequences:
+
+* Storage needed nothing else. A template's rows are block rows in the book, so
+  the §三十七 reclaim sweep already counts an image block inside a template as a
+  referencer through `doc.all_blocks()` — `cover_ids()` and the undo vote did not
+  grow a template term, because the flag itself points at no file.
+* The repository reads the column `unwrap_or(0)`: a half-migrated library loses a
+  template rather than refusing to load, and that is the right direction of
+  failure — a template that reads as an ordinary page is visible and editable,
+  where a page that refuses to load is nothing.
+* `AppState::delete_page` returns whether the deleted page was the one on screen,
+  not whether it succeeded, so it answers `false` for every template. Two of this
+  slice's tests asserted on that bool and were wrong twice over; they now ask the
+  workspace whether the row is there before and after, which is the assertion the
+  menu's Delete row actually makes.
+* A locked page refuses an insert like any other edit — the gate is
+  `exec_all_on_open_page`'s and needs no template-specific term — and still
+  offers Save as template, since copying a body out of a page is not writing to
+  it. The refusal line must not overwrite the lock's own line, so the emptiness
+  notice is gated on `!page_locked()`.
+* Search still *indexes* a template, so a library that gains one pays a little
+  index and no results; the palette, the sidebar and the Move-to walks pay nothing
+  at all, which is the point of non-attachment.
+* Track 1's migration priority is spent a third time: v14 is the template flag, so
+  any draft numbered 14 or higher moves up — Track 3's 草案 included.
+* The page ⋯ menu is thirteen rows now, and the two scenes that show it moved
+  differently: `menu.png` at 6 sampled pixels in one column (x 414, y 682..692 —
+  the ListView's scrollbar thumb, because that popup was already clamped by
+  `min(rows * 30px + 8px, window-h - menu-y - 20px)` before this row existed), and
+  `page-lock-menu.png` at 428 sampled pixels across x 240..422 / y 558..640,
+  because that one is anchored high enough to draw all thirteen and every row
+  below the insertion shifts. Same menu, two anchors; reading the smaller number
+  as "barely changed" would be the trap.
+* **Hand-test owed**: ⋯ → Templates → each of the six rows, including the two
+  `rfd` file dialogs, which no headless capture can reach. That is on top of the
+  cover and colour-emoji arms still owed since ADR-0047.
+
 ## ADR-0048 · A lock is one column on the page, and a refusal has to be heard
 
 Decision: SPEC §三十八's lock is `pages.locked INTEGER NOT NULL DEFAULT 0`

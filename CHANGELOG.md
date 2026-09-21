@@ -251,6 +251,26 @@ First functional release: a local, single-file-database notes workspace.
   keeps only its two read-only Copy rows. Undo is refused while a page is locked
   and its stack is kept, not dropped; a duplicated page starts **un**locked,
   which is the one place a lock departs from a look (ADR-0048)
+- Template library (top bar ⋯ → Templates): a template is a page you cannot open —
+  its rows are a body to copy from, and that is all it ever is (schema v14:
+  `pages.template`; no second content format, so marks, colours, code languages,
+  column layouts and page references ride along in a copy untouched). Six rows
+  manage the whole feature: insert one into the page you are typing in (the slash
+  menu and the "+" handle offer the library too, filtered by what you type), start
+  a new page from one, save the current page as one, export and import through the
+  same Markdown channel pages use, and delete one. An insert is one Ctrl+Z step, not
+  eleven, and it fills the empty line it lands on rather than sitting below it. Five
+  presets — Meeting notes, Weekly review, Project brief, Bug report, Long-form draft
+  — land on a library's first start, and deleting one is permanent: they are imported
+  once, not re-added at every launch. A template stays out of the sidebar, the page
+  tree, the palette, search and the shared LAN workspace, which is a consequence of
+  it never being attached to the tree rather than a list of places that remember to
+  hide it (ADR-0049)
+- Fixed: an **empty** list item used to vanish from a Markdown export, so a
+  template's blank row — the line left open for somebody to fill in — did not
+  survive its own round trip. An empty block now writes its marker bare (`-`,
+  `1.`, `>`, `#`) and comes back as the same empty block, which also fixes
+  ordinary pages whose drafts include an unfilled bullet (ADR-0049)
 - Slash menu ("/") for block types; command palette (Ctrl+K) with page
   jumping, plus Go Back / Go Forward (Alt+← / Alt+→) along the pages
   visited this session — a page deleted since drops out of the history
@@ -264,11 +284,11 @@ First functional release: a local, single-file-database notes workspace.
 
 ### Persistence & reliability
 - SQLite (bundled, no server): pages, blocks, marks, colors, attachments,
-  settings, metadata (schema v1–v13)
+  settings, metadata (schema v1–v14)
 - Debounced batched writes; Ctrl+S forces a save; close saves too
 - Rotating snapshots on every open (5 generations), restore-at-open when
   the main file is damaged, damaged file quarantined (`.corrupt`)
-- Startup integrity checks; schema migrations (v1–v13). The steps that only add a
+- Startup integrity checks; schema migrations (v1–v14). The steps that only add a
   column share one helper and each guard on its own column's absence, so a
   half-migrated file — one somebody edited by hand, or restored to the middle of a
   sequence — converges instead of erroring on a duplicate column name
@@ -466,5 +486,14 @@ First functional release: a local, single-file-database notes workspace.
   tables, and importing one back gives a paragraph per row. Deliberate and
   pinned by a test — the importer is line-at-a-time and a table needs
   lookahead
+- A built-in template is only as rich as Markdown: the five presets carry
+  headings, bullets, numbered items, a todo, a quote, a link, a contents block
+  (the one `<!-- quire:toc -->` marker the channel knows) and one code block,
+  because that is what the importer knows. A preset that asked for a callout, a
+  table, a colour or a column layout would arrive as a paragraph, so the built-in
+  library cannot show those shapes — a template you save from your own page can,
+  since that one is a copy of real rows. And saving never overwrites: start from a
+  template, edit it, save it back, and the library gains a second entry with the
+  same name rather than updating the first, so pruning is a Delete you do by hand
 - Chinese IME: the manual acceptance pass (docs/IME_CHECKLIST.md) is
   signed off — 2026-09-20

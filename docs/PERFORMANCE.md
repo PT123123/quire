@@ -1536,3 +1536,57 @@ the lock leaked cost into the
 drawing path — a row that re-reads the workspace, a token written per frame — the
 71 would not have been 71. And unlike the cover, this slice has no raster to argue
 about at all: the gate's resolution floor is ≈1 MB and everything above is bytes.
+
+## M12 · a template costs one bool per page, and its library is 48 rows you pay for once (2026-09-22, ADR-0049)
+
+**No RAM bench owed, and this time there is a number to point at instead of only
+a shape.** The slice adds one column, one hidden-page kind, and a menu. Nothing in
+it is called per row, per block, or per frame.
+
+**Per page: one bool, read twice and never in a loop.** `Workspace::is_template`
+is a `HashMap::get` and a field read, the same shape as `locked_of` and `cover_of`
+beside it. Its two call sites are `open_page` (once per page change, on a path
+that already does a `mark_opened`, an `expand_ancestors` and a persistence write)
+and `fill_template_pick` (once per popup open). `template_list()` is a filter over
+the loaded page map plus a sort by id — it runs when a menu fills, and the whole
+library it walks is what a workspace holds, not something it re-reads from disk.
+
+**The built-in library is the one part of this slice that makes every new library
+bigger, so it was measured rather than argued about: 5 hidden pages, 48 block
+rows, and under 2 KB of text between them** (a scratch probe on a real seeded
+`AppState`, since deleted). That is a first-start write, not a running cost: the
+rows are ordinary `pages` and `blocks` rows, the FTS index gains those same 48
+rows, and after the seed the settings flag means no later start looks at the
+presets again. The cost of the read-side exclusion is the same 48 rows sitting in
+the index unreachable — that is the deliberate price of one join term instead of
+two sources of truth (ADR-0049), and 48 rows next to the 10 000-block bench scene
+is two orders of magnitude below anything the gate can resolve.
+
+**Per migration: no rewrite, same as the lock's.** `ADD COLUMN template INTEGER
+NOT NULL DEFAULT 0` is SQLite's documented no-copy case — the default lives in the
+schema, so a v13 library of any size migrates in the time of one `PRAGMA` dance.
+Seeding is *not* in the migration on purpose (ADR-0049): it costs 5 page inserts
+and 48 block inserts through the ordinary write path on the first start, which is
+the same traffic any imported page already generates, instead of a hand-written
+batch that would have to keep order keys, child links and both FTS tables in step.
+
+**Per insert: one command, one remap.** `InsertForest` copies `n` rows with a
+`HashMap<BlockId, BlockId>` for the parent remap — O(n) in the size of the
+template, which is 48 rows for the largest built-in and whatever the user saved.
+It produces an ordinary `BlockInserted` list, so the flush, the index and the undo
+stack see one growth event rather than n commands each re-planning the document.
+
+**Substitute evidence: `sweep36` → `sweep38` moved 2 of 76, and the label fix
+afterwards moved 2 of 80 and nothing else.** The first sweep's two movers are both
+the page ⋯ menu at two different anchors — `menu.png` at 6 sampled px in a single
+column (x 414, y 682..692, the scrollbar thumb of a popup `min(rows*30+8,
+window-h-menu-y-20)` had already clamped) and `page-lock-menu.png` at 428 px across
+x 240..422 / y 558..640, where all thirteen rows draw and everything below the new
+one shifts. The second sweep is the control that the label rewrite touched only
+what it claimed: `page-templates` and `dark-page-templates` moved, and the other 78
+scenes were byte-identical, which is the difference between a scoped change and a
+global one — widening `ContextMenu` for those labels would have moved every menu in
+the app. Four new scenes (`page-templates`, `page-template-pick`, `slash-template`,
+`dark-page-templates`) carry the feature's own pixels; nothing in the slice has a
+raster to argue about, so the gate's resolution floor stays ≈1 MB and everything
+this costs is bytes.

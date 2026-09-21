@@ -100,6 +100,11 @@ pub struct AppState {
     pub pending_delete: Cell<Option<i32>>,
     /// Benchmark scroll bookkeeping (scene F): last viewport-y seen.
     pub last_scroll_y: Cell<f32>,
+    /// Which ⋯ → Templates row opened the template picker, so a picked
+    /// template knows what it is being picked *for* (SPEC §三十八). One of the
+    /// `MENU_TEMPLATE_*` action ids; `fill_template_pick` writes it and the
+    /// row click reads it. Nothing else uses it, so it never needs clearing.
+    template_pick: Cell<i32>,
 }
 
 /// One decoded picture plus what it costs to keep it decoded.
@@ -423,6 +428,7 @@ impl AppState {
                     icon,
                     cover: None,
                     locked: false,
+                    template: false,
                 }));
             }
             // rows before the blocks that point at them
@@ -492,6 +498,7 @@ impl AppState {
             nav: RefCell::new(NavHistory::default()),
             pending_delete: Cell::new(None),
             last_scroll_y: Cell::new(0.0),
+            template_pick: Cell::new(0),
         };
         // restore persisted recents before the first open marks its page
         let state = Rc::new(state);
@@ -501,6 +508,10 @@ impl AppState {
                 state.workspace.borrow_mut().set_recents(recents);
             }
         }
+        // The library exists before the first menu is filled: a template the
+        // user inserts is read out of `doc`, so seeding here is what lets the
+        // same start offer the built-ins and use one.
+        state.seed_builtin_templates();
         state.open_page(open);
         state
     }
@@ -536,7 +547,7 @@ impl AppState {
     /// pixel offset inside the tree area (used to anchor the context menu).
     pub fn rebuild_sidebar(&self) {
         self.sidebar.set_vec(self.build_sidebar_rows());
-        let empty = self.workspace.borrow().page_count() == 0;
+        let empty = self.workspace.borrow().visible_page_count() == 0;
         if let Some(ui) = self.ui.borrow().clone() {
             ui.upgrade().unwrap().set_workspace_empty(empty);
         }
@@ -656,6 +667,14 @@ impl AppState {
         {
             let mut ws = self.workspace.borrow_mut();
             if !ws.contains(id) {
+                return;
+            }
+            // A template has no door in (SPEC §三十八). It is not a list that
+            // happens to hide the page: opening one would put it in `recents`
+            // and in the `current-page` meta, which are two more places a
+            // template must not appear. The template's own body is read through
+            // `insert_template`, which never needs it open.
+            if ws.is_template(id) {
                 return;
             }
             ws.mark_opened(id);
@@ -1161,10 +1180,13 @@ impl AppState {
 
     // ---- slash menu (descriptors owned by Rust, per SPEC §十五) ----
 
-    /// Filter the block-kind descriptors by the text after "/".
+    /// Filter the block-kind descriptors by the text after "/", then append the
+    /// templates that match too: typing `/meet` should offer both a Heading and
+    /// the "Meeting notes" body, because from the user's side a template is just
+    /// another thing that can appear on this line.
     pub fn open_slash(&self, filter: &str) {
         let needle = filter.to_lowercase();
-        let rows: Vec<SlashRow> = SLASH_ITEMS
+        let mut rows: Vec<SlashRow> = SLASH_ITEMS
             .iter()
             .filter(|(_, label, _)| needle.is_empty() || label.to_lowercase().contains(&needle))
             .map(|(kind, label, hint)| SlashRow {
@@ -1174,7 +1196,32 @@ impl AppState {
                 disabled: false,
             })
             .collect();
+        rows.append(&mut self.template_slash_rows(&needle));
         self.slash.set_vec(rows);
+    }
+
+    /// The slash popup's template tail: one row per template whose name matches
+    /// `needle`, id-encoded as `TEMPLATE_SLASH_BASE + index` into
+    /// `template_list()` so the click handler can name the same row back.
+    ///
+    /// The index rather than the page id, because a row's id must survive being
+    /// clicked *after* the library changed, and because `TEMPLATE_SLASH_BASE` is
+    /// far above any block-kind int — which is what lets `slash_selected_kind`
+    /// tell "this row is a template" from "this row is a kind it has no entry
+    /// for". `hint` is the literal word: a template has no breadcrumb to show,
+    /// it is not in the tree.
+    fn template_slash_rows(&self, needle: &str) -> Vec<SlashRow> {
+        self.template_list()
+            .into_iter()
+            .enumerate()
+            .filter(|(_, (_, title))| needle.is_empty() || title.to_lowercase().contains(needle))
+            .map(|(index, (_, title))| SlashRow {
+                id: TEMPLATE_SLASH_BASE + index as i32,
+                label: title.into(),
+                hint: "Template".into(),
+                disabled: false,
+            })
+            .collect()
     }
 
     /// Fill the "+"-handle insert menu, filtered by `filter` (the block's
@@ -1182,7 +1229,7 @@ impl AppState {
     /// placeholders — see INSERT_ITEMS.
     pub fn open_slash_insert(&self, filter: &str) {
         let needle = filter.to_lowercase();
-        let rows: Vec<SlashRow> = INSERT_ITEMS
+        let mut rows: Vec<SlashRow> = INSERT_ITEMS
             .iter()
             .filter(|(_, label, _)| needle.is_empty() || label.to_lowercase().contains(&needle))
             .map(|(id, label, hint)| SlashRow {
@@ -1192,6 +1239,7 @@ impl AppState {
                 disabled: *id < 0,
             })
             .collect();
+        rows.append(&mut self.template_slash_rows(&needle));
         self.slash.set_vec(rows);
     }
 
@@ -1230,7 +1278,28 @@ impl AppState {
             // placeholder row (later-milestone kind): nothing to apply
             return None;
         }
+        if row.id >= TEMPLATE_SLASH_BASE {
+            // A template is not a block kind: `kind_from_int` would fold an
+            // unknown number down into Paragraph, which is the one outcome that
+            // is silently wrong — the line would become an empty paragraph and
+            // the user's words would be gone. The controller asks
+            // `slash_selected_template` about these rows instead.
+            return None;
+        }
         Some(kind_from_int(row.id))
+    }
+
+    /// The template behind a focused slash row, or `None` when that row is a
+    /// block kind. Returns the template's **page id** plus its name, not an
+    /// index: the id is what `insert_template` and `new_page_from_template`
+    /// already take, and the name is what a refusal has to quote back, and the
+    /// encoding stops at this one function.
+    pub fn slash_selected_template(&self, focus: i32) -> Option<(i32, String)> {
+        let row = self.slash.row_data(focus.max(0) as usize)?;
+        if row.disabled || row.id < TEMPLATE_SLASH_BASE {
+            return None;
+        }
+        self.template_picked(TEMPLATE_PICK_BASE + (row.id - TEMPLATE_SLASH_BASE))
     }
 
     // ---- block menu ----
@@ -2347,6 +2416,7 @@ impl AppState {
             icon: String::new(),
             cover: None,
             locked: false,
+            template: false,
         })]);
         let from = self.open_page.get();
         self.open_page(id);
@@ -2354,6 +2424,308 @@ impl AppState {
         // was (SPEC §十六)
         self.nav.borrow_mut().record(from, id);
         id
+    }
+
+    /// The template library as the menus see it (SPEC §三十八 "模板"):
+    /// `(id, name)`, oldest first. This is the only list a template appears in
+    /// — the sidebar, the page tree, the palette, search and the Move-to walks
+    /// never see one, because a template was never attached to the tree.
+    pub fn template_list(&self) -> Vec<(i32, String)> {
+        self.workspace.borrow().templates()
+    }
+
+    pub fn is_template(&self, id: i32) -> bool {
+        self.workspace.borrow().is_template(id)
+    }
+
+    /// Add a template called `name`, empty for now, and record it.
+    ///
+    /// `PageCreated` carries a whole `Page`, so the flag needs no change variant
+    /// of its own — and the row that lands in `pages` is the row an ordinary
+    /// page writes, plus one column. Note what is *not* here: no `open_page` (a
+    /// template cannot be opened, and that refusal is the feature), no nav
+    /// entry, no recents. The caller fills the body with `fill_template`, or the
+    /// template is a blank one the menus will offer.
+    pub fn create_template(&self, name: &str) -> i32 {
+        let id = self.workspace.borrow_mut().create_template(name);
+        self.page_order.borrow_mut().insert(id, OrderKey::FIRST);
+        self.record(vec![Change::PageCreated(crate::core::Page {
+            id: PageId(id as u32 as u64),
+            title: name.to_string(),
+            parent: None,
+            order: OrderKey::FIRST,
+            favorite: false,
+            expanded: false,
+            font: PageFont::default(),
+            full_width: false,
+            small_text: false,
+            icon: String::new(),
+            cover: None,
+            locked: false,
+            template: true,
+        })]);
+        id
+    }
+
+    /// Give template `template` the block sequence `src` (SPEC §三十八: "模板的
+    /// 表示必须是「块序列的副本」"). `src` is read off some other page, in that
+    /// page's display order, and every field a block can carry rides along: this
+    /// is a copy of rows, not a re-encoding, which is why §三十八 can forbid a
+    /// second content format and this function stays twenty lines rather than
+    /// becoming a parser.
+    ///
+    /// Ids are minted from the allocator the editor uses, so a copy can never
+    /// collide with its source; order keys are kept, because a key only means
+    /// something inside one page and a fresh template has no rows to collide
+    /// with; parent links are remapped onto the copies, which is what keeps a
+    /// table's grid and a toggle's children together.
+    ///
+    /// No undo step, deliberately: the history stack is per page and belongs to
+    /// the page the user is typing in, and a template page is never open. The
+    /// way back from a wrong save is Templates > Delete, which is also how the
+    /// built-in library is pruned.
+    fn fill_template(&self, template: i32, src: &[Block]) {
+        if src.is_empty() || !self.workspace.borrow().is_template(template) {
+            return;
+        }
+        let pid = core_page_id(template);
+        let mut copies: Vec<Block> = Vec::with_capacity(src.len());
+        let mut remap: HashMap<BlockId, BlockId> = HashMap::new();
+        {
+            let mut doc = self.doc.borrow_mut();
+            for b in src {
+                let fresh = doc.alloc_block_id();
+                remap.insert(b.id, fresh);
+                let mut copy = b.clone();
+                copy.id = fresh;
+                copy.page = pid;
+                copies.push(copy);
+            }
+            for copy in copies.iter_mut() {
+                copy.parent = copy.parent.and_then(|p| remap.get(&p).copied());
+            }
+            doc.set_page_blocks(pid, copies.clone());
+        }
+        let changes: Vec<Change> = copies.into_iter().map(Change::BlockInserted).collect();
+        self.record(changes);
+    }
+
+    /// Copy the page `page` is showing into a new template named after it
+    /// (SPEC §三十八 "存为模板").
+    ///
+    /// The name is the page's title because a text box would be a dialog this
+    /// app has no pattern for, and because it makes the menu entry say exactly
+    /// what it does. Two templates may share a name — the library sorts by age,
+    /// not title (`Workspace::templates`) — so saving the same page twice makes
+    /// two templates rather than quietly overwriting one. Overwriting would be
+    /// the destructive option: a template body is on nobody's undo stack, so the
+    /// older copy would be gone for good.
+    pub fn save_as_template(&self, page: i32) -> i32 {
+        let name = self
+            .workspace
+            .borrow()
+            .title_of(page)
+            .filter(|t| !t.trim().is_empty())
+            .unwrap_or("Untitled template")
+            .to_string();
+        let src = {
+            let doc = self.doc.borrow();
+            doc.page_blocks(core_page_id(page)).to_vec()
+        };
+        let id = self.create_template(&name);
+        self.fill_template(id, &src);
+        id
+    }
+
+    /// Insert a template's block sequence into the open page (SPEC §三十八 "在
+    /// 页面内插入模板"). `anchor` is the row the menu was opened from; `None`
+    /// means the page has no row to point at yet, and the copy appends.
+    ///
+    /// `InsertForest` is what makes this the right shape: one command, so one
+    /// `Ctrl+Z` undoes the whole template instead of leaving nine of eleven
+    /// blocks behind, and the change list is ordinary `BlockInserted`s, so the
+    /// flush, the FTS index and a restart all see a page that simply grew.
+    ///
+    /// An empty paragraph at the anchor is *replaced* rather than followed, in
+    /// the same batch: the "+" line and a brand-new page's first row are both
+    /// empty, and a template that arrives one row below the caret looks like it
+    /// missed. The delete can ride in the same `exec_all` because that plans
+    /// every command against the pre-state — the anchor is still there to plan
+    /// against — and its apply list is inserts-then-delete.
+    ///
+    /// A template holding a `Page`-kind block inserts a second block pointing at
+    /// the *same* child page: the sequence is what is copied, and a reference is
+    /// part of it. The page being written is `self.open_page`, so the lock gate
+    /// is `exec_all_on_open_page`'s and a locked page refuses this like any
+    /// other edit.
+    ///
+    /// Returns the first inserted block's id — the row the caret goes to. The
+    /// caller needs it because this command can *remove* the row it was asked
+    /// to anchor on, and a caret left pointing at a deleted block is a click
+    /// away from editing nothing. `None` means nothing landed (locked, empty
+    /// template, or an anchor that isn't on this page).
+    pub fn insert_template(&self, anchor: Option<i32>, template: i32) -> Option<i32> {
+        if !self.workspace.borrow().is_template(template) {
+            return None;
+        }
+        let blocks = {
+            let doc = self.doc.borrow();
+            doc.page_blocks(core_page_id(template)).to_vec()
+        };
+        if blocks.is_empty() {
+            return None;
+        }
+        let anchor_id = anchor.map(|a| BlockId(a as u64));
+        let take_anchor = {
+            let doc = self.doc.borrow();
+            anchor_id.is_some_and(|id| {
+                doc.page_blocks(core_page_id(self.open_page.get()))
+                    .iter()
+                    .any(|b| {
+                        b.id == id
+                            && b.kind == BlockKind::Paragraph
+                            && b.text.is_empty()
+                            && b.marks.is_empty()
+                    })
+            })
+        };
+        let mut cmds = vec![Command::InsertForest {
+            anchor: anchor_id,
+            blocks,
+        }];
+        if take_anchor {
+            if let Some(id) = anchor_id {
+                cmds.push(Command::DeleteBlock { id });
+            }
+        }
+        let changes = self.exec_all_on_open_page(cmds)?;
+        // `BlockInserted` in apply order, so the first one is the forest's first
+        // root — which is what the user sees appear at the caret.
+        changes
+            .iter()
+            .find_map(|c| match c {
+                Change::BlockInserted(b) => Some(b.id.as_u64() as i32),
+                _ => None,
+            })
+    }
+
+    /// Create a page under `parent` whose body is a template's block sequence
+    /// (SPEC §三十八 "新建页面时选模板").
+    ///
+    /// This is `create_page` and then the insert, which is the point: the new
+    /// page is an ordinary page from its first change on — in the tree, in
+    /// search, on its own undo stack — and the template stays hidden behind it.
+    /// It takes the template's name, since "Untitled" for a page the user just
+    /// chose a shape for says nothing. `create_page` already opened it, and a
+    /// fresh page has no rows, so the copy lands with `anchor: None`.
+    pub fn new_page_from_template(&self, parent: Option<i32>, template: i32) -> i32 {
+        let id = self.create_page(parent);
+        let name = self
+            .workspace
+            .borrow()
+            .title_of(template)
+            .unwrap_or("")
+            .to_string();
+        if self.insert_template(None, template).is_some() && !name.is_empty() {
+            self.rename_page(id, &name);
+        }
+        id
+    }
+
+    /// The Markdown a template exports as (SPEC §三十八: "导入导出走 §二十六 的
+    /// Markdown 通道"). `None` when the id is not a template — exporting the
+    /// open page is a different menu entry, and this one must not answer for it.
+    pub fn template_markdown(&self, template: i32) -> Option<String> {
+        if !self.workspace.borrow().is_template(template) {
+            return None;
+        }
+        let doc = self.doc.borrow();
+        Some(crate::services::export_service::export_page(doc.page_blocks(
+            core_page_id(template),
+        )))
+    }
+
+    /// Land a Markdown file in the library as a new template (SPEC §三十八,
+    /// through §二十六's parser).
+    ///
+    /// `import_service::import_markdown` already builds exactly this change
+    /// list — `PageCreated` plus one `BlockInserted` per block, ids from the
+    /// caller's allocator — and the `Page` it writes is the one handed in, so
+    /// all a *template* import needs that a page import does not is
+    /// `template: true` on that struct. Reusing the channel is what keeps the
+    /// promise §三十八 makes: an imported template is a block sequence in the
+    /// same rows, with no format of its own anywhere in the file.
+    pub fn import_template(&self, name: &str, src: &str) -> i32 {
+        let id = self.create_template(name);
+        let core_page = crate::core::Page {
+            id: PageId(id as u32 as u64),
+            title: name.to_string(),
+            parent: None,
+            order: OrderKey::FIRST,
+            favorite: false,
+            expanded: false,
+            font: PageFont::default(),
+            full_width: false,
+            small_text: false,
+            icon: String::new(),
+            cover: None,
+            locked: false,
+            template: true,
+        };
+        let changes = {
+            let mut doc = self.doc.borrow_mut();
+            let mut alloc = || doc.alloc_block_id();
+            crate::services::import_service::import_markdown(src, &core_page, &mut alloc)
+        };
+        // the service re-states the `PageCreated` `create_template` already
+        // recorded; its rows are the part that is new here
+        let rest: Vec<Change> = changes.into_iter().skip(1).collect();
+        {
+            let mut doc = self.doc.borrow_mut();
+            doc.apply(&rest);
+        }
+        self.record(rest);
+        id
+    }
+
+    /// Put the built-in library into a database that has never had one (SPEC
+    /// §三十八 "预置若干本地模板"), once per library.
+    ///
+    /// Two guards, each doing one job. The settings flag is what makes a
+    /// deletion stick: without it, deleting all five built-ins and restarting
+    /// would resurrect them. The name check is what makes a retry safe: the
+    /// writes flush in batches, so a session that died halfway through a seed
+    /// would otherwise land the whole library twice, and a menu with two
+    /// "Meeting notes" rows is a mess the user cannot undo.
+    ///
+    /// It is deliberately not a migration. Schema v14 adds the column and stops
+    /// there, because a migration that wrote block rows itself would have to
+    /// keep the order keys, the child links and both FTS indexes in step by hand
+    /// — when `import_template`, the very function the menu's Import row calls,
+    /// already does all three. So the built-ins are imported, not invented, and
+    /// there is one code path that can be wrong.
+    pub fn seed_builtin_templates(&self) {
+        // A session with no library has no library to seed. The mock workspace
+        // the tests and the bench scenes run on is not a place a template
+        // belongs: it has nothing to persist to, so the flag could not be
+        // written, and every start would re-add five hidden pages.
+        if self.persistence.is_none() || self.setting_flag(SEEDED_BUILTIN_TEMPLATES) {
+            return;
+        }
+        let have: Vec<String> = self
+            .template_list()
+            .into_iter()
+            .map(|(_, title)| title)
+            .collect();
+        for preset in crate::core::template::PRESETS {
+            if have.iter().any(|t| t == preset.name) {
+                continue;
+            }
+            self.import_template(preset.name, preset.markdown);
+        }
+        // after the bodies, so a session that never got as far as flushing
+        // anything retries the whole library rather than recording a lie
+        self.record_setting(SEEDED_BUILTIN_TEMPLATES, "1");
     }
 
     pub fn rename_page(&self, id: i32, title: &str) {
@@ -2496,6 +2868,7 @@ impl AppState {
                 // just made: the look travels with a duplicate, the gate on
                 // editing does not.
                 locked: false,
+                template: false,
             })];
             for b in &copies {
                 batch.push(Change::BlockInserted(b.clone()));
@@ -2666,6 +3039,7 @@ impl AppState {
                 icon: String::new(),
                 cover: None,
                 locked: false,
+                template: false,
             }),
             Change::BlockRefSet {
                 id: block_id,
@@ -3209,6 +3583,14 @@ impl AppState {
                 false,
             ),
         );
+        // The library, as one row above the lock (SPEC §三十八 "模板"). It sits
+        // with the things a page does rather than the things a page looks like,
+        // and it is the only trace of templates this menu shows: what they hold
+        // is in the submenu, and what the workspace holds is nobody's page.
+        rows.insert(
+            rows.len() - 2,
+            row(MENU_PAGE_TEMPLATES, "Templates", "page", false, -1, false),
+        );
         self.menu.set_vec(rows);
     }
 
@@ -3296,6 +3678,82 @@ impl AppState {
         self.menu.set_vec(rows);
     }
 
+    /// ⋯ → Templates: the library's management surface (SPEC §三十八). The page
+    /// menu gained one row for all of this rather than six, because the row's
+    /// label is the feature's name and the submenu is where the choices live.
+    ///
+    /// There is no "edit template" row, and that is the design rather than an
+    /// omission: a template is a body to copy from, so the way to change one is
+    /// to start a page from it, edit the page, and save that as a template —
+    /// which is two of the rows below plus Delete. It keeps a template off
+    /// every editor surface, which is what makes it invisible in the first
+    /// place. The cost is honest and written down: the older copy stays in the
+    /// library until the user deletes it, because saving never overwrites.
+    /// The labels are short on purpose: every popup in the app shares one
+    /// 184px `ContextMenu`, and its Text rows elide rather than wrap, so a
+    /// label that names its object twice — the submenu is already called
+    /// Templates — ends in an ellipsis. The object is the row the user came
+    /// from, and the picker that follows names it again.
+    pub fn fill_template_menu(&self) {
+        self.menu.set_vec(vec![
+            row(MENU_BACK, "Back", "chevron-left", false, -1, false),
+            row(MENU_TEMPLATE_INSERT, "Insert template", "plus", false, -1, false),
+            row(MENU_TEMPLATE_NEW_PAGE, "Use as new page", "page", false, -1, false),
+            row(MENU_TEMPLATE_SAVE, "Save as template", "copy", false, -1, false),
+            row(MENU_TEMPLATE_EXPORT, "Export Markdown", "export", false, -1, false),
+            row(MENU_TEMPLATE_IMPORT, "Import Markdown", "import", false, -1, false),
+            row(MENU_TEMPLATE_DELETE, "Delete template", "trash", true, -1, false),
+        ]);
+    }
+
+    /// The picker four of those rows open: one row per template, oldest first,
+    /// labelled with its name and nothing else — the name is what the user chose
+    /// and a hint column would only repeat the menu they came from.
+    ///
+    /// `action` is the row that opened this, remembered on `template_pick`
+    /// because the menu model has no room for it and the click handler has no
+    /// other way to know whether "Meeting notes" means *insert it*, *export it*
+    /// or *delete it*. Back has its own id for the same reason: the generic
+    /// `MENU_BACK` means "the page menu", and from here that would be wrong.
+    pub fn fill_template_pick(&self, action: i32) {
+        self.template_pick.set(action);
+        let mut rows = vec![row(
+            MENU_TEMPLATE_PICK_BACK,
+            "Back",
+            "chevron-left",
+            false,
+            -1,
+            false,
+        )];
+        for (index, (_, title)) in self.template_list().iter().enumerate() {
+            rows.push(row(
+                TEMPLATE_PICK_BASE + index as i32,
+                title.clone(),
+                "page",
+                action == MENU_TEMPLATE_DELETE,
+                -1,
+                false,
+            ));
+        }
+        self.menu.set_vec(rows);
+    }
+
+    /// The template a picked row names, or `None` when the row was not a
+    /// template. Out-of-band ids (an empty library, a row from the previous
+    /// fill) read as nothing rather than as index 0.
+    pub fn template_picked(&self, action: i32) -> Option<(i32, String)> {
+        let index = action - TEMPLATE_PICK_BASE;
+        if index < 0 {
+            return None;
+        }
+        self.template_list().into_iter().nth(index as usize)
+    }
+
+    /// The action the picker was opened for. Read once when a row is clicked.
+    pub fn template_pick_action(&self) -> i32 {
+        self.template_pick.get()
+    }
+
     /// Benchmark scene F: the controller reads/writes the editor viewport-y
     /// property and uses this cell to detect "hit the bottom" (position
     /// stopped changing) so the scroll can wrap.
@@ -3340,6 +3798,28 @@ pub const MENU_PAGE_COVER_REMOVE: i32 = 15;
 /// ⋯ → Lock page / Unlock page (SPEC §三十八 "lock"). One id for both
 /// directions because the row's label already answers which one it is.
 pub const MENU_PAGE_LOCK: i32 = 16;
+/// ⋯ → Templates, and the seven rows of that submenu (SPEC §三十八 "模板").
+/// Four of them (`INSERT`, `NEW_PAGE`, `EXPORT`, `DELETE`) open a picker that
+/// lists the library; three act at once.
+pub const MENU_PAGE_TEMPLATES: i32 = 17;
+pub const MENU_TEMPLATE_INSERT: i32 = 18;
+pub const MENU_TEMPLATE_NEW_PAGE: i32 = 19;
+pub const MENU_TEMPLATE_SAVE: i32 = 20;
+pub const MENU_TEMPLATE_EXPORT: i32 = 21;
+pub const MENU_TEMPLATE_IMPORT: i32 = 22;
+pub const MENU_TEMPLATE_DELETE: i32 = 23;
+/// Back out of the template picker. Not `MENU_BACK`, which means "the page
+/// menu" and would drop two levels at once.
+pub const MENU_TEMPLATE_PICK_BACK: i32 = 24;
+/// The picker's rows: index into `template_list()`, oldest template first.
+pub const TEMPLATE_PICK_BASE: i32 = 800_000;
+/// The "+" / slash menu's template rows, in the same index space. A separate
+/// band because that popup's other ids are block kinds, and `kind_from_int`
+/// answers an unknown id with a paragraph.
+pub const TEMPLATE_SLASH_BASE: i32 = 900_000;
+/// The settings row that says this library has already been given the built-in
+/// templates (SPEC §三十八). Its whole job is to make deleting one final.
+pub const SEEDED_BUILTIN_TEMPLATES: &str = "builtin-templates-seeded";
 /// "Top level" target of the page-menu Move-to submenu (root, `None` parent).
 pub const PAGE_MOVE_TO_ROOT: i32 = 499_999;
 /// Page-menu Move-to targets encode the destination page above this base.
@@ -6411,6 +6891,656 @@ mod tests {
         assert!(
             state.move_block_to_page(moved, page),
             "control: unlock the destination and the same move lands"
+        );
+    }
+
+    // --- templates (SPEC §三十八 "模板") ---
+
+    /// The storage shape's whole claim is that a template is a page nobody can
+    /// reach, so the test is a list of the doors: the tree walk, the sidebar
+    /// model, recents, the open-page setter, the search panel, and the two page
+    /// counts that disagree on purpose. `page_count` is the control that proves
+    /// the template is really there — an empty library would pass every
+    /// "cannot see it" assertion below by itself.
+    #[test]
+    fn a_template_is_invisible_in_every_place_a_page_shows_up() {
+        use super::AppState;
+        use slint::Model as _;
+
+        let state = AppState::new(&plain_args(), None);
+        // A memory-only session still gets the mock workspace, so everything
+        // below is a delta against what this one started with -- an absolute
+        // count would be a test about the fixture rather than about templates.
+        let before_pages = state.workspace.borrow().page_count();
+        let before_visible = state.workspace.borrow().visible_page_count();
+        let page = state.create_page(None);
+        let host = state.start_page().expect("the page takes its first block");
+        add_line(&state, host, "the words a template copies");
+        let t = state.import_template("Zephyr body", "## Beta head\n\n- one\n");
+
+        assert_eq!(
+            state.workspace.borrow().page_count(),
+            before_pages + 2,
+            "the page, and the body saved behind it"
+        );
+        assert_eq!(
+            state.workspace.borrow().visible_page_count(),
+            before_visible + 1,
+            "and only the page is one you can see"
+        );
+        assert!(state.workspace.borrow().contains(t), "a template *is* a page row");
+        assert!(state.is_template(t));
+
+        let ws = state.workspace.borrow();
+        let tree = ws.dfs_order();
+        assert!(tree.contains(&page), "control: the page is in the walk");
+        assert!(!tree.contains(&t), "the tree walk never sees it");
+        assert!(!ws.children_of(None).contains(&t), "it has no parent and no root slot");
+        assert_eq!(
+            ws.title_of(t),
+            Some("Zephyr body"),
+            "but it keeps the name the menu shows"
+        );
+        drop(ws);
+
+        assert!(
+            !(0..state.sidebar.row_count())
+                .filter_map(|i| state.sidebar.row_data(i))
+                .any(|r| r.id == t),
+            "the sidebar has no row for it"
+        );
+
+        // Opening one is the strongest door, because the two things a template
+        // must not touch are what `open_page` writes: `recents` and the
+        // `current-page` meta row.
+        let was = state.open_page.get();
+        state.open_page(t);
+        assert_eq!(state.open_page.get(), was, "a template has no door in");
+        assert!(
+            !state.workspace.borrow().recents_ids().contains(&t),
+            "and refusing it kept it out of recents"
+        );
+
+        // The palette's blob scan walks the tree, so the same absence answers
+        // it. Both names carry the same word, so "the page is a hit and the
+        // body is not" is the scan saying *not in the tree* rather than merely
+        // *nothing matched this query*.
+        state.rename_page(page, "Zephyr agenda");
+        state.set_search_query("zephyr");
+        let hits: Vec<i32> = (0..state.search.row_count())
+            .filter_map(|i| state.search.row_data(i))
+            .map(|r| r.page_id)
+            .collect();
+        assert!(
+            hits.contains(&page),
+            "control: the page in the tree is findable by its own title"
+        );
+        assert!(!hits.contains(&t), "the body is not");
+    }
+
+    /// "模板的表示必须是「块序列的副本」", read as two things a copy has to get
+    /// right: it carries the rows as they are — kinds, marks, order — and it
+    /// shares no id with its source, because an id is how a row is found again
+    /// and two rows answering to one id is the corruption this whole feature
+    /// avoids by not inventing a format. The second half is the save policy:
+    /// saving twice makes two templates, since overwriting would destroy a body
+    /// that sits on nobody's undo stack.
+    #[test]
+    fn saving_a_page_copies_its_rows_and_saving_twice_overwrites_nothing() {
+        use super::AppState;
+        use crate::core::{BlockId, BlockKind, Command, MarkKind};
+
+        let state = AppState::new(&plain_args(), None);
+        let page = state.create_page(None);
+        let host = state.start_page().expect("the page takes its first block");
+        state
+            .exec_editor(Command::ReplaceText {
+                id: BlockId(host as u64),
+                text: "the agenda".into(),
+            })
+            .expect("typing");
+        state
+            .exec_on_open_page(Command::SetBlockType {
+                id: BlockId(host as u64),
+                kind: BlockKind::Heading1,
+            })
+            .expect("a row becomes a heading");
+        let second = add_line(&state, host, "do the thing");
+        state
+            .exec_on_open_page(Command::SetBlockType {
+                id: BlockId(second as u64),
+                kind: BlockKind::Todo,
+            })
+            .expect("a row becomes a todo");
+        state
+            .exec_editor(Command::ToggleMark {
+                id: BlockId(second as u64),
+                start: 0,
+                end: 2,
+                kind: MarkKind::Bold,
+                url: String::new(),
+            })
+            .expect("and a word goes bold");
+
+        let first = state.save_as_template(page);
+        assert_eq!(
+            state.workspace.borrow().title_of(first),
+            state.workspace.borrow().title_of(page),
+            "the menu names a template after the page it came from"
+        );
+        let src = state.doc.borrow().page_blocks(super::core_page_id(page)).to_vec();
+        let copied = state
+            .doc
+            .borrow()
+            .page_blocks(super::core_page_id(first))
+            .to_vec();
+        assert_eq!(copied.len(), src.len(), "every row of the page is in the body");
+        assert_eq!(copied[0].kind, BlockKind::Heading1);
+        assert_eq!(copied[1].kind, BlockKind::Todo);
+        assert_eq!(copied[1].checked, src[1].checked);
+        assert_eq!(copied[1].marks.len(), 1, "an inline mark rides along with its row");
+        assert_eq!(copied[1].text, src[1].text);
+        assert!(
+            copied.iter().zip(&src).all(|(c, s)| c.id != s.id),
+            "a copy sharing an id with its source is one row in two pages"
+        );
+        assert_eq!(
+            state.template_list(),
+            vec![(first, state.workspace.borrow().title_of(page).unwrap().to_string())],
+            "one template, named after the page"
+        );
+
+        // Saving the same page again does not touch the first body.
+        let again = state.save_as_template(page);
+        assert_ne!(again, first);
+        assert_eq!(state.template_list().len(), 2, "two templates, one name");
+        let kept = state
+            .doc
+            .borrow()
+            .page_blocks(super::core_page_id(first))
+            .to_vec();
+        assert_eq!(kept.len(), 2, "the older copy still has its rows");
+        assert_eq!(
+            kept.iter().map(|b| b.id).collect::<Vec<_>>(),
+            copied.iter().map(|b| b.id).collect::<Vec<_>>(),
+            "and the same rows — a save never rewrote it"
+        );
+
+        // Deleting one of them is the way out, so it had better be surgical.
+        // (`delete_page` answers "was it the page on screen", not "did it
+        // work" -- for a template that is always false, so the proof is the
+        // row count and the surviving body.)
+        assert!(state.workspace.borrow().contains(again));
+        state.delete_page(again);
+        assert!(
+            !state.workspace.borrow().contains(again),
+            "the picker's Delete row is not a lie"
+        );
+        assert_eq!(state.template_list().len(), 1);
+        assert_eq!(
+            state
+                .doc
+                .borrow()
+                .page_blocks(super::core_page_id(first))
+                .len(),
+            2,
+            "the survivor is untouched by its twin's deletion"
+        );
+        assert!(state.workspace.borrow().contains(page), "and the page it came from least of all");
+    }
+
+    /// Two anchor cases, one command. An empty line is *replaced* — the "+" row
+    /// and a new page's first row are both empty, and a template arriving one
+    /// row below the caret looks like it missed — while a line with words keeps
+    /// them and takes the copy below. Both have to come back on a single
+    /// Ctrl+Z, which is what `exec_all`'s one-batch-one-step rule buys.
+    #[test]
+    fn inserting_a_template_replaces_an_empty_line_and_undoes_as_one_step() {
+        use super::AppState;
+        use crate::core::{BlockId, Command};
+
+        let state = AppState::new(&plain_args(), None);
+        state.create_page(None);
+        let t = state.import_template("Two lines", "one\n\ntwo\n");
+        let host = state.start_page().expect("a new page takes its first row");
+
+        let first = state
+            .insert_template(Some(host), t)
+            .expect("the empty line takes the copy");
+        let rows = words(&state);
+        assert_eq!(
+            rows.iter().map(|(_, _, w)| w.as_str()).collect::<Vec<_>>(),
+            ["one", "two"],
+            "the line it replaced left no empty row behind"
+        );
+        assert_eq!(first, rows[0].0, "the id it hands back is the row the caret goes to");
+        assert!(
+            state.doc.borrow().block(BlockId(host as u64)).is_none(),
+            "and that row is really gone from the document"
+        );
+
+        state.undo_open_page();
+        let back = words(&state);
+        assert_eq!(back.len(), 1, "one step undid the whole copy");
+        assert_eq!(back[0].0, host, "the replaced line is back");
+        assert!(back[0].2.is_empty(), "with nothing written on it");
+
+        // The other case: the anchor keeps its words.
+        state
+            .exec_editor(Command::ReplaceText {
+                id: BlockId(host as u64),
+                text: "what I typed".into(),
+            })
+            .expect("typing");
+        assert!(state.insert_template(Some(host), t).is_some());
+        let rows = words(&state);
+        assert_eq!(
+            rows.iter().map(|(_, _, w)| w.as_str()).collect::<Vec<_>>(),
+            ["what I typed", "one", "two"],
+            "the copy arrived below a line that has content"
+        );
+        state.undo_open_page();
+        assert_eq!(words(&state).len(), 1, "again in one step");
+
+        // `None` anchor is the ⋯ menu's "append to this page".
+        assert!(state.insert_template(None, t).is_some());
+        let rows = words(&state);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[2].2, "two", "and it landed at the end");
+
+        // A template is not consumed by being used.
+        assert_eq!(
+            state
+                .doc
+                .borrow()
+                .page_blocks(super::core_page_id(t))
+                .len(),
+            2
+        );
+    }
+
+    /// The two id encodings this feature adds to existing popups. A slash row
+    /// for a template must *not* read as a block kind: `kind_from_int` folds an
+    /// unknown number into Paragraph, which would quietly turn the user's line
+    /// into an empty paragraph. And the ⋯ picker indexes into a list that can
+    /// change under it, so an out-of-range or stale row has to answer `None`
+    /// rather than "the first template".
+    #[test]
+    fn a_picker_row_names_a_template_and_never_a_block_kind() {
+        use super::{
+            AppState, MENU_TEMPLATE_DELETE, MENU_TEMPLATE_INSERT, MENU_TEMPLATE_PICK_BACK,
+            TEMPLATE_PICK_BASE, TEMPLATE_SLASH_BASE,
+        };
+        use crate::core::BlockKind;
+        use slint::Model as _;
+
+        let state = AppState::new(&plain_args(), None);
+        let meeting = state.import_template("Meeting notes", "## Agenda\n");
+        let weekly = state.import_template("Weekly review", "## Shipped\n");
+        assert_eq!(state.template_list().len(), 2);
+
+        state.open_slash("meet");
+        let rows: Vec<(i32, String, String)> = (0..state.slash.row_count())
+            .filter_map(|i| state.slash.row_data(i))
+            .map(|r| (r.id, r.label.to_string(), r.hint.to_string()))
+            .collect();
+        let picked = rows
+            .iter()
+            .position(|(id, _, _)| *id >= TEMPLATE_SLASH_BASE)
+            .expect("one template row survived the filter");
+        assert_eq!(rows[picked].1, "Meeting notes");
+        assert_eq!(rows[picked].2, "Template", "a template has no breadcrumb to show");
+        assert_eq!(
+            state.slash_selected_template(picked as i32),
+            Some((meeting, "Meeting notes".into())),
+            "and the row names the page it copies from"
+        );
+        assert!(
+            state.slash_selected_kind(picked as i32).is_none(),
+            "the same row is not a block kind"
+        );
+        // The tail's ids index the *library*, not the rows currently visible.
+        // A needle that matches only a later template must still name that one:
+        // number the rows after filtering and this popup's single row becomes
+        // "the first template", which inserts a body the user never read.
+        state.open_slash("weekly");
+        assert_eq!(state.slash.row_count(), 1, "and no block kind answers to it");
+        assert_eq!(
+            state.slash_selected_template(0),
+            Some((weekly, "Weekly review".into())),
+            "row 0 of a one-row popup is still the second template in the library"
+        );
+        // control: with a filter no template answers to, a real kind row still
+        // works both ways -- it names a block kind and it names no template.
+        // ("meet" above matches no kind label, so it proves the tail stands
+        // alone but cannot host a kind row.)
+        state.open_slash("tog");
+        let kind_row = (0..state.slash.row_count())
+            .filter_map(|i| state.slash.row_data(i).map(|r| (i, r)))
+            .find(|(_, r)| r.label == "Toggle list")
+            .expect("the filter keeps the kinds it matches");
+        assert_eq!(
+            state.slash_selected_kind(kind_row.0 as i32),
+            Some(BlockKind::Toggle)
+        );
+        assert!(
+            state.slash_selected_template(kind_row.0 as i32).is_none(),
+            "and a kind row is not a template"
+        );
+
+        // No filter: the templates are the tail, in library order.
+        state.open_slash("");
+        let count = state.slash.row_count();
+        assert_eq!(
+            (0..count)
+                .filter_map(|i| state.slash.row_data(i))
+                .filter(|r| r.id >= TEMPLATE_SLASH_BASE)
+                .map(|r| r.label.to_string())
+                .collect::<Vec<_>>(),
+            ["Meeting notes", "Weekly review"],
+            "both are offered, oldest first, after every block kind"
+        );
+        // The "+" popup offers them too, as the same tail after its own items.
+        state.open_slash_insert("");
+        assert_eq!(
+            (0..state.slash.row_count())
+                .filter_map(|i| state.slash.row_data(i))
+                .filter(|r| r.id >= TEMPLATE_SLASH_BASE)
+                .map(|r| r.label.to_string())
+                .collect::<Vec<_>>(),
+            ["Meeting notes", "Weekly review"],
+            "the + menu ends in the library as well"
+        );
+        state.open_slash("qqqqq");
+        assert_eq!(state.slash.row_count(), 0, "an unmatched filter matches no template either");
+
+        // ---- the ⋯ picker ----
+        state.fill_template_pick(MENU_TEMPLATE_DELETE);
+        assert_eq!(state.template_pick_action(), MENU_TEMPLATE_DELETE);
+        let menu: Vec<(i32, String, bool)> = (0..state.menu.row_count())
+            .filter_map(|i| state.menu.row_data(i))
+            .map(|r| (r.id, r.label.to_string(), r.danger))
+            .collect();
+        assert_eq!(menu[0].0, MENU_TEMPLATE_PICK_BACK);
+        assert_eq!(
+            menu[1],
+            (TEMPLATE_PICK_BASE, "Meeting notes".into(), true),
+            "a delete picker draws its rows in the danger colour"
+        );
+        assert_eq!(menu[2].2, true);
+        assert_eq!(
+            state.template_picked(TEMPLATE_PICK_BASE + 1),
+            Some((
+                state.template_list()[1].0,
+                "Weekly review".into()
+            ))
+        );
+        assert!(state.template_picked(TEMPLATE_PICK_BASE + 9).is_none(), "a stale index is nothing");
+        assert!(state.template_picked(MENU_TEMPLATE_INSERT).is_none(), "and so is a row from the menu above");
+
+        // An emptied library: the picker has only its Back row, and every index
+        // into it is out of range.
+        for (id, _) in state.template_list() {
+            state.delete_page(id);
+        }
+        state.fill_template_pick(MENU_TEMPLATE_INSERT);
+        assert_eq!(state.menu.row_count(), 1);
+        assert!(state.template_picked(TEMPLATE_PICK_BASE).is_none());
+    }
+
+    /// The library a first start writes (SPEC §三十八 "预置若干本地模板"), once per
+    /// database. Three sessions on one file because the two guards fail in
+    /// opposite directions: without the settings flag every start adds five more
+    /// hidden pages, and without the name check a session that died halfway
+    /// through the seed lands the library twice. A deletion has to survive the
+    /// flag too, or the menu's Delete row is a lie — the built-ins would be
+    /// furniture bolted to the floor.
+    #[test]
+    fn the_builtin_library_lands_once_and_a_deletion_sticks() {
+        use super::AppState;
+        use crate::core::template::PRESETS;
+        use crate::testing::ScratchDir;
+
+        let dir = ScratchDir::new("template-seed");
+        let repo = scratch_repo(&dir);
+        let first = AppState::new(&plain_args(), Some(repo.clone()));
+        assert_eq!(
+            first
+                .template_list()
+                .iter()
+                .map(|(_, t)| t.as_str())
+                .collect::<Vec<_>>(),
+            PRESETS.iter().map(|p| p.name).collect::<Vec<_>>(),
+            "a fresh library gets every preset, in the order the menu shows them"
+        );
+        assert_eq!(
+            first.workspace.borrow().page_count(),
+            first.workspace.borrow().visible_page_count() + PRESETS.len(),
+            "pages in the database, none of them on screen"
+        );
+        for (id, name) in first.template_list() {
+            assert!(
+                !first
+                    .doc
+                    .borrow()
+                    .page_blocks(super::core_page_id(id))
+                    .is_empty(),
+                "{name} arrived with a body, not as a blank page"
+            );
+        }
+        first.persistence_force_flush();
+        drop(first);
+
+        let second = AppState::new(&plain_args(), Some(repo.clone()));
+        assert_eq!(
+            second.template_list().len(),
+            PRESETS.len(),
+            "a second start does not double the library"
+        );
+        // A restart is also the moment a hidden page could reattach itself: the
+        // load path rebuilds `roots` and `children` out of the rows it read.
+        let ids: Vec<i32> = second.template_list().iter().map(|(id, _)| *id).collect();
+        let tree = second.workspace.borrow().dfs_order();
+        assert!(
+            ids.iter().all(|id| !tree.contains(id)),
+            "and after the restart every one of them is still out of the tree"
+        );
+        for id in &ids {
+            assert!(
+                !second
+                    .doc
+                    .borrow()
+                    .page_blocks(super::core_page_id(*id))
+                    .is_empty(),
+                "the rows a template is made of came back too"
+            );
+        }
+        let meeting = ids[0];
+        // `delete_page` answers "was the deleted page the one on screen", which
+        // a template never is; the assertion is that the row is gone.
+        second.delete_page(meeting);
+        assert!(
+            !second.workspace.borrow().contains(meeting),
+            "and it went the moment it was asked"
+        );
+        second.persistence_force_flush();
+        drop(second);
+        drop(repo);
+
+        let third = AppState::new(&plain_args(), Some(scratch_repo(&dir)));
+        assert_eq!(
+            third.template_list().len(),
+            PRESETS.len() - 1,
+            "this library was seeded already, so nothing came back"
+        );
+        assert!(!third.is_template(meeting), "and the deleted one is not a page any more");
+    }
+
+    /// §三十八 sends a template's import and export through §二十六's Markdown
+    /// channel, so the claim worth testing is that the channel is a *loop*: a
+    /// body exported and re-imported reads as the same rows. The presets are
+    /// included because they are written in that channel rather than stored in
+    /// a second format, which is exactly what §三十八 forbids.
+    #[test]
+    fn a_template_round_trips_through_the_markdown_channel() {
+        use super::AppState;
+        use crate::core::template::PRESETS;
+
+        let state = AppState::new(&plain_args(), None);
+        let texts = |state: &AppState, id: i32| {
+            state
+                .doc
+                .borrow()
+                .page_blocks(super::core_page_id(id))
+                .iter()
+                .map(|b| b.text.clone())
+                .collect::<Vec<_>>()
+        };
+
+        let page = state.create_page(None);
+        assert!(
+            state.template_markdown(page).is_none(),
+            "Export template must not answer for the page it is not"
+        );
+
+        let t = state.import_template("Imported", "# Title\n\n> quoted\n\n- [x] done\n\n1. first\n");
+        assert_eq!(
+            texts(&state, t),
+            ["Title", "quoted", "done", "first"],
+            "the parser turned a file into rows, on a page nobody can open"
+        );
+        let md = state.template_markdown(t).expect("a template exports");
+        assert!(
+            md.contains("# Title") && md.contains("- [x] done") && md.contains("1. first"),
+            "and the export says the same thing back: {md}"
+        );
+        let again = state.import_template("Imported again", &md);
+        assert_eq!(texts(&state, again), texts(&state, t), "in one file, out one file");
+
+        for preset in PRESETS {
+            let id = state.import_template(preset.name, preset.markdown);
+            let body = texts(&state, id);
+            assert!(
+                !body.iter().all(String::is_empty),
+                "{} arrived empty",
+                preset.name
+            );
+            let exported = state.template_markdown(id).expect("a preset exports");
+            let back = state.import_template(&format!("{} again", preset.name), &exported);
+            assert_eq!(
+                texts(&state, back),
+                body,
+                "{} does not survive its own export:\n{exported}",
+                preset.name
+            );
+        }
+    }
+
+    /// A template writes blocks, so the lock covers it like any other edit and
+    /// says no out loud (§三十八 refuses a silent swallow). What the lock leaves
+    /// alone matters as much: saving a locked page as a template, or starting a
+    /// new page from one, take information out and put it somewhere unlocked —
+    /// which is the same reasoning that keeps two read-only rows in the ⋮⋮ menu.
+    #[test]
+    fn a_locked_page_refuses_a_template_and_still_offers_to_save_one() {
+        use super::AppState;
+
+        let state = AppState::new(&plain_args(), None);
+        let page = state.create_page(None);
+        let host = state.start_page().expect("a new page takes its first row");
+        add_line(&state, host, "kept words");
+        let t = state.import_template("Body", "inserted\n");
+        state.set_page_locked(page, true);
+        assert!(state.page_locked());
+        let queued = || state.db_notice.borrow().len();
+        let quiet = queued();
+
+        assert!(
+            state.insert_template(Some(host), t).is_none(),
+            "the copy at a row is refused"
+        );
+        assert!(
+            state.insert_template(None, t).is_none(),
+            "so is the append"
+        );
+        assert_eq!(words(&state).len(), 2, "and the page did not grow");
+        assert!(queued() > quiet, "the refusal was said out loud");
+        assert!(
+            state.db_notice.borrow().last().unwrap().contains("locked"),
+            "and it named the reason"
+        );
+        state.undo_open_page();
+        assert_eq!(words(&state).len(), 2, "undo is behind the same door");
+
+        let saved = state.save_as_template(page);
+        assert_eq!(
+            state
+                .doc
+                .borrow()
+                .page_blocks(super::core_page_id(saved))
+                .len(),
+            2,
+            "a locked page can still be copied *out*"
+        );
+        // The new page is a tree operation and it is not the locked one, so the
+        // copy lands there — which is also why `insert_template` reads
+        // `open_page` rather than the id the menu was opened on.
+        let made = state.new_page_from_template(Some(page), t);
+        assert_ne!(made, page);
+        assert_eq!(state.open_page.get(), made, "and creating one navigates to it");
+        assert_eq!(words(&state).len(), 1, "with its body, on a page that can be edited");
+        assert_eq!(state.workspace.borrow().title_of(made), Some("Body"));
+        state.open_page(page);
+        assert_eq!(words(&state).len(), 2, "the locked page is exactly as it was");
+    }
+
+    /// "新建页面时选模板": the page it makes is an ordinary page — in the tree, in
+    /// the sidebar, openable, on its own undo stack — while the body it was
+    /// filled from stays hidden. This is the one place both roles sit side by
+    /// side, so it is where the split is worth pinning.
+    #[test]
+    fn a_page_from_a_template_is_an_ordinary_page() {
+        use super::AppState;
+        use crate::core::BlockKind;
+        use slint::Model as _;
+
+        let state = AppState::new(&plain_args(), None);
+        let parent = state.create_page(None);
+        let t = state.import_template("Meeting notes", "## Agenda\n\n- [ ] action\n");
+        let new = state.new_page_from_template(Some(parent), t);
+
+        let ws = state.workspace.borrow();
+        assert!(
+            ws.children_of(Some(parent)).contains(&new),
+            "it is a page of the tree"
+        );
+        assert!(!ws.is_template(new));
+        assert_eq!(ws.title_of(new), Some("Meeting notes"), "named after its body");
+        drop(ws);
+        state.open_page(new);
+        assert_eq!(state.open_page.get(), new, "which is to say: it opens");
+        assert_eq!(
+            words(&state).iter().map(|(_, k, _)| *k).collect::<Vec<_>>(),
+            vec![BlockKind::Heading2, BlockKind::Todo],
+            "with the template's rows still their own kinds"
+        );
+        let sidebar: Vec<i32> = (0..state.sidebar.row_count())
+            .filter_map(|i| state.sidebar.row_data(i))
+            .map(|r| r.id)
+            .collect();
+        assert!(sidebar.contains(&new), "the sidebar lists the page");
+        assert!(!sidebar.contains(&t), "and never the template");
+
+        state.undo_open_page();
+        assert!(words(&state).is_empty(), "the copy was one step on this page's stack");
+        assert_eq!(
+            state
+                .doc
+                .borrow()
+                .page_blocks(super::core_page_id(t))
+                .len(),
+            2,
+            "and the library still has what it had"
         );
     }
 }

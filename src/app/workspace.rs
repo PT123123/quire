@@ -39,6 +39,14 @@ pub struct Page {
     /// one funnel that refuses commands can ask the tree instead of the
     /// document — the lock is a fact about the page, not about its blocks.
     pub locked: bool,
+    /// This page is a template (SPEC §三十八 "模板"), and the flag has one
+    /// meaning here: the page is **not attached to the tree**. Everything that
+    /// lists pages walks `roots` / `children`, so an unattached page is already
+    /// invisible to the sidebar, the blob search, the palette, the slash page
+    /// picker and the Move-to walks without a single `if template` in any of
+    /// them. It stays in `pages`, because the library has to be able to name it
+    /// and its blocks have to be reachable to copy them.
+    pub template: bool,
     /// Title + block text blob, filled by the app layer; the search source.
     pub search_text: String,
 }
@@ -130,6 +138,11 @@ impl Workspace {
                 icon: String::new(),
                 cover: None,
                 locked: false,
+                // A page created through the tree is a page. The template flag
+                // is only ever set by `create_template`, which never attaches
+                // what it makes -- so no caller can forget this line and end up
+                // with a page that is both in the tree and a body to copy from.
+                template: false,
                 search_text: String::new(),
             },
         );
@@ -162,6 +175,41 @@ impl Workspace {
         }
         self.attach(id, parent, None);
         id
+    }
+
+    /// Create a **template** (SPEC §三十八 "模板"): a page whose blocks are a
+    /// body to copy from. The one thing that makes it a template is that it is
+    /// never `attach`ed -- no parent, no slot in `roots` -- so every walk that
+    /// lists pages skips it for free. It stays in `pages`, because the library
+    /// has to be able to name it and its body has to be reachable to copy it.
+    /// The caller owns the body: `app::state` fills it with `BlockInserted`s,
+    /// exactly the way a page's own blocks are recorded.
+    pub fn create_template(&mut self, title: &str) -> i32 {
+        let id = self.new_page(title);
+        self.pages.get_mut(&id).expect("page exists").template = true;
+        id
+    }
+
+    /// The template library as the menus see it: `(id, name)`, oldest first.
+    /// Id order means the built-ins seeded on a library's first start lead the
+    /// list and anything saved later follows it; nothing sorts by title,
+    /// because two templates called "Meeting notes" are the user's business
+    /// rather than a reason to reshuffle their menu.
+    pub fn templates(&self) -> Vec<(i32, String)> {
+        let mut out: Vec<(i32, String)> = self
+            .pages
+            .values()
+            .filter(|p| p.template)
+            .map(|p| (p.id, p.title.clone()))
+            .collect();
+        out.sort_by_key(|(id, _)| *id);
+        out
+    }
+
+    /// Is this id a template? False for a missing page, which is the same
+    /// answer as "not a page at all" and is why the delete path can ask it.
+    pub fn is_template(&self, id: i32) -> bool {
+        self.pages.get(&id).map_or(false, |p| p.template)
     }
 
     pub fn rename(&mut self, id: i32, title: &str) {
@@ -495,6 +543,16 @@ impl Workspace {
         self.pages.len()
     }
 
+    /// Pages a person can see, which is `page_count` minus the library (SPEC
+    /// §三十八). The one caller that matters is the sidebar's "is this workspace
+    /// empty" flag: five built-in templates arrive on a library's first start,
+    /// and an empty-looking workspace that says it is not empty is a hint that
+    /// never comes back. `page_count` stays the raw count for the benches, which
+    /// report what the file holds.
+    pub fn visible_page_count(&self) -> usize {
+        self.pages.values().filter(|p| !p.template).count()
+    }
+
     pub fn title_of(&self, id: i32) -> Option<&str> {
         self.pages.get(&id).map(|p| p.title.as_str())
     }
@@ -635,14 +693,23 @@ impl Workspace {
                     icon: p.icon.clone(),
                     cover: p.cover,
                     locked: p.locked,
+                    template: p.template,
                     search_text: String::new(),
                 },
             );
         }
-        // assemble roots/children ordered by key
+        // assemble roots/children ordered by key. A template is skipped here and
+        // nowhere else: `roots` is the only door every page listing walks, so
+        // leaving a template out of it is what keeps a restart from putting the
+        // library back into the sidebar. (Its `parent` is NULL for the same
+        // reason -- see `create_template` -- so the only way it could reattach
+        // is by being a root.)
         let mut by_parent: std::collections::BTreeMap<Option<i32>, Vec<(crate::core::OrderKey, i32)>> =
             std::collections::BTreeMap::new();
         for p in pages {
+            if p.template {
+                continue;
+            }
             let key = (p.parent.map(|v| v.0 as i32), p.order);
             by_parent
                 .entry(key.0)

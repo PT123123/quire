@@ -1568,6 +1568,8 @@ PDF
 
 第一版不要做。
 
+一条通道规则在 2026-09-22 被 §三十八 的模板测试抓到并补上（ADR-0049）：**一个没有正文的块仍然要写出它的标记** —— 空的列表项写 `-`（编号项写 `1.`，且不带尾随空格），空的引用写 `>`，空的标题写 `#`。在此之前导出会把空列表项整行丢掉，于是「往返」这件事在空行上是假的：一份模板导出再导入就少一行。这条对普通页面导出同样成立，而且对模板尤其重要——一个空的 bullet 就是模板的内容，它是留给别人填的那一行。钉住它的是 `an_empty_block_exports_its_bare_marker_and_comes_back_as_itself`，五种能为空的块各走一遍。
+
 ==================================================
 二十七、第二十一阶段：Windows UX
 =====================
@@ -1860,11 +1862,11 @@ M12 — Page 外观与属性（§三十八）
 完成：
 
 * icon —— 2026-09-22 已交付，ADR-0045（`pages.icon`）；原文里的「+ 本地图片」由 ADR-0046 决定不做在 icon 上，图片归 cover
-* cover —— 未做（ADR-0046 之后，「放一张图」这件事由它承接）
+* cover —— 2026-09-22 已交付，ADR-0047（`pages.cover`，schema v12，可空，存 AttachmentId；固定遮罩把 §二十一 的可读性要求变成算术）
 * font（default / serif / mono）/ full width / small text —— 2026-09-21 已交付，ADR-0044
-* lock
-* version history
-* 模板按钮 + 模板库
+* lock —— 2026-09-22 已交付，ADR-0048（`pages.locked`，schema v13；两层门：Rust 拒写 + .slint 拒光标）
+* version history —— 未做；仍欠 §三十八 不肯留无限的磁盘 / 内存保留数字
+* 模板按钮 + 模板库 —— 2026-09-22 已交付，ADR-0049（`pages.template`，schema v14：模板就是一张页，看不见靠不挂树；`InsertForest` 让一次插入 = 一步撤销；五个预置经 §二十六 通道导入而不是写进 migration。顺带修掉 §二十六 一处真缺陷：空的列表项在导出时会整行消失）
 
 验收：
 
@@ -2438,7 +2440,7 @@ synced block：依赖 §四十 的引用基础设施，排在它之后
 
 §十七 的 Page Tree 只管结构，不管页面本身长什么样。本阶段补上。
 
-数据前提：pages 表加列（icon / cover / font / layout / locked），走 §十八 的 migration，schema 版本 +1，旧库必须能无损升上来。—— 2026-09-21 落了 font + layout 两列（schema v10，ADR-0044），2026-09-22 落了 icon 一列（schema v11，ADR-0045），同日落了 cover 一列（schema v12，ADR-0047，可空而不是 `DEFAULT 0`：`0` 是一个合法的 AttachmentId，「没有封面」必须是第三种值），同日落了 locked 一列（schema v13，ADR-0048，`NOT NULL DEFAULT 0`）；这些步骤共用一个 `add_page_columns`，所以一个半途的库（有人手工加过列、或从备份恢复到步骤中间）是收敛而不是报错。
+数据前提：pages 表加列（icon / cover / font / layout / locked / template），走 §十八 的 migration，schema 版本 +1，旧库必须能无损升上来。—— 2026-09-21 落了 font + layout 两列（schema v10，ADR-0044），2026-09-22 落了 icon 一列（schema v11，ADR-0045），同日落了 cover 一列（schema v12，ADR-0047，可空而不是 `DEFAULT 0`：`0` 是一个合法的 AttachmentId，「没有封面」必须是第三种值），同日落了 locked 一列（schema v13，ADR-0048，`NOT NULL DEFAULT 0`），同日落了 template 一列（schema v14，ADR-0049，同样 `NOT NULL DEFAULT 0`：「不是模板」也是一个值）；这些步骤共用一个 `add_page_columns`，所以一个半途的库（有人手工加过列、或从备份恢复到步骤中间）是收敛而不是报错。
 
 ## 图标与封面
 
@@ -2480,11 +2482,17 @@ version history：
 
 ## 模板
 
-页面内模板按钮 + 新建页面时选模板
+页面内模板按钮 + 新建页面时选模板 —— 2026-09-22 交付，ADR-0049。页面内那一半开在**两个**已经存在的入口上：slash 菜单与「+」把手的插入菜单（`open_slash_insert`），两者的候选表尾都接上模板库（`template_slash_rows`），hint 列写死一个 `Template` 词，因为模板不在树里、没有面包屑可给；`TEMPLATE_SLASH_BASE` 远在任何块类型整数之上，所以 `slash_selected_kind` 能分清「这行是模板」与「这行是它不认识的类型」——后者会被 `kind_from_int` 折成 Paragraph，那是唯一一种**静默**错法的结局。新建页面时选模板那一半是 ⋯ → Templates → Use as new page：`create_page` 然后一次插入，于是新页从它第一个变化起就是一张普通页（在树里、在搜索里、在自己的 undo 栈上），模板继续藏在它后面，标题取模板的名字（一张用户刚挑过形状的用「Untitled」什么也不说）。
 
-workspace 模板库：预置若干本地模板，导入导出走 §二十六 的 Markdown 通道
+workspace 模板库：预置若干本地模板，导入导出走 §二十六 的 Markdown 通道 —— 五个预置（`core::template::PRESETS`：Meeting notes / Weekly review / Project brief / Bug report / Long-form draft），按「多久会有人需要」排序而不是字母序。它们是**内容而不是资源**：不读文件、不下载，任何库都带着这五个。落库的方式是 `seed_builtin_templates` 而不是 migration（ADR-0049）：v14 只加列就停，因为自己写块行的迁移得手工对齐 order key、`block_children` 与两张 FTS 表，而菜单里 Import 那一行调的 `import_template` 已经把三件事都做对了 —— 于是内置库是被**导入**的，不是被发明的，可能出错的代码路径只有一条。两道门各管一个方向：settings 旗标 `builtin-templates-seeded` 让「删掉五个」这件事活得过重启（否则菜单的 Delete 行是一句谎），名字检查让一次半途而废的 seed 可以重试（旗标在正文**之后**才记，否则什么都没写进去的会话会旗标为已种而永远缺图）。没有库可种的会话（`persistence.is_none()`）直接拒绝——headless 的 bench 场景与视觉捕获因此自己画一份库，而不是看见这五个。
 
-模板的表示必须是「块序列的副本」，不得引入第二套内容格式。
+模板的表示必须是「块序列的副本」，不得引入第二套内容格式。—— 交付方式是遵从而不是对抗：模板**就是**一张页，`pages.template` 一列（schema v14，`NOT NULL DEFAULT 0`，形状与 v13 的 locked 一模一样）是它身上唯一一条普通页没有的事实，正文与所有页面共用 `blocks` 表。于是 marks / 颜色 / `lang` / `columns` / `img_percent` / 一个 `Page` 引用在复制时一律随行，一行新的映射代码都不需要；`fill_template` 二十行就够了，因为它 clone 的是行：id 由文档自己的分配器另发（副本永不会与源相撞），order key 原样留着（一个 key 只在一页之内有意义，而新模板没有东西可与它撞），parent 指针重映射到副本上——把一个表的格子、一个 toggle 的孩子绑在一起的正是这一步。代价也写在这里：预置模板只能装 Markdown 装得下的东西（§二十六 的解析器没有颜色 / callout / table / 分栏的语法，要了就会悄悄变成一个段落），而用户「Save as template」存下来的那份不同，它是真实行的副本，源页有什么就留什么。
+
+「看不见」读成**不挂树**，而不是一长串过滤器（ADR-0049）：`create_template` 造一页、翻一个旗标，既不进 `roots` 也不进任何父亲的 `children`，所以所有走树的枚举器（侧栏、页面树、命令面板、Move-to、Recents）免费跳过它——没有一份「记得要过滤」的清单需要后来人维护。四把不走树的门各自补了一项：`open_page` 在 `mark_opened` 之前返回（打开会写 `recents` 与 `current-page` meta，那是模板再多不能出现的两个地方）；`search_index::matches` 的 join 上多一个 `AND p.template = 0`；LAN 分享过滤页列表与子页遍历，而 `/api/page/<模板 id>.md` 回答 **404** 而不是它自己的 Markdown，因为对岸没有办法表达「模板」，那会把它落成一张普通页。第五把门考虑过并且**拒绝**：不给模板的行建索引——那会让 `insert_block` 去问自己脚下这页是不是模板（一份 join 已经知道的事实出现第二个真相源），而 `rebuild` 必须与 `insert` 对「哪些行属于索引」持不同意见，于是模板会在一次重建之后开始出现在搜索结果里。钉住这条的测试除了断言命中为空，还断言 `search_blocks` 里的原始行数，好让「看不见」不能被解释成「没数据」。
+
+`InsertForest` 是「一次插入 = 一步撤销」的那条命令（ADR-0049）：十一块的模板按一次 Ctrl+Z 就该全走，而不是留下九块；它产出的变化清单就是普通 `BlockInserted`，所以 flush、FTS 与重启看到的都只是「这页长了几行」。锚点上那行**空的** paragraph 是同批被替换掉的（「+」那一行与新建页的第一行都是空的，模板落在光标下面一行看起来像没生效），这只有 `exec_all` 拿前态给每条命令做计划才成立；它返回第一个插入块的 id，因为这条命令可能**删掉**用户点的那一行，光标留在一个已不存在的块上是一次点击之外的编辑失败。`fill_template` 不产生 undo 步骤，这是设计而非缺口：历史栈属于用户正在打字的那一页，而模板页从来不是开着的——存错的回头路是 Templates > Delete。
+
+入口是页面 ⋯ → **Templates** 一行（菜单因此十三行；一行而不是六行，因为那一行的标签就是特性的名字），子菜单六行：Insert template / Use as new page / Save as template / Export Markdown / Import Markdown / Delete template。标签短是被迫的而且是可查的：全应用共用一个 184px 的 `ContextMenu`，它的行是 elide 而不是换行，第一版渲染里六行有四行结尾是省略号——对象已经被用户站着的那个子菜单和紧随其后的库选择器各说了一遍，所以留下的是能一眼读完的那一行。没有「edit template」那一行，因为改一个模板的方式就是拿它开一页、编辑、再存回去；保存**从不**覆盖，所以旧的那份会留在库里直到用户删掉它，而库里可以有两个同名模板（按年龄排而不是按标题排）。Delete 不再弹确认框（那是用户从自己起的名字里挑的第二下点击，行本身已经画成危险色），但它必须说话：通知条点名被删掉的是哪一个。`delete_page` 回答的是「删掉的是不是屏幕上那页」而不是成没成功，对模板恒为 `false`，所以测试断言的是前后两次 `workspace.contains()`。锁页拒绝插入（门在 `exec_all_on_open_page` 上，不需要模板专属的一项）但照样提供「Save as template」——把正文抄出去不是往这页里写。回收扫描（§三十七）一项都没加：模板的行就是 book 里的块行，`doc.all_blocks()` 已经把它们指着的图算作引用者，而旗标自己不指向任何文件。
 
 ## 本阶段不做
 

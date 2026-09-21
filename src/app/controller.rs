@@ -374,16 +374,52 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                 } else {
                     s.fill_page_menu_style(id);
                 }
-                let menu_h = g.get_menu_rows().row_count() as f32 * 28.0 + 16.0;
-                let y = g.get_menu_y().clamp(
-                    48.0,
-                    (g.get_window_h() - menu_h - 8.0).max(48.0),
-                );
-                g.set_menu_y(y);
+                reanchor_page_menu(&g);
                 return;
             }
             if action == crate::app::state::MENU_BACK {
                 s.fill_menu(id);
+                return;
+            }
+            // ---- Templates (SPEC §三十八) ----
+            // Two of these swap the popup's rows instead of closing it, for the
+            // same reason Move-to does: the list they install is taller than
+            // the menu it replaces, so the anchor has to be re-measured or the
+            // bottom rows land off-window. The third group *is* the row that
+            // was clicked in the picker, and it closes.
+            //
+            // What is deliberately *not* here is a fourth door: the ⋮⋮ block
+            // menu does not offer templates. That menu is about the block it
+            // was opened on, and a template is not a property of a block — the
+            // slash popup already inserts at that exact row, so the extra door
+            // would only add a picker to maintain.
+            if action == crate::app::state::MENU_PAGE_TEMPLATES {
+                s.fill_template_menu();
+                reanchor_page_menu(&g);
+                return;
+            }
+            if action == crate::app::state::MENU_TEMPLATE_PICK_BACK {
+                s.fill_template_menu();
+                reanchor_page_menu(&g);
+                return;
+            }
+            if matches!(
+                action,
+                crate::app::state::MENU_TEMPLATE_INSERT
+                    | crate::app::state::MENU_TEMPLATE_NEW_PAGE
+                    | crate::app::state::MENU_TEMPLATE_EXPORT
+                    | crate::app::state::MENU_TEMPLATE_DELETE
+            ) {
+                // The picker has nothing to show and the row would be a popup
+                // with one Back button. Saving and importing are the two rows
+                // that answer for an empty library instead.
+                if s.template_list().is_empty() {
+                    g.set_menu_open(false);
+                    g.set_db_notice("No templates yet — save this page as one first.".into());
+                    return;
+                }
+                s.fill_template_pick(action);
+                reanchor_page_menu(&g);
                 return;
             }
             g.set_menu_open(false);
@@ -492,6 +528,86 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                         g.set_title_editing(false);
                         let now = !s.workspace.borrow().locked_of(id);
                         s.set_page_locked(id, now);
+                    }
+                }
+                crate::app::state::MENU_TEMPLATE_SAVE => {
+                    if id > 0 {
+                        // The name is the page's title, so the notice is what
+                        // tells the user a *copy* was made rather than the page
+                        // being marked somehow — and where to find it.
+                        let name = s
+                            .workspace
+                            .borrow()
+                            .title_of(id)
+                            .unwrap_or("Untitled template")
+                            .to_string();
+                        s.save_as_template(id);
+                        g.set_db_notice(
+                            format!("Saved \"{name}\" as a template — ⋯ → Templates.").into(),
+                        );
+                    }
+                }
+                crate::app::state::MENU_TEMPLATE_IMPORT => {
+                    import_template_dialog(&g, &s);
+                }
+                a if (crate::app::state::TEMPLATE_PICK_BASE
+                    ..crate::app::state::TEMPLATE_PICK_BASE + 1_000_000)
+                    .contains(&a) =>
+                {
+                    let Some((template, name)) = s.template_picked(a) else {
+                        return;
+                    };
+                    // The picker doesn't say what it was opened *for* — the row
+                    // id only names the template — so `template_pick` carries
+                    // the action across the row swap.
+                    match s.template_pick_action() {
+                        crate::app::state::MENU_TEMPLATE_INSERT => {
+                            // The ⋯ menu can be opened on a sidebar row that is
+                            // not the page on screen, and a template writes
+                            // *blocks*, which only ever land on the open page.
+                            // Saying so beats filling a page three rows away
+                            // from the one the user clicked.
+                            if id != s.open_page.get() {
+                                g.set_db_notice(
+                                    "Open that page first — a template inserts into the page on screen."
+                                        .into(),
+                                );
+                            } else if let Some(first) = s.insert_template(None, template) {
+                                // The caret follows the copy. Without this the
+                                // page grew and the selection stayed wherever
+                                // it was, which reads as "nothing happened" on
+                                // a long page.
+                                focus_block(&g, &s, first, i32::MAX);
+                            } else if !s.page_locked() {
+                                // A locked page already put its own line up
+                                // (ADR-0048), and overwriting it with a vaguer
+                                // one would hide the real reason.
+                                g.set_db_notice(
+                                    format!("\"{name}\" has no blocks to insert.").into(),
+                                );
+                            }
+                        }
+                        crate::app::state::MENU_TEMPLATE_NEW_PAGE => {
+                            // A tree operation, so it follows the menu's page
+                            // rather than the screen: the subpage button two
+                            // rows above does the same thing with no template.
+                            let parent = if id > 0 { Some(id) } else { None };
+                            let new_id = s.new_page_from_template(parent, template);
+                            open(&g, &s, new_id);
+                        }
+                        crate::app::state::MENU_TEMPLATE_EXPORT => {
+                            export_template_markdown(&g, &s, template, &name);
+                        }
+                        crate::app::state::MENU_TEMPLATE_DELETE => {
+                            // No confirm dialog, unlike Delete page: this is the
+                            // second deliberate click in a row the user chose
+                            // from a list of their own names, and the row is
+                            // drawn in the danger colour to say so. What it must
+                            // not be is silent, so the line names the loss.
+                            s.delete_page(template);
+                            g.set_db_notice(format!("Deleted the \"{name}\" template.").into());
+                        }
+                        _ => {}
                     }
                 }
                 crate::app::state::MENU_DELETE => {
@@ -1441,6 +1557,47 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                 g.set_editing_id(-1);
                 return;
             }
+            // A template row: this line becomes the copy. Both doors mean the
+            // same thing at this point — "/" has nothing left to keep once the
+            // filter is stripped, so its empty line is replaced, while the "+"
+            // menu's line keeps whatever it holds and the copy lands under it.
+            // That split is `insert_template`'s replace-an-empty-anchor rule
+            // reading the row's own emptiness, so no mode test picks where the
+            // blocks go; the mode only decides whether to clear the text first.
+            if let Some((template, name)) = s.slash_selected_template(focus) {
+                let insert_mode = g.get_slash_insert();
+                let id = g.get_editing_id();
+                g.set_slash_open(false);
+                if id <= 0 {
+                    g.set_slash_insert(false);
+                    return;
+                }
+                if !insert_mode {
+                    let _ = s.exec_on_open_page(Command::ReplaceText {
+                        id: BlockId(id as u64),
+                        text: String::new(),
+                    });
+                    g.set_editing_text("".into());
+                    g.set_pending_caret(0);
+                }
+                g.set_slash_insert(false);
+                match s.insert_template(Some(id), template) {
+                    Some(first) => focus_block(&g, &s, first, i32::MAX),
+                    None => {
+                        // Nothing landed, so the row that asked for it is still
+                        // the row on screen — except in the replace case, where
+                        // it is gone, and an editing-id pointing at a deleted
+                        // block is a stale caret rather than an empty line.
+                        g.set_editing_id(-1);
+                        if !s.page_locked() {
+                            g.set_db_notice(
+                                format!("\"{name}\" has no blocks to insert.").into(),
+                            );
+                        }
+                    }
+                }
+                return;
+            }
             let kind = match s.slash_selected_kind(focus) {
                 Some(k) => k,
                 None => return,
@@ -2296,6 +2453,7 @@ pub fn import_lan_pages(
             icon: String::new(),
             cover: None,
             locked: false,
+            template: false,
         };
         let changes = {
             let mut doc = state.doc.borrow_mut();
@@ -2457,6 +2615,79 @@ fn copy_current_page_markdown(g: &UIState<'_>, s: &Rc<AppState>) {
     g.set_db_notice(notice.into());
 }
 
+/// Re-measure the page menu's popup after its rows were swapped for a taller
+/// submenu (Move-to, Style, Templates). Every 28 px row counts, and the anchor
+/// is the top of the popup, so a list that outgrows the space below the ⋯
+/// button has to move up or its last rows are unreachable.
+fn reanchor_page_menu(g: &UIState<'_>) {
+    let menu_h = g.get_menu_rows().row_count() as f32 * 28.0 + 16.0;
+    let y = g
+        .get_menu_y()
+        .clamp(48.0, (g.get_window_h() - menu_h - 8.0).max(48.0));
+    g.set_menu_y(y);
+}
+
+/// Write a template out through §二十六's channel: the same `export_page` the
+/// page export calls, on the template's block sequence. `g` is only here so the
+/// failure is something the user sees rather than a line in a console nobody
+/// has open.
+fn export_template_markdown(
+    g: &UIState<'_>,
+    state: &Rc<AppState>,
+    template: i32,
+    name: &str,
+) {
+    let Some(md) = state.template_markdown(template) else {
+        g.set_db_notice("That row is no longer a template.".into());
+        return;
+    };
+    if let Some(path) = rfd::FileDialog::new()
+        .add_filter("Markdown", &["md"])
+        .set_file_name(&format!("{name}.md"))
+        .save_file()
+    {
+        match std::fs::write(&path, md) {
+            Ok(()) => g.set_db_notice(format!("Exported \"{name}\" to {}", path.display()).into()),
+            Err(e) => g.set_db_notice(format!("Export failed: {e}").into()),
+        }
+    }
+}
+
+/// Pull a .md file into the library as a template. Separate from
+/// `import_markdown_dialog` on purpose: that one makes a *page* and opens it,
+/// and a template must not be openable — sharing the function would mean one of
+/// the two doors is wrong.
+fn import_template_dialog(g: &UIState<'_>, state: &Rc<AppState>) {
+    let Some(path) = rfd::FileDialog::new()
+        .add_filter("Markdown", &["md"])
+        .pick_file()
+    else {
+        return;
+    };
+    let Ok(src) = std::fs::read_to_string(&path) else {
+        g.set_db_notice(format!("Cannot read {}", path.display()).into());
+        return;
+    };
+    let name = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "Imported template".into());
+    let id = state.import_template(&name, &src);
+    // The count is the fact worth reporting: a Markdown file that parses to no
+    // blocks lands as an empty template, and the menu would offer it forever.
+    let blocks = {
+        let d = state.doc.borrow();
+        d.page_blocks(core_page_id(id)).len()
+    };
+    if blocks == 0 {
+        g.set_db_notice(format!("Imported \"{name}\" as an empty template.").into());
+    } else {
+        g.set_db_notice(
+            format!("Imported \"{name}\" as a template ({blocks} blocks).").into(),
+        );
+    }
+}
+
 fn export_current_page(g: &UIState<'_>, state: &Rc<AppState>) {
     let page = state.open_page.get();
     let title = state
@@ -2519,6 +2750,7 @@ pub fn import_from_path(g: &UIState<'_>, state: &Rc<AppState>, path: &std::path:
         icon: String::new(),
         cover: None,
         locked: false,
+        template: false,
     };
     let changes = {
         let mut doc = state.doc.borrow_mut();
@@ -2691,6 +2923,17 @@ pub fn bench_switch_next(
 }
 
 // Scenes for headless visual captures (--scene <name>).
+/// The built-in library, in the session a scene draws. A headless shot has no
+/// database, and `AppState::seed_builtin_templates` refuses to seed without one
+/// (its "already done" flag is a settings row), so the same five bodies land
+/// through `import_template` — the channel the menu's Import row uses, which is
+/// the point: a preset is Markdown in the ordinary rows, not a resource file.
+fn seed_template_library(state: &Rc<AppState>) {
+    for preset in crate::core::template::PRESETS {
+        state.import_template(preset.name, preset.markdown);
+    }
+}
+
 pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
     let g = ui.global::<UIState>();
     match scene {
@@ -3370,6 +3613,49 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
         "dark-page-lock" => {
             g.set_dark(true);
             apply_scene(ui, state, "page-lock");
+        }
+        // The three surfaces SPEC §三十八 "模板" adds (ADR-0049). A headless
+        // session has no database, and `seed_builtin_templates` refuses to write
+        // one without it on purpose, so the scene lands the same five bodies
+        // through the channel the Import row uses — which is the feature's own
+        // claim: a preset is Markdown, not a resource.
+        "page-templates" => {
+            seed_template_library(state);
+            let page = state.open_page.get();
+            state.fill_template_menu();
+            g.set_menu_node_id(page);
+            g.set_menu_y(TREE_TOP_PX + state.sidebar_row_y(page) as f32 - 4.0);
+            g.set_menu_x(240.0);
+            reanchor_page_menu(&g);
+            g.set_menu_open(true);
+        }
+        // The Delete picker rather than the Insert one: the list of names is the
+        // same, and this is the only place the library draws in the danger
+        // colour, so the shot is the one that can be wrong in a new way.
+        "page-template-pick" => {
+            seed_template_library(state);
+            let page = state.open_page.get();
+            state.fill_template_pick(crate::app::state::MENU_TEMPLATE_DELETE);
+            g.set_menu_node_id(page);
+            g.set_menu_y(TREE_TOP_PX + state.sidebar_row_y(page) as f32 - 4.0);
+            g.set_menu_x(240.0);
+            reanchor_page_menu(&g);
+            g.set_menu_open(true);
+        }
+        // A template row inside the "/" popup, with the block kinds filtered
+        // away: the one picture of "it reads as a row of this menu, and its
+        // hint says Template because a body has no breadcrumb".
+        "slash-template" => {
+            seed_template_library(state);
+            state.open_slash("weekly");
+            g.set_slash_focus(0);
+            g.set_slash_x(340.0);
+            g.set_slash_y(260.0);
+            g.set_slash_open(true);
+        }
+        "dark-page-templates" => {
+            g.set_dark(true);
+            apply_scene(ui, state, "page-templates");
         }
         "marks" => {
             // seed inline marks on the first paragraph (visual test only,

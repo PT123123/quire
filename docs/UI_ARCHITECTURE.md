@@ -99,12 +99,14 @@ toggle-fold, image, image-half, file, recovered, title-edit, table, table-edit,
 table-marks, columns, columns-3, columns-marks, math, math-inline, toc, embed,
 embed-empty, code-hl, style-serif, style-mono, style-small, style-full,
 style-tight, page-icon, icon-picker, page-cover, page-cover-white, page-cover-icon,
-page-lock, page-lock-menu, page-lock-block-menu
+page-lock, page-lock-menu, page-lock-block-menu,
+page-templates, page-template-pick, slash-template
 plus dark combos (dark-slash, dark-find, dark-marks, dark-link, dark-code-hl,
 dark-block-menu, dark-block-colors, dark-title-edit, dark-style-serif,
-dark-page-icon, dark-page-cover, dark-page-cover-white, dark-page-lock).
-`benchmarks/scripts/sweep.ps1` holds the authoritative list — 76 scenes as of
-ADR-0048 — and this prose is the summary, so when the two disagree trust the
+dark-page-icon, dark-page-cover, dark-page-cover-white, dark-page-lock,
+dark-page-templates).
+`benchmarks/scripts/sweep.ps1` holds the authoritative list — 80 scenes as of
+ADR-0049 — and this prose is the summary, so when the two disagree trust the
 script. Every visual change ships with re-shot
 scenes; the judge-reviewed set is the regression baseline. `toggle` and
 `toggle-fold` are a pair on purpose: the same section open and closed, so a
@@ -158,6 +160,31 @@ gesture is refused inside them, and the bar's pixels already belong to the
 `recovered` scene. "不能静默吞输入" is the part a PNG cannot say — a refusal is a
 missing change — so that half is proved in Rust, by the queued line each refused
 call leaves behind.
+The four template scenes are ADR-0049's, and they are the set that had to be built
+around a refusal of a different kind: a template is a page that cannot be opened,
+so no scene can show one the way `page-lock` shows a locked page. What they paint
+instead is the only two surfaces the feature has. `page-templates` is ⋯ →
+Templates, seven rows (Back, Insert template, Use as new page, Save as template,
+Export Markdown, Import Markdown, and Delete template in the danger colour), and
+its labels are the scene's own story: every popup in the app shares one 184 px
+`ContextMenu` whose rows elide rather than wrap, so the first version of this
+scene had four of six labels ending in an ellipsis. The fix was the labels, not
+the width — widening the popup moves every menu in the app and re-judges most of
+the baseline for one submenu's wording — and the re-shot sweep is the proof the
+swap was scoped: 78 of 80 scenes byte-identical, the two movers both this submenu.
+`page-template-pick` is the library picker with the five built-ins, drawn in the
+Delete arm because that is the only place the library ever draws in the danger
+colour, and a wall of red is the honest picture of a list where every row is the
+one you are about to destroy. `slash-template` is the in-page half: one row
+matching "weekly", hint column reading `Template`, and the popup's ground sitting
+over the caret's line — the scene exists to make visible the fact that a template
+row and a block-kind row share one popup and cannot be confused by id.
+`dark-page-templates` is the submenu in the other theme. Nothing here shows an
+insert: the copy lands as ordinary rows on an ordinary page, which is the point of
+the representation, and `default.png` already proves those rows draw. The library
+these scenes paint is seeded by hand (`seed_template_library` in the controller),
+because `seed_builtin_templates` refuses a session with no database — and the
+headless capture is exactly that.
 `image` and `image-half` are the same pair for the width tier — one picture
 block at 100 % and at 50 %, so a width setting that only moves the label and
 not the raster is caught by the row geometry. `file` is the picture scene's
@@ -376,10 +403,30 @@ higher — its own diff against `default.png` is 3 316 px inside x 240..560 /
 y 52..610, i.e. a 12-row popup at y 266..610 plus the pill, and its 4 586 px
 against `menu.png` is two boxes plus a label, not one box changed. `dark-page-lock`
 is the pill in the other theme and repaints the whole frame, as every `dark-*` does.
-The baseline is `.scratch/sweep36` (76 scenes). Note that `.scratch/` is
+`sweep36` → `sweep38` (the template library, ADR-0049) moved **74 of 76 byte-identical**
+and added 4. Two movers, both the page ⋯ menu, and they are the pair to remember
+because it is *one* menu at *two* anchors: `menu.png` at 6 sampled px in the single
+column x 414 at y 682..692 (its popup was already clamped by `min(rows*30+8,
+window-h - menu-y - 20)`, so a thirteenth row has only the scrollbar thumb to move),
+and `page-lock-menu.png` at 428 px across x 240..422 / y 558..640 (that one is
+anchored high enough to draw all thirteen rows, so every row below the insertion
+shifts). The smaller number is the one that invites the wrong reading — "6 px, so
+nothing happened" — when the two scenes are the same change seen from two places.
+The four new scenes then proved the label rewrite was scoped rather than lucky: a
+second full sweep moved **78 of 80 byte-identical**, the two movers being exactly
+`page-templates.png` and `dark-page-templates.png`. Each new scene also carries its
+own control against `default.png`, and the claim in all three is that the page
+behind the popup did not move: the submenu 2 115 px inside x 240..422 / y 244..460
+(a 7-row box, 182 px wide), the picker 1 714 px in the same x band at y 244..430,
+and the slash tail 2 332 px in x 340..618 / y 260..298 — one row, at the caret the
+scene parked it at. No scene shows an insert: a template's copy lands as ordinary
+rows on an ordinary page, which is the whole point of the representation, and
+`default.png` already proves those rows draw.
+The baseline is `.scratch/sweep38` (80 scenes). Note that `.scratch/` is
 gitignored *per worktree*, so a `sweepNN` in one checkout is not the same bytes as
 the same number in another; the name is a convention, not an address.
-The set before it, `.scratch/sweep35`
+The set before it, `.scratch/sweep36`
+(76 scenes), then `.scratch/sweep35`
 (72 scenes), then `.scratch/sweep33`
 (67 scenes), and before that `.scratch/sweep32`
 (64 scenes), and before that `.scratch/sweep10`

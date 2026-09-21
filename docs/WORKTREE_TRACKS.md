@@ -163,15 +163,16 @@ worktree 里提交是干净的（只有一个 HEAD、只有你的改动）。**p
 | 位置 | 分支 | 归谁 | 状态 |
 |------|------|------|------|
 | 主工作树（仓库根本身） | `track/3-database`（HEAD） | 共享，四个 agent 都往里写 | 脏：挂着 T2/T3 的未提交改动 |
-| `.scratch/wt/t1` | `track/1-page-appearance` | Track 1（版式 → icon → cover → lock 四刀在这里收口） | lock 一刀在此收口：`target/` **13 G**，sweep 到 **76 张**（基线 `sweep36`，只存在于这个 worktree 的 `.scratch/` 里），像素闸与 `contrast_probe.ps1` 都在这条上跑通 |
+| `.scratch/wt/t1` | `track/1-page-appearance` | Track 1（版式 → icon → cover → lock → templates 五刀在这里收口） | templates 一刀在此收口：`target/` **13 G**，sweep 到 **80 张**（基线 `sweep38`，只存在于这个 worktree 的 `.scratch/` 里），像素闸与 `contrast_probe.ps1` 都在这条上跑通 |
 | （尚无） | — | Track 2 / 4 | 建议按 §2 各开一个，别在主工作树里建目录；**先读 §4 最后那段**，全量 worktree 开不起两个 |
 
 master 与 `origin/master` 在 `78ddf35`（本节写下时的值；Track 1 的 cover 一刀随后把 master
 往前挪，那一刀的 sha 以 `git log --oneline -1` 为准，不要以这里为准）。
 
 **给 Track 3 的一条**：`pages.cover` 花掉了 schema **v12**（ADR-0047），同一天 `pages.locked`
-花掉 **v13**（ADR-0048），`CURRENT_VERSION` 现在是 13。你那份草案里编号 13–16 的迁移步骤
-要整体往上挪一位起（database 那列如果是按 v13 写的，改成 v14）。别指望撞号会替你报错得很
+花掉 **v13**（ADR-0048），还是同一天 `pages.template` 花掉 **v14**（ADR-0049），
+`CURRENT_VERSION` 现在是 **14**。你那份草案里编号 14–17 的迁移步骤要整体往上挪一位起（database
+那列如果是按 v14 写的，改成 v15）。别指望撞号会替你报错得很
 清楚：`ensure_current`（migrations.rs:412，v13 之后；这行的号会随新步骤往下漂，认函数名别
 认行号）
 只在**进函数时**读一次 `user_version`，循环里的判断是 `migration.version <= from`，所以两
