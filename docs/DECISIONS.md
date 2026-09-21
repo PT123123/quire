@@ -2,6 +2,109 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0038 · A formula is stored as source, and its picture is derived on the way out
+
+Decision: math is two surfaces over one renderer. `BlockKind::Math` (row id 20)
+keeps LaTeX-subset source in `blocks.text`; `MarkKind::Math` keeps the same
+source inline, as a span over the bytes *between* the `$`s. Neither stores a
+rendered string. `core::math::to_unicode` is the only renderer, reached twice:
+the block row asks for it through a `pure callback math-render(string) ->
+string` on `UIState`, and `build_runs` calls it while projecting inline runs, so
+the `TextRun` it hands the UI already holds glyphs. No layout engine, no schema
+change, no migration. And because this scene is the first marked line in the
+sweep short enough to leave slack inside its frame, all three run rows gain
+`alignment: start` — a Slint layout's default `stretch` had been spending that
+slack as gaps between the runs.
+
+Why: SPEC §三十七 批次 C asks for a LaTeX subset and sets the bar at "渲染优先
+Unicode 近似排版", gating a typesetting engine behind its own ADR plus memory
+numbers. Unicode approximation crosses the bar without triggering that gate: no
+engine, so no numbers to owe. Storing source rather than glyphs is what makes
+the renderer replaceable — when an engine does arrive it replaces one function,
+and no library written before it needs migrating, re-exporting, or a different
+search index. It also keeps the two-way `text <=> UIState.editing-text` binding
+honest (the user edits the formula, never its picture) and keeps Markdown a
+round trip instead of a one-way render.
+
+The renderer's contract is three rules, and they are what its tests pin:
+- **the output never loses what the user typed.** An unknown command comes back
+  as its own source, an environment likewise, so the worst reading is "this did
+  not render" and never "this vanished";
+- **whitespace in the source is content, not syntax.** TeX discards spaces in
+  math mode; this does not, because in a single-line Unicode fallback the space
+  the user typed *is* the only surviving expression of their spacing
+  (`\alpha + \beta` and `\alpha+\beta` render differently, on purpose);
+- **it is idempotent.** `to_unicode(to_unicode(x)) == to_unicode(x)`, which is
+  what lets a row re-derive its text on every binding evaluation without
+  drifting.
+
+Consequences:
+- **No migration, as a checked fact.** Kinds and mark kinds are strings in the
+  database (`BlockKind::as_str` / `MarkKind::try_from_str`, read back in
+  `storage/repository.rs`) with no CHECK list to widen — ADR-0030's argument for
+  `file`, repeated because it keeps paying. `user_version` stays 8. There are 21
+  block kinds now, and an unknown kind is still corruption-on-load, so an older
+  build reading a math library fails loudly instead of silently dropping rows.
+- **A derived binding is a per-element cost, not a per-kind one.** The math Text
+  is `visible: false` on every other row, and invisible elements still evaluate
+  their bindings, so the text reads `is-math ? UIState.math-render(…) : ""`.
+  Without the guard a 10 000-row page would call the renderer 10 000 times per
+  projection for paragraphs that have no formula in them. The cost is measured,
+  not assumed: ≈0.61 µs per formula (`to_unicode` over five representative
+  sources, release build, `core::math::tests::cost_per_formula`, `#[ignore]`d
+  because it prints), i.e. ≈6 ms per projection for a page whose every line
+  holds one inline formula — arithmetic on that measurement, not a frame this
+  build has been observed to miss, and no whole-page projection is on record. Inline runs pay it at *projection* time for the same
+  reason: a binding would pay it per repaint instead.
+- **An empty formula still has to look like one.** A `math` block with no text
+  renders `$$`, so the row has height and reads as a formula slot rather than a
+  blank band; the block stays in `editing`'s editable set, so clicking it opens
+  the source in the live TextEdit and the rendered Text hides itself.
+- **The `$` guard is a pair, and both halves are the same predicate.** Import
+  opens a span only TeX's flanking rule allows — a `$` followed by a non-space,
+  closed by a `$` preceded by a non-space — so "costs $5 and $10" stays prose.
+  Export escapes a `$` only when a pair could really re-form on the way back
+  (`dollar_pair_ahead`), so prose dollars survive without a `\$` on every price.
+  A `$$ … $$` fence is verbatim the way a code fence is, because `\alpha` must
+  arrive with one backslash.
+- **A formula span is the outermost thing on its range.** `kind_order` /
+  `mark_order` put Math last (5), and export drops any mark a Math span
+  contains: `$**x**$` has no reading in a renderer that does not parse markup
+  inside a formula. A space-padded Math mark has no Markdown spelling either, so
+  it is dropped rather than exported as a fence that would not re-open.
+- **The new scene caught a real defect, and the pixel evidence is the
+  baseline.** `math-inline` is a short marked line — the first in the sweep —
+  and it came back with ~155 px gaps between three runs. Cause: the run
+  `HorizontalLayout`s default to `alignment: stretch`, so leftover frame width
+  was divided among the runs; the 44 existing scenes never showed it because
+  every one of their marked lines overflows its frame and gets clipped
+  (that clipping is the separate, already-documented platform wall in
+  `docs/EDITOR_ARCHITECTURE.md` §"Platform wall"). `alignment: start` on all
+  three run rows (block, table cell, column line) moved **0 of the 44 baseline
+  scenes**, which is the control that says the fix only touches lines that had
+  slack to waste.
+- **The gate ran with a same-session control build, which 批次 B owed.** Both
+  arms measured in one sitting, alternating, on their own pinned databases
+  (raw rows `benchmarks/results/2026-09-21-m10-math-ram.jsonl`): control =
+  `2e9de99` from a clean worktree (md5 `57eefe68…`, 21 873 152 B), math = this
+  tree (md5 `5bfeceea…`, 21 929 472 B). Scene D steady state: control 135.7 /
+  135.8 MB WS and 109.8 / 110.7 private, math 136.6 / 136.7 and 111.7 / 112.4 —
+  **1.016× the control's private bytes**, inside the ≤1.2× gate. The +1.8 MB is
+  on a page containing no formula at all, and the within-arm spread is 0.9 MB,
+  so it is real but small and unattributed (the exe grew 56 KB; the rest is
+  assumed to be the symbol tables and the extra model arm). Each arm's first run
+  (143.3 / 143.7) is the seeding pass and is excluded.
+- **What it does not do** (boundaries, not defects): no display-style layout, so
+  `\frac{a}{b}` is one-line `a/b` and `\int_0^1` is a glyph plus Unicode
+  sub/superscripts where the font has them, else `^(…)`; `\begin{pmatrix}`
+  echoes verbatim; no KaTeX parity; no math font (the row uses the UI face); no
+  `\( … \)` or `\[ … \]` delimiters; the `file`/`image` style of per-block
+  affordances is absent — a formula has no menu of its own beyond ⋮.
+- **Still needs a human window.** No headless scene shows a math block *being
+  edited* (source in the live TextEdit) or Ctrl+M over a selection, because
+  `quire-shot` never focuses a row. The two new scenes prove the derived
+  rendering; they do not prove the editing path.
+
 ## ADR-0037 · Orphaned attachments get one reclamation path, and it cannot outrun undo
 
 Decision: `reclaim_attachments()` in `AppState`, reachable as a **Reclaim**

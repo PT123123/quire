@@ -325,6 +325,7 @@ export component ColumnItemRow inherits Rectangle {
         visible: root.is-text-line && !is-edit && item.runs.length > 0;
         clip: true;
         run-row := HorizontalLayout {
+            alignment: start;
             spacing: 0px;
             for run in item.runs : Rectangle {
                 min-width: run-text.preferred-width;
@@ -554,6 +555,10 @@ export component ColumnItemRow inherits Rectangle {
             } else if (event.modifiers.control && event.text == Key.E
                 && self.anchor-position-byte-offset != self.cursor-position-byte-offset) {
                 UIState.toggle-mark(3, self.anchor-position-byte-offset, self.cursor-position-byte-offset);
+                accept
+            } else if (event.modifiers.control && event.text == Key.M
+                && self.anchor-position-byte-offset != self.cursor-position-byte-offset) {
+                UIState.toggle-mark(4, self.anchor-position-byte-offset, self.cursor-position-byte-offset);
                 accept
             } else if (event.modifiers.control && event.text == Key.L
                 && self.anchor-position-byte-offset != self.cursor-position-byte-offset) {

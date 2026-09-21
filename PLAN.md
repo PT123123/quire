@@ -1468,3 +1468,100 @@ None)`，`storage-available` 恒为 false。
 这次没有把它再欠一遍，但也没有还。下一步按 SPEC §三十七 进批次 C（highlight / bookmark /
 embed / math / TOC / synced block），批次 C 六条里只有 math 不撞平台墙（高亮要 inline runs
 的单行通道、TOC 要跳转、bookmark / embed 要有 TLS 客户端），开工前再确认一次。
+
+## M11 批次 C · slice 1 — math：公式存源，图片是导出路上算出来的（2026-09-21，on `master`，ADR-0038）
+
+批次 C 六条里那条不撞墙的。SPEC §三十七 要「LaTeX 子集」并把标准写成「渲染优先 Unicode
+近似排版」，同时规定**引入排版引擎必须先出 ADR 并附内存数字**——走 Unicode 近似就跨过了
+标准而没有触发那道闸：没有引擎，也就没有欠的内存数字。
+
+**改动面**：新文件 `src/core/math.rs`（`to_unicode`，唯一的渲染器）；`core/mod.rs` 挂模块；
+`core/types.rs` 的 `BlockKind::Math`（`ALL` 20→21）和 `MarkKind::Math`；`app/state.rs` 的行
+号 20、slash / insert 菜单各一行、以及 `build_runs` 在**投影**时把公式 run 换成字形；
+`app/controller.rs` 的 `"$$ "` 行首快捷键、`on_math_render`、`on_toggle_mark` 的 arm 4、两
+个新 bench scene；`services/import_service.rs` 的 `$$ … $$` 围栏 + 行内 `$…$` + TeX 的
+flanking rule；`services/export_service.rs` 的围栏、`dollar_pair_ahead` 转义与 span 排序；
+`ui/Types.slint` 一个 `pure callback math-render(string) -> string`；`EditorBlock.slint` 的
+公式框；`SettingsDialog.slint` 的快捷键行。**没有迁移**，schema 停在 v8：kind 与 mark kind
+在库里都是字符串（ADR-0030 那套论证），没有 CHECK 列表要放宽，而未知 kind 依旧是「读到就
+报损坏」，所以旧构建打开一个带公式的库是响亮地失败，不是悄悄丢行。
+
+**七条决定**：
+
+1. **存源不存字形**。`blocks.text` 里是 `\frac{a+b}{2}`，不是 `(a+b)/2`。这让渲染器可替换：
+   将来引擎到位是换一个函数，之前写下的每个库都不需要迁移、重导出或重建搜索索引；它也保住了
+   `text <=> UIState.editing-text` 双向绑定的诚实（用户编辑的是公式，永远不是它的图片），以及
+   Markdown 的往返（而不是一次性渲染）。
+2. **渲染器三条契约**，测试钉的就是这三条：输出**永远不丢用户打下的东西**（未知命令原样回
+   来，最坏读成「这条没渲染出来」而不是「这条不见了」）；源里的空格**是内容不是语法**（TeX 在
+   数学模式丢空格，这里不丢——在单行近似里，用户打的那个空格是他间距唯一的幸存表达，
+   `\alpha + \beta` 和 `\alpha+\beta` 故意不同）；**幂等**（所以每行每次绑定求值都能重derive而
+   不漂移）。
+3. **派生绑定是按元素的成本，不是按 kind 的**。`visible: false` 的 `Text` 照样求值它的绑定，
+   所以公式那行读 `is-math ? UIState.math-render(…) : ""`；不加守卫，一页 10 000 行会为了 1
+   行公式调用渲染器 10 000 次。行内公式同理，但走的是投影而不是绑定：绑定是每帧重付。
+4. **公式 span 是它那段字节上最外层的东西**（`kind_order` / `mark_order` 里 Math = 5）。被它
+   包含的 mark 在导出时丢掉，与它**共享边界**的 mark 也丢掉——因为 `$**a**$` 会把两颗星导进公
+   式源里；首尾带空格的源没有 `$…$` 写法（importer 要求两侧都是非空格），于是 mark 走、字留。
+5. **`$` 的守卫是成对的，两半是同一个谓词**。import 只开 TeX flanking rule 允许的对（紧跟非空
+   格、闭合前非空格），所以「costs $5 and $10」是散文；export 只在真的会重新成对时才转义
+   （`dollar_pair_ahead`），所以散文里的美元符号不必每个价格前面挂一个 `\$`。`$$ … $$` 围栏像
+   代码围栏一样逐字，因为 `\alpha` 必须带着那一个反斜杠回来。
+6. **空公式也要看起来是个公式**：无文本时渲染 `$$`，行有高度、读起来是一个槽位而不是一条空白
+   带；而 kind 仍在可编辑集合里，所以点它就把源开在活的 TextEdit 中、渲染 Text 自己让位。
+7. **21 个 kind 这条事实是核对过的**：`BlockKind::ALL` 从 20 变 21，而 `docs/ROADMAP.md` 里
+   那句「16 个 kind」是 columns 批次留下的旧账，一并改到 21。
+
+**顺带抓到一个真缺陷**：`math-inline` 是这一集里第一条**短到在自己框里留下余量**的带 mark 的
+行，而那个余量把三处 run 行的布局问题照出来了——`HorizontalLayout` 的默认 `alignment` 是
+`stretch`，每个 item 的 `min-width` 钉在 `Text.preferred-width`、`horizontal-stretch: 0`，这套
+读起来像「用自然宽度」但**不是**：一处 stretch 都不给，多余宽度照样被摊到 item 之间。结果是三
+条 run 之间 155 px 的空隙。控制断言不是假设：改成 `start` 之后，基线里 44 张 scene **一字节都
+没动**（`marks`、`table-edit`、两张 `columns` 全部 byte-identical），因为它们全都溢出自己的框、
+从来就有余量可浪费。两条 Slint 陷阱（默认 stretch、`visible: false` 不挡求值）都写进
+`docs/UI_ARCHITECTURE.md` §"Slint geometry traps"。
+
+**验证**：`cargo check --all-targets` 干净；`cargo test --all-targets -- --skip
+clipboard_write_and_read_round_trip_unicode` → **335 passed / 0 failed / 9 ignored**（比上一批
+的 312 / 8 正好多这次的 23 条断言 + 1 条打印型计时；跳掉的那条是本 session 环境的剪贴板独占，
+见上一批的记录）；`cargo build --release --all-targets` 零警告、4 m 11 s。新测试：`core/math.rs`
+15 条（希腊字母 / 关系符 / 分式 / 根式 / 上下标 / 环境 / 未知命令原样 / 幂等 / 空格是内容 / 空
+公式…），`markdown_test.rs` 9 条（两种围栏形状、行内往返、含两个 `$` 的散文、导出转义、公式吞
+掉别的样式、首尾空格降级、双形状 import）。控制断言在关键处：「散文里两个美元」那条先证明它
+**没有**产生 mark，否则一个什么都没解析的测试也会绿。
+
+**性能**：`to_unicode` 五例平均 **658.5 / 625.8 / 608.3 ns**（release，200 000 轮 × 5 例，
+`#[ignore]` 打印型）⇒ **≈0.61 µs 一条公式** ⇒ 每行都挂一个公式的 10 000 行页，一次投影的上界
+≈6 ms（10 000 × 0.61 µs 的算术，**不是量出来的帧**：仓库里从来没有一条整页投影的读数，最接近
+的两个各自都不是它——打字那行的按键处理中位数 47–66 µs 是一个事件，存储那行的去抖 32 变更
+`apply` 中位数 3.42 ms 是一次 SQLite 提交）。6 ms 是一句「渲染器最坏能被记多少账」的上界，
+也是「不在换行的行内渲染公式」和「转换放在投影里」两个决定的理由：那样一页一秒重画 60 次，放
+在绑定里就要把 6 ms 再乘 60。RAM 闸这次**带了自己的 control**（批次 B 欠的方法账，
+现在还）：把前一个 commit `2e9de99` 在 `git worktree` 里编出来（`git status --short` 为空、树
+里没有 `src/core/math.rs`），两个 exe 在同一 sitting 里交替跑 scene D——control 135.7 / 135.8
+WS · 109.8 / 110.7 private，math 136.6 / 136.7 · 111.7 / 112.4，**1.016×**（闸 ≤1.2×）。种子
+那次（143.3 / 143.7）不进稳态。两臂各自自证身份（大小 + md5），所以谁也不能冒充谁。那 +1.8 MB
+比臂内 0.9 MB 的散布大，所以**记下而不抹平**：exe 本身大了 56 KB，其余推测是两个 `match` 各多
+一个 arm 加符号表，未归因。同一 scene 的空闲 CPU 这次读 2.5–4.5 %、媒体批次读 0.0–0.2 %，这也
+是闸只按臂间比值讲、从不报绝对值的原因。数据在
+`benchmarks/results/2026-09-21-m10-math-ram.jsonl`，论证在 `docs/PERFORMANCE.md`。
+
+**像素**：`.scratch/sweep18` → `.scratch/sweep21`，44 张里动 4 张、新增 2 张（`math`、
+`math-inline`），40 张 byte-identical。四个 bbox 全在改动能解释的带内：`slash` 621 px 与
+`dark-slash` 2 483 px 同 `x 340..618 / y 532..586`（菜单多了「Math — or type $$」那一行）、
+`plus` 10 983 px 覆盖 `x 600..878 / y 0..798`（插入菜单整列高了一行，所以它画的每一行都位移）、
+`settings` 77 px 在 `x 548..724 / y 490..500`（快捷键行现在写 Ctrl+B / I / E / M）。46 张是新的
+基线。这一批**不是**靠肉眼判的：先算哈希、只重看变化的 6 张。
+
+**未验证**：①**人眼**看一个光标下的 Math block（活 TextEdit 里编辑源）和选中文字按 Ctrl+M——
+`quire_shot` 从不聚焦某一行，两张新 scene 因此都是渲染态，编辑态没有像素。②真实 LaTeX 语料：
+「常见子集之外一律原样回来」是策略不是验证，`\begin{aligned}` 那类多行环境没有排版。③代码高
+亮那条硬要求（长代码块打字延迟不可测）还没测过——批次 C 的下一条若走同一条 runs 通道，会直接
+复用这次的 ≈0.61 µs/次的结论。
+
+**批次 C 还剩**：highlight / bookmark / embed / TOC / synced block。上一批结尾那句判断要改一
+半：**TOC 的墙已经不在了**——`quire://block` 锚点在应用内跳转从 M8 就能用，缺的只是收集标题
+和刷新，跟 §二十五 的快照机制没有冲突；highlight 撞的是 runs 的单行通道（这次没动它，但公式
+run 走的就是那条道）；bookmark / embed 仍然要有 TLS 客户端，而 SPEC §二/§三十三 禁 WebView 与
+JS 运行时，所以它们需要一条不含网络的形状（embed 至少要能画一张占位卡）。建议顺序：TOC → 代码
+高亮 → embed 占位卡 → bookmark → synced block。

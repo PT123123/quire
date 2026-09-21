@@ -31,6 +31,7 @@ export component EditorBlock inherits Rectangle {
     property <bool> is-file: block.kind == 15;
     property <bool> is-table: block.kind == 16;
     property <bool> is-columns: block.kind == 18;
+    property <bool> is-math: block.kind == 20;
     // picture (kind 14): the row's height comes from the raster's ratio, which
     // Rust knows from the attachments row. 0 means there is no picture to
     // show — a missing file or an attachment from another library — and the
@@ -74,7 +75,7 @@ export component EditorBlock inherits Rectangle {
         : block.kind == 2 ? Theme.spacing-lg + Theme.spacing-xs
         : block.kind == 3 || block.kind == 9 || block.kind == 10
             || block.kind == 14 || block.kind == 15 || block.kind == 16
-            || block.kind == 18
+            || block.kind == 18 || block.kind == 20
             ? Theme.spacing-md
         : 0px;
 
@@ -101,6 +102,7 @@ export component EditorBlock inherits Rectangle {
         : block.kind == 7 ? quote-text.height + Theme.spacing-xs
         : block.kind == 8 ? code-text.height + 2 * Theme.spacing-md
         : block.kind == 10 ? callout-text.height + 2 * Theme.spacing-sm
+        : block.kind == 20 ? math-text.height + 2 * Theme.spacing-sm
         : block.kind == 9 ? 20px
         : block.kind == 14 ? (pic-aspect > 0 ? pic-height : missing-text.height)
         : block.kind == 15 ? root.file-height
@@ -201,6 +203,10 @@ export component EditorBlock inherits Rectangle {
         height: plain-text.height;
         clip: true;
         HorizontalLayout {
+            // start, not the default stretch: a short marked line leaves
+            // space in the frame, and a stretching layout spends it as gaps
+            // between the runs instead of leaving it at the end
+            alignment: start;
             spacing: 0px;
             for run in block.runs : Rectangle {
                 // natural run size: decorations anchor to the text line
@@ -327,6 +333,10 @@ export component EditorBlock inherits Rectangle {
             } else if (event.modifiers.control && event.text == Key.E
                 && self.anchor-position-byte-offset != self.cursor-position-byte-offset) {
                 UIState.toggle-mark(3, self.anchor-position-byte-offset, self.cursor-position-byte-offset);
+                accept
+            } else if (event.modifiers.control && event.text == Key.M
+                && self.anchor-position-byte-offset != self.cursor-position-byte-offset) {
+                UIState.toggle-mark(4, self.anchor-position-byte-offset, self.cursor-position-byte-offset);
                 accept
             } else if (event.text == Key.Tab
                 && !event.modifiers.shift
@@ -542,6 +552,39 @@ export component EditorBlock inherits Rectangle {
         wrap: word-wrap;
     }
 
+    // math (kind 20): the formula, centred in a box like a code block's. What
+    // the box shows is derived — `math-render` turns the stored LaTeX subset
+    // into Unicode — and what the live input shows is the source, because the
+    // user edits the formula, never its picture. An empty block says "$$" so
+    // the slot has a height and reads as a formula rather than a blank band.
+    Rectangle {
+        x: content-x;
+        y: top-margin;
+        width: content-width;
+        height: root.body-height;
+        visible: is-math;
+        border-radius: Theme.radius-md;
+        background: block.bg > 0 ? block-bg-color : Colors.code-background;
+        border-width: 1px;
+        border-color: Colors.border;
+    }
+    math-text := Text {
+        x: content-x;
+        y: top-margin + Theme.spacing-sm;
+        width: content-width;
+        visible: is-math && !editing;
+        // the `: ""` branch matters: a binding is per element, not per kind,
+        // and an invisible Text still evaluates it — so without the guard
+        // every row of a page would run the renderer
+        text: is-math ? UIState.math-render(block.text == "" ? "$$" : block.text) : "";
+        horizontal-alignment: center;
+        font-family: Typography.ui-font;
+        font-size: Typography.size-body;
+        color: block-text-color;
+        line-height-factor: Typography.line-body;
+        wrap: word-wrap;
+    }
+
     Rectangle {
         x: content-x;
         y: top-margin + 10px;
@@ -550,7 +593,6 @@ export component EditorBlock inherits Rectangle {
         visible: block.kind == 9;
         background: Colors.divider;
     }
-
     // callout (kind 10): tinted box, an emoji, and the text. The background
     // color picker overrides the default tint.
     Rectangle {

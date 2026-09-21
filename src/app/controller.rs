@@ -769,6 +769,10 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         ui.global::<UIState>()
             .on_attachment_size(move |id| s.attachment_size(id).into());
     }
+    // math block (SPEC §三十七 批次 C): no state to consult — the source is in
+    // the row, and the conversion is a function of it.
+    ui.global::<UIState>()
+        .on_math_render(move |src| crate::core::math::to_unicode(&src).into());
     {
         let gw = gw.clone();
         let s = state.clone();
@@ -1611,6 +1615,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                     1 => Some(crate::core::MarkKind::Italic),
                     2 => Some(crate::core::MarkKind::Strike),
                     3 => Some(crate::core::MarkKind::Code),
+                    4 => Some(crate::core::MarkKind::Math),
                     _ => None,
                 };
                 if let Some(kind) = kind {
@@ -2341,7 +2346,12 @@ fn markdown_convert(
     current: Option<crate::core::BlockKind>,
 ) -> Option<(crate::core::BlockKind, String, Option<bool>)> {
     use crate::core::BlockKind;
-    if matches!(current, Some(BlockKind::Code) | Some(BlockKind::Divider)) {
+    if matches!(
+        current,
+        Some(BlockKind::Code) | Some(BlockKind::Divider) | Some(BlockKind::Math)
+    ) {
+        // a formula is source: `> x` inside `\begin{...}` is content, not a
+        // quote marker
         return None;
     }
     let conv = |kind, rest: &str| Some((kind, rest.to_string(), None));
@@ -2365,6 +2375,10 @@ fn markdown_convert(
         conv(BlockKind::Divider, "")
     } else if text == "```" {
         conv(BlockKind::Code, "")
+    } else if let Some(rest) = text.strip_prefix("$$ ") {
+        conv(BlockKind::Math, rest)
+    } else if text == "$$" {
+        conv(BlockKind::Math, "")
     } else {
         None
     }
@@ -2767,6 +2781,61 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
                         text: format!("Column {}", n + 1).into(),
                     });
                 }
+            }
+            state.reproject_blocks();
+        }
+        // SPEC §三十七 批次 C: a formula, built the way the slash menu builds
+        // one and then filled with source that touches every shape the
+        // renderer knows — fraction, radical, relation, script, spacing escape.
+        "math" => {
+            let page = core_page_id(state.open_page.get());
+            let target = {
+                let d = state.doc.borrow();
+                d.page_blocks(page)
+                    .iter()
+                    .find(|b| b.kind == crate::core::BlockKind::Paragraph && !b.text.is_empty())
+                    .map(|b| b.id)
+            };
+            let Some(id) = target else { return };
+            let _ = state.exec_on_open_page(Command::SetBlockType {
+                id,
+                kind: crate::core::BlockKind::Math,
+            });
+            let _ = state.exec_editor(Command::ReplaceText {
+                id,
+                text: r"\frac{a+b}{2} \leq \sqrt{ab} \ne 0 \quad \int_0^1 x^2 \,dx".into(),
+            });
+            state.reproject_blocks();
+        }
+        // …and the same renderer inside a sentence: the mark holds the source,
+        // the run shows the glyphs, and the words around it are untouched.
+        "math-inline" => {
+            let page = core_page_id(state.open_page.get());
+            let target = {
+                let d = state.doc.borrow();
+                d.page_blocks(page)
+                    .iter()
+                    .find(|b| b.kind == crate::core::BlockKind::Paragraph && !b.text.is_empty())
+                    .map(|b| b.id)
+            };
+            let Some(id) = target else { return };
+            let text = r"The rest energy is E = mc^2 for any mass.";
+            let source = r"E = mc^2";
+            let _ = state.exec_editor(Command::ReplaceText {
+                id,
+                text: text.into(),
+            });
+            if let Some(start) = text.find(source) {
+                let marks = vec![crate::core::Mark {
+                    start,
+                    end: start + source.len(),
+                    kind: crate::core::MarkKind::Math,
+                    url: String::new(),
+                }];
+                state
+                    .doc
+                    .borrow_mut()
+                    .apply(&[crate::core::Change::BlockMarksSet { id, marks }]);
             }
             state.reproject_blocks();
         }

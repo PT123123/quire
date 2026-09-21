@@ -95,11 +95,11 @@ the overlay half so headless two-pass renders see their transitions.
 Current set: default, dark, palette, search-notes, menu, rename, settings,
 dialog, empty, edit, slash, block-menu, marks, link, find, nest, toggle,
 toggle-fold, image, image-half, file, recovered, title-edit, table, table-edit,
-columns, columns-3,
+columns, columns-3, math, math-inline,
 plus dark combos (dark-slash, dark-find, dark-marks, dark-link, dark-block-menu,
 dark-title-edit).
-`benchmarks/scripts/sweep.ps1` holds the authoritative list — 44 scenes as of
-ADR-0032 — and this prose is the summary, so when the two disagree trust the
+`benchmarks/scripts/sweep.ps1` holds the authoritative list — 46 scenes as of
+ADR-0038 — and this prose is the summary, so when the two disagree trust the
 script. Every visual change ships with re-shot
 scenes; the judge-reviewed set is the regression baseline. `toggle` and
 `toggle-fold` are a pair on purpose: the same section open and closed, so a
@@ -125,7 +125,16 @@ third word where the second one was. `diffbbox.ps1` measured that pair at 1 111
 changed pixels, and every one of them inside the layout's own band (y 205..221),
 which is the evidence that the flexbox re-flowed rather than the scene drifting. The layout's hover strip is
 kept out of the sweep for the same reason the grid's is.
-The baseline is `.scratch/sweep18` (44 scenes). The set before it, `.scratch/sweep10`
+`math` and `math-inline` are the derived-text pair (ADR-0038): the same renderer
+seen from its two surfaces, one line converted into a formula block whose source
+is `\frac{a+b}{2} \leq \sqrt{ab} \ne 0 \quad \int_0^1 x^2 \,dx` — a shape for
+every branch the renderer knows — and one short paragraph with a `math` mark over
+`E = mc^2` inside a sentence. The second is the one that earned its place: it is
+the first marked line in the set short enough to leave slack inside its frame,
+and the slack is what exposed the stretch-alignment defect above. Neither scene
+shows the editing state (`quire-shot` never focuses a row), so a math block under
+a caret and Ctrl+M over a selection stay human-verified.
+The baseline is `.scratch/sweep21` (46 scenes). The set before it, `.scratch/sweep10`
 (42 scenes), re-baselined 37 of them for a
 reason unrelated to tables: `DocumentRow.head` bound `height` without `y` and so
 was centred in its delegate, which had been sitting the page title ~34 px below
@@ -135,6 +144,15 @@ clipboard paste and the media bench batch touched no UI, and that zero is the
 reading rather than an assertion — and `sweep16` → `sweep18` moved
 `settings.png` alone, which is the one scene the Reclaim button belongs to
 (`sweep17` is the same dialog with the layout defect below still in it).
+`sweep18` → `sweep21` (math) moved 4 of those 44 and added 2: `slash` and
+`dark-slash` at 621 / 2 483 px inside `x 340..618 / y 532..586` (the menu gained
+its "Math — or type $$" row above Divider), `plus` at 10 983 px over
+`x 600..878 / y 0..798` (the insert menu is one row taller, so every row it draws
+shifted — a whole-band box that the change explains), and `settings` at 77 px
+inside `x 548..724 / y 490..500` (the shortcut row now reads
+"Ctrl+B / I / E / M"). `marks`, `table-edit` and the two `columns` scenes came
+through the `alignment: start` change byte-identical, which is the control that
+says it only touches lines with slack to waste.
 A re-sweep after a
 layout change is judged by diffing, not by looking:
 `benchmarks/scripts/diffbbox.ps1 -OldDir A -NewDir B` reports the bounding box
@@ -170,6 +188,21 @@ title; both cost a rebuild to find and neither is in the docs where you look.
   appears or disappears with a condition is a child of the condition, not a
   child of the layout with a `visible:` binding:
   `if UIState.storage-available : HorizontalLayout { … }`.
+* **A layout's default `alignment` is `stretch`, and it spends leftover width on
+  its items.** Three `HorizontalLayout`s hold a marked line's runs side by side,
+  each item's `min-width` pinned to its `Text.preferred-width` and
+  `horizontal-stretch: 0` — which reads as "natural width" and is not: with no
+  stretch anywhere, the leftover width is divided among the items anyway. Every
+  swept marked line overflowed its frame, so the slack never existed and the
+  defect stayed invisible through 44 scenes; the first short one (`math-inline`,
+  ADR-0038) came back with three runs ~155 px apart. `alignment: start` costs the
+  44 baseline scenes nothing — that is the control, not an assumption.
+* **`visible: false` does not stop a binding from running.** An element hidden
+  by a kind check still evaluates its property bindings every time its inputs
+  change, so a derived `Text` (the math row's `UIState.math-render(...)`) has to
+  guard the *binding*, not just the visibility: `is-math ? render(…) : ""`.
+  Unguarded, a 10 000-row page calls the renderer 10 000 times per projection to
+  paint nothing on 9 999 of them.
 
 ## Slint language traps (1.18)
 

@@ -1085,3 +1085,70 @@ long enough that the notice bar's count is the feedback, short enough that it
 does not need a progress UI. A sweep is also idempotent and non-destructive to
 anything referenced, so a user who thinks the window has hung and clicks again
 loses nothing.
+
+## M11 · math renders at ≈0.6 µs a formula, and the gate finally ran with a control (2026-09-21, ADR-0038)
+
+Two numbers owe an answer for a block kind whose whole job is a string
+conversion. One is what the conversion costs; the other is whether adding a 21st
+kind, a mark kind and a callback made everything else dearer. The second one is
+the measurement 批次 B left unpaid — `columns` compared itself against a baseline
+from a different sitting — so this batch built the previous commit in a clean
+worktree and ran both arms in one sitting.
+
+**The renderer.** `core::math::tests::cost_per_formula` (`#[ignore]`, prints)
+runs five representative sources — a plain script, a greek relation, a fraction
+over a radical, an integral with a spacing escape, and an environment that
+echoes verbatim — 200 000 times per round, release profile:
+
+| round | ns per formula (mean of the five) |
+|-------|----------------------------------:|
+| 0 | 658.5 |
+| 1 | 625.8 |
+| 2 | 608.3 |
+
+**≈0.61 µs per formula.** That is paid once per *run*, at projection time
+(`build_runs`), not once per repaint — which is why inline math converts in the
+projection instead of in a `Text` binding, and why the block's binding is
+guarded by kind (`is-math ? … : ""`): an invisible `Text` still evaluates its
+binding, so an unguarded row would run the renderer over every paragraph on the
+page. A 10 000-line page whose every line carries one formula therefore costs
+≈6 ms per projection — arithmetic from the table above (10 000 × 0.61 µs), not a
+measured frame. Nothing on record measures a whole-page projection: the closest
+published UI numbers are the typing row's key-handler median (47–66 µs, an
+event not a projection) and the storage row's debounced 32-change `apply` median
+(3.42 ms with the index, a SQLite commit not a projection), so ≈6 ms is quoted
+as a ceiling the renderer could be charged with, not as a cost this build has
+been observed to pay. It is the reason there is no plan to render formulas
+inside a wrapping line, and the reason the conversion sits in the projection:
+a page like that repaints 60 times a second, and a `Text` binding would multiply
+this figure by every one of them.
+
+**The gate.** Scene D (10 000 blocks, no formula anywhere in it) with a pinned
+database per arm, arms alternating, one sitting (raw rows
+`benchmarks/results/2026-09-21-m10-math-ram.jsonl`):
+
+| arm | exe | steady WS MB | steady private MB |
+|-----|-----|-------------:|------------------:|
+| control `2e9de99` | md5 `57eefe68…`, 21 873 152 B | 135.7 / 135.8 | 109.8 / 110.7 |
+| math (this tree) | md5 `5bfeceea…`, 21 929 472 B | 136.6 / 136.7 | 111.7 / 112.4 |
+
+**1.016× the control's private bytes** — inside the ≤1.2× gate, and this time
+the ratio is between two builds measured in the same hour on the same machine,
+not across a day of drift. Each arm's first run (143.3 / 143.7 WS) is the pass
+that *seeds* its database and is excluded from the steady-state pair. The +1.8 MB
+private is on a page that contains no formula, no new column and no new per-row
+model, and the spread within an arm is 0.9 MB, so the delta is larger than noise
+but not attributed: the exe itself grew 56 KB, and the rest is assumed to be the
+symbol tables plus one more arm in two `match`es. Recorded rather than explained
+away.
+
+**Both arms self-identified, and that is part of the row.** The control came from
+`git worktree add` at `2e9de99` with `git status --short` empty and
+`src/core/math.rs` absent; the math arm's md5 is the exe this working tree
+builds. Two sizes and two md5s are on the line above, so neither arm can be
+passed off as the other.
+
+**What this sitting does not settle:** idle CPU read 2.5–4.5 % on both arms here
+where the media batch read 0.0–0.2 % on the same scene. Nothing in this slice
+adds per-frame work, so the likeliest reading is session state, and it is the
+reason the gate is quoted as a ratio between the arms and never as an absolute.

@@ -17,8 +17,8 @@ First functional release: a local, single-file-database notes workspace.
   spot and the drop commits one undo-able move; landings that would split a
   nested list away from its parent are rejected
 - Markdown line-shortcuts: type "# ", "## ", "### ", "- ", "* ", "1. ",
-  "[] ", "[x] ", "> ", "---" or "```" at a block start to convert it as you
-  type (one undo step)
+  "[] ", "[x] ", "> ", "---", "```" or "$$ " at a block start to convert it as
+  you type (one undo step)
 - Callout block: a tinted rounded box with an emoji and text (slash menu
   "Callout"; turns into Text/Code/Divider like the other kinds)
 - Block menu (⋮⋮) — Notion's set, minus the collab/AI items that stay out
@@ -32,7 +32,7 @@ First functional release: a local, single-file-database notes workspace.
 - "+" handle opens Notion's insert menu: it creates the empty line below
   and shows the full block list (Text, Page, To-do, Headings, Bulleted /
   Numbered, Quote, Divider, Callout, Code, Toggle list, Image, File, Table,
-  Columns) — picking a
+  Columns, Math) — picking a
   row converts the new line, clicking away or Escape keeps the empty line,
   typing filters the menu. The database views (Table view, Board, Gallery,
   List, Calendar, Timeline) appear as muted "later" placeholders and
@@ -67,7 +67,7 @@ First functional release: a local, single-file-database notes workspace.
   Delete column — where adding goes after the row or column the caret sits
   in and deleting takes it, and a table never shrinks below 1×1. Cells hold
   text with the same inline marks as anywhere else (Ctrl+B / Ctrl+I /
-  Ctrl+E / Ctrl+Shift+X work inside a cell). Turning a line into a table
+  Ctrl+E / Ctrl+Shift+X / Ctrl+M work inside a cell). Turning a line into a table
   keeps its words in the top-left cell, and turning a table back into text
   gives every cell back as its own paragraph; Markdown export writes a
   GitHub-flavoured table (import still reads those lines as text). This is
@@ -85,6 +85,21 @@ First functional release: a local, single-file-database notes workspace.
   child block and so is every line in it — so undo covers every layout edit and
   no new storage is needed. Markdown export flattens a layout into page-level
   paragraphs, keeping the words and the reading order
+- Math block: a formula on its own line, from the insert menu, the slash menu,
+  Turn into, or by typing "$$ ". It stores what you type — a LaTeX subset as
+  source — and paints the nearest Unicode reading of it: `\frac{a+b}{2}` becomes
+  one-line `(a+b)/2`, `\sqrt{ab}` becomes `√(ab)`, `x^2_i` becomes `x²ᵢ` wherever
+  the alphabet has the glyph. Nothing is thrown away: a command it does not know
+  comes back as its own source, so the worst case reads "that did not render"
+  rather than "that vanished". Click the block and the source is what you edit.
+  Markdown writes and reads a `$$ … $$` fence, verbatim inside like a code fence
+- Fixed a marked line with room to spare painting its runs apart. A paragraph's
+  inline marks render as side-by-side runs, and the row laid them out with
+  Slint's default `alignment: stretch`, so any leftover width was divided among
+  the runs as gaps — ~155 px between three of them on the first short formula
+  line the sweep had ever shot. Every marked line in the then-44-scene baseline
+  overflowed its frame instead, so nothing showed it before. The fix is on all
+  three run rows — block, table cell, column line — and moved none of them
 - Fixed the page title sitting below where it is bound. The row's title band
   sets its height but used to leave `y` alone, and Slint centres such a child
   vertically in its parent — harmless while every first block was one line
@@ -122,7 +137,10 @@ First functional release: a local, single-file-database notes workspace.
   editing or not
 - Inline marks: bold (Ctrl+B), italic (Ctrl+I), inline code (Ctrl+E),
   strikethrough (Ctrl+Shift+X), links (Ctrl+L + dialog; click a link to
-  open it — internal quire:// links navigate in-app)
+  open it — internal quire:// links navigate in-app), inline math (Ctrl+M over
+  a selection: the same LaTeX subset as a math block, rendered inside the
+  sentence; Markdown writes it as `$…$`, and a sentence that merely mentions
+  prices — "costs $5 and $10" — stays prose)
 - Toggle the sidebar with Ctrl+\ — it had been Ctrl+B, which is bold, so the
   same chord was labelled two different things in two different places
 - A brand-new page can be written in: click the "This page is empty" panel, or
@@ -241,6 +259,14 @@ First functional release: a local, single-file-database notes workspace.
   0 — a run that measured nothing and said it finished. Two more shapes joined the
   matrix so every row the media batch published is reproducible from the script:
   the flick-sized scroll on a text page, and a short page of pictures
+- A RAM gate now comes with its control. The previous four batches each reported
+  a same-direction rise on both arms and recorded it as "session drift" without
+  ever measuring what drift is, so the math slice built the commit before it
+  (`2e9de99`) in a temporary worktree against the same target dir and ran the two
+  exes alternately in one sitting: 1.016× on private bytes, with each binary
+  first proving which build it is (md5, and the control tree has no math source
+  file). The worktree goes once the number is in; the next kind that claims a
+  per-row cost repeats the run against its own predecessor commit
 
 ### Known limitations
 - Switching directly from one open menu to another (e.g. ⋮⋮ on a different
@@ -279,10 +305,17 @@ First functional release: a local, single-file-database notes workspace.
   formatting, no sorting. Inside a cell only Tab / Shift+Tab cross between
   cells — Enter does not split one, Backspace does not merge it with a
   neighbour, and the arrow keys will not step up or down a row. A cell takes
-  bold / italic / code / strikethrough but not a link (Ctrl+L is not wired
-  there), and converting a marked line into a table keeps its words and drops
-  its marks. Hovering the grid adds its toolbar as a row, so content below a
+  bold / italic / code / strikethrough / formula but not a link (Ctrl+L is
+  not wired there), and converting a marked line into a table keeps its words
+  and drops its marks. Hovering the grid adds its toolbar as a row, so
+  content below a
   table shifts down by 22 px while the pointer is on it
+- Math is a Unicode reading, not typesetting: `\frac{a+b}{2}` paints on one
+  line as `(a+b)/2`, so there are no stacked fractions, no alignment, no
+  equation numbers, and a superscript falls back to its plain characters
+  wherever the alphabet has no glyph for it. Unknown commands come back as
+  their own source. A Math mark and the other marks do not stack — a formula
+  inside bold text keeps the formula and drops the bold on export
 - Markdown reads tables as plain text: export writes GitHub-flavoured
   tables, and importing one back gives a paragraph per row. Deliberate and
   pinned by a test — the importer is line-at-a-time and a table needs

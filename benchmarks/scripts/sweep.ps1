@@ -31,6 +31,7 @@ $all = @(
     "default", "edit", "empty", "nest", "toggle", "toggle-fold", "rename", "title-edit", "recovered",
     "find", "marks", "block-colors", "page-block", "link-block", "image", "image-half", "file",
     "table", "table-edit",
+    "math", "math-inline",
     "columns", "columns-3",
     "slash", "plus", "block-menu", "move-to", "page-move-to", "text-color",
     "bg-color", "link", "menu", "palette", "palette-nav", "search", "search-notes",

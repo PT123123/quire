@@ -2831,6 +2831,7 @@ const SLASH_ITEMS: &[(BlockKind, &str, &str)] = &[
     (BlockKind::Columns, "Columns", "Two columns of blocks, side by side"),
     (BlockKind::Callout, "Callout", "Highlighted box with an emoji"),
     (BlockKind::Code, "Code", "Monospaced block — or type ```"),
+    (BlockKind::Math, "Math", "LaTeX formula — or type $$"),
     (BlockKind::Divider, "Divider", "Visual separator — or type ---"),
 ];
 
@@ -2862,6 +2863,7 @@ const INSERT_ITEMS: &[(i32, &str, &str)] = &[
     (kind_to_int(BlockKind::Divider), "Divider", "Visual separator"),
     (kind_to_int(BlockKind::Callout), "Callout", "Highlighted box with an emoji"),
     (kind_to_int(BlockKind::Code), "Code", "Monospaced block"),
+    (kind_to_int(BlockKind::Math), "Math", "LaTeX formula, rendered as Unicode"),
     (-1, "Table view", "Database table · later"),
     (-1, "Board", "Board view · later"),
     (-1, "Gallery", "Gallery view · later"),
@@ -2921,6 +2923,7 @@ pub fn kind_from_int(kind: i32) -> BlockKind {
         17 => BlockKind::TableCell,
         18 => BlockKind::Columns,
         19 => BlockKind::Column,
+        20 => BlockKind::Math,
         _ => BlockKind::Paragraph,
     }
 }
@@ -2946,6 +2949,7 @@ const fn kind_to_int(kind: BlockKind) -> i32 {
         BlockKind::TableCell => 17,
         BlockKind::Columns => 18,
         BlockKind::Column => 19,
+        BlockKind::Math => 20,
         BlockKind::Paragraph => 0,
     }
 }
@@ -3032,8 +3036,20 @@ fn build_runs(text: &str, marks: &[crate::core::Mark]) -> Vec<TextRun> {
             let link_mark = marks
                 .iter()
                 .find(|m| m.kind == crate::core::MarkKind::Link && m.start <= s && m.end >= e);
+            // a formula run shows its glyphs, not its source: the document
+            // keeps `\alpha`, the row shows α. Converted here rather than in
+            // the delegate, so the cost is one pass per projection and not one
+            // per binding evaluation.
+            let math = marks
+                .iter()
+                .any(|m| m.kind == crate::core::MarkKind::Math && m.start <= s && m.end >= e);
+            let run_text = &text[s..e];
             Some(TextRun {
-                text: text[s..e].into(),
+                text: if math {
+                    crate::core::math::to_unicode(run_text).into()
+                } else {
+                    run_text.into()
+                },
                 bold: marks
                     .iter()
                     .any(|m| m.kind == crate::core::MarkKind::Bold && m.start <= s && m.end >= e),
@@ -3407,6 +3423,7 @@ pub const BLOCK_TABLE: i32 = 16;
 pub const BLOCK_TABLE_CELL: i32 = 17;
 pub const BLOCK_COLUMNS: i32 = 18;
 pub const BLOCK_COLUMN: i32 = 19;
+pub const BLOCK_MATH: i32 = 20;
 
 fn block(kind: i32, text: &str) -> BlockRow {
     BlockRow {

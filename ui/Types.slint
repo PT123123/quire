@@ -246,7 +246,7 @@ export global UIState {
     // insert-above row index shown as the accent drop line; == blocks.length
     // means "below the last block", -1 hidden
     in-out property <int> drop-line-row: -1;
-    callback toggle-mark(int, int, int); // kind(0 bold,1 italic,2 strike,3 code), start, end
+    callback toggle-mark(int, int, int); // kind(0 bold,1 italic,2 strike,3 code,4 math), start, end
     callback indent-list(int);
     callback outdent-list(int);
     callback duplicate-block(int);
@@ -286,6 +286,11 @@ export global UIState {
     // lookup and not a model field; the two actions hand those bytes to the
     // system, which is the only thing in the app that reaches outside it.
     pure callback attachment-size(int) -> string;
+    // math (SPEC §三十七 批次 C): the LaTeX subset a block or a span holds,
+    // turned into the Unicode a row shows. A callback and not a model field
+    // because the conversion is a pure function of text the row already has,
+    // and the document keeps the source the user edits — never the picture.
+    pure callback math-render(string) -> string;
     callback attachment-opened(int);
     callback attachment-saved(int);
     callback block-activate(int);
