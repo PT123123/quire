@@ -17,7 +17,13 @@ export global Colors {
     // ---- text ----
     out property <color> text-primary: Theme.dark ? #e7e7ea : #1f2328;
     out property <color> text-secondary: Theme.dark ? #b4b4bb : #5f6569;
-    out property <color> text-muted: Theme.dark ? #7d7d86 : #9b9da2;
+    // The third tier is the one that carries the palette's hint rows, block
+    // handles and footers, and in light it used to sit at 2.71:1 on white --
+    // the dimmest text in a light UI, which is a legibility floor, not a style.
+    // #75787d is 4.43 on white / 4.10 on the sidebar, still clearly lighter
+    // than secondary (5.91), so the three tiers survive. Dark was never the
+    // problem: 4.25 / 4.02 on its surfaces.
+    out property <color> text-muted: Theme.dark ? #7d7d86 : #75787d;
     out property <color> text-on-accent: Theme.dark ? #ffffff : #ffffff;
 
     // ---- lines & fills ----
@@ -50,12 +56,22 @@ export global Colors {
     // Notion's light/dark swatches so exported text stays readable.
 
     // text colors: pure function, resolved per row
+    //
+    // Slot 3 and 4 are measured, not eyeballed: on their own tint the light
+    // orange and yellow used to sit at 2.81:1 and 2.48:1, the worst pair in the
+    // palette and the reason an orange block on an orange background is the
+    // hardest row to read. (The A4 sweep named "green-on-olive and red-on-black"
+    // as the weakest pairs by eye; they measure 3.86 and 4.72, so that finding
+    // is retracted and these two are the real ones.) They now read 3.61 and 3.56
+    // on their tint, 4.21 and 3.95 on a plain background — and stop there,
+    // because a darker orange is no longer orange. Every other slot is at or
+    // above 3.71 in light and 4.72 in dark, and dark is unchanged.
     public pure function block-text(slot: int) -> color {
         if (slot <= 0) { return Theme.dark ? #e7e7ea : #1f2328; }
         if (slot == 1) { return Theme.dark ? #9b9a97 : #787774; }
         if (slot == 2) { return Theme.dark ? #c3996b : #9f6b53; }
-        if (slot == 3) { return Theme.dark ? #e28d50 : #d9730d; }
-        if (slot == 4) { return Theme.dark ? #dcae3f : #cb912f; }
+        if (slot == 3) { return Theme.dark ? #e28d50 : #bd6408; }
+        if (slot == 4) { return Theme.dark ? #dcae3f : #a87718; }
         if (slot == 5) { return Theme.dark ? #6ba584 : #448361; }
         if (slot == 6) { return Theme.dark ? #5b9bc4 : #337ea9; }
         if (slot == 7) { return Theme.dark ? #ad7fb8 : #9065b0; }

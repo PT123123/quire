@@ -1147,6 +1147,22 @@ on-screen; the "current color" check is drawn as an icon because the
 software renderer has no font fallback (a ✓ glyph rendered as nothing in
 headless captures).
 
+Amended 2026-09-21 · the ten slots and `text-muted` are now measured, not
+approximated. WCAG relative luminance over the four light surfaces said the
+third text tier sat at 2.51–2.71:1 and the orange and yellow slots at 2.81
+and 2.48 on their own tints — the two weakest pairs in the palette, and the
+reason the A4 sweep's "dimmest text in a light UI" finding was real. Light
+`text-muted` is `#75787d` (4.43 on white, 4.10 on the sidebar), slot 3 is
+`#bd6408` (3.61 on its tint, 4.21 on plain), slot 4 is `#a87718` (3.56,
+3.95). Dark did not move: its muted tier had always read 3.9–4.4, which is
+now the band both themes agree on. Two consequences worth stating: the
+hierarchy is capped by that band, not by AA — pushing muted past ~`#71747a`
+closes the gap to `text-secondary` (5.91) and there is then nothing left
+that reads as a whisper — and the same arithmetic retracted the finding it
+was written to check, because the pairs the sweep named by eye as the
+weakest (green-on-olive, red-on-black) measure 3.86 and 4.72 and were never
+the problem.
+
 ## ADR-0022 · Markdown line-shortcuts; the menus list only what symbols can't reach
 Decision: typing a trigger at the block start converts the block live —
 `# `/`## `/`### ` → Heading 1/2/3, `- `/`* ` → Bullet, `12. ` → Numbered,

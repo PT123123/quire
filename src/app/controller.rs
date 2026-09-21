@@ -3190,6 +3190,22 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
                     if let Some(t) = blocks.iter().find(|b| b.kind == crate::core::BlockKind::Todo) {
                         v.push((t.id, crate::core::ColorKind::Default, crate::core::ColorKind::Blue));
                     }
+                    // Orange and yellow text on their own tint used to be in
+                    // this scene only as a menu dot, which is exactly the pair
+                    // the palette's contrast slice moved -- a hex ratio needs a
+                    // row of glyphs to be worth reading.
+                    let taken: Vec<BlockId> = v.iter().map(|(id, ..)| *id).collect();
+                    let mut rest = blocks
+                        .iter()
+                        .filter(|b| !b.text.is_empty() && !taken.contains(&b.id));
+                    for c in [
+                        crate::core::ColorKind::Orange,
+                        crate::core::ColorKind::Yellow,
+                    ] {
+                        if let Some(b) = rest.by_ref().next() {
+                            v.push((b.id, c, c));
+                        }
+                    }
                     v
                 };
             let doc_changes: Vec<crate::core::Change> = colors

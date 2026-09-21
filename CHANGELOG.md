@@ -234,6 +234,10 @@ First functional release: a local, single-file-database notes workspace.
 
 ### Desktop integration
 - Frameless window with custom title bar, light + dark themes (persisted)
+- The light theme's quietest text is measured rather than eyeballed: the third
+  text tier (block handles, footer, sidebar, every hint row) went from 2.5–2.7:1
+  to 4.1–4.4:1, and the two weakest block colours from 2.81 and 2.48 on their own
+  tint to 3.61 and 3.56 — the band the dark theme has always sat in (ADR-0023)
 - Window size remembered; last-opened page restored
 - Settings: appearance, LAN sharing, the database folder (open it in
   Explorer, take a backup on demand, reclaim unused attachments)

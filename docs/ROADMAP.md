@@ -124,17 +124,33 @@ after `wire()`, and the app binary is untouched, because the app really does run
 the backend its features select. The re-baseline is the proof of scope: 53 scenes
 moved 118–125 px in the footer's single caption line, `settings` 244 px across that
 line plus the dialog's Renderer row — the two places that read the property, and
-nothing else. `.scratch/sweep27` (54 scenes) is the baseline.
+nothing else. `.scratch/sweep29` (54 scenes) is the baseline.
 
 The A4 open list this snapshot used to carry (1 HIGH + 2 MEDIUM + 3 LOW + 1 known
 limitation) is now: **closed** — D1 (marked lines did not wrap, ADR-0041), D9 (the
 empty state's "later milestone" copy, ADR-0033 — no such string is in `ui/`
-anymore), the modal scrim, the `Ctrl+B` palette chord (sidebar is `Ctrl+\`), and
-the renderer label above. **Still open** — D7 · MEDIUM: per-page find reports
+anymore), the modal scrim, the `Ctrl+B` palette chord (sidebar is `Ctrl+\`), the
+renderer label above, and both contrast LOWs. The label one is what taught the
+last: the two contrast findings went from eyeballed to measured, one half of the
+second was false, and the pair that really was weakest had never been painted.
+**Still open** — D7 · MEDIUM: per-page find reports
 "2 / 16" and paints no individual match. The code is now the evidence for what
 that costs: `ui/components/EditorBlock.slint` has no reference to the find term at
 all, so a hit in a block the caret is not in cannot be drawn — it is a missing
 feature (row-level hit ranges, which is the same one-`Text`-one-colour wall ADR-0042
-went around for code), not a broken one. Plus the two contrast LOWs: the palette
-and search hint rows are the dimmest text in a light UI, and `block-colors`
-green-on-olive / red-on-black are the weakest pairs.
+went around for code), not a broken one.
+
+The contrast pair, measured rather than judged (WCAG relative luminance over the
+four light surfaces, `.scratch/contrast.py` for the before table and
+`.scratch/contrast_after.py` for the after): light `text-muted` was 2.71:1 on
+white and 2.51 on the sidebar — the palette's third tier, which the block handle,
+the footer, the sidebar and every hint row in the palette and search panel paint —
+and is now 4.43 / 4.10. The two weakest block slots were orange-on-its-own-tint at
+2.81 and yellow at 2.48; they read 3.61 and 3.56, and on a plain background 4.21
+and 3.95. `#d9730d`/`#cb912f` → `#bd6408`/`#a87718`, dark untouched. What the
+measurement also did was retract: the sweep's named pairs, green-on-olive and
+red-on-black, measure 3.86 and 4.72 and were never the problem. And the ceiling is
+now explicit rather than assumed — muted cannot simply go to 4.5 on every surface,
+because the next step down is `text-secondary` at 5.91 and a third tier that sits
+1.0 above the second is one tier. The dark muted has read 3.9–4.4 all along, so
+that band, not the AA line, is where both themes meet.

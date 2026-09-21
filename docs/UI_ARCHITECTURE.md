@@ -206,7 +206,38 @@ the 54 moved 118–125 px inside `x 96..192 / y 778..784` — the footer's one c
 line — and `settings` moved 244 px across `x 96..722 / y 692..784`, which is that
 same line plus the dialog's Renderer row. Two places read the property; two boxes,
 nothing else.
-The baseline is `.scratch/sweep27` (54 scenes). The set before it, `.scratch/sweep10`
+`sweep27` → `sweep28` (the light palette measured) moved **45 of the 54** and left
+all 9 dark shots byte-identical — the reading a colour-token change has to earn,
+since three literals moved and all three are light-only. (Both new arms are the
+working tree at `2f1ab57` plus this uncommitted diff: the manifest's commit line
+names the last commit, never the tree it was cut from, so the identity of a
+pre-commit sweep is its md5 column, not that header.) A palette diff has no
+bbox worth quoting: `text-muted` is the block handle, the footer, the sidebar and
+every hint row, so `diffbbox` hands back the whole window. The confinement
+argument is directional instead. Across all 54 scenes **no pixel got brighter on
+any channel** (every token moved down), and the largest single-channel drop
+anywhere is 38 — exactly `text-muted`'s red delta, 155 → 117; the two scenes that
+cap at 25, `dialog` and `link`, are the two with 0 pixels of full-coverage muted
+text in the baseline (`default` has 575), so their ceiling is the same 38 scaled
+down by whatever the antialiasing left. Per pixel, a classifier that asks
+whether one coverage `a` and one surface `s` put `a·T_old + (1-a)·s` →
+`a·T_new + (1-a)·s` there attributed 38 176 of 38 283 sampled changed pixels in
+six scenes to one of the three families. The 107-pixel residue is all in `code-hl`,
+all ≤4/3/1 per channel, all on an orange glyph edge over a tinted background where
+the plain sRGB mix the model assumes is not what the rasterizer did. That model
+gets its control from the slice before: run on `sweep26` → `sweep27`, which these
+tokens did not author, it calls 897 of `settings`' 1 215 changed pixels
+unexplained. It can say no. The old value's own census reads the same way: exact
+`#9b9da2` goes 575 → 0 px, and the 1 214 pixels still "within 4" of it are
+antialiased edges of the *new* gray at ~73 % coverage, which passes numerically
+through the old value's neighbourhood on its way to white.
+`sweep28` → `sweep29` moved **2 of 54** and added no scene: the `block-colors`
+fixture gained an orange-on-orange and a yellow-on-yellow row, in both themes,
+because the two slots this slice darkened had never been painted as anything but
+their own menu dot — 120 px of chip, no glyph to read. The census now finds 289 px
+of `#bd6408` and 164 px of `#a87718` where the sweep before had 0 of either, with
+the dark arm's `#e28d50`/`#dcae3f` at the same rows confirming dark moved nothing.
+The baseline is `.scratch/sweep29` (54 scenes). The set before it, `.scratch/sweep10`
 (42 scenes), re-baselined 37 of them for a
 reason unrelated to tables: `DocumentRow.head` bound `height` without `y` and so
 was centred in its delegate, which had been sitting the page title ~34 px below
