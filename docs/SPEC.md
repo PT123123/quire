@@ -2516,11 +2516,11 @@ record 与 page 的关系必须可逆：删 record 与删页面的行为都要�
 
 table → board → list → calendar → gallery → timeline → form → chart
 
-顺序即实现顺序。chart 放最后，且不得为此引入图表库：先用现有绘制 primitive 做 bar / line / pie 三种。—— 2026-09-22 形状定于 ADR-0060（八种是同一个 `Database` 块的 `db_views.layout`，不是八个块种类）与 ADR-0064（视图定义持久化）。「+」插入菜单里那六行 muted 占位（`INSERT_ITEMS` 的 `Table view` / `Board` / `Gallery` / `List view` / `Calendar` / `Timeline`，`id = -1`）就是其中六种 layout，点亮它们 = 给这些行真 id，不是加块种类。2026-09-22 D1 落了**视图定义的存储**（`db_views`：名字 / layout / 顺序是列，规则是一份 JSON，ADR-0064），视图本身（渲染与切换器）仍未有，六行仍不可选。
+顺序即实现顺序。chart 放最后，且不得为此引入图表库：先用现有绘制 primitive 做 bar / line / pie 三种。—— 2026-09-22 形状定于 ADR-0060（八种是同一个 `Database` 块的 `db_views.layout`，不是八个块种类）与 ADR-0064（视图定义持久化）。「+」插入菜单里那六行 muted 占位（`INSERT_ITEMS` 的 `Table view` / `Board` / `Gallery` / `List view` / `Calendar` / `Timeline`，`id = -1`）就是其中六种 layout，点亮它们 = 给这些行真 id，不是加块种类。2026-09-22 D1 落了**视图定义的存储**（`db_views`：名字 / layout / 顺序是列，规则是一份 JSON，ADR-0064），视图本身（渲染与切换器）仍未有，六行仍不可选。 —— 2026-09-22 **D3 交付 table**（ADR-0072…ADR-0075 随刀）：`DatabaseView` / `DatabaseCell` / `DatabaseSwitcher` 三个组件与 `BlockKind::Database` 块（`blocks.db_ref`，v18）点亮，窗口投影真的从 SQL 取行（`core::database::window` 算出 `LIMIT`/`OFFSET`，10 000 行只 realize 视口那一窗，行的 y 由 `db-row-start` 摆回滚动面的原位——「行是动态的」两条规则照 §三十七）；视图切换器是真实的 tab 条（今天每库一个视图，D5 加第二个视图只是加一行）；「+」菜单的 `Table view` 行点亮（真 id），其余五行仍 muted，board 起的七种打开时以自己的 layout 名明说「not in this build yet」。
 
 ## 操作
 
-filter / sort / group by / 视图内搜索 / 行内编辑 / 列宽与隐藏列 / 视图切换器；视图与 schema 一起持久化 —— 行已能存（D1），操作与 UI 未交付（D3 / D4）。视图定义怎么存定于 ADR-0064：视图是 `db_views` 行（名字 / layout / 顺序是列），**规则**（过滤 + 排序 + 分组 + 可见列 + 列宽）是一份 JSON 文档，判据是本 ADR 与 ADR-0061/0062 共用的那一句「SQL 有东西要在它上面过滤吗」——列和值要在，视图规则不用。
+filter / sort / group by / 视图内搜索 / 行内编辑 / 列宽与隐藏列 / 视图切换器；视图与 schema 一起持久化 —— 2026-09-22 **D3 交付行内编辑、列宽与隐藏列、视图切换器**（ADR-0072…ADR-0075）：行内编辑接了 title / text / number 的行内输入、checkbox 的整格点击、select / status 的格内选项列表（一个 `TextInput` 纪律照旧，值经列自己的 kind 解析，ADR-0069）；列宽是 permille、存进视图文档（ADR-0074 的原样透传），隐藏列走窗口级 Columns popup（title 列锁定，ADR-0063）；切换是会话态（ADR-0073）。**filter / sort / group by / 视图内搜索仍未交付（D4）**。视图定义怎么存定于 ADR-0064：视图是 `db_views` 行（名字 / layout / 顺序是列），**规则**（过滤 + 排序 + 分组 + 可见列 + 列宽）是一份 JSON 文档，判据是本 ADR 与 ADR-0061/0062 共用的那一句「SQL 有东西要在它上面过滤吗」——列和值要在，视图规则不用。视图定义怎么存定于 ADR-0064：视图是 `db_views` 行（名字 / layout / 顺序是列），**规则**（过滤 + 排序 + 分组 + 可见列 + 列宽）是一份 JSON 文档，判据是本 ADR 与 ADR-0061/0062 共用的那一句「SQL 有东西要在它上面过滤吗」——列和值要在，视图规则不用。
 
 linked database：引用另一个库的某个视图，不复制数据 —— 未交付（D7）。ADR-0060 / ADR-0064 已定：指向 `(db, view)`，不拷定义，与 ADR-0026 的 Link 块同构。
 

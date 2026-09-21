@@ -1,0 +1,260 @@
+// One cell of a database table view (SPEC §三十九, ADR-0060/0062). The whole
+// point of this component is that it decides nothing: a row's data arrives
+// already painted (`DbCell.text`), already typed (`DbCell.kind`) and already
+// judged (`editable`), so a frame costs a `Text` and one or two comparisons —
+// which is what lets a database of ten thousand rows scroll at all (§二十二's
+// "the delegate stays cheap", ARCHITECTURE rule 6).
+//
+// Three arms, and no fourth:
+//
+//   * a **checkbox** (kind 7) is a box, and clicking anywhere in the cell writes
+//     the inverse — a 16 px square is a precision task, and Notion's checkbox
+//     cell is click-anywhere;
+//   * a **pick** (select 3 / status 5) is a pill that opens the column's own
+//     options *inside the cell*: a popup per realized row would be thirty
+//     window-level popups, so the list is drawn here, above the rows below;
+//   * everything else is text, which becomes the page's one live `TextInput`
+//     while this cell is the editing one — the discipline ADR-0031's grid and
+//     the editor rows already follow (exactly one input exists, and it is created
+//     with the focus rather than told to take the keyboard later).
+//
+// One `TouchArea` for all three arms, branch inside it: three overlapping areas
+// would be three hit tests per cell per frame, and the option list (declared
+// last, so it paints on top) has to be the thing that wins a click when it is
+// open.
+//
+// The static `Text` is drawn even while the input exists: it measures the cell
+// (the cell's height comes from the block anyway, but the pipeline stays one
+// shape), and it is what the cell shows again the moment the editor goes away.
+
+import { Theme } from "../Theme.slint";
+import { Colors } from "../Colors.slint";
+import { Typography } from "../Typography.slint";
+import { UIState, DbCell, DbColumn } from "../Types.slint";
+
+export component DatabaseCell inherits Rectangle {
+    in property <DbCell> cell;
+    in property <DbColumn> column;
+    in property <int> record; // the row this cell belongs to
+    in property <int> block;  // the Database block, for every callback
+
+    // The one live editor for the whole page: `db-editing-*` names this cell,
+    // and `editing-id` being negative is what guarantees the *block* editor is
+    // not also up (the two are set by different layers and must not both win).
+    property <bool> editing: UIState.db-editing-record == record
+        && UIState.db-editing-property == cell.property
+        && UIState.editing-id < 0;
+    // The other "this cell is open" state. The two cannot both be true: opening
+    // one closes the other, in this component and in the controller.
+    property <bool> picking: UIState.db-picking-record == record
+        && UIState.db-picking-property == cell.property;
+    property <bool> is-flag: cell.kind == 7;
+    property <bool> is-pick: cell.kind == 3 || cell.kind == 5;
+    property <length> pad: Theme.spacing-sm;
+
+    background: transparent;
+    border-width: 1px;
+    border-color: Colors.border;
+
+    // ── text (and the fallback for a kind with no cell of its own) ────────
+    if !is-flag && !is-pick : Text {
+        x: root.pad;
+        y: 0px;
+        width: root.width - 2 * root.pad;
+        height: parent.height;
+        vertical-alignment: center;
+        overflow: elide;
+        text: root.editing ? UIState.editing-text : cell.text;
+        font-family: Typography.ui-font;
+        font-size: Typography.size-ui;
+        color: Colors.text-primary;
+    }
+
+    // ── checkbox (kind 7) ────────────────────────────────────────────────
+    if is-flag : Rectangle {
+        x: root.pad;
+        y: (parent.height - 16px) / 2;
+        width: 16px;
+        height: 16px;
+        border-radius: Theme.radius-xs;
+        border-width: 1.5px;
+        border-color: cell.checked ? Colors.accent : Colors.border-strong;
+        background: cell.checked ? Colors.accent : transparent;
+
+        if cell.checked : Text {
+            x: 0px;
+            y: -1px;
+            width: parent.width;
+            height: parent.height;
+            text: "v";
+            font-size: 11px;
+            font-weight: Typography.weight-bold;
+            color: Colors.text-on-accent;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
+    // ── pick (select 3 / status 5) ───────────────────────────────────────
+    if is-pick : Rectangle {
+        x: root.pad;
+        y: (parent.height - 20px) / 2;
+        width: Math.min(root.width - 2 * root.pad, pill.width + 2 * Theme.spacing-sm);
+        height: 20px;
+        border-radius: 10px;
+        background: Colors.surface-hover;
+        border-width: cell.text == "" ? 1px : 0px;
+        border-color: Colors.border-strong;
+
+        pill := Text {
+            x: Theme.spacing-sm;
+            y: 0px;
+            height: parent.height;
+            vertical-alignment: center;
+            text: cell.text == "" ? "Empty" : cell.text;
+            font-family: Typography.ui-font;
+            font-size: Typography.size-caption;
+            color: cell.text == "" ? Colors.text-muted : Colors.text-primary;
+        }
+    }
+
+    // ── the cell's own clicks: one area, three meanings ──────────────────
+    ta := TouchArea {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: parent.height;
+        // a derived or computed column has no editor to open, so its cell is
+        // inert; a cell whose editor is up keeps its area (the input is on top
+        // of it) so that clicking away and back does not re-open anything
+        enabled: cell.editable && !root.editing;
+        mouse-cursor: cell.editable ? MouseCursor.pointer : MouseCursor.default;
+        clicked => {
+            if (root.is-flag) {
+                UIState.db-cell-toggled(root.block, root.record, root.cell.property, root.cell.checked);
+            } else if (root.is-pick) {
+                // clicking the open pill closes it: the picker has no scrim, so
+                // this is the only way back out without picking anything
+                UIState.db-picking-record = root.picking ? -1 : root.record;
+                UIState.db-picking-property = root.picking ? -1 : root.cell.property;
+            } else {
+                UIState.db-cell-activated(root.block, root.record, root.cell.property);
+            }
+        }
+    }
+
+    // ── the options, over the rows below this one ────────────────────────
+    // Declared after `ta` so it wins the click, and *below* no row: it paints
+    // over the following rows of the same table, which is what a dropdown does.
+    if picking && cell.editable : Rectangle {
+        x: root.pad;
+        y: parent.height + 2px;
+        width: 200px;
+        height: column.options.length * 26px + 8px;
+        border-radius: Theme.radius-md;
+        background: Colors.surface-overlay;
+        border-width: 1px;
+        border-color: Colors.border;
+        drop-shadow-blur: 8px;
+        drop-shadow-color: Colors.shadow;
+
+        for option[index] in column.options : Rectangle {
+            x: 4px;
+            y: 4px + index * 26px;
+            width: parent.width - 8px;
+            height: 26px;
+            border-radius: Theme.radius-sm;
+            background: opt-ta.has-hover ? Colors.surface-hover : transparent;
+
+            Text {
+                x: 6px;
+                y: 0px;
+                width: parent.width - 12px;
+                height: parent.height;
+                vertical-alignment: center;
+                overflow: elide;
+                text: option.name;
+                font-family: Typography.ui-font;
+                font-size: Typography.size-ui;
+                color: option.id == cell.text ? Colors.accent-text : Colors.text-primary;
+            }
+
+            opt-ta := TouchArea {
+                width: parent.width;
+                height: parent.height;
+                mouse-cursor: MouseCursor.pointer;
+                clicked => {
+                    // picking the option a cell already holds clears it, which is
+                    // why the current value travels with the call
+                    UIState.db-option-picked(
+                        root.block, root.record, root.cell.property,
+                        option.id, root.cell.text);
+                    UIState.db-picking-record = -1;
+                    UIState.db-picking-property = -1;
+                }
+            }
+        }
+
+        // an empty option list is a column nobody has configured yet: it says so
+        // instead of drawing an empty box (the option editor is D5's)
+        if column.options.length == 0 : Text {
+            x: 6px;
+            y: 0px;
+            width: parent.width - 12px;
+            height: 26px;
+            vertical-alignment: center;
+            text: "No options yet";
+            font-family: Typography.ui-font;
+            font-size: Typography.size-caption;
+            color: Colors.text-muted;
+        }
+    }
+
+    // ── the text editor: one live input, created with the focus ──────────
+    if editing && cell.editable : cell-edit := TextInput {
+        x: root.pad;
+        y: 0px;
+        width: root.width - 2 * root.pad;
+        height: parent.height;
+        vertical-alignment: center;
+        text <=> UIState.editing-text;
+        font-family: Typography.ui-font;
+        font-size: Typography.size-ui;
+        color: Colors.text-primary;
+        single-line: true;
+        selection-foreground-color: Colors.text-primary;
+        selection-background-color: Colors.selection;
+
+        // A cell has no line shortcuts (no "# ", no "/"), so this is the
+        // debounced commit alone — the same contract the table grid's cells and
+        // the columns layout's items have (SPEC §三十七, ADR-0031).
+        edited => {
+            UIState.db-cell-changed();
+        }
+        accepted => {
+            // Enter commits and closes: the row is the unit here, not the line.
+            // Closing goes through the controller (`db-cell-closed`), because
+            // the editor resetting the two ids is what makes the debounced
+            // commit a no-op — a text typed in the last 300 ms must not die.
+            UIState.db-cell-closed();
+        }
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                UIState.db-cell-closed();
+                accept
+            } else if (event.text == Key.Tab) {
+                UIState.db-cell-closed();
+                accept
+            } else {
+                reject
+            }
+        }
+        init => {
+            // created with the focus, like the sidebar's rename input: an
+            // always-there input would have to be *told* to take the keyboard,
+            // and `init` is the one moment that is reliable
+            cell-edit.focus();
+            cell-edit.select-all();
+        }
+    }
+}

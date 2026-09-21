@@ -104,6 +104,35 @@ export struct BlockRow {
     column-boxes: [ColumnBox],
     // a toc (21) block's lines: this page's headings, derived every projection
     toc-entries: [TocEntry],
+    // ─── database (23), SPEC §三十九 ──────────────────────────────────────
+    // The entity this block draws (ADR-0060); -1 = the block has none, and
+    // `db-ok` says whether one exists at all — a dangling ref is ADR-0060's
+    // "(deleted database)", a single muted line.
+    db-ref: int,
+    db-ok: bool,
+    db-title: string,   // the database's own name, for the header line
+    db-rows: [DbRow],   // ONLY the realized window (D0: 31 rows of 10 000)
+    db-columns: [DbColumn],
+    db-views: [DbViewTab],
+    // The window's place in the scroll surface: row `n` of the database is model
+    // index `n - db-row-start`, and the surface is `db-row-count` rows tall.
+    // This is §三十七's row->model conversion, done in Rust, not in a delegate.
+    db-row-start: int,
+    db-row-count: int,
+    db-row-height: length,
+    db-header-height: length,
+    db-layout: string,     // the active view's layout, as its label
+    db-layout-ok: bool,    // false = this build does not draw that layout yet
+}
+
+// Database (23) cell values (SPEC §三十九). Everything is already painted and
+// every decision is already made: a delegate draws `text` and compares `kind`.
+export struct DbColumnToggle {
+    property: int,
+    name: string,
+    kind: string,
+    visible: bool,
+    locked: bool, // the title column: listed, never hideable
 }
 
 export struct CommandRow {
@@ -226,6 +255,38 @@ export global UIState {
     in-out property <int> editing-id: -1;
     in-out property <string> editing-text: "";
     in-out property <int> pending-caret: -1;
+
+    // database cells (SPEC §三十九): the same "one live TextInput" discipline as
+    // blocks above, keyed by (record, property) because a database cell is not a
+    // block and has no block id. Both are -1 when no cell is being edited, and a
+    // cell's editor exists only while `editing-id < 0` — so a page can never
+    // have two live inputs, whatever order the two were set in.
+    in-out property <int> db-editing-record: -1;
+    in-out property <int> db-editing-property: -1;
+    // The block the edited cell belongs to. A database cell is named by
+    // (block, record, property) — record and property alone could name a row
+    // of a different database — and the commit path reads all three, so the
+    // block travels with the other two rather than being guessed at.
+    in-out property <int> db-editing-block: -1;
+    // The list of a cell's options while a select/status cell is picking, and the
+    // cell that owns it. The picker is drawn inside the cell rather than in a
+    // popup: one popup per realized row is not a popup, it is a list.
+    in-out property <int> db-picking-record: -1;
+    in-out property <int> db-picking-property: -1;
+    // A row's own menu (delete this row), keyed the same way.
+    in-out property <int> db-menu-record: -1;
+    // The editor list's own height, reported by Editor.slint. It is the viewport
+    // the database window is computed from — one number for the page, because
+    // every database on it sees the same one.
+    in-out property <length> editor-viewport-h: 720px;
+    // The columns popup (hide/show a column of the active view). It is a
+    // window-level popup like the block menu, so it lives in AppWindow.slint and
+    // its rows are pushed by Rust.
+    in-out property <bool> db-columns-open: false;
+    in-out property <int> db-columns-block: -1;
+    in-out property <[DbColumnToggle]> db-columns-rows;
+    in-out property <length> db-columns-x: 300px;
+    in-out property <length> db-columns-y: 200px;
 
     // command palette
     in-out property <bool> palette-open: false;
@@ -382,6 +443,37 @@ export global UIState {
     // a box with no blocks has nothing to click into, so it offers its own id
     // and Rust gives it its first line
     callback column-fill(int); // box (Column block) id
+    // database (SPEC §三十九), the one block kind whose rows are not blocks.
+    // Everything a cell does is one of these; the *values* it writes are typed in
+    // Rust (`core::database_property` parses them through the column's own kind),
+    // so a delegate never converts anything. `property` is the PropertyKind-carrying
+    // property id and `kind` the PropertyKind index (0 title, 1 text, 2 number,
+    // 3 select, 4 multi-select, 5 status, 6 date, 7 checkbox, 8 url, 9 email,
+    // 10 phone, 11 files, 12 created time, 13 last edited time, 14 formula,
+    // 15 rollup, 16 relation — `PropertyKind::ALL`'s order in Rust).
+    callback db-cell-activated(int, int, int);   // block, record, property: focus the one editor
+    callback db-cell-changed();                  // the live cell's text moved: re-arm the commit
+    // The live cell is going away (Enter / Escape / Tab). The commit cannot be
+    // left to the debounce here — closing the editor resets the two ids the
+    // debounced commit reads back, so a text typed in the last 300 ms would be
+    // silently dropped. The controller commits synchronously, then closes.
+    callback db-cell-closed();
+    callback db-cell-toggled(int, int, int, bool); // block, record, property, what the cell now shows
+    callback db-option-picked(int, int, int, string, string); // block, record, property, option id, current
+    callback db-row-added(int);                  // block: append a row
+    callback db-row-removed(int, int);           // block, record
+    callback db-column-resized(int, int, int);   // block, property, width in permille (0 = auto)
+    callback db-columns-opened(int, length, length); // block, viewport-x, viewport-y
+    callback db-column-toggled(int, int);        // block, property
+    callback db-columns-closed();
+    // The view switcher: one view today, and the shape that makes D5's second
+    // view a row instead of a rewrite.
+    callback db-view-picked(int, int);           // block, view id
+    // The block's own top edge relative to the editor viewport, in px — how the
+    // window follows the page's scroll without Rust being able to see Slint's
+    // layout. Fired when that number moves, which is a scroll or a reflow.
+    callback db-viewport(int, length);           // block, top-in-viewport
+    callback db-open-record(int, int);           // block, record: open the row's page (D5)
     // rich paste (SPEC §二十七): true = the clipboard landed as blocks (the
     // key is consumed); false = fall through to the native plain paste
     callback rich-paste(int) -> bool;

@@ -10,6 +10,7 @@ import { Icon } from "../Icons.slint";
 import { BlockHandle } from "./BlockHandle.slint";
 import { TableBlock } from "./TableBlock.slint";
 import { ColumnsBlock } from "./ColumnsBlock.slint";
+import { DatabaseView } from "./DatabaseView.slint";
 import { BlockRow, UIState } from "../Types.slint";
 
 export component EditorBlock inherits Rectangle {
@@ -34,6 +35,23 @@ export component EditorBlock inherits Rectangle {
     property <bool> is-math: block.kind == 20;
     property <bool> is-toc: block.kind == 21;
     property <bool> is-embed: block.kind == 22;
+    // database (kind 23, SPEC §三十九): a leaf like a grid or a layout — it owns
+    // no child blocks (its rows are records, its cells are values)
+    property <bool> is-database: block.kind == 23;
+    // The row's height is the view's own (SPEC §三十九 红线第一条): the header
+    // plus every row of the *database*, not of the realized window, which is
+    // what makes the page's scroll the view's scroll — a 10 000-row database
+    // is a tall block, and the rows that exist as objects are only the ones
+    // the viewport can see. The two lengths come from Rust
+    // (`TableView::HEADER_HEIGHT` / `ROW_HEIGHT`), so the delegate and the
+    // window arithmetic cannot disagree about a row's height. An empty
+    // database reserves one clickable line; a dangling entity is its one
+    // muted line (ADR-0060).
+    property <length> db-height: !block.db-ok ? 34px
+        : block.db-row-count > 0
+            ? block.db-header-height + block.db-row-count * block.db-row-height
+            : block.db-header-height + 34px;
+
     // picture (kind 14): the row's height comes from the raster's ratio, which
     // Rust knows from the attachments row. 0 means there is no picture to
     // show — a missing file or an attachment from another library — and the
@@ -85,7 +103,7 @@ export component EditorBlock inherits Rectangle {
         : block.kind == 3 || block.kind == 9 || block.kind == 10
             || block.kind == 14 || block.kind == 15 || block.kind == 16
             || block.kind == 18 || block.kind == 20 || block.kind == 21
-            || block.kind == 22
+            || block.kind == 22 || block.kind == 23
             ? Theme.spacing-md
         : 0px;
 
@@ -126,6 +144,7 @@ export component EditorBlock inherits Rectangle {
         : block.kind == 15 ? root.file-height
         : block.kind == 16 ? tbl.height
         : block.kind == 18 ? clm.height
+        : is-database ? root.db-height
         : is-page-ish ? page-text.height
         : plain-text.height;
 
@@ -147,7 +166,7 @@ export component EditorBlock inherits Rectangle {
             // a table owns its clicks: each cell is the thing you aim at, and
             // activating the table itself would put a caret in nowhere. Same
             // for a layout: its boxes are where the text is.
-            else if (!is-table && !is-columns && !editing) {
+            else if (!is-table && !is-columns && !is-database && !editing) {
                 UIState.block-activate(block.id);
             }
         }
@@ -1085,6 +1104,23 @@ export component EditorBlock inherits Rectangle {
         line-y: row-y;
         line-x: content-x;
         hovered: ta.has-hover || handle.hovered || clm.inner-hover;
+    }
+
+    // database (kind 23): the whole view is this one row. Its rows are records,
+    // not child blocks, so nothing is hidden from the projection — the row
+    // carries the realized window plus the view's own shape (SPEC §三十九).
+    // Declared after `ta` like the grid and the layout: the cells are the
+    // things you aim at, so they win the click. `row-y` is the block body's
+    // top in list coords, which is the anchor the component's scroll
+    // arithmetic reports back to Rust (`db-viewport`).
+    dbv := DatabaseView {
+        x: content-x;
+        y: top-margin;
+        width: content-width;
+        visible: is-database;
+        block: block;
+        content-width: content-width;
+        row-y: root.row-y + top-margin;
     }
 
     // drag-reorder drop indicator: accent line where the block would land.

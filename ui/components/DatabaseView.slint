@@ -1,0 +1,446 @@
+// The table view of a database block (SPEC §三十九 「视图」, ADR-0060/0064/0067).
+//
+// This component is the *whole* block body: the view switcher, the column
+// header, and the realized rows. Three things about it are decisions rather than
+// drawing, and each one is why a database can sit inside a page at all:
+//
+// 1. **The rows here are a window, not the table.** `block.db-rows` holds the
+//    rows the viewport asked for (31 of 10 000 at the default geometry) and
+//    `block.db-row-start` says where that slice begins. Each row is placed at
+//    its true `y` — `header + (start + index) * row-height` — so the block is as
+//    tall as the database and the rows appear where a reader expects them, while
+//    the objects that exist are only the ones on screen (ADR-0067, SPEC's first
+//    red line). The row→model conversion is that expression and nothing else:
+//    model index `i` is row `start + i`, and no delegate ever guesses which one
+//    it has been handed.
+//
+// 2. **The scroll is the page's scroll.** There is no second scroll region: the
+//    block grows to the table's height and the editor's own `ListView` scrolls
+//    it, so the realized rows are the ones the page viewport can see. Rust
+//    cannot see Slint's layout, so this component *reports* where its top is
+//    relative to the viewport (`top-in-view`, below) and Rust turns that into
+//    the window. The alternative — a nested scroll area — is the one shape this
+//    project refuses on principle: a wheel that scrolls an inner list instead of
+//    the page is a trap, not a feature.
+//
+// 3. **Column widths are permille, and the layout divides them.** A stored width
+//    is a fraction of the grid (ADR-0064's `widths` map), so a fixed column gets
+//    an explicit pixel width and an "auto" one (permille 0) gets an equal share
+//    of what is left — through `horizontal-stretch`, because Slint has no fold
+//    to sum the fixed widths inside a binding. Header and rows use the same
+//    expression, which is what keeps the columns aligned.
+//
+// What is deliberately *not* here: adding or reordering a property, a filter, a
+// sort, a row menu beyond delete, and the other seven layouts. The first four
+// are D4/D5, and the last is why `db-layout-ok` exists: a view whose layout this
+// build cannot draw says so instead of pretending to be a table.
+
+import { Theme } from "../Theme.slint";
+import { Colors } from "../Colors.slint";
+import { Typography } from "../Typography.slint";
+import { Icon } from "../Icons.slint";
+import { UIState, BlockRow } from "../Types.slint";
+import { DatabaseCell } from "./DatabaseCell.slint";
+import { DatabaseSwitcher } from "./DatabaseSwitcher.slint";
+
+export component DatabaseView inherits Rectangle {
+    in property <BlockRow> block;
+    in property <length> content-width;
+    in property <length> row-y; // the block body's top, in list-content coords
+
+    // The page scroll, and this block's place in it: where the viewport's top
+    // edge falls inside this block, in px. Negative when the block's top is
+    // above the viewport, positive when the block starts below it. Reported to
+    // Rust whenever it moves — a scroll, a reflow, a page switch — and it is the
+    // *only* piece of layout this slice lets Rust depend on.
+    property <length> top-in-view: root.row-y - UIState.editor-scroll-y;
+    changed top-in-view => {
+        UIState.db-viewport(root.block.id, root.top-in-view);
+    }
+
+    // The scroll surface: the header plus every row of the *database*, not of
+    // the window. An empty database reserves one line for its "no rows" text, so
+    // the block is never zero-height and always clickable.
+    property <length> body-top: root.block.db-header-height;
+    property <length> body-h: root.block.db-row-count * root.block.db-row-height;
+    property <length> empty-h: 34px;
+    property <bool> has-rows: root.block.db-row-count > 0;
+    height: root.body-top + (root.has-rows ? root.body-h : root.empty-h);
+
+    // The columns' grid: the row-action slot is reserved on both the header and
+    // the rows, which is what keeps their columns aligned.
+    property <length> slot-w: 22px;
+    property <length> grid-w: Math.max(root.content-width - root.slot-w, 40px);
+    property <int> drag-col: -1;
+    property <length> drag-dx: 0px;
+    // [T2 unblock fix] PointerEvent 没有 delta-x 字段（那是 scroll 事件才有），
+    // 改用 TouchArea.pressed-x 手动求差；只是让编译通过，拖拽语义不变。
+    property <length> drag-last-x: 0px;
+    property <bool> live: block.db-ok && block.db-layout-ok;
+    // A view whose layout is not drawn still names itself; the label is the
+    // view's `db_views.layout` as a word (ADR-0060's fold, on screen).
+    property <bool> foreign: block.db-ok && !block.db-layout-ok;
+
+    // The width of one column: a stored permille is a pixel width, and an "auto"
+    // one (0) asks the layout for a share (see the header comment).
+    function col-w(index: int) -> length {
+        root.block.db-columns[index].permille > 0
+            ? root.grid-w * root.block.db-columns[index].permille / 1000
+            : 0px
+    }
+    function col-fixed(index: int) -> bool {
+        root.block.db-columns[index].permille > 0
+    }
+
+    background: transparent;
+
+    // ── the block has no entity: ADR-0060's "(deleted database)" ─────────
+    // One muted line, exactly as a dangling `page_ref` draws. The block is still
+    // a block: hiding it would silently take a row out of the page.
+    if !block.db-ok : Text {
+        x: 0px;
+        y: Theme.spacing-md;
+        width: root.content-width;
+        height: 24px;
+        vertical-alignment: center;
+        text: "(deleted database)";
+        font-family: Typography.ui-font;
+        font-size: Typography.size-ui;
+        color: Colors.text-muted;
+    }
+
+    // ── the header: the views, the actions, and the column names ──────────
+    if root.live : Rectangle {
+        x: 0px;
+        y: 0px;
+        width: root.content-width;
+        height: root.body-top;
+        background: transparent;
+
+        DatabaseSwitcher {
+            x: 0px;
+            y: 4px;
+            tabs: root.block.db-views;
+            block: root.block.id;
+        }
+
+        // How many rows there are, in words: a 10 000-row table's scroll bar
+        // cannot say it, and the switcher line has the room. Right-aligned
+        // against the two buttons, which are fixed-width.
+        Text {
+            x: parent.width - 96px - 92px - 96px;
+            y: 4px;
+            width: 88px;
+            height: 22px;
+            vertical-alignment: center;
+            horizontal-alignment: right;
+            text: root.block.db-row-count == 1 ? "1 row"
+                : root.block.db-row-count + " rows";
+            font-family: Typography.ui-font;
+            font-size: Typography.size-caption;
+            color: Colors.text-muted;
+        }
+
+        // "New row": the one row action that is not per-row. It lives in the
+        // header rather than under the last row, because a 10 000-row database
+        // has no reachable last row.
+        new-row := Rectangle {
+            x: parent.width - 96px - 92px;
+            y: 4px;
+            width: 92px;
+            height: 22px;
+            border-radius: Theme.radius-sm;
+            background: new-row-ta.has-hover ? Colors.surface-hover : transparent;
+
+            Icon {
+                x: 4px;
+                y: 4px;
+                width: 14px;
+                height: 14px;
+                size: 14px;
+                name: "plus";
+                color: Colors.text-secondary;
+            }
+            Text {
+                x: 22px;
+                y: 0px;
+                height: parent.height;
+                vertical-alignment: center;
+                text: "New row";
+                font-family: Typography.ui-font;
+                font-size: Typography.size-caption;
+                color: Colors.text-secondary;
+            }
+            new-row-ta := TouchArea {
+                width: parent.width;
+                height: parent.height;
+                mouse-cursor: MouseCursor.pointer;
+                clicked => {
+                    UIState.db-row-added(root.block.id);
+                }
+            }
+        }
+
+        // "Columns": the visible-column list (SPEC §三十九's 隐藏列). A window
+        // popup and not an inline menu, because a menu drawn inside a row would
+        // be clipped by the list view it sits in.
+        columns-btn := Rectangle {
+            x: parent.width - 96px;
+            y: 4px;
+            width: 96px;
+            height: 22px;
+            border-radius: Theme.radius-sm;
+            background: columns-ta.has-hover ? Colors.surface-hover : transparent;
+
+            Icon {
+                x: 4px;
+                y: 4px;
+                width: 14px;
+                height: 14px;
+                size: 14px;
+                name: "minimize";
+                color: Colors.text-secondary;
+            }
+            Text {
+                x: 22px;
+                y: 0px;
+                height: parent.height;
+                vertical-alignment: center;
+                text: "Columns";
+                font-family: Typography.ui-font;
+                font-size: Typography.size-caption;
+                color: Colors.text-secondary;
+            }
+            columns-ta := TouchArea {
+                width: parent.width;
+                height: parent.height;
+                mouse-cursor: MouseCursor.pointer;
+                clicked => {
+                    // anchored just under the button, in *window* coordinates:
+                    // the popup lives at the window root (slint rule), and
+                    // `absolute-position` is the element's position relative
+                    // to that window — scroll and sidebar included, so the
+                    // controller has no geometry of its own to add. The
+                    // controller still clamps (the last rows must not open
+                    // off the bottom).
+                    UIState.db-columns-opened(
+                        root.block.id,
+                        self.absolute-position.x,
+                        self.absolute-position.y + self.height);
+                }
+            }
+        }
+
+        // the column names, one per visible column, in view order
+        HorizontalLayout {
+            x: 0px;
+            y: root.body-top - 34px;
+            width: root.grid-w;
+            height: 34px;
+            spacing: 0px;
+
+            for column[index] in root.block.db-columns : Rectangle {
+                width: root.col-w(index);
+                horizontal-stretch: root.col-fixed(index) ? 0 : 1;
+                background: head-ta.has-hover ? Colors.surface-hover : transparent;
+                border-width: 1px;
+                border-color: Colors.border;
+
+                Text {
+                    x: Theme.spacing-sm;
+                    y: 0px;
+                    width: parent.width - 2 * Theme.spacing-sm;
+                    height: parent.height;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    text: column.name;
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-caption;
+                    font-weight: Typography.weight-semibold;
+                    color: Colors.text-secondary;
+                }
+
+                head-ta := TouchArea {
+                    width: parent.width - 6px;
+                    height: parent.height;
+                }
+
+                // The resize handle: a 6 px strip on the column's trailing edge.
+                // The width is applied **on release**, and the drag paints a
+                // guide instead — a per-move write would be a SQL write per
+                // frame, and a per-move re-projection would rebuild the window
+                // the reader is looking at.
+                resize := TouchArea {
+                    x: parent.width - 6px;
+                    width: 6px;
+                    height: parent.height;
+                    mouse-cursor: MouseCursor.pointer;
+                    pointer-event(e) => {
+                        if (e.kind == PointerEventKind.down) {
+                            root.drag-col = index;
+                            root.drag-dx = 0px;
+                            root.drag-last-x = self.pressed-x;
+                        } else if (e.kind == PointerEventKind.move) {
+                            if (root.drag-col == index) {
+                                root.drag-dx += self.pressed-x - root.drag-last-x;
+                                root.drag-last-x = self.pressed-x;
+                            }
+                        } else if (e.kind == PointerEventKind.up) {
+                            if (root.drag-col == index) {
+                                root.drag-dx += self.pressed-x - root.drag-last-x;
+                                root.drag-last-x = self.pressed-x;
+                                // the resolved width of this column, which the
+                                // layout already knows (which is why the handle
+                                // lives inside it) plus what the drag moved
+                                UIState.db-column-resized(
+                                    root.block.id,
+                                    column.property,
+                                    Math.round((parent.width + root.drag-dx) * 1000 / root.grid-w));
+                                root.drag-col = -1;
+                                root.drag-dx = 0px;
+                            }
+                        }
+                    }
+                }
+
+                // where the edge would land if the drag were released now
+                if root.drag-col == index : Rectangle {
+                    x: parent.width + root.drag-dx - 1px;
+                    y: 0px;
+                    width: 2px;
+                    height: parent.height;
+                    background: Colors.accent;
+                }
+            }
+        }
+    }
+
+    // ── the rows ────────────────────────────────────────────────────────
+    // One element per realized row, placed at its own offset in the scroll
+    // surface: `db-row-start` is what makes `index` a *model* index and the
+    // position a *row* index (§三十七's two extra rules for a block whose rows
+    // are dynamic). Deliberately not clipped — a select cell's option list is
+    // taller than the row it belongs to, and the list view clips to the viewport
+    // anyway.
+    if root.live : Rectangle {
+        x: 0px;
+        y: root.body-top;
+        width: root.content-width;
+        height: root.has-rows ? root.body-h : root.empty-h;
+        background: transparent;
+
+        for row[index] in root.block.db-rows : Rectangle {
+            x: 0px;
+            y: (root.block.db-row-start + index) * root.block.db-row-height;
+            width: parent.width;
+            height: root.block.db-row-height;
+            background: transparent;
+
+            HorizontalLayout {
+                x: 0px;
+                y: 0px;
+                width: root.grid-w;
+                height: parent.height;
+                spacing: 0px;
+
+                for cell[ci] in row.cells : DatabaseCell {
+                    width: root.col-w(ci);
+                    horizontal-stretch: root.col-fixed(ci) ? 0 : 1;
+                    height: parent.height;
+                    cell: cell;
+                    column: root.block.db-columns[ci];
+                    record: row.record;
+                    block: root.block.id;
+                }
+            }
+
+            // The row's own action, in the slot both the header and the rows
+            // reserve. Delete is ADR-0063's plan (`[values, record, page?]`, one
+            // Ctrl+Z) and the only row menu D3 ships: renaming a row is editing
+            // its title cell, and opening one as a page is D5's.
+            row-actions := Rectangle {
+                x: root.grid-w;
+                width: root.slot-w;
+                height: parent.height;
+                background: transparent;
+
+                Text {
+                    x: 0px;
+                    y: 0px;
+                    width: parent.width;
+                    height: parent.height;
+                    text: "x";
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    font-size: Typography.size-caption;
+                    // only on hover: a row that always shows a delete affordance
+                    // is a row of noise, and the 22 px slot is a deliberate
+                    // small target for a destructive action
+                    color: del-ta.has-hover ? Colors.danger : Colors.text-muted;
+                    opacity: del-ta.has-hover ? 1.0 : 0.0;
+                }
+                del-ta := TouchArea {
+                    width: parent.width;
+                    height: parent.height;
+                    mouse-cursor: MouseCursor.pointer;
+                    clicked => {
+                        UIState.db-row-removed(root.block.id, row.record);
+                    }
+                }
+            }
+        }
+
+        // an empty database says so and offers its first row, in the place the
+        // rows would start
+        if !root.has-rows : Rectangle {
+            x: 0px;
+            y: 0px;
+            width: parent.width;
+            height: root.empty-h;
+            background: empty-ta.has-hover ? Colors.surface-hover : transparent;
+
+            Text {
+                x: Theme.spacing-sm;
+                y: 0px;
+                height: parent.height;
+                vertical-alignment: center;
+                text: "No rows yet - New row adds one";
+                font-family: Typography.ui-font;
+                font-size: Typography.size-caption;
+                color: Colors.text-muted;
+            }
+            empty-ta := TouchArea {
+                width: parent.width;
+                height: parent.height;
+                mouse-cursor: MouseCursor.pointer;
+                clicked => {
+                    UIState.db-row-added(root.block.id);
+                }
+            }
+        }
+    }
+
+    // ── a layout this build cannot draw yet (D5) ─────────────────────────
+    // SPEC §三十九's order is the implementation order, so a database written by
+    // a later build can name a view this one has no drawing for. It says which
+    // view it is, instead of showing a table that is not what was asked for.
+    if root.foreign : Rectangle {
+        x: 0px;
+        y: root.body-top;
+        width: root.content-width;
+        height: root.empty-h;
+        background: transparent;
+
+        Text {
+            x: 0px;
+            y: 0px;
+            width: parent.width;
+            height: parent.height;
+            vertical-alignment: center;
+            text: "\{root.block.db-layout} view - not in this build yet";
+            font-family: Typography.ui-font;
+            font-size: Typography.size-caption;
+            color: Colors.text-muted;
+        }
+    }
+}

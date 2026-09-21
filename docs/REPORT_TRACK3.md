@@ -712,3 +712,196 @@ B 树（`USE TEMP B-TREE FOR ORDER BY` 就是它），而 Rust 排 10 000 个 f6
    本刀的选择，是「谁的提交先落地」决定的；合并顺序若先合 Track 2，本刀那步会自动接在 v16 之后。
 3. **`quire-shot`（debug）与 `quire`（release）用同一棵源码树**：本刀的 sweep 因此采到了 Track 2 的 10 个
    新场景（见 §3 结尾），读数要按「67 个既有场景逐字节相同」来看，而不是「10 个 new」。
+
+# Track 3 — Database（D3：table view，代码刀）
+
+D0 决策、D1 存储层、D2 属性系统之后，D3 把 §三十九 **画出来**并点亮 ADR-0060 的六个接点。
+本刀遵守任务书铁律：**只写代码，一行 cargo 都没跑**（不 check / 不 build / 不 test / 不 run，
+不跑 sweep）——编译、测试、视觉对照全部留给全部代码生成完之后的总测试。本节行号是**工作树**
+（四条 track 未提交改动的合集）的行号。
+
+## 1 · 开工时的现状（对任务书五个缺口的核对结论）
+
+接手时上一轮 D3 的 WIP 比任务书记的多：`state.rs` 的投影层（`DbWindow` / `db_watch` /
+`db_refresh` / `db_fill_row` / 12 个 `db_*` 写入 helper / `db_absorb`）、`command.rs` 的六个
+Database 命令、`persistence.rs` 的 `BlockDbRefSet`、`document.rs` 的应用臂、`migrations.rs` 的
+v18、`export_service.rs` 的 `DatabaseTable` + `render_database` + 导出臂**都已写好**。逐条核对
+任务书的缺口：
+
+| 缺口 | 核对结论 | 本刀动作 |
+|------|----------|----------|
+| 1. AppWindow 没注册三个组件 | **部分成立**。`DatabaseCell`/`DatabaseSwitcher` 由 `DatabaseView.slint` import（无需 AppWindow）；`DatabaseView` 已被 `EditorBlock.slint` import（L13）但**从未实例化**，`body-height` 也没有 kind 23 的臂；AppWindow 缺的是 `db-columns` 的**窗口级 popup** | `EditorBlock.slint` 实例化 `dbv := DatabaseView`（L1240）+ `db-height` 属性（L45）+ body-height 臂（L188）+ `ta` 点击排除（L211）；AppWindow 新增 `DatabaseColumnsPopup`（L188）+ 实例化（L675）+ show/close 接线（L386、L521） |
+| 2. controller 没有 dispatch | **成立**（`on_db_*` 0 处） | `controller.rs` L1322–1520 新增 12 个 callback 接线 + 4 个 helper（`db_debounce_arm` L2557、`db_commit_cell` L2593、`db_refill_row` L2612、`db_push_columns` L2628） |
+| 3. apply_scene 没有 database-table | **成立** | `apply_scene` 加 `database-table`（L3619）与 `dark-database-table`（L3487）两臂 + `seed_database_table`（L3213）；`quire_shot.rs` 的 `needs_db` 加 `contains("database")`（L176） |
+| 4. Markdown 导出是否完整 | **导出器完整、调用侧断了**：`export_page_full` 的 `database` 参数两处调用都传 `&|_| None` | 两处调用点接上 `&|id| s.db_markdown_table(id.as_u64() as i32)`（L2949 clipboard、L2984 .md 导出）；`db_markdown_table` 开头补 `force_flush`（导出的是用户**正在看的**表，写队列必须先落） |
+| 5. 菜单行是否真接上 | **一半**：`SLASH_ITEMS`/`INSERT_ITEMS`/`TURN_INTO` 的 `Table view` 行、`kind_from_int`/`kind_to_int` 的 23 都在（WIP）；但 `make_database` **0 个调用者**——slash-apply、Turn-into 都没有 Database 分支，菜单行点了会掉进 `SetBlockType` 的拒绝臂 | slash-apply 加分支（L1800）、Turn-into 加分支（L2105），都走 `state.make_database` |
+
+## 2 · 本刀改了哪些文件
+
+| 文件 | 为什么 | 关键位置（工作树行号） |
+|------|--------|------------------------|
+| `ui/components/EditorBlock.slint` | 实例化 DatabaseView；块的行高 = 视图自己的高度（页面的滚动 = 视图的滚动） | `db-height` L45、body-height 臂 L188、`ta` 排除 L211、`dbv :=` L1240 |
+| `ui/AppWindow.slint` | 隐藏列的窗口级 popup（一行一属性，title 锁定），照 BlockMenuPopup 的三件套（component / 实例化 / is-open 镜像） | L188、L386、L521、L675 |
+| `ui/Types.slint` | `db-editing-block`（提交路径要三件套才能定位一格）与 `db-cell-closed`（同步提交，见 §4.2） | L352、L542 |
+| `ui/components/DatabaseCell.slint` | 关闭路径从「本地改两个属性」改为调 `db-cell-closed`——debounce 会在编辑器关闭后读回已清零的 id，最后 300 ms 的输入会被吞 | accepted/Escape/Tab 三处 |
+| `ui/components/DatabaseView.slint` | 列 popup 的锚点从「两个 absolute-position 相加」修成只用 TouchArea 自己的（`absolute-position` 是**窗口相对**，相加是双重计数） | L218–231 |
+| `ui/components/Editor.slint` | `editor-viewport-h` 此前**没有任何 .slint 写它**（投影只能吃 720 的默认值）——Editor 根部的 `changed height` 报告一次 | L13–20 |
+| `src/app/controller.rs` | 12 个 db callback + 4 个 helper + 两个菜单分支 + 两处导出调用点 | 见 §1 表 |
+| `src/app/state.rs` | `db_fill_row` 补上 `db_row_height`/`db_header_height`（此前从不赋值，Slint 默认 0px——**行高会塌成 0** 的真 bug）；`db_refresh` 的 offset 公式修正（见 §4.1）；`make_database` 同批清空行的字；`db_markdown_table` 先 flush | L4955、L4793、L5049 起、L5495 起 |
+| `src/bin/quire_shot.rs` | `needs_db` 加 `contains("database")`（表画的是 record，record 在 SQL 里，无库的会话只能拍到空格子） | L176 |
+| `docs/DECISIONS.md` | ADR-0072…0075（文件末尾） | 见 §6 |
+| `docs/SPEC.md` | §三十九「视图」「操作」标注已交付 + ADR 号 | 两处 hunk |
+| `PLAN.md` | 末尾追加 `## Track 3 · D3 table view` | 文件末尾 |
+| `docs/REPORT_TRACK3.md` | 本节 | — |
+
+**没碰**：`CHANGELOG.md`、`docs/ROADMAP.md`、`Cargo.toml`（本轮零新依赖）、`[profile.release]`、
+任何 Track 1/2/4 的功能文件。
+
+## 3 · 六个接点各落在哪（ADR-0060 的清单）
+
+1. **types**：`src/core/types.rs` `BlockKind::Database`（L152）+ `ALL` 追加 + `db_ref` 字段
+   （L400 附近）——WIP 已有，核对无误；
+2. **kind 字符串**：`as_str` 的 `"database"`（types.rs L231）+ `state.rs` 的
+   `kind_to_int`/`kind_from_int`（23 ↔ `BlockKind::Database`）——WIP 已有（重复臂已被修）；
+3. **Markdown**：`export_service.rs` 的 `DatabaseTable`/`render_database`/导出臂（WIP）+
+   本刀接上的两处调用点 + `state::db_markdown_table` 的 flush；
+4. **Turn into**：controller L2105 分支 → `make_database`（`SetBlockType` 对 Database 的拒绝臂在
+   `command.rs` L1131，WIP 已有）；
+5. **slash / insert 菜单**：菜单行（WIP）+ 本刀的 slash-apply 分支（L1800）；
+6. **截图场景**：`database-table` / `dark-database-table` + `seed_database_table` +
+   quire_shot 的 `needs_db`。
+
+## 4 · 写码时抓到的三个真 bug（都是「接线才看得见」的）
+
+1. **窗口算术的双重计数**：delegate 报的锚是 body 顶**相对视口**的 px（`row-y - editor-scroll-y`），
+   而 `db_refresh` 用 `offset = scroll - top` 把 scroll 又加了一次——任何非零滚动位置上取的窗口都
+   不盖住视口。修正：`offset = (-top).max(0.0)`（body 顶在视口上方多少 px，就有多少 px 已经滚过去）。
+   两半的约定都在注释里钉死了（state.rs L4780 起、DatabaseView.slint 的 `top-in-view`）。
+2. **行高塌 0**：`Types.slint` 的 `db-row-height`/`db-header-height` 没有 Slint 默认值（0px），而
+   `db_fill_row` 从不赋值——块的 `db-height` 因此是 header 0 + count×0，整张表画成一条线。修正：
+   `db_fill_row` 开头写 `TableView::ROW_HEIGHT`/`HEADER_HEIGHT`（常数只有一个来源，投影的窗口算术
+   与委托的摆放不可能再 disagree）。
+3. **最后 300 ms 的输入会丢**：cell 的 Enter/Escape/Tab 原地清零 `db-editing-record/-property`，
+   而 debounce 提交靠的就是这两个 id——先清零再等 300 ms 的提交，等于吞掉最后一次输入。修正：
+   新增 `db-cell-closed` callback，关闭时同步提交再清零（`db_commit_cell`）。
+
+## 5 · 已接 / 未接的行内编辑（D3 的诚实边界）
+
+| 类型 | 状态 | 说明 |
+|------|------|------|
+| title / text | **已接** | 行内 `TextInput`，debounce 提交，`parse_one` 按列的 kind 解析（ADR-0069） |
+| number | **已接** | 同上；编辑器里是 `0.5`，画出来是 `50%`（`db_cell_text` 给的是**存储形态**不是绘制形态） |
+| checkbox | **已接** | 整格点击写 `Flag(!shown)`（16px 的方块是精度任务，Notion 同款） |
+| select / status | **已接（读侧）** | 格内选项列表（一个 popup per realized row 不是 popup 是列表）；**写侧只能选已有选项**——「加一个选项」的 `Change` 臂仍欠着（D2 的偏离 1，D5 的选项编辑器） |
+| date / url / email / phone | 未接输入控件 | 画值（ISO 文本原样）；date 的日历选择器是 D5 的。文本输入臂**其实能编辑它们**（parse_one 接受对应形态），但没有专门控件就不算交付 |
+| multi-select / files | 未接 | 列表型的输入是 D5/D6 |
+| created time / last edited time | 不可编辑（设计如此） | 派生列，`editable = false`，点击不开编辑器 |
+| formula / rollup / relation | 不可编辑（设计如此） | 计算列，D6 |
+
+## 6 · 四个新决策（ADR-0072…0075，全文在 DECISIONS.md 末尾）
+
+| # | 一句话决策 | 代价（写进 ADR 的） |
+|---|------------|---------------------|
+| 0072 | 六张表的 id 是**会话水位**：启动时 `MAX(id)` 播种一次，只有 plan 成功才推进；`MakeDatabase` 等把 id 带**进**命令 | 被拒绝的命令不烧 id；没写库的 id 重启后遗忘（无人引用，无可观察的空洞） |
+| 0073 | 「这个块正在看哪个视图」是**会话态**不是列：`db_active_view` 是 AppState 的一张 map，重启回到第一个视图 | 视图切换不进 undo、不写库；记忆跨重启需要等 D5 的 schema 问题 |
+| 0074 | 视图文档**按文本读改写**：本刀只写 `columns`/`widths` 两个键，`filter`/`sorts`/`v` 原样透传 | 隐藏一列不会顺带清掉后一刀的过滤规则；undo 恢复的是整段文本 |
+| 0075 | 内存 catalog 从 change 批次学习（apply/undo/redo 共用 `record()` 这一个漏斗），record 永不进 catalog | fold 方向与 storage 一致（change 说发生了什么，不说往哪个方向跑）；`DatabaseDeleted` 在内存里级联 |
+
+## 7 · 迁移号（串行接缝）
+
+* 动手前读 `src/storage/migrations.rs`：工作树 `CURRENT_VERSION = 19`（D2 的 v17 之后，
+  Track 4 的 v19 `block sync pointer` 在我之后追加）。
+* 本刀采用 **v18**（`blocks.db_ref`，`add_db_ref_column`，「缺哪列补哪列」的收敛范式，
+  与 v5 的 `page_ref` 同形：可空、无外键、无索引）。**本刀的提交 blob 里 `CURRENT_VERSION = 18`**
+  （HEAD 是 17 + 本刀的 18）；工作树里的 19 是 Track 4 的，合并后 12…19 连续。
+* 未重号：12–15 是 D1 的，16 是 Track 2 的，17 是 D2 的，**18 是本刀的**，19 是 Track 4 的。
+
+## 8 · 共享工作树的提交方式与三个已知交叠
+
+1. **方法**：D0/D1/D2 的「只暂存自己那段」（`git show HEAD:<file>` + 本刀文本 →
+   `git hash-object -w --path` + `git update-index --cacheinfo`），脚本在 `.scratch/track3-d3/stage.py`。
+   提交后这些共享文件在工作树里仍是 modified（那是别人的改动），不是脏数据。
+2. **导出调用点与 Track 2 交叠**：工作树里那两处 `export_page_full(...)` 调用是 Track 2 未提交的
+   hunk（title_of 与 sync_of 两个闭包是他们的）。本刀**只把他们传的 `&|_| None`（database 位）换成
+   db_markdown_table**，他们的行一字未动。**给整合者**：若 Track 2 先提交并重写这两处调用，
+   请把 database 位的闭包带过去——那一行丢了，数据库导出就静默退回「什么都不写」。
+3. **quire_shot 的 `needs_db` 与 Track 2 交叠**：同一道理——那块（含注释）是 Track 2 为 backlinks
+   场景写的未提交 hunk，本刀在其条件上追加 `|| contains("database")` 并加了一段注释。
+4. **合并痕迹三处**（两条 track 的未提交改动在同一文件尾相撞造成的复制）：`Types.slint` 的
+   `db-layout`/`db-layout-ok` 重复字段、`state.rs` 的 `kind_from_int` 重复 `23 =>` 臂、
+   `controller.rs` 的重复 `"backlinks-small"` 臂——本刀开工时都在，**等待期间被并行修掉了**
+   （前两处在我的段落上，后一处是 Track 2 的段落），本刀没有再动。
+
+## 9 · 未验证（诚实清单——因为一行 cargo 都没跑）
+
+1. **编译**：本刀全部代码没有过 `cargo check`。静态自查做过（生成类型的字段名、callback 签名、
+   借用次序、`Model`/`Rc` 的 import、`DbColumnToggle` 生成类型与 state 自建类型的双路径并存），
+   但那不是编译器。
+2. **测试**：没有跑任何已有测试；铁律禁止新增 `#[test]`，本刀没有写。
+3. **视觉**：`database-table` / `dark-database-table` 两个场景从未渲染过；`seed_database_table`
+   走真写路径（in-memory 库 + force_flush），但「5 行 4 列的表长什么样」没有像素证据。
+4. **`absolute-position` 的语义**：按 Slint 文档（窗口相对、逻辑 px）写的锚点与 clamp；若 1.18 的
+   实际语义不同（例如父相对），popup 会错位但不会崩——统一测试的第一张 shot 就能看出来。
+5. **布局期回调的重入**：`changed top-in-view` 在布局期调进 Rust（`db_watch` 可能触发一次 SQL 读），
+   窗口移动时 `db_refill_row` 会 `set_row_data`——高度不变（total 不变），预期无循环，但没有跑过。
+6. **`exec_all` 里 `ReplaceText`+`MakeDatabase` 的一步 undo**：`exec_all` 跳过 plan 为 None 的命令、
+   所有 plan 针对同一 pre-state（读的是 `command.rs` 源码），行为没有测试钉住。
+7. **性能**：D1 量出的「底部窗口读 12.9 ms / 排序 +8 ms」原样有效（本刀没有换游标读，那是 D4 的）；
+   D3 欠的「切换视图耗时」「行内编辑到重绘」两个数字见下面测试计划。
+
+## 10 · 测试计划（留给最终统一测试——每项：验什么 / 建议测试名 / 量哪个数 / 怎么量）
+
+**A. 编译与门槛**
+
+1. 全树可编译、零警告：`cargo check --all-targets` / `cargo build --release`（看 warning 计数 = 0）；
+2. 全测试不回归：`cargo test --all-targets`（D2 时 478 条的基线上，本刀不新增测试，允许别人新增）。
+
+**B. 功能（headless 可证的）**
+
+3. 数据库块在页面上画出一张 5 行 4 列的表：`quire-shot --scene database-table`，
+   建议场景名 `database-table` / `dark-database-table`（已写）；**人工核对** header 64px、行高 32px、
+   列对齐（表头与行的列来自同一次投影）；
+4. 「行是动态的」：同一场景加 `--scroll-y 4000`，**数 delegate 数不变**（窗口 31 行左右）、
+   行的内容随滚动换——量法：`--probe-blocks` 之外在 `db_refresh` 临时打印 `window.start`（不要提交），
+   或对比 shot 像素；
+5. 悬垂 ref：`DatabaseDeleted` 后块回退渲染 `(deleted database)`——建议测试名
+   `a_dangling_db_ref_renders_one_muted_line`（headless：造块→undo 掉创建批→shot）；
+6. 单元格写入路径：checkbox 点击 300 ms 后 `db_values.flag` 翻转、number 输入 `abc` 被拒且存储值
+   不变——建议测试名 `a_checkbox_toggles_as_one_undo_step` /
+   `a_number_cell_refuses_non_numbers_and_keeps_the_stored_value`；
+7. 导出：带一个数据库的页 `Copy page as Markdown`，文件含当前视图的 GFM 表、页-backed 行标题是
+   `quire://page/<id>`——建议测试名 `a_database_exports_as_the_view_it_is_showing`
+   （`export_page_full` 纯函数级，直接测，不用 UI）；
+8. 视图文档透传（ADR-0074）：带 `filter`/`sorts` 键的文档经一次「隐藏列」后两键原样保留——
+   建议测试名 `hiding_a_column_keeps_the_keys_this_build_does_not_own`。
+
+**C. 视觉与交互（人工 / sweep）**
+
+9. sweep 对照 D2 基线：67 个既有场景应当逐字节相同，`database-table`、`dark-database-table` 为 new——
+   `pwsh benchmarks/scripts/sweep.ps1 -OutDir .scratch/track3-sweep-d3 -Baseline .scratch/track3-sweep-d2`；
+10. Columns popup 落点：点 `database-table` 场景里 Columns 按钮的坐标（`--click x,y`），
+    popup 应出现在按钮正下方且不出窗——这一条同时验证 §9.4 的 `absolute-position` 语义；
+11. slash 输入 `/table` → 选中 `Table view` → 空行变数据库（`--probe-blocks` 应看到 kind 23）、
+    一次 Ctrl+Z 回到原段落（验 §9.6）。
+
+**D. 性能（SPEC §三十九 欠的三个数字，本刀能收口的两个）**
+
+12. **切换视图耗时**：今天每库只有一个视图，真正的切换数字在 D5 有第二个视图后才有——本刀能量的是
+    「切换路径本身」：`db_pick_view` + `db_refresh` 的重读。量法：release 下在 `db_pick_view` 前后
+    打印 `Instant::elapsed`（10 000 行库，参照 D1 的探针写法 `#[ignore]` 打印型测试），对照 D1 的
+    窗口读数（顶 463 µs / 底 12.9 ms），数字进 `benchmarks/results/`；
+13. **行内编辑到重绘**：一次 cell 写入的全路径 = flush（D2 量过：5.5–7.4 ms 单发 / 10.6–14.9 µs 批内）
+    + `SetDatabaseCell` 计划 + 窗口重读。量法：同上探针，10 000 行库上量 `db_set_cell_text` 端到端，
+    期望 ≈ D1 的窗口读 + D2 的单发写；**10 000 行的 RAM** 仍以 D1 的 31 行 / 5 576 B 为准
+    （本刀没有改变「行只活在窗口里」的形状，bench.ps1 的数据库臂仍欠——D8 收口时一起）。
+
+## 11 · 给整合者的注意事项
+
+1. §8 的三条交叠（导出调用点、quire_shot 的 needs_db、并行修掉的三处合并痕迹）；
+2. 迁移号：合并后 12…19 应连续（§7）；本刀提交 blob 里 `CURRENT_VERSION = 18`、数组缺 16
+   （Track 2 的 v16 未提交）——runner 允许跳号，D2 的报告 §2 已论证过这是安全的形状；
+3. 本刀的提交树**没有单独跑过门槛**（铁律禁止跑 cargo）——D1/D2 的「提交树单独验证」这一步
+   请整合者在统一测试时补做，重点看 §9.1 的静态自查清单；
+4. `DbColumnToggle` 有两个同名类型：`crate::DbColumnToggle`（slint 生成，popup 的模型行）与
+   `crate::app::state::DbColumnToggle`（state 的构建形状）——并存是有意的（生成的类型不该从
+   state 导出），控制器里 `db_push_columns` 是两者唯一的转换点。

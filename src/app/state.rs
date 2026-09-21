@@ -7,17 +7,25 @@
 // BlockRow / CommandRow / SearchRow / MenuRow).
 
 use crate::app::workspace::{SearchHit, Workspace, BENCH_ID_BASE, MAX_RECENTS};
+use crate::core::database::{
+    CellValue, DatabaseCatalog, DatabaseDraft, DatabaseId, Property, PropertyId, PropertyKind,
+    RecordId, RowRequest, RowWindow, ViewGeometry, ViewId,
+};
+use crate::core::database_view::{
+    all_columns, table_columns, table_rows, view_columns, LayoutSupport, TableColumn, TableView,
+    ViewDefinition, ViewTab, WIDTH_AUTO,
+};
 use crate::core::persistence::{Change, Repository};
 use crate::core::{
     Attachment, AttachmentId, Block, BlockId, BlockKind, ColorKind, Command, Document, History, Lang,
-    OrderKey, PageFont, PageId,
+    OrderKey, PageFont, Page, PageId,
 };
 use crate::services::find_service::FindSession;
 use crate::services::persistence::PersistenceService;
 use crate::services::search_service::SearchService;
 use crate::storage::search_index::SearchRequest;
 use crate::storage::SqliteRepository;
-use crate::{BlockRow, ColumnBox, ColumnItem, TableCell, CommandRow, MenuRow, SearchRow, SidebarNode, SlashRow, TextRun, TocEntry};
+use crate::{BlockRow, ColumnBox, ColumnItem, TableCell, DbCell, DbColumn, DbOption, DbRow, DbViewTab, CommandRow, MenuRow, SearchRow, SidebarNode, SlashRow, TextRun, TocEntry};
 use slint::{Model, ModelRc, VecModel};
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
@@ -100,7 +108,40 @@ pub struct AppState {
     pub pending_delete: Cell<Option<i32>>,
     /// Benchmark scroll bookkeeping (scene F): last viewport-y seen.
     pub last_scroll_y: Cell<f32>,
-}
+
+    // ─── SPEC §三十九 Database (D3) ─────────────────────────────────────────
+    /// The database layer's schema — every entity, its columns and its views,
+    /// loaded once at startup and kept in step with every write this session
+    /// makes. Deliberately **not** its records: ADR-0067 makes a window the only
+    /// way a row reaches memory, so this is a schema's worth of data (a handful
+    /// of rows) however large the databases it describes are.
+    databases: RefCell<DatabaseCatalog>,
+    /// One block's realized window, by block id. A cache with a rule: it is
+    /// rebuilt when the projection's inputs change (the view, the definition,
+    /// the geometry) and *not* when a scroll stays inside the window it already
+    /// holds. `Rc<VecModel>` inside it because the delegate reads the rows
+    /// through the block's row, and a re-read must update the UI without
+    /// rebuilding the page's row list.
+    db_windows: RefCell<HashMap<i32, DbWindow>>,
+    /// Which view each database block is showing. Session state (ADR-0073) and
+    /// not a column: it is a fact about a window, not about a document.
+    db_active_view: RefCell<HashMap<i32, ViewId>>,
+    /// Where each database block's top sits relative to the editor viewport, as
+    /// the block itself reported it (Rust cannot see Slint's layout). What the
+    /// window is computed from, together with the page's scroll offset.
+    db_anchor: RefCell<HashMap<i32, f32>>,
+    /// The editor list's own height, in px, reported by `Editor.slint` when it
+    /// changes. The window's *viewport height* — the number `core::database::window`
+    /// divides by — and a property rather than a callback argument because it is
+    /// one number for the whole page and every database on it wants the same one.
+    pub editor_viewport_h: Cell<f32>,
+    // The four id watermarks (ADR-0072): one counter per table, seeded from
+    // `MAX(id)` at startup and never read again. `Cell<u64>` because a creation
+    // is one counter step and nothing else in the layer is mutable state.
+    next_db_id: Cell<u64>,
+    next_property_id: Cell<u64>,
+    next_record_id: Cell<u64>,
+    next_view_id: Cell<u64>,}
 
 /// One decoded picture plus what it costs to keep it decoded.
 #[derive(Clone)]
@@ -448,6 +489,31 @@ impl AppState {
                 .unwrap_or(PAGE_GETTING_STARTED)
         };
         let all_commands = mock_commands(&workspace);
+        // The database layer's schema and its four id watermarks (ADR-0067 /
+        // ADR-0072). A session with no file has no databases — and a file whose
+        // read fails says so once, in the notice line, rather than refusing to
+        // start: a database layer that cannot be read is a page that draws no
+        // rows, which is recoverable, while a library that does not open is not.
+        let (database_catalog, db_ids, db_notice_read) = match &repo_for_state {
+            Some(repo) => match repo.load_databases() {
+                Ok(catalog) => {
+                    let maximum = |table| repo.max_id(table).unwrap_or(0);
+                    let ids = (
+                        maximum(crate::storage::database_store::DbTable::Databases) + 1,
+                        maximum(crate::storage::database_store::DbTable::Properties) + 1,
+                        maximum(crate::storage::database_store::DbTable::Records) + 1,
+                        maximum(crate::storage::database_store::DbTable::Views) + 1,
+                    );
+                    (catalog, ids, None)
+                }
+                Err(e) => (
+                    DatabaseCatalog::default(),
+                    (1, 1, 1, 1),
+                    Some(format!("database layer unreadable: {e}")),
+                ),
+            },
+            None => (DatabaseCatalog::default(), (1, 1, 1, 1), None),
+        };
         let blocks = Rc::new(VecModel::from(Vec::new()));
         let commands = Rc::new(VecModel::from(all_commands.clone()));
         let state = AppState {
@@ -490,6 +556,16 @@ impl AppState {
             nav: RefCell::new(NavHistory::default()),
             pending_delete: Cell::new(None),
             last_scroll_y: Cell::new(0.0),
+
+            databases: RefCell::new(database_catalog),
+            db_windows: RefCell::new(HashMap::new()),
+            db_active_view: RefCell::new(HashMap::new()),
+            db_anchor: RefCell::new(HashMap::new()),
+            editor_viewport_h: Cell::new(DEFAULT_EDITOR_VIEWPORT_H),
+            next_db_id: Cell::new(db_ids.0),
+            next_property_id: Cell::new(db_ids.1),
+            next_record_id: Cell::new(db_ids.2),
+            next_view_id: Cell::new(db_ids.3),
         };
         // restore persisted recents before the first open marks its page
         let state = Rc::new(state);
@@ -703,6 +779,16 @@ impl AppState {
             .filter(|r| r.kind == BLOCK_PAGE || r.kind == BLOCK_LINK)
         {
             row.text = ws.title_of(row.page_ref).unwrap_or("(deleted page)").into();
+        }
+        // SPEC §三十九: a `Database` block's row is the one thing this
+        // projection cannot build from blocks alone — its rows are records in
+        // six tables, so they come from the state's realized window and the
+        // window comes from `core::database::window`. The guard is the same
+        // shape as the table's and the toc's: the walk happens only for the rows
+        // that want it, so a page with one database pays one read and a page
+        // without one pays nothing.
+        for row in rows.iter_mut().filter(|r| r.kind == BLOCK_DATABASE) {
+            self.db_fill_row(row);
         }
         self.blocks.set_vec(rows);
         // Every row was just rebuilt with the current hits in it, so the list
@@ -3191,6 +3277,15 @@ const SLASH_ITEMS: &[(BlockKind, &str, &str)] = &[
         "Embed",
         "A link as a card — paste an address",
     ),
+    // SPEC §三十九 (D3): the database's first view. One entry, not six — the six
+    // `INSERT_ITEMS` rows for the other layouts light up one phase at a time
+    // (ADR-0060: they are `db_views.layout`, not block kinds), and this is the
+    // curated "/" menu, which lists what exists rather than what is planned.
+    (
+        BlockKind::Database,
+        "Table view",
+        "A database, as a table",
+    ),
     (BlockKind::Divider, "Divider", "Visual separator — or type ---"),
 ];
 
@@ -3233,7 +3328,16 @@ const INSERT_ITEMS: &[(i32, &str, &str)] = &[
         "Embed",
         "A link as a card, opened in the browser",
     ),
-    (-1, "Table view", "Database table · later"),
+    // SPEC §三十九's six placeholders, and D3 lights the first of them: a real
+    // block-kind int makes this row insertable, and the menu shows it exactly as
+    // it shows every other kind. The other five stay muted (`id < 0`) because
+    // their layouts are D5's — the row is the promise, and D3 keeps one of them.
+    (
+        kind_to_int(BlockKind::Database),
+        "Table view",
+        "A database, as a table",
+    ),
+    (-1, "Board", "Board view · later"),
     (-1, "Board", "Board view · later"),
     (-1, "Gallery", "Gallery view · later"),
     (-1, "List view", "Database list · later"),
@@ -3295,6 +3399,11 @@ pub fn kind_from_int(kind: i32) -> BlockKind {
         20 => BlockKind::Math,
         21 => BlockKind::Toc,
         22 => BlockKind::Embed,
+        // SPEC §三十九's database view sits between Embed and Synced in the
+        // enum, and this map follows declaration order, so 23 is its number.
+        // Filled in here rather than left empty because a gap would silently
+        // `kind_from_int(23)` into a paragraph the day somebody types it.
+        23 => BlockKind::Database,
         _ => BlockKind::Paragraph,
     }
 }
@@ -3323,6 +3432,7 @@ const fn kind_to_int(kind: BlockKind) -> i32 {
         BlockKind::Math => 20,
         BlockKind::Toc => 21,
         BlockKind::Embed => 22,
+        BlockKind::Database => 23,
         BlockKind::Paragraph => 0,
     }
 }
@@ -3385,6 +3495,7 @@ fn rows_to_blocks(page: i32, rows: Vec<BlockRow>, doc: &mut Document) -> Vec<Blo
                 img_percent: 100,
                 columns: 0,
                 lang: Lang::Plain,
+                db_ref: None,
             }
         })
         .collect()
@@ -3658,6 +3769,1099 @@ fn toc_entries(blocks: &[Block], shown: &[usize]) -> Vec<TocEntry> {
         .collect()
 }
 
+// ─── SPEC §三十九 Database (D3: the table view) ─────────────────────────────
+//
+// The data flow, once, because three layers meet here and the red line is about
+// which of them does what:
+//
+//     page scroll (Slint)  ->  `db_watch(block, top_in_view)`
+//                                    |
+//                     `core::database::window` (the window, from the viewport)
+//                                    |
+//                     `repo.window_rows` (`LIMIT`/`OFFSET`, 31 rows of 10 000)
+//                                    |
+//          `core::database_view` (columns, painted cells, row->y arithmetic)
+//                                    |
+//                  `ModelRc<DbRow>` ->  the block's delegate, which only draws
+//
+// Four things in here are deliberate and each has a reason:
+//
+// 1. **The window is computed by `core::database::window` and nowhere else**, so
+//    "先算可见窗口再取行" is one function rather than a rule three callers
+//    remember (ADR-0067).
+// 2. **A scroll only re-reads when the window moved.** Overscan is what buys
+//    that: the window is a screenful plus eight rows above and below, so 256 px
+//    of scrolling costs one read instead of one per frame. The arithmetic runs
+//    every time; the *query* runs when `window.start` changes.
+// 3. **The rows live in a model of their own** (`DbWindow::rows`), cloned into
+//    the block's row. A re-read therefore replaces one model and one outer row
+//    (`set_row_data`) instead of rebuilding the page's whole row list, which is
+//    what makes scrolling a 10 000-row database cost one query and one row.
+// 4. **The anchor is reported, not measured.** Rust cannot see Slint's layout,
+//    so the block tells it where its top is relative to the viewport
+//    (`database-viewport`), and Rust turns that into "how far into the database
+//    is the reader": `offset = scroll - top`, clamped at zero. One reported
+//    number per scroll frame per database block, and no I/O while it is static.
+
+/// One database block's realized window: the rows that exist as objects, which
+/// window of the database they are, and the model the delegate reads.
+///
+/// The columns are part of the window rather than read fresh each projection,
+/// because a row's cells and its header have to come from *one* definition: the
+/// `RowView`s in `rows` were painted against exactly this column list, and a
+/// header built from a newer definition would label the cells with the wrong
+/// names — the kind of defect that looks like a sorting bug.
+#[derive(Clone)]
+struct DbWindow {
+    /// The view this window was read for. A view change invalidates the window
+    /// (different columns, and in D4 different rows), which is why it is here and
+    /// not in a separate map.
+    view: ViewId,
+    /// The columns the read was made with, in view order.
+    columns: Vec<TableColumn>,
+    /// The database's row count at the time of the read.
+    total: usize,
+    /// The slice of `total` the model holds.
+    window: RowWindow,
+    /// The realized rows, as the delegate reads them. Cloned into the block's
+    /// row, so a re-read updates the UI without touching the page's row list.
+    rows: Rc<VecModel<DbRow>>,
+}
+
+/// How a database block's columns popup is built: every property of the
+/// database, whether the active view shows it, and whether it may be toggled.
+/// The title column is listed and *not* toggleable — a table with no title
+/// column is a list of anonymous rows (ADR-0063), so the switch is absent
+/// rather than present-and-lying.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DbColumnToggle {
+    pub property: i32,
+    pub name: String,
+    pub kind: String,
+    pub visible: bool,
+    pub locked: bool,
+}
+
+/// The `PropertyKind` int a Slint delegate compares against. `PropertyKind::ALL`
+/// is the list and the index is the int, so the numbering has exactly one source
+/// and adding a kind appends a number instead of renumbering one — the same rule
+/// `BlockKind`'s ints follow. The legend is written out in `ui/Types.slint`.
+fn property_kind_int(kind: crate::core::database::PropertyKind) -> i32 {
+    crate::core::database::PropertyKind::ALL
+        .iter()
+        .position(|k| *k == kind)
+        .map(|at| at as i32)
+        .unwrap_or(0)
+}
+
+impl AppState {
+    /// The entity a `Database` block draws, from the in-memory document — which
+    /// is where the block's pointer lives (`Change::BlockDbRefSet` is applied to
+    /// the document as well as to SQL).
+    pub fn db_ref_of(&self, block: i32) -> Option<DatabaseId> {
+        let doc = self.doc.borrow();
+        doc.block(BlockId(block as u64)).and_then(|b| b.db_ref)
+    }
+
+    /// Whether a database entity exists for the block. `false` for a block whose
+    /// entity was deleted and which came back through an undo — ADR-0060's
+    /// "(deleted database)", the one thing a dangling ref renders as.
+    pub fn db_exists(&self, block: i32) -> bool {
+        match self.db_ref_of(block) {
+            Some(id) => self.databases.borrow().database(id).is_some(),
+            None => false,
+        }
+    }
+
+    /// The view a block is showing: the one the session picked, else the
+    /// database's first.
+    ///
+    /// The choice is **session state, not a column** (ADR-0073): "which view am
+    /// I looking at" is a fact about a window and not about a document, and the
+    /// cost of that decision is written down there — a restart opens the first
+    /// view rather than the last one looked at.
+    pub fn db_active_view(&self, block: i32) -> Option<ViewId> {
+        let db = self.db_ref_of(block)?;
+        if let Some(view) = self.db_active_view.borrow().get(&block) {
+            if self.databases.borrow().views_of(db).any(|v| v.id == *view) {
+                return Some(*view);
+            }
+        }
+        self.databases.borrow().views_of(db).map(|v| v.id).next()
+    }
+
+    /// A view's `definition` document, or the empty one when the view is gone.
+    fn db_definition(&self, view: ViewId) -> ViewDefinition {
+        self.databases
+            .borrow()
+            .views
+            .iter()
+            .find(|v| v.id == view)
+            .map(|v| ViewDefinition::parse(&v.definition))
+            .unwrap_or_default()
+    }
+
+    /// The columns the given view shows, for a database.
+    fn db_columns(&self, db: DatabaseId, view: ViewId) -> Vec<TableColumn> {
+        let catalog = self.databases.borrow();
+        let Some(row) = catalog.views.iter().find(|v| v.id == view) else {
+            return Vec::new();
+        };
+        let properties = view_columns(&catalog, db, row);
+        let definition = ViewDefinition::parse(&row.definition);
+        table_columns(&properties, &definition)
+    }
+
+    /// The store, or `None` in a headless session with no database. Every
+    /// database read goes through this: a session without a file has no records
+    /// to draw, which is a fact about the session and not an error.
+    fn db_repo(&self) -> Option<&Arc<SqliteRepository>> {
+        self.repo.as_ref()
+    }
+
+    /// Teach the in-memory catalog what a change list did (ADR-0075).
+    ///
+    /// The catalog is the schema the read path consults on every projection,
+    /// and until this function existed nothing kept it in step with a write: a
+    /// freshly made database was in SQL and not in memory, so its own block drew
+    /// ADR-0060's "(deleted database)" until the next restart. `record` is the
+    /// funnel, so apply, undo and redo all arrive here.
+    ///
+    /// **A change names what happened, not which direction it ran** (that is
+    /// `core::document`'s contract for `apply`/`revert`): `DatabaseCreated`
+    /// always means the row exists now, whether the user made it or undid its
+    /// deletion. So this is a fold in the same direction as storage's, and the
+    /// two cannot disagree about what a list means.
+    ///
+    /// Records and values are deliberately absent: they are not in the catalog
+    /// at all (ADR-0067), and a row's life is a window's business.
+    fn db_absorb(&self, changes: &[Change]) {
+        let mut catalog = self.databases.borrow_mut();
+        for change in changes {
+            match change {
+                Change::DatabaseCreated(db) => {
+                    // An undo replays a creation that this session may already
+                    // have learned (redo of a delete), so the insert is
+                    // idempotent rather than a push that could double a row.
+                    if catalog.database(db.id).is_none() {
+                        catalog.databases.push(db.clone());
+                    }
+                }
+                Change::DatabaseRenamed { id, name } => {
+                    if let Some(row) = catalog.databases.iter_mut().find(|d| d.id == *id) {
+                        row.name = name.clone();
+                    }
+                }
+                // Deleting the entity takes its columns and views with it
+                // (`ON DELETE CASCADE`), so the fold has to do the same or the
+                // catalog would keep drawing a schema whose rows are gone.
+                Change::DatabaseDeleted { id } => {
+                    catalog.databases.retain(|d| d.id != *id);
+                    catalog.properties.retain(|p| p.db != *id);
+                    catalog.views.retain(|v| v.db != *id);
+                }
+                Change::PropertyAdded(property) => {
+                    if !catalog.properties.iter().any(|p| p.id == property.id) {
+                        catalog.properties.push(property.clone());
+                    }
+                    // `ord` is the schema's order (ADR-0061) and the store
+                    // returns the columns by it, so the catalog keeps the same
+                    // order in memory that a restart would load.
+                    catalog.properties.sort_by_key(|p| (p.db, p.ord));
+                }
+                Change::PropertyRenamed { id, name } => {
+                    if let Some(row) = catalog.properties.iter_mut().find(|p| p.id == *id) {
+                        row.name = name.clone();
+                    }
+                }
+                // ADR-0062's one write path that changes what a *cell means*:
+                // the values stay where they are and the column's type moves, so
+                // the next projection paints the same bytes through the new kind.
+                Change::PropertyKindSet { id, kind } => {
+                    if let Some(row) = catalog.properties.iter_mut().find(|p| p.id == *id) {
+                        row.kind = *kind;
+                    }
+                }
+                Change::PropertyOrdSet { id, ord } => {
+                    if let Some(row) = catalog.properties.iter_mut().find(|p| p.id == *id) {
+                        row.ord = *ord;
+                    }
+                    catalog.properties.sort_by_key(|p| (p.db, p.ord));
+                }
+                Change::PropertyDeleted { id } => {
+                    catalog.properties.retain(|p| p.id != *id);
+                }
+                Change::ViewAdded(view) => {
+                    if !catalog.views.iter().any(|v| v.id == view.id) {
+                        catalog.views.push(view.clone());
+                    }
+                    catalog.views.sort_by_key(|v| (v.db, v.ord));
+                }
+                Change::ViewRenamed { id, name } => {
+                    if let Some(row) = catalog.views.iter_mut().find(|v| v.id == *id) {
+                        row.name = name.clone();
+                    }
+                }
+                Change::ViewLayoutSet { id, layout } => {
+                    if let Some(row) = catalog.views.iter_mut().find(|v| v.id == *id) {
+                        row.layout = *layout;
+                    }
+                }
+                // The one the width drag and the hide/show toggle write: the
+                // view's rules document, replaced whole (ADR-0064). It is
+                // learned here rather than at the drag's own call site because
+                // its *undo* has to be learned too, and undo has no call site of
+                // its own.
+                Change::ViewDefinitionSet { id, definition } => {
+                    if let Some(row) = catalog.views.iter_mut().find(|v| v.id == *id) {
+                        row.definition = definition.clone();
+                    }
+                }
+                Change::ViewOrdSet { id, ord } => {
+                    if let Some(row) = catalog.views.iter_mut().find(|v| v.id == *id) {
+                        row.ord = *ord;
+                    }
+                    catalog.views.sort_by_key(|v| (v.db, v.ord));
+                }
+                Change::ViewDeleted { id } => {
+                    catalog.views.retain(|v| v.id != *id);
+                }
+                // Everything else in the enum belongs to the block tree, the
+                // pages or the settings, none of which this catalog describes.
+                _ => {}
+            }
+        }
+    }
+
+    /// Recompute one block's window from its reported geometry, and re-read when
+    /// the window moved. Returns `true` when the model changed (the caller then
+    /// updates that one row).
+    ///
+    /// `top_in_view` is the block's top edge relative to the editor viewport's
+    /// top, in px, as the delegate measured it: negative when the block starts
+    /// above the viewport, positive when it starts below it.
+    pub fn db_watch(&self, block: i32, top_in_view: f32) -> bool {
+        self.db_anchor.borrow_mut().insert(block, top_in_view);
+        self.db_refresh(block)
+    }
+
+    /// The refresh itself, without recording the anchor — the path a scroll and
+    /// the path that follows a structural edit share.
+    ///
+    /// **It settles the write queue first, and that is not an optimisation.**
+    /// A row lives in SQL and nowhere else (ADR-0067) while every write in this
+    /// app is debounced by 300 ms (`PersistenceService`), so a read that did not
+    /// flush first would answer a cell commit with the *old* value — the defect
+    /// that looks like "the edit did not take". Flushing here rather than in the
+    /// four write helpers is deliberate: undo and redo also reach a read
+    /// (`undo_open_page` reprojects) and they have no write call site to hang it
+    /// on. `force_flush` with an empty queue is a no-op, so a scroll pays for
+    /// this only when there is something to write — and the cost of the flush
+    /// itself is D2's number: 5.5–7.4 ms for a lone cell write, 10.6–14.9 µs
+    /// inside a batch.
+    fn db_refresh(&self, block: i32) -> bool {
+        let (Some(db), Some(view)) = (self.db_ref_of(block), self.db_active_view(block)) else {
+            return false;
+        };
+        let Some(repo) = self.db_repo().cloned() else {
+            return false;
+        };
+        if let Some(persistence) = &self.persistence {
+            // A failed flush is reported by the write path's own error channel
+            // (`take_last_error`); the read below then answers with whatever the
+            // file holds, which is the honest thing to draw.
+            let _ = persistence.force_flush();
+        }
+        let catalog = self.databases.borrow();
+        let Some(db_row) = catalog.views.iter().find(|v| v.id == view) else {
+            return false;
+        };
+        let properties = view_columns(&catalog, db, db_row);
+        let definition = ViewDefinition::parse(&db_row.definition);
+        let columns = table_columns(&properties, &definition);
+        drop(catalog);
+
+        // `top` is the anchor the delegate reports (`db-viewport`): the block
+        // body's top — header included — **relative to the viewport's top
+        // edge**. The reader's offset into the row surface is therefore its
+        // negation: a body whose top is 500 px above the viewport has exactly
+        // 500 px of rows already scrolled past it, and a body below the
+        // viewport has nothing scrolled past yet, which is what the clamp
+        // says. (Both halves must agree on the convention: the .slint side
+        // reports `row-y - editor-scroll-y`, so `scroll` must NOT enter here
+        // a second time — that double count was the one real arithmetic bug
+        // the D3 wiring caught, and it would have fetched a window that does
+        // not cover the viewport at any scroll position other than the top.)
+        let top = *self.db_anchor.borrow().get(&block).unwrap_or(&0.0);
+        let viewport = self.editor_viewport_h.get();
+        let offset = (-top).max(0.0);
+        let geometry = ViewGeometry::new(TableView::ROW_HEIGHT, viewport);
+
+        let total = match repo.record_count(db) {
+            Ok(total) => total,
+            Err(e) => {
+                self.db_notice.borrow_mut().push(format!("database read failed: {e}"));
+                return false;
+            }
+        };
+        let wanted = crate::core::database::window(total, geometry, offset);
+
+        {
+            let windows = self.db_windows.borrow();
+            if let Some(existing) = windows.get(&block) {
+                // The whole point of overscan: a scroll that stays inside the
+                // window costs the arithmetic above and nothing else.
+                if existing.view == view && existing.window == wanted && existing.total == total {
+                    return false;
+                }
+            }
+        }
+
+        let title = properties.iter().find(|p| p.kind.is_title()).map(|p| p.id);
+        let Some(title) = title else {
+            // ADR-0061: a database without a title column cannot draw a row. The
+            // invariant is the insert path's, so this is only reachable through a
+            // hand-edited file — and the answer is an empty view, not a panic.
+            return false;
+        };
+        let request = RowRequest::new(db, title, &properties);
+        let rows = match repo.window_rows(&request, wanted) {
+            Ok(rows) => rows,
+            Err(e) => {
+                self.db_notice
+                    .borrow_mut()
+                    .push(format!("database read failed: {e}"));
+                return false;
+            }
+        };
+        // Which rows are pages (ADR-0063), for the row's own Open/name column.
+        // One query for the database, not one per row: lazy pages mean this is a
+        // handful of rows however large the database is.
+        let pages = repo.record_pages(db).unwrap_or_default();
+        let view_rows: Vec<DbRow> = table_rows(&rows, &columns, &pages)
+            .into_iter()
+            .map(|row| DbRow {
+                record: row.record as i32,
+                page: row.page.map(|p| p.as_u64() as i32).unwrap_or(-1),
+                title: row.title.into(),
+                cells: ModelRc::from(Rc::new(VecModel::from(row
+                    .cells
+                    .into_iter()
+                    .map(|cell| DbCell {
+                        property: cell.property.as_u64() as i32,
+                        kind: property_kind_int(cell.kind),
+                        text: cell.painted.into(),
+                        checked: cell.checked,
+                        editable: cell.editable,
+                    })
+                    .collect::<Vec<_>>()))),
+            })
+            .collect();
+
+        let mut windows = self.db_windows.borrow_mut();
+        let entry = windows.entry(block).or_insert_with(|| DbWindow {
+            view,
+            columns: Vec::new(),
+            total,
+            window: wanted,
+            rows: Rc::new(VecModel::from(Vec::new())),
+        });
+        entry.view = view;
+        entry.columns = columns;
+        entry.total = total;
+        entry.window = wanted;
+        entry.rows.set_vec(view_rows);
+        true
+    }
+
+    /// The projection handed to a `Database` block's row: tabs, columns, the
+    /// realized window, and the two numbers that place it in the scroll surface.
+    /// `None` for a block with no entity, which the delegate draws as ADR-0060's
+    /// "(deleted database)".
+    pub fn db_table(&self, block: i32) -> Option<TableView> {
+        let db = self.db_ref_of(block)?;
+        let catalog = self.databases.borrow();
+        let active = self.db_active_view(block)?;
+        let row = catalog.views.iter().find(|v| v.id == active)?;
+        let layout = row.layout;
+        let definition = ViewDefinition::parse(&row.definition);
+        let properties = view_columns(&catalog, db, row);
+        let columns = table_columns(&properties, &definition);
+        let tabs: Vec<ViewTab> = catalog
+            .views_of(db)
+            .map(|view| ViewTab {
+                view: view.id,
+                name: view.name.clone(),
+                layout: view.layout,
+                active: view.id == row.id,
+            })
+            .collect();
+        drop(catalog);
+        // The window is the cache's; a projection that found none (the first
+        // one after a page switch, before any geometry report) refreshes once,
+        // which is also what seeds the model.
+        let _ = self.db_refresh(block);
+        let windows = self.db_windows.borrow();
+        let window = windows.get(&block)?;
+        Some(TableView {
+            tabs,
+            columns,
+            rows: Vec::new(),
+            total: window.total,
+            window: window.window,
+            layout,
+            support: LayoutSupport::of(layout),
+        })
+    }
+
+    /// The model a `Database` block's row carries: the realized rows, which the
+    /// delegate reads and no one else writes.
+    fn db_rows_model(&self, block: i32) -> ModelRc<DbRow> {
+        match self.db_windows.borrow().get(&block) {
+            Some(window) => ModelRc::from(window.rows.clone()),
+            None => ModelRc::default(),
+        }
+    }
+
+    /// Fill one projected row's SPEC §三十九 fields, from the block's entity.
+    ///
+    /// Two callers, and the second is why this exists as a function rather than
+    /// as a loop inside `reproject_blocks`:
+    ///
+    /// * the page projection, for every `Database` block on the page;
+    /// * the **scroll** path, which must not rebuild the page's row list — a
+    ///   window that moved past its overscan changes `db-row-start`, and the
+    ///   delegate needs that number, but re-projecting a 10 000-block page to
+    ///   deliver one integer would be the same defect as realizing the whole
+    ///   table. The realized rows themselves arrive through `db_rows_model`'s
+    ///   `VecModel`, which the refresh mutates in place.
+    ///
+    /// A block whose entity is gone gets every field cleared, which is what the
+    /// delegate reads as ADR-0060's "(deleted database)": a row that was drawn
+    /// before the entity was deleted must not keep drawing its last window.
+    pub fn db_fill_row(&self, row: &mut BlockRow) {
+        row.db_ok = false;
+        row.db_title = "".into();
+        row.db_rows = ModelRc::default();
+        row.db_columns = ModelRc::default();
+        row.db_views = ModelRc::default();
+        row.db_row_start = 0;
+        row.db_row_count = 0;
+        row.db_layout = "".into();
+        row.db_layout_ok = true;
+        // The two constants the window arithmetic is laid out at, handed to the
+        // delegate rather than restated in .slint: `core::database::window`
+        // divides the scroll offset by ROW_HEIGHT, and the block is as tall as
+        // HEADER_HEIGHT + total * ROW_HEIGHT — one source, or the view would
+        // fetch a window that does not cover its own viewport. Set before the
+        // early return: even a dangling entity's one muted line is laid out at
+        // the same geometry.
+        row.db_row_height = TableView::ROW_HEIGHT;
+        row.db_header_height = TableView::HEADER_HEIGHT;
+        // `db_ref` is not reset: it is the block's own pointer, projected from
+        // the document by `block_row`, and it is what says the block *meant* to
+        // draw a database at all.
+        let block = row.id;
+        let Some(view) = self.db_table(block) else {
+            return;
+        };
+        row.db_ok = true;
+        row.db_title = self
+            .db_ref_of(block)
+            .and_then(|db| self.databases.borrow().database(db).map(|d| d.name.clone()))
+            .unwrap_or_default()
+            .into();
+        row.db_rows = self.db_rows_model(block);
+        row.db_row_start = self.db_row_start(block);
+        row.db_row_count = self.db_row_count(block);
+        row.db_layout = view.layout.label().into();
+        row.db_layout_ok = view.support.is_drawn();
+        row.db_columns = ModelRc::from(Rc::new(VecModel::from(
+            view.columns
+                .iter()
+                .map(|column| DbColumn {
+                    property: column.property.as_u64() as i32,
+                    name: column.name.clone().into(),
+                    kind: property_kind_int(column.kind),
+                    permille: column.width as i32,
+                    title: column.title,
+                    options: ModelRc::from(Rc::new(VecModel::from(column
+                        .options
+                        .iter()
+                        .map(|option| DbOption {
+                            id: option.id.clone().into(),
+                            name: option.name.clone().into(),
+                            color: option.color.clone().into(),
+                        })
+                        .collect::<Vec<_>>()))),
+                })
+                .collect::<Vec<_>>(),
+        )));
+        row.db_views = ModelRc::from(Rc::new(VecModel::from(
+            view.tabs
+                .iter()
+                .map(|tab| DbViewTab {
+                    view: tab.view.as_u64() as i32,
+                    name: tab.name.clone().into(),
+                    active: tab.active,
+                })
+                .collect::<Vec<_>>(),
+        )));
+    }
+
+    /// The window's first row index — the row→model conversion §三十七 requires:
+    /// the model holds the window's rows, and row *n* of the database is model
+    /// index `n - start`.
+    fn db_row_start(&self, block: i32) -> i32 {
+        self.db_windows
+            .borrow()
+            .get(&block)
+            .map(|w| w.window.start as i32)
+            .unwrap_or(0)
+    }
+
+    fn db_row_count(&self, block: i32) -> i32 {
+        self.db_windows
+            .borrow()
+            .get(&block)
+            .map(|w| w.total as i32)
+            .unwrap_or(0)
+    }
+
+    /// The columns of the block's active view, for the columns popup.
+    pub fn db_column_toggles(&self, block: i32) -> Vec<DbColumnToggle> {
+        let Some(db) = self.db_ref_of(block) else {
+            return Vec::new();
+        };
+        let Some(view) = self.db_active_view(block) else {
+            return Vec::new();
+        };
+        let catalog = self.databases.borrow();
+        let Some(row) = catalog.views.iter().find(|v| v.id == view) else {
+            return Vec::new();
+        };
+        let definition = ViewDefinition::parse(&row.definition);
+        let all = all_columns(&catalog, db);
+        catalog
+            .properties_of(db)
+            .map(|property| DbColumnToggle {
+                property: property.id.as_u64() as i32,
+                name: property.name.clone(),
+                kind: property.kind.as_str().to_string(),
+                visible: definition.shows(property.id, &all),
+                // ADR-0063: the title column is a row's name, so it has no
+                // switch — the popup shows it locked instead of offering a
+                // toggle the table would have to refuse.
+                locked: property.kind.is_title(),
+            })
+            .collect()
+    }
+
+    /// Turn a line into a database block: the block, the entity, its `title`
+    /// column and its first view, in one `Entry` (ADR-0060/0061). Returns `true`
+    /// when it happened.
+    ///
+    /// The ids are allocated here because this is the layer that holds the
+    /// store's watermarks (ADR-0072) — one counter per table, seeded from
+    /// `MAX(id)` at startup and never read again, so two creations in the same
+    /// batch cannot collide even though neither row is in the file yet (the write
+    /// path is debounced).
+    pub fn make_database(&self, block: i32) -> bool {
+        let name = {
+            // The database's own name: the page it is first created on, which is
+            // what a link to it would say. Renameable later (`DatabaseRenamed`).
+            let ws = self.workspace.borrow();
+            ws.title_of(self.open_page.get())
+                .unwrap_or("Database")
+                .to_string()
+        };
+        let draft = DatabaseDraft::new(
+            DatabaseId(self.next_db_id.get()),
+            PropertyId(self.next_property_id.get()),
+            ViewId(self.next_view_id.get()),
+            name,
+        );
+        // The line gives up its words in the same batch that makes it a
+        // database: a `Database` block's `text` has no surface to be drawn on
+        // (the view draws records), and words kept behind the view would be
+        // two owners of one decision — the same rule the Synced conversion
+        // follows (ADR-0052). One batch, one Ctrl+Z restores the line whole
+        // (`exec_all` skips a command that plans to nothing, so the empty-line
+        // case — the "+"-menu's usual caller — costs nothing).
+        let Some(changes) = self.exec_all_on_open_page(vec![
+            Command::ReplaceText {
+                id: BlockId(block as u64),
+                text: String::new(),
+            },
+            Command::MakeDatabase {
+                id: BlockId(block as u64),
+                draft,
+            },
+        ]) else {
+            return false;
+        };
+        // The counters move only when the write is planned: a refused command
+        // (`MakeDatabase` refuses a cell, a container's child, or a block that
+        // already has an entity) must not burn an id.
+        self.next_db_id.set(self.next_db_id.get() + 1);
+        self.next_property_id.set(self.next_property_id.get() + 1);
+        self.next_view_id.set(self.next_view_id.get() + 1);
+        let _ = changes;
+        self.db_refresh(block);
+        true
+    }
+
+    /// Add one row to the database at `ord` (the end of the listing). Returns the
+    /// new record's id.
+    pub fn db_add_record(&self, block: i32, ord: OrderKey) -> Option<i64> {
+        let id = self.next_record_id.get();
+        let cmd = Command::AddDatabaseRecord {
+            block: BlockId(block as u64),
+            record: RecordId(id),
+            ord,
+        };
+        self.exec_on_open_page(cmd)?;
+        self.next_record_id.set(id + 1);
+        // The new row is at the end: the window has to be recomputed, and a
+        // database that fits on one screen re-reads instantly.
+        self.db_refresh(block);
+        Some(id as i64)
+    }
+
+    /// The next row's order key: one stride past the last row the *store*
+    /// reports, asked once per new row (a `MAX(ord)` on an index, not a table
+    /// scan) because the app deliberately does not hold the rows of a 10 000-row
+    /// database to find the last one (ADR-0067).
+    pub fn db_next_row_ord(&self, block: i32) -> OrderKey {
+        let Some(db) = self.db_ref_of(block) else {
+            return OrderKey::FIRST;
+        };
+        let Some(repo) = self.db_repo() else {
+            return OrderKey::FIRST;
+        };
+        match repo.last_record_ord(db) {
+            Ok(Some(ord)) => OrderKey::between(Some(ord), None).unwrap_or(OrderKey(ord.0 + OrderKey::STRIDE)),
+            _ => OrderKey::FIRST,
+        }
+    }
+
+    /// One new column at the end of the schema (ADR-0061's `ord`, past the last
+    /// one). Returns the new property's id as an int, or `None` when the name is
+    /// unusable.
+    ///
+    /// **Refused here rather than left to SQL**, for two reasons that are the
+    /// same reason: `db_properties` has `UNIQUE (db, name)`, and a write that
+    /// trips it fails inside the debounced flush — where nobody is listening —
+    /// so the app would show a column that is not in the file. The other is that
+    /// an unnamed column has an empty header and no way back (renaming is D5's),
+    /// which is a column a user cannot find. A trim, then two checks: non-empty,
+    /// and not already a name of this database.
+    ///
+    /// The kind is a parameter because the *scene* and the D3 test plan need
+    /// columns of the four kinds the inline editors carry, while the UI's one
+    /// button makes a text column — a kind picker is D5's, and a caller that
+    /// passes another kind is not doing anything the storage layer minds
+    /// (ADR-0062's shape is per kind, not per creation path).
+    pub fn db_add_column(&self, block: i32, name: &str, kind: PropertyKind) -> Option<i32> {
+        let db = self.db_ref_of(block)?;
+        let name = name.trim();
+        if name.is_empty() || kind.is_title() {
+            return None;
+        }
+        let ord = {
+            let catalog = self.databases.borrow();
+            if catalog.properties_of(db).any(|p| p.name == name) {
+                return None;
+            }
+            // The catalog holds every column (a schema is a handful of rows, and
+            // ADR-0067 keeps only *records* out of memory), so the end of the
+            // order is a fold in memory and not a `MAX(ord)` query.
+            catalog
+                .properties_of(db)
+                .map(|p| p.ord)
+                .max()
+                .map(|last| {
+                    OrderKey::between(Some(last), None).unwrap_or(OrderKey(last.0 + OrderKey::STRIDE))
+                })
+                .unwrap_or(OrderKey::FIRST)
+        };
+        let id = self.next_property_id.get();
+        let property = Property {
+            id: PropertyId(id),
+            db,
+            name: name.to_string(),
+            kind,
+            // Born with an empty config: a select's options, a number's format
+            // and a rollup's target all live in this one document (ADR-0061) and
+            // all of them are D5's editors to fill.
+            config: String::new(),
+            ord,
+        };
+        self.exec_on_open_page(Command::AddDatabaseProperty {
+            block: BlockId(block as u64),
+            property,
+        })?;
+        // The counter moves only for a write that was planned (ADR-0072).
+        self.next_property_id.set(id + 1);
+        // A new column changes every row's cells, so the window is re-read: the
+        // store paints cells against the column list it was handed, and a header
+        // drawn from a newer schema than the cells is the defect that looks like
+        // a sorting bug.
+        self.db_refresh(block);
+        Some(id as i32)
+    }
+
+    /// What a cell holds **as it is stored** — the text a live editor has to
+    /// start with. A point read, made once per focus rather than once per
+    /// projection: a painted cell is what a reader sees, and a number with a
+    /// format paints (`50%`) differently from what an editor must accept
+    /// (`0.5`), which is exactly the kind of difference that must not be
+    /// guessed at from the painted string.
+    pub fn db_cell_text(&self, block: i32, record: i64, property: i32) -> Option<String> {
+        let _ = block;
+        let repo = self.db_repo()?.clone();
+        let value = repo
+            .cell(RecordId(record as u64), PropertyId(property as u64))
+            .ok()?;
+        // The value's own form: `Display` for a number (so `0.5`), the stored
+        // ISO text for a date, the id for a select — never the painted form.
+        Some(value.display())
+    }
+
+    /// Write one cell from a text a user typed. The text is parsed **through the
+    /// column's own rules** (`core::database_property::parse_one`), so a number
+    /// column takes a number and a date column takes a date; the parse is the
+    /// same one D2 tested, and its rejection is what the caller paints as a
+    /// refusal. An empty input clears the cell (ADR-0062's one representation of
+    /// empty).
+    pub fn db_set_cell_text(&self, block: i32, record: i64, property: i32, text: &str) -> bool {
+        let Some(kind) = self.db_property_kind(property) else {
+            return false;
+        };
+        let config = self.db_property_config(property);
+        let value = match crate::core::database_property::parse_one(kind, &config, text) {
+            Ok(value) => value,
+            // A rejected input keeps the old value and says so; the paint path
+            // then puts the stored cell back on screen, so a bad entry reads as
+            // "that did not take" instead of as a silently coerced number.
+            Err(e) => {
+                self.db_notice.borrow_mut().push(e.to_string());
+                return false;
+            }
+        };
+        self.db_write_cell(block, record, property, value)
+    }
+
+    /// Write one cell with an already-typed value — the checkbox and the picker
+    /// paths, which know their own value and must not go through a text parse.
+    pub fn db_set_cell_value(
+        &self,
+        block: i32,
+        record: i64,
+        property: i32,
+        value: CellValue,
+    ) -> bool {
+        self.db_write_cell(block, record, property, value)
+    }
+
+    fn db_write_cell(
+        &self,
+        block: i32,
+        record: i64,
+        property: i32,
+        value: CellValue,
+    ) -> bool {
+        let Some(repo) = self.db_repo().cloned() else {
+            return false;
+        };
+        let record_id = RecordId(record as u64);
+        let property_id = PropertyId(property as u64);
+        // The old value, read here and not in the plan: `core::command::plan` has
+        // no SQL, and an undo that guessed the previous value would put the wrong
+        // thing back. One point read on the primary key of `db_values`.
+        let from = repo.cell(record_id, property_id).unwrap_or(CellValue::Empty);
+        let cmd = Command::SetDatabaseCell {
+            block: BlockId(block as u64),
+            record: record_id,
+            property: property_id,
+            from,
+            to: value,
+        };
+        if self.exec_editor(cmd).is_none() {
+            return false;
+        }
+        // The cell's paint is derived (an option id shows as a name, a number
+        // through its format), so the row has to be re-read rather than patched:
+        // one window read, which is the same cost the projection pays and the
+        // only way the cell and its neighbours stay consistent.
+        self.db_refresh(block);
+        true
+    }
+
+    /// A checkbox toggled: the inverse of what the cell shows, which is the
+    /// stored flag (the painted word is ADR-0065's `Yes`/`No`).
+    pub fn db_toggle_checkbox(&self, block: i32, record: i64, property: i32, checked: bool) -> bool {
+        self.db_write_cell(block, record, property, CellValue::Flag(!checked))
+    }
+
+    /// Pick one option for a select / status cell. `option` is the **id** as a
+    /// string (ADR-0061 stores ids, not labels), and picking the option that is
+    /// already there clears the cell — the same gesture as unchecking a box.
+    pub fn db_pick_option(
+        &self,
+        block: i32,
+        record: i64,
+        property: i32,
+        option: &str,
+        current: &str,
+    ) -> bool {
+        let value = if option == current {
+            CellValue::Empty
+        } else {
+            CellValue::Text(option.to_string())
+        };
+        self.db_write_cell(block, record, property, value)
+    }
+
+    /// Delete one row: its values, the record, and the page it owns when it is
+    /// page-backed — one `Entry`, one Ctrl+Z (ADR-0063).
+    ///
+    /// The values and the page row are read here because the plan layer has no
+    /// SQL: two reads (one query for the values, one point read for the record)
+    /// against an undo that puts back exactly what was there.
+    pub fn db_delete_record(&self, block: i32, record: i64) -> bool {
+        let Some(repo) = self.db_repo().cloned() else {
+            return false;
+        };
+        let record_id = RecordId(record as u64);
+        let Some(row) = repo.record(record_id).ok().flatten() else {
+            return false;
+        };
+        let values = repo.record_values(record_id).unwrap_or_default();
+        // The page row itself, not just its id: the undo has to write the title
+        // and the parent back, and a page rebuilt from an id would be a page
+        // with the wrong name.
+        let page = row.page.and_then(|id| self.page_row(id));
+        let cmd = Command::DeleteDatabaseRecord {
+            block: BlockId(block as u64),
+            record: row,
+            values,
+            page,
+        };
+        if self.exec_on_open_page(cmd).is_none() {
+            return false;
+        }
+        self.db_refresh(block);
+        true
+    }
+
+    /// One page row as `core::Page`, for the delete's undo. Built from the
+    /// workspace (which holds the title, the parent and the appearance) and the
+    /// page-order map (which holds the sibling order) — the two places a page's
+    /// own facts live in this layer. `None` for a page the session does not have,
+    /// which is a record pointing at a page it does not own.
+    fn page_row(&self, id: PageId) -> Option<Page> {
+        let ws = self.workspace.borrow();
+        let int = id.as_u64() as i32;
+        let page = ws.get(int)?;
+        Some(Page {
+            id,
+            title: page.title.clone(),
+            parent: page.parent.map(|p| PageId(p as u32 as u64)),
+            order: *self.page_order.borrow().get(&int).unwrap_or(&OrderKey::FIRST),
+            favorite: page.favorite,
+            expanded: page.expanded,
+            font: page.font,
+            full_width: page.full_width,
+            small_text: page.small_text,
+            icon: page.icon.clone(),
+        })
+    }
+
+    /// Set one column's width, in permille of the grid (ADR-0064's `widths`).
+    /// Persisted as the view's whole document, because that is what a view's
+    /// rules are: one JSON blob, replaced whole.
+    pub fn db_set_column_width(&self, block: i32, property: i32, permille: i32) -> bool {
+        let width = if permille <= 0 {
+            WIDTH_AUTO
+        } else {
+            permille.min(u16::MAX as i32) as u16
+        };
+        self.db_edit_definition(block, |definition| {
+            definition.set_width(PropertyId(property as u64), width)
+        })
+    }
+
+    /// Hide or show one column. The title column cannot be hidden (ADR-0063: it
+    /// is what a row is called), and the call is refused rather than silently
+    /// ignored so a caller cannot believe it worked.
+    pub fn db_toggle_column(&self, block: i32, property: i32) -> bool {
+        let Some(db) = self.db_ref_of(block) else {
+            return false;
+        };
+        let locked = self
+            .databases
+            .borrow()
+            .properties_of(db)
+            .any(|p| p.id == PropertyId(property as u64) && p.kind.is_title());
+        if locked {
+            return false;
+        }
+        let all: Vec<PropertyId> = self
+            .databases
+            .borrow()
+            .properties_of(db)
+            .map(|p| p.id)
+            .collect();
+        self.db_edit_definition(block, move |definition| {
+            let id = PropertyId(property as u64);
+            if definition.shows(id, &all) {
+                definition.hide(id, &all);
+            } else {
+                definition.show(id, &all);
+            }
+        })
+    }
+
+    /// Apply one edit to the active view's document and store the result. The
+    /// document is *read, edited and written back as text* — never re-serialised
+    /// from the fields this build knows, which is what keeps a later build's
+    /// `filter` and `sorts` alive through a width drag (ADR-0074).
+    fn db_edit_definition(&self, block: i32, edit: impl FnOnce(&mut ViewDefinition)) -> bool {
+        let (Some(db), Some(view)) = (self.db_ref_of(block), self.db_active_view(block)) else {
+            return false;
+        };
+        let _ = db;
+        let from = self
+            .databases
+            .borrow()
+            .views
+            .iter()
+            .find(|v| v.id == view)
+            .map(|v| v.definition.clone());
+        let Some(from) = from else {
+            return false;
+        };
+        let mut definition = ViewDefinition::parse(&from);
+        edit(&mut definition);
+        let to = definition.to_text();
+        if to == from {
+            return false;
+        }
+        // The catalog learns the new document from the change batch itself
+        // (`db_absorb`), on the way through `record` — so the projection below
+        // reads the new widths, and the *undo* of a drag reads the old ones.
+        let cmd = Command::SetDatabaseViewDefinition {
+            block: BlockId(block as u64),
+            view,
+            from,
+            to,
+        };
+        if self.exec_editor(cmd).is_none() {
+            return false;
+        }
+        self.db_refresh(block);
+        true
+    }
+
+    /// Switch the block to another view of the same database. Session state
+    /// (ADR-0073): the document is untouched, and the window is re-read because
+    /// a different view has different columns.
+    pub fn db_pick_view(&self, block: i32, view: i32) -> bool {
+        let Some(db) = self.db_ref_of(block) else {
+            return false;
+        };
+        let wanted = ViewId(view as u64);
+        if !self.databases.borrow().views_of(db).any(|v| v.id == wanted) {
+            return false;
+        }
+        self.db_active_view.borrow_mut().insert(block, wanted);
+        // The cached window belongs to the old view: dropping it is what makes
+        // the next projection read the new view's columns rather than reuse a
+        // row set painted against the old ones.
+        self.db_windows.borrow_mut().remove(&block);
+        self.db_refresh(block);
+        true
+    }
+
+    fn db_property_kind(&self, property: i32) -> Option<PropertyKind> {
+        self.databases
+            .borrow()
+            .properties
+            .iter()
+            .find(|p| p.id == PropertyId(property as u64))
+            .map(|p| p.kind)
+    }
+
+    fn db_property_config(&self, property: i32) -> String {
+        self.databases
+            .borrow()
+            .properties
+            .iter()
+            .find(|p| p.id == PropertyId(property as u64))
+            .map(|p| p.config.clone())
+            .unwrap_or_default()
+    }
+
+    /// The Markdown export's version of one database block (ADR-0065): the
+    /// header row and every row the view shows, as display strings, rendered
+    /// **here** because this is the layer that can read records.
+    ///
+    /// The rows are the *whole* table, not a window: a file has no viewport, so
+    /// the control read D1 measured (`unwindowed_rows`) is the honest one — and
+    /// the price is written down in ADR-0065's boundary and again in D8's
+    /// list: a ten-thousand-row database exports in one `Vec`, which is why the
+    /// streaming read is D8's收口 and not this slice's.
+    pub fn db_markdown_table(&self, block: i32) -> Option<crate::services::export_service::DatabaseTable> {
+        // A file says what the user is *looking at*, so the write queue is
+        // settled first — the same rule the window read follows (`db_refresh`).
+        // A cell typed in the last debounce window must not be missing from
+        // the exported table.
+        if let Some(persistence) = &self.persistence {
+            let _ = persistence.force_flush();
+        }
+        let db = self.db_ref_of(block)?;
+        let view = self.db_active_view(block)?;
+        let (properties, columns) = {
+            let catalog = self.databases.borrow();
+            let row = catalog.views.iter().find(|v| v.id == view)?;
+            let properties = view_columns(&catalog, db, row);
+            let definition = ViewDefinition::parse(&row.definition);
+            (properties.clone(), table_columns(&properties, &definition))
+        };
+        let title = properties.iter().find(|p| p.kind.is_title())?.id;
+        let repo = self.db_repo()?.clone();
+        let rows = repo.unwindowed_rows(&RowRequest::new(db, title, &properties)).ok()?;
+        let pages = repo.record_pages(db).unwrap_or_default();
+        let mut header: Vec<String> = vec![properties
+            .iter()
+            .find(|p| p.kind.is_title())
+            .map(|p| p.name.clone())
+            .unwrap_or_default()];
+        header.extend(columns.iter().skip(1).map(|c| c.name.clone()));
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            // ADR-0065's one link: a page-backed row writes its title as a
+            // `quire://page/<id>` address (ADR-0026's shape for a Page block), so
+            // the file keeps the only durable handle a reader has on that page; a
+            // bare record's title stays plain text.
+            let mut line = Vec::with_capacity(header.len());
+            line.push(match pages.get(&row.record) {
+                Some(page) => format!("[{}](quire://page/{})", row.title, page.as_u64()),
+                None => row.title.clone(),
+            });
+            // The title column is the first cell of the row and the first entry
+            // of the header, written once above; the rest follow in view order.
+            line.extend(row.cells.iter().skip(1).cloned());
+            out.push(line);
+        }
+        Some(crate::services::export_service::DatabaseTable {
+            header,
+            rows: out,
+        })
+    }
+}
+
 /// The cells of one table, as the row's data.
 fn table_cells(blocks: &[Block], table: &Block, hits: &FindHits) -> Vec<TableCell> {
     grid_blocks(blocks, table)
@@ -3918,6 +5122,19 @@ pub const BLOCK_COLUMN: i32 = 19;
 pub const BLOCK_MATH: i32 = 20;
 pub const BLOCK_TOC: i32 = 21;
 pub const BLOCK_EMBED: i32 = 22;
+/// A database view (SPEC §三十九, ADR-0060). The *layout* — table / board / … —
+/// is `db_views.layout` and not a kind int: one kind, eight layouts, which is
+/// what lets the six insert-menu placeholders light one at a time.
+pub const BLOCK_DATABASE: i32 = 23;
+
+/// The editor viewport height assumed before Slint has reported the real one, in
+/// px: `benchmarks/scripts/bench.ps1` renders at 1280×800, and the editor is
+/// most of it below the top bar. The window arithmetic divides by a *viewport*,
+/// so the first projection after startup (before any layout has run) would
+/// otherwise realize the whole table for one frame — the number only has to be
+/// the right order of magnitude, and `Editor.slint` replaces it on the first
+/// layout pass.
+pub const DEFAULT_EDITOR_VIEWPORT_H: f32 = 720.0;
 
 fn block(kind: i32, text: &str) -> BlockRow {
     BlockRow {
@@ -4408,6 +5625,7 @@ mod tests {
             img_percent: 100,
             columns: 0,
             lang: Lang::Plain,
+            db_ref: None,
         }
     }
 
@@ -5122,6 +6340,7 @@ mod tests {
                 img_percent: 100,
                 columns: 0,
                 lang: Lang::Plain,
+                db_ref: None,
             })
             .collect();
         bench_pictures(&mut blocks, 250);
@@ -5219,6 +6438,7 @@ mod tests {
             img_percent: 100,
             columns: if kind == BlockKind::Table { 3 } else { 0 },
             lang: Lang::Plain,
+            db_ref: None,
         };
         let cell = |id: u64, text: &str| mk(id, Some(8), BlockKind::TableCell, text);
         let mut blocks = vec![

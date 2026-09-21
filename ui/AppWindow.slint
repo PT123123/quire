@@ -178,6 +178,90 @@ component SlashMenuPopup inherits PopupWindow {
     }
 }
 
+// The database columns popup (SPEC §三十九 「操作」): hide/show a column of
+// the active view. A window-level popup like the block menu — one popup for
+// the whole app, not one per realized row — and its rows are pushed by Rust
+// (`db_column_toggles`), because "what the view shows" is the view
+// document's answer, not the delegate's. The title column is listed and
+// locked: it is what a row is named by (ADR-0063), so it has no switch
+// rather than a switch the table would refuse.
+component DatabaseColumnsPopup inherits PopupWindow {
+    width: 224px;
+    height: UIState.db-columns-rows.length * 30px + 8px;
+    // outside click / Escape dismiss; UIState syncs via the is-open mirror
+    close-policy: PopupClosePolicy.close-on-click-outside;
+
+    Rectangle {
+        x: 2px; y: 3px;
+        width: parent.width - 4px;
+        height: parent.height - 5px;
+        border-radius: Theme.radius-md + 2px;
+        background: Colors.shadow;
+    }
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        border-radius: Theme.radius-md;
+        background: Colors.surface-overlay;
+        border-width: 1px;
+        border-color: Colors.border;
+
+        for item[index] in UIState.db-columns-rows : Rectangle {
+            x: 4px;
+            y: 4px + (index * 30px);
+            width: parent.width - 8px;
+            height: 30px;
+            border-radius: Theme.radius-sm;
+            background: !item.locked && dc-ta.has-hover ? Colors.surface-hover : transparent;
+            animate background { duration: Theme.duration-instant; }
+
+            HorizontalLayout {
+                x: 8px;
+                width: parent.width - 16px;
+                spacing: Theme.spacing-sm;
+                Text {
+                    text: item.name;
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-ui;
+                    color: item.locked ? Colors.text-muted
+                        : (dc-ta.has-hover ? Colors.text-primary : Colors.text-secondary);
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+                // the column's type, as the kind's own word — a caption, not a
+                // second name; the popup is about visibility
+                Text {
+                    text: item.kind;
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-caption;
+                    color: Colors.text-muted;
+                    vertical-alignment: center;
+                }
+                if item.visible : Icon {
+                    vertical-stretch: 0;
+                    cross-axis-self-alignment: center;
+                    width: 13px;
+                    height: 13px;
+                    size: 13px;
+                    name: "todo-check";
+                    stroke-width: 2.6px;
+                    color: item.locked ? Colors.text-muted : Colors.accent;
+                }
+            }
+            dc-ta := TouchArea {
+                // the title column is listed so the popup is the one place the
+                // whole schema is visible; it does not pretend to be toggleable
+                enabled: !item.locked;
+                mouse-cursor: item.locked ? MouseCursor.default : MouseCursor.pointer;
+                clicked => {
+                    UIState.db-column-toggled(UIState.db-columns-block, item.property);
+                }
+            }
+        }
+    }
+}
+
 component LinkDialog inherits PopupWindow {
     width: 380px;
     // preferred-height already carries the layout's own padding; adding
@@ -299,6 +383,7 @@ export component AppWindow inherits Window {
     in-out property <bool> menu-open <=> UIState.menu-open;
     in-out property <bool> slash-open <=> UIState.slash-open;
     in-out property <int> block-menu-open-id <=> UIState.block-menu-open-id;
+    in-out property <bool> db-columns-open <=> UIState.db-columns-open;
     in-out property <bool> link-open <=> UIState.link-open;
     in-out property <bool> dialog-open <=> UIState.dialog-open;
     in-out property <bool> settings-open <=> UIState.settings-open;
@@ -367,6 +452,14 @@ export component AppWindow inherits Window {
         }
     }
 
+    changed db-columns-open => {
+        if (db-columns-open) {
+            dbColumns.show();
+        } else {
+            dbColumns.close();
+        }
+    }
+
     changed link-open => {
         if (link-open) {
             linkDialog.show();
@@ -422,6 +515,12 @@ export component AppWindow inherits Window {
     changed block-menu-shown => {
         if (!block-menu-shown && UIState.block-menu-open-id >= 0) {
             UIState.block-menu-open-id = -1;
+        }
+    }
+    property <bool> db-columns-shown: dbColumns.is-open;
+    changed db-columns-shown => {
+        if (!db-columns-shown && UIState.db-columns-open) {
+            UIState.db-columns-open = false;
         }
     }
     property <bool> palette-shown: palette.is-open;
@@ -570,6 +669,11 @@ export component AppWindow inherits Window {
     blockMenu := BlockMenuPopup {
         x: UIState.block-menu-x;
         y: UIState.block-menu-y;
+    }
+
+    dbColumns := DatabaseColumnsPopup {
+        x: UIState.db-columns-x;
+        y: UIState.db-columns-y;
     }
 
     linkDialog := LinkDialog {

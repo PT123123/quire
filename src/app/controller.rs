@@ -1261,6 +1261,207 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         });
     }
 
+    // ---- database views (SPEC §三十九) ----
+    //
+    // A database is the one block whose rows are not blocks, so none of these
+    // callbacks goes through `editing-id`: a cell is named by
+    // (block, record, property) and the write paths (`AppState::db_*`) parse,
+    // plan and re-read the window. Two rules hold across the whole section:
+    //
+    // * **the "one live TextInput" discipline still holds** — a cell's editor
+    //   exists only while `editing-id < 0`, and opening a cell closes the
+    //   block editor (and the other way round, in `focus_block`'s caller),
+    //   so a page can never have two inputs whatever order the two were set;
+    // * **a structural change re-fills that one row.** A window read mutates
+    //   the rows model in place (that is why scrolling a 10 000-row table is
+    //   one query), but the *shape* the delegate lays out — row count, window
+    //   start, columns, tabs — rides on the `BlockRow`, which only
+    //   `db_fill_row` rebuilds. `db_refill_row` is the one-row version of the
+    //   page projection, and it is what keeps the block as tall as the table.
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>()
+            .on_db_cell_activated(move |block, record, property| {
+                let g = gw.upgrade().unwrap();
+                // a block editor's pending keystrokes land first: closing it
+                // below would otherwise drop everything typed in the last
+                // debounce window
+                flush_pending_edit(&g, &s);
+                // the *stored* value, not the painted one: a number with a
+                // format paints (`50%`) differently from what an editor must
+                // accept (`0.5`)
+                let text = s
+                    .db_cell_text(block, record as i64, property)
+                    .unwrap_or_default();
+                g.set_editing_id(-1);
+                g.set_editing_text(text.into());
+                g.set_db_editing_block(block);
+                g.set_db_editing_record(record);
+                g.set_db_editing_property(property);
+                // a click is also the way out of an open option list
+                g.set_db_picking_record(-1);
+                g.set_db_picking_property(-1);
+            });
+    }
+    {
+        // the debounced commit while typing: the same 300 ms timer the prose
+        // rows use, with the database's own ids read back instead of
+        // `editing-id`.
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_cell_changed(move || {
+            db_debounce_arm(t, &gw, &s);
+        });
+    }
+    {
+        // the live cell is going away (Enter / Escape / Tab): commit **now**.
+        // Leaving it to the debounce would lose the text typed in the last
+        // 300 ms, because closing resets the two ids that commit reads back.
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_cell_closed(move || {
+            let g = gw.upgrade().unwrap();
+            db_commit_cell(&g, &s);
+            g.set_db_editing_block(-1);
+            g.set_db_editing_record(-1);
+            g.set_db_editing_property(-1);
+            // the next editor is created with the focus and gets its text from
+            // Rust; an empty mirror here is what keeps a stale value from
+            // flashing up first
+            g.set_editing_text("".into());
+            g.set_db_picking_record(-1);
+            g.set_db_picking_property(-1);
+        });
+    }
+    {
+        let s = state.clone();
+        ui.global::<UIState>()
+            .on_db_cell_toggled(move |block, record, property, checked| {
+                // the inverse of what the cell shows, which is the stored flag
+                // (the painted word is ADR-0065's `Yes`/`No`); the rows model is
+                // re-read in place, so no `db_refill_row` is needed — a toggle
+                // changes no row's existence
+                s.db_toggle_checkbox(block, record as i64, property, checked);
+            });
+    }
+    {
+        let s = state.clone();
+        ui.global::<UIState>()
+            .on_db_option_picked(move |block, record, property, option, current| {
+                // `option` is the stored id (ADR-0061 stores ids, not labels);
+                // picking the one a cell already holds clears it
+                s.db_pick_option(block, record as i64, property, &option, &current);
+            });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_row_added(move |block| {
+            let g = gw.upgrade().unwrap();
+            flush_pending_edit(&g, &s);
+            // the key is asked of the store (a `MAX(ord)` on an index): the app
+            // deliberately does not hold the rows to find the last one (ADR-0067)
+            let ord = s.db_next_row_ord(block);
+            if s.db_add_record(block, ord).is_some() {
+                db_refill_row(&s, block);
+            }
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_row_removed(move |block, record| {
+            let g = gw.upgrade().unwrap();
+            flush_pending_edit(&g, &s);
+            if s.db_delete_record(block, record as i64) {
+                // the row menu's delete is ADR-0063's plan ([values, record,
+                // page?]) and one Ctrl+Z, so nothing here touches the history
+                db_refill_row(&s, block);
+            }
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>()
+            .on_db_column_resized(move |block, property, permille| {
+                // applied on release, never per move: the write is one
+                // view-document edit and one undo step (ADR-0064's `widths`)
+                if s.db_set_column_width(block, property, permille) {
+                    db_refill_row(&s, block);
+                }
+            });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>()
+            .on_db_columns_opened(move |block, x, y| {
+                let g = gw.upgrade().unwrap();
+                db_push_columns(&g, &s, block);
+                // `absolute-position` is window-relative, so the anchor needs
+                // no conversion — only a clamp: a database near the bottom of
+                // the window must not open its popup off screen.
+                let rows = g.get_db_columns_rows().row_count() as f32;
+                let popup_h = rows * 30.0 + 8.0;
+                let y = y.clamp(48.0, (g.get_window_h() - popup_h - 8.0).max(48.0));
+                let x = x.clamp(8.0, (g.get_window_w() - 232.0).max(8.0));
+                g.set_db_columns_x(x);
+                g.set_db_columns_y(y);
+                g.set_db_columns_block(block);
+                g.set_db_columns_open(true);
+            });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_column_toggled(move |block, property| {
+            let g = gw.upgrade().unwrap();
+            if s.db_toggle_column(block, property) {
+                // the view shows different columns now: the row is re-filled
+                // (header and cells) and the popup's own rows are rebuilt in
+                // place, because it stays open across the click
+                db_refill_row(&s, block);
+                db_push_columns(&g, &s, block);
+            }
+        });
+    }
+    {
+        let gw = gw.clone();
+        ui.global::<UIState>().on_db_columns_closed(move || {
+            let g = gw.upgrade().unwrap();
+            g.set_db_columns_open(false);
+        });
+    }
+    {
+        let s = state.clone();
+        ui.global::<UIState>().on_db_view_picked(move |block, view| {
+            // session state, not a column (ADR-0073): a different view has
+            // different columns, so the row is re-read and re-filled
+            if s.db_pick_view(block, view) {
+                db_refill_row(&s, block);
+            }
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_viewport(move |block, top_in_view| {
+            let g = gw.upgrade().unwrap();
+            // the editor's height is the viewport every database on the page is
+            // windowed against; the delegate reports it once per resize
+            s.editor_viewport_h.set(g.get_editor_viewport_h());
+            // a scroll costs the arithmetic and, only when the window moved past
+            // its overscan, one query (`db_watch` is that gate). The rows model
+            // is mutated in place; the block row is re-filled only when the
+            // window really moved, because that is when `db-row-start` changed.
+            if s.db_watch(block, top_in_view) {
+                db_refill_row(&s, block);
+            }
+        });
+    }
+
     {
         let gw = gw.clone();
         let s = state.clone();
@@ -1463,6 +1664,20 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                 g.set_slash_pick_page(true);
                 return;
             }
+            // SPEC §三十九: "Table view" turns the line into a database — the
+            // block, the entity, its title column and its first view in one
+            // batch (`make_database`; the line's own words go with the same
+            // undo). `SetBlockType` refuses a Database kind by design: the
+            // entity is not the plan layer's to allocate. A database draws no
+            // line input of its own, so the caret leaves the row entirely.
+            if kind == crate::core::BlockKind::Database {
+                s.make_database(id);
+                g.set_slash_open(false);
+                g.set_slash_insert(false);
+                g.set_editing_text("".into());
+                g.set_editing_id(-1);
+                return;
+            }
             let _ = s.exec_on_open_page(Command::ReplaceText {
                 id: BlockId(id as u64),
                 text: cleaned.clone(),
@@ -1663,6 +1878,20 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                     // Page's child page survives in the tree, unowned
                     let old_kind = s.block_kind_of(id);
                     let new_kind = kind_from_int(a - 100);
+                    // SPEC §三十九: Turn-into reaches the same one-batch path
+                    // the "/" and "+" menus do. `SetBlockType` refuses a
+                    // Database kind — the entity, its title column and its
+                    // first view are not the plan layer's to allocate — so
+                    // `make_database` is the only door, and the line's words
+                    // leave with it (one Ctrl+Z restores the line whole).
+                    if new_kind == crate::core::BlockKind::Database {
+                        s.make_database(id);
+                        if g.get_editing_id() == id {
+                            g.set_editing_text("".into());
+                            g.set_editing_id(-1);
+                        }
+                        return;
+                    }
                     // A picture is not a style: it takes a file first, and the
                     // block only converts once the user has chosen one.
                     if matches!(
@@ -2130,6 +2359,120 @@ fn columns_refocus(g: &UIState<'_>, s: &Rc<AppState>) {
     }
 }
 
+/// The database cell's debounced commit (SPEC §三十九). The same 300 ms rhythm
+/// the prose rows use, but the ids it reads back are the cell's —
+/// (block, record, property), never `editing-id`, which is `-1` while a cell
+/// is live by the one-input discipline. A parse the column's kind refuses
+/// (`db_set_cell_text` returns `false`) keeps the editor open with the typed
+/// text: the cell's stored value is untouched, and closing the editor is what
+/// repaints it. A commit that lands re-reads the window in place.
+fn db_debounce_arm(
+    t: &'static slint::Timer,
+    gw: &slint::Weak<UIState<'static>>,
+    s: &Rc<AppState>,
+) {
+    let gw = gw.clone();
+    let s = s.clone();
+    t.start(
+        slint::TimerMode::SingleShot,
+        std::time::Duration::from_millis(300),
+        move || {
+            if let Some(g) = gw.upgrade() {
+                let record = g.get_db_editing_record();
+                let property = g.get_db_editing_property();
+                // not a live cell, or the block editor took the keyboard back:
+                // neither state belongs to this commit
+                if record < 0 || property < 0 || g.get_editing_id() >= 0 {
+                    return;
+                }
+                let block = g.get_db_editing_block();
+                if block < 0 {
+                    return;
+                }
+                let text = g.get_editing_text().to_string();
+                let _ = s.db_set_cell_text(block, record as i64, property, &text);
+            }
+        },
+    );
+}
+
+/// Commit the live database cell synchronously — the `db-cell-closed` path
+/// (Enter / Escape / Tab). The debounce cannot be trusted here: closing resets
+/// `db-editing-record`/`-property`, and the debounced commit reads those back,
+/// so a text typed in the last 300 ms would be silently dropped. A refused
+/// parse closes anyway: the editor going away is what repaints the stored
+/// value, which is the honest answer to "that did not take".
+fn db_commit_cell(g: &UIState<'_>, state: &Rc<AppState>) {
+    let record = g.get_db_editing_record();
+    let property = g.get_db_editing_property();
+    if record < 0 || property < 0 || g.get_db_editing_block() < 0 {
+        return;
+    }
+    let block = g.get_db_editing_block();
+    let text = g.get_editing_text().to_string();
+    let _ = state.db_set_cell_text(block, record as i64, property, &text);
+}
+
+/// Re-fill one projected block row's §三十九 fields in place — the one-row
+/// version of the page projection's `db_fill_row` pass. A window read mutates
+/// the rows model in place, but the *shape* the delegate lays out (row count,
+/// window start, columns, tabs) rides on the `BlockRow`, and every structural
+/// database change (row added or removed, column toggled or resized, view
+/// picked) moves that shape. Walking the model here keeps the cost one row
+/// instead of one page — the same reasoning the projection's targeted patch
+/// (`set_row_data` on the todo toggle) already follows.
+fn db_refill_row(state: &Rc<AppState>, block: i32) {
+    let mut i = 0;
+    while let Some(mut row) = state.blocks.row_data(i) {
+        if row.id == block {
+            state.db_fill_row(&mut row);
+            state.blocks.set_row_data(i, row);
+            return;
+        }
+        i += 1;
+    }
+}
+
+/// (Re)build the columns popup's rows from the view's own document. Two
+/// callers, one truth: opening the popup, and the moment after a toggle — the
+/// popup stays open across the click, so its rows are stale the instant the
+/// toggle lands, and the same builder is what un-stales them.
+fn db_push_columns(g: &UIState<'_>, state: &Rc<AppState>, block: i32) {
+    let rows: Vec<crate::DbColumnToggle> = state
+        .db_column_toggles(block)
+        .into_iter()
+        .map(|t| crate::DbColumnToggle {
+            property: t.property,
+            name: t.name.into(),
+            kind: t.kind.into(),
+            visible: t.visible,
+            locked: t.locked,
+        })
+        .collect();
+    g.set_db_columns_rows(Rc::new(slint::VecModel::from(rows)).into());
+}
+
+/// Where the caret belongs after a row or column delete: `at` was the focused
+/// cell's row-major slot, so the same slot of the smaller grid is the cell
+/// nearest to it. `None` means the caret was never in this grid — the delete
+/// took a row from under someone else, so it keeps its own focus.
+fn table_refocus(g: &UIState<'_>, s: &Rc<AppState>, table: i32, at: Option<usize>) {
+    match at.and_then(|at| s.table_cell_at(table, at)) {
+        Some(cell) => focus_block(g, s, cell, i32::MAX),
+        None => refresh_focused_text(g, s),
+    }
+}
+
+/// Adding or removing a box rebuilds the layout's row, and the item's input
+/// is created with the focus — so it would come back with the caret at the
+/// start of the line. Hand it back where the reader left it.
+fn columns_refocus(g: &UIState<'_>, s: &Rc<AppState>) {
+    let id = g.get_editing_id();
+    if id > 0 && s.is_column_item(id) {
+        focus_block(g, s, id, i32::MAX);
+    }
+}
+
 /// Commit the live editing text as a `ReplaceText` command (no-op when the
 /// text is unchanged). Called by the debounce timer and before every
 /// structural operation so undo history stays consistent.
@@ -2357,7 +2700,12 @@ fn copy_current_page_markdown(g: &UIState<'_>, s: &Rc<AppState>) {
     let page = s.open_page.get();
     let md = {
         let d = s.doc.borrow();
-        crate::services::export_service::export_page(d.page_blocks(core_page_id(page)))
+        crate::services::export_service::export_page_with(
+            d.page_blocks(core_page_id(page)),
+            // ADR-0065: the caller that can read the database pre-renders
+            // the table (current view → GFM); a clipboard copy is that caller.
+            &|id| s.db_markdown_table(id.as_u64() as i32),
+        )
     };
     let notice = if md.trim().is_empty() {
         "This page has nothing to copy yet.".to_string()
@@ -2379,7 +2727,12 @@ fn export_current_page(g: &UIState<'_>, state: &Rc<AppState>) {
         .to_string();
     let md = {
         let d = state.doc.borrow();
-        crate::services::export_service::export_page(d.page_blocks(core_page_id(page)))
+        crate::services::export_service::export_page_with(
+            d.page_blocks(core_page_id(page)),
+            // ADR-0065: the caller that can read the database pre-renders
+            // the table (current view → GFM); the .md export is that caller.
+            &|id| state.db_markdown_table(id.as_u64() as i32),
+        )
     };
     if let Some(path) = rfd::FileDialog::new()
         .add_filter("Markdown", &["md"])
@@ -2451,6 +2804,81 @@ fn find_inserted_id(changes: &[Change]) -> Option<i32> {
         Change::BlockInserted(b) => Some(b.id.0 as i32),
         _ => None,
     })
+}
+
+/// Seed the database-table scene (SPEC §三十九): one table on the demo page
+/// with its title column and three more kinds the inline editors carry —
+/// number, checkbox, date — and five rows of fixed values, because a shot has
+/// to look the same tomorrow (the date is a literal, exactly as the `@date`
+/// scene's is). Every step goes through the write paths the UI uses
+/// (`make_database` → `db_add_column` → `db_add_record` → `db_set_cell_text`),
+/// so the scene is a fixture of the *pipeline* and not of the model: if the
+/// command layer cannot build a database, the scene must not pretend one.
+///
+/// A select/status column is deliberately absent: D3 has no option editor
+/// (D5's), so a fresh select column has an empty option list and the shot
+/// would be about "No options yet" rather than about the table.
+fn seed_database_table(state: &Rc<AppState>) -> Option<i32> {
+    use crate::core::database::{CellValue, PropertyKind};
+    use crate::core::BlockKind;
+
+    // the line the database grows from: an empty paragraph after the first
+    // line of prose (the same anchor every near-top seed uses)
+    let after = {
+        let d = state.doc.borrow();
+        d.page_blocks(core_page_id(state.open_page.get()))
+            .iter()
+            .find(|b| b.kind == BlockKind::Paragraph && !b.text.is_empty())
+            .map(|b| b.id.0 as i32)
+    }?;
+    let id = state
+        .exec_on_open_page(Command::InsertBlockAfter {
+            id: BlockId(after as u64),
+            kind: BlockKind::Paragraph,
+            text: String::new(),
+        })
+        .as_deref()
+        .and_then(find_inserted_id)?;
+    if !state.make_database(id) {
+        return None;
+    }
+    let points = state.db_add_column(id, "Points", PropertyKind::Number);
+    let done = state.db_add_column(id, "Done", PropertyKind::Checkbox);
+    let due = state.db_add_column(id, "Due", PropertyKind::Date);
+    let (Some(points), Some(done), Some(due)) = (points, done, due) else {
+        return None;
+    };
+    // The title column's id: the one `MakeDatabase` created first and locked
+    // (ADR-0061), which the popup lists as non-toggleable.
+    let Some(title) = state.db_column_toggles(id).iter().find(|t| t.locked).map(|t| t.property)
+    else {
+        return None;
+    };
+    // (name, points, done, due) — the values are literals, not `now()`/`today()`:
+    // a sweep that runs tomorrow must photograph the same table.
+    let rows: [(&str, &str, bool, &str); 5] = [
+        ("Spec the window", "31", true, "2026-09-22"),
+        ("Sort in SQL", "10", false, "2026-09-23"),
+        ("Write the switcher", "7", true, "2026-09-25"),
+        ("Measure a scroll", "39", false, "2026-10-01"),
+        ("Light the menus", "3", true, "2026-10-04"),
+    ];
+    for (name, pts, checked, day) in rows {
+        let Some(record) = state.db_add_record(id, state.db_next_row_ord(id)) else {
+            continue;
+        };
+        state.db_set_cell_text(id, record, title, name);
+        state.db_set_cell_text(id, record, points, pts);
+        state.db_set_cell_text(id, record, due, day);
+        // the box carries a typed value, not a parse: the cell's own toggle
+        // path is `Flag(!shown)`, and the scene uses the same door
+        state.db_set_cell_value(id, record, done, CellValue::Flag(checked));
+    }
+    // the last write's window is current, but the block row's *shape* (row
+    // count) is only rebuilt by `db_fill_row` — the same call every structural
+    // change in the wire section follows its write with
+    db_refill_row(state, id);
+    Some(id)
 }
 
 /// The first cell a grid-building command created — the cell a table's caret
@@ -2657,6 +3085,10 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             g.set_dark(true);
             apply_scene(ui, state, "title-edit");
         }
+        "dark-database-table" => {
+            g.set_dark(true);
+            apply_scene(ui, state, "database-table");
+        }
         "title-edit" => {
             g.set_page_title("Renaming in place…".into());
             g.set_title_editing(true);
@@ -2723,6 +3155,12 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
 
         "rename" => {
             g.set_renaming_id(108);
+        }
+
+        // SPEC §三十九: the table view. A real database through the real write
+        // paths — nothing here hand-builds a fixture the UI could not make.
+        "database-table" => {
+            seed_database_table(state);
         }
 
         "empty" => open(&g, state, 113),

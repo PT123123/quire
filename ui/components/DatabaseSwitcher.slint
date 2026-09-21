@@ -1,0 +1,102 @@
+// The view switcher (SPEC §三十九 「视图」, ADR-0060/0064): the tabs above a
+// database, one per `db_views` row.
+//
+// D3 has exactly one view per database, and this component is *still* a tab
+// strip — that is the point. ADR-0060 says the eight SPEC layouts are
+// `db_views.layout` rather than eight block kinds precisely so that adding one
+// is a row and not a rewrite: a switcher built for one view would have to be
+// rewritten by the second (D5), and every later view would rewrite it again.
+// What D3 fixes here is the shape — a row of named tabs with the active one
+// marked, a `+` that says what it does not do yet, and a place for the layout
+// label of a view this build cannot draw.
+//
+// The `+` is present and muted rather than absent: the same reasoning the six
+// `INSERT_ITEMS` placeholders follow (it is a promise the roadmap can be read
+// off), and the same the six rows' lighting follows — D3 keeps one more promise
+// than D0–D2 did, and this line keeps the next one visible.
+
+import { Theme } from "../Theme.slint";
+import { Colors } from "../Colors.slint";
+import { Typography } from "../Typography.slint";
+import { UIState, DbViewTab } from "../Types.slint";
+
+export component DatabaseSwitcher inherits Rectangle {
+    in property <[DbViewTab]> tabs;
+    in property <int> block;
+
+    height: 26px;
+    background: transparent;
+
+    HorizontalLayout {
+        spacing: Theme.spacing-xs;
+
+        for tab[index] in root.tabs : Rectangle {
+            width: tab-text.width + 2 * Theme.spacing-sm;
+            height: 24px;
+            border-radius: Theme.radius-sm;
+            background: tab.active ? Colors.surface-selected
+                : (tab-ta.has-hover ? Colors.surface-hover : transparent);
+            animate background { duration: Theme.duration-instant; }
+
+            tab-text := Text {
+                x: Theme.spacing-sm;
+                y: 0px;
+                height: parent.height;
+                vertical-alignment: center;
+                text: tab.name;
+                font-family: Typography.ui-font;
+                font-size: Typography.size-caption;
+                font-weight: tab.active ? Typography.weight-medium : Typography.weight-regular;
+                color: tab.active ? Colors.text-primary : Colors.text-secondary;
+            }
+
+            tab-ta := TouchArea {
+                width: parent.width;
+                height: parent.height;
+                mouse-cursor: MouseCursor.pointer;
+                clicked => {
+                    UIState.db-view-picked(root.block, tab.view);
+                }
+            }
+        }
+
+        // "+": the second view. Muted and inert, with the sentence that makes
+        // the muteness honest.
+        add := Rectangle {
+            width: 22px;
+            height: 24px;
+            border-radius: Theme.radius-sm;
+            background: add-ta.has-hover ? Colors.surface-hover : transparent;
+
+            Text {
+                x: 0px;
+                y: 0px;
+                width: parent.width;
+                height: parent.height;
+                text: "+";
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                font-size: Typography.size-ui;
+                color: Colors.text-muted;
+            }
+
+            add-ta := TouchArea {
+                width: parent.width;
+                height: parent.height;
+                mouse-cursor: MouseCursor.default;
+            }
+        }
+
+        // what a database has that this build cannot draw yet: a view whose
+        // layout is D5's opens as its own name rather than as a wrong table
+        // (ADR-0060's fold, said out loud on screen)
+        if root.tabs.length == 0 : Text {
+            height: parent.height;
+            vertical-alignment: center;
+            text: "View";
+            font-family: Typography.ui-font;
+            font-size: Typography.size-caption;
+            color: Colors.text-muted;
+        }
+    }
+}

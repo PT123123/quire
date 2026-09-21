@@ -2388,3 +2388,46 @@ ADR-0001 的「一个进程一个运行时」比省这百来行重要。两种 f
 
 **下一步**：D3 的第一个视图（table view）——把窗口接到真帧上，点亮六行占位，回答 D1 留下的游标问题，
 并把单元格编辑器接到 `parse_one` / `paint` 上。
+
+## Track 3 · D3 table view（2026-09-22，on `track/3-database`，schema v18，ADR-0072…ADR-0075）
+
+**缘起**：D0 证明通道（窗口有界），D1 让通道真的从 SQL 取行，D2 让窗口里的每一格有意义——D3 把
+它们画出来，并把 ADR-0060 的六个接点整批点亮：块种类（`BlockKind::Database`，kind 字符串
+`database`）、`blocks.db_ref`（迁移 **v18**，`add_db_ref_column`，一步一语义单位）、`/` 与「+」菜单
+（`Table view` 行真 id，其余五行仍 muted）、Turn into（三个入口都走 `Command::MakeDatabase`，
+`SetBlockType { kind: Database }` 被显式拒绝）、Markdown 导出（ADR-0065）、截图场景
+（`database-table` / `dark-database-table`）。
+
+**通道形状（一次说清）**：页面滚动（Slint）→ `db-viewport`（块的 body 顶相对视口的 px）→
+`core::database::window`（由视口与行高算窗口）→ `database_store::window_rows`（`LIMIT`/`OFFSET`）
+→ `core::database_view`（列、已绘制的格、row→y 算术）→ `ModelRc<DbRow>` → 委托只画。四个接缝各有
+一条纪律：窗口只由 `core::database::window` 算；只有窗口越过 overscan 才重新取行；行模型就地替换
+（不重建页面的行列表）；块高 = 表高（页面的滚动就是视图的滚动，没有第二个滚动区）。
+
+**「行是动态的」两条规则**：projection 真的**删掉**不可见的行（`db-windows` 里的模型只装窗口，不是
+`visible: false` 的全表）；模型下标与行下标差一个 `db-row-start`，由 Rust 算出、写进行数据，委托只做
+`(db-row-start + index) * db-row-height` 的摆放（§三十七 对「行动态」块的两条附加规则）。
+
+**交付物**：`src/core/database_view.rs`（视图文档读写 + 列/行投影 + 15 种 kind 的格形状）；
+`ui/components/DatabaseView.slint` / `DatabaseCell.slint` / `DatabaseSwitcher.slint`；
+`ui/AppWindow.slint` 的 `DatabaseColumnsPopup`（窗口级隐藏列 popup，title 列锁定）；
+`EditorBlock.slint` 的 kind 23 臂（`db-height` 与 `database` 正文）；`controller.rs` 的 12 个
+`UIState.db-*` callback（激活/提交/取消/勾选/选选项/加行/删行/列宽/开合列 popup/切视图/视口报告）；
+`state.rs` 的 `make_database` / `db_add_record` / `db_set_cell_text` / `db_toggle_checkbox` /
+`db_pick_option` / `db_delete_record` / `db_set_column_width` / `db_toggle_column` / `db_pick_view`
+/ `db_watch` / `db_markdown_table` 与 `db_absorb`（ADR-0075）。
+
+**行内编辑的覆盖（D3 的诚实边界）**：title / text / number 是行内 `TextInput`，checkbox 是整格点击，
+select / status 是格内选项列表；其余九种（multi-select / date / url / email / phone / files /
+created time / last edited time / formula / rollup / relation）今天**只画不编**——`editable` 为
+false 的格是惰性的，日期与列表的输入控件是 D5/D6 的。
+
+**验证**（见报告 D3 一节的完整读数）：`cargo check --all-targets` / `cargo test --all-targets` /
+`cargo build --release` 三条门槛，加上提交树单独跑一遍；视觉用 sweep 对照 D1/D2 的基线
+（`database-table` 与 `dark-database-table` 是新增场景，其余场景应当不动）；性能收口 SPEC §三十九 的
+三个数字里 D3 能给的（切换视图耗时、行内编辑到重绘的路径成本）。
+
+**未验证**（诚实清单，详见报告）：没有真键盘输入与鼠标的端到端测试（headless 只能证明投影）；
+`absolute-position` 的窗口坐标语义只在文档层面确认（统一测试要看 popup 是否落在按钮正下方）；
+10 000 行滚动时的读延迟仍受 D1 量出的 `OFFSET` + `LEFT JOIN` 影响（D4 的游标读）；
+`formula` / `rollup` 列在导出里的计算值是 D6 的正确性。

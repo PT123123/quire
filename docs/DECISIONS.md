@@ -2685,3 +2685,150 @@ Consequences:
 * Still unverified: no picker consumes the list, so its cost (one `DISTINCT` over
   the file) is unmeasured; and "two spellings are two people" is a decision a UI
   may soften with a case-insensitive match — a UI decision, not this one.
+
+## ADR-0072 · The six tables' ids are session watermarks, seeded from the store and never re-read
+
+Decision: the drawn layer allocates database ids from four counters in
+`AppState` (`next_db_id` / `next_property_id` / `next_record_id` /
+`next_view_id`), each seeded once at startup from the highest id its table
+holds (`database_store::maximum`) and incremented only when the command that
+was to spend the id was actually planned. `Command::MakeDatabase`,
+`AddDatabaseRecord` and `AddDatabaseProperty` carry their ids **in** — the
+plan layer can allocate block ids and nothing else, which
+`Command::InsertImage` set the precedent for — so the counters are the one
+place the drawn layer's ids come from.
+
+Why not a `MAX(id)` query per creation: the write path is debounced
+(`PersistenceService`), so two creations in the same batch cannot collide
+even though neither row is in the file yet, and the app deliberately never
+holds the rows of a 10 000-row database to find the highest one (ADR-0067) —
+putting that question back on every click of "New row" is the exact cost the
+window exists to avoid. The seed answers the only question that matters
+("which ids are taken *before this session*") in one query per table at
+startup.
+
+Consequences:
+
+* A refused command burns no id: the counters move only after
+  `exec_all_on_open_page` returned changes, so `MakeDatabase`'s refusals (a
+  cell, a container's child, a block that already has an entity) leave the
+  watermark where it was.
+* An id a session allocated and never wrote is forgotten at restart; nothing
+  references it, so no gap is observable. A batch that wrote it is in the
+  file before anything can point at it, because the change list that carries
+  the reference carries the row.
+* The bulk path does not disturb the watermarks: ADR-0066's snapshot carries
+  the rows across, so the highest ids survive it, and the session's next
+  allocation is re-seeded only by a restart.
+* Still unverified: two processes writing one file concurrently is outside
+  the model (a single-process app; the LAN share is read-only), so no test
+  covers the counters against a foreign writer — a hand-edited library can
+  collide, and the failure is the store's UNIQUE constraint, reported, not
+  silent.
+
+## ADR-0073 · Which view a block is showing is session state, not a column
+
+Decision: `db_active_view` is a map in `AppState` (`RefCell<HashMap<i32,
+ViewId>>`), written by `db_pick_view` and read by every projection; nothing
+is persisted, and a restart opens the database's first view.
+
+Why not a column on `db_views` (a `selected` flag): "which view am I looking
+at" is a fact about a **window**, not about the document — two blocks may
+show the same database and each is looking at its own view, so the fact is
+per (block, session), which is exactly the shape a column cannot have. And
+not a document change: making a switch a `Change` would cost an undo step
+and a write for a fact nothing else depends on, and Ctrl+Z would move the
+user's view back to a view they deliberately left. The document holds the
+view *definitions* (ADR-0064); the session holds which one is on screen.
+
+Consequences:
+
+* The choice dies with the session. That is the recorded cost, and it is
+  honest: a view switcher that remembered across restarts needs a place to
+  remember *in*, which is a schema question for the milestone that also
+  brings a second view (D5).
+* Undo and redo never move it — the map is not in the change path, which is
+  also why the in-memory catalog's fold (ADR-0075) has no arm for it.
+* Switching invalidates the block's cached window (`db_windows.remove`): a
+  different view has different columns, and a row set painted against the
+  old ones must not survive the switch.
+* Still unverified: no number for the switch cost — one view per database
+  today, so nothing can be switched *to*; the number is D5's, with the same
+  caveat the shared-tree session drift always carries.
+
+## ADR-0074 · A view's definition is read, edited and written back as text, and the keys this build does not own pass through untouched
+
+Decision: `core::database_view::ViewDefinition` keeps ADR-0064's document as
+the parsed JSON it arrived as and rewrites exactly two keys — `columns` and
+`widths`, the ones D3 owns. Every other key (`filter`, `sorts`, `groups`,
+`v`) is carried through in the position it was found. `db_edit_definition`
+in `AppState` is the only writer, and it is read-edit-write of the **text**:
+the stored document is parsed, one edit function runs, the result is
+serialised, and the whole text is what `SetDatabaseViewDefinition` carries
+as its `from` and `to`.
+
+Why: this build owns two keys and a later build owns the rest. A struct of
+the fields this build knows would silently drop the keys it has no field
+for — "hide a column" would quietly clear a filter — and re-serialising
+only the known keys has the same effect with more code. The document is the
+view's only copy of its rules (ADR-0064 put them there because SQL never
+filters on them), so a writer that eats keys is not a round-off, it is data
+loss.
+
+Consequences:
+
+* A document that does not parse degrades to "no rules" (ADR-0064's fold),
+  and a *newly written* one is always an object with the two keys present —
+  an empty `widths` map is stored as `{}` rather than removed, because "I
+  own this key and it is empty" is a different statement from "I have never
+  heard of it".
+* The undo of a width drag is the previous **text**, so it restores a later
+  build's key edits too — the `Change` carries the bytes, not a delta.
+* A hand-edited width below the floor reads as the floor, and `0` reads as
+  "auto" (an equal share); a drag can store neither, which is why the two
+  cannot be confused.
+* Still unverified: the pass-through is a property of the code's shape
+  (`put` keeps unknown fields) and the fold is pinned by `core` tests; a
+  round-trip test that drives a document with foreign keys through a D3 edit
+  is on the final unified test's plan.
+
+## ADR-0075 · The in-memory catalog learns the schema from change lists, and records never enter it
+
+Decision: `AppState::db_absorb` folds every change batch the session records
+into the `DatabaseCatalog` the read path consults: `DatabaseCreated` /
+`DatabaseRenamed` / `DatabaseDeleted`, `PropertyAdded` / `PropertyRenamed` /
+`PropertyKindSet` / `PropertyOrdSet` / `PropertyDeleted`, `ViewAdded` /
+`ViewRenamed` / `ViewLayoutSet` / `ViewDefinitionSet` / `ViewOrdSet` /
+`ViewDeleted`. The funnel is `record()` — the one place apply, undo and redo
+all arrive — so no write path has to remember to teach the catalog
+itself. Records, values and list items are deliberately absent: they are not
+in the catalog at all (ADR-0067), and a row's life is a window's business.
+
+Why: the catalog is what every projection reads, and until it learned, a
+freshly made database existed in SQL and not in memory — its own block drew
+ADR-0060's "(deleted database)" until the next restart, which is the kind of
+defect that survives every unit test of the layers below it. Undo is the
+reason this is a fold over changes and not code at the call sites: an undo
+has no call site, and its batch must teach the catalog the same way an apply
+does.
+
+Consequences:
+
+* **A change names what happened, not which direction it ran** — the same
+  contract `core::document`'s apply/revert already runs on. `DatabaseCreated`
+  always means "the row exists now", whether the user created it or undid a
+  deletion, so the fold is idempotent (an insert that finds the row already
+  there keeps it) and the catalog cannot disagree with storage about what a
+  batch means.
+* `DatabaseDeleted` cascades in memory exactly as `ON DELETE CASCADE` does in
+  SQL (the entity's columns and views go with it); `PropertyDeleted` does
+  **not** clean view documents, because no foreign key reaches inside
+  ADR-0064's JSON — the compiler drops the ids it does not find (ADR-0074's
+  unknown-key rule, applied to reads).
+* A fresh batch that adds a property sorts the catalog by `(db, ord)` after
+  the insert: `ord` is the schema's order (ADR-0061) and the store returns
+  columns by it, so the in-memory order is what a restart would load.
+* Still unverified: a LAN pull's change list reaches `record()` the same way
+  (the bulk path's database snapshot is ADR-0066's, and is not a change
+  batch), so the fold is exercised by the app's own paths only — a mixed
+  replay test is on the final unified test's plan.

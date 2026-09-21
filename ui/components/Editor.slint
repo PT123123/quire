@@ -143,6 +143,15 @@ export component Editor inherits Rectangle {
 
     background: Colors.background;
 
+    // The editor's own height is the viewport the database window is computed
+    // from (SPEC §三十九): every database on the page sees the same viewport,
+    // so the number is reported once per resize here and never measured
+    // inside a row — Rust cannot see Slint's layout, and this is the one
+    // number its window arithmetic needs.
+    changed height => {
+        UIState.editor-viewport-h = self.height;
+    }
+
     // in-page find bar (Ctrl+F)
     if UIState.find-open : Rectangle {
         x: parent.width - self.width - Theme.spacing-md;
