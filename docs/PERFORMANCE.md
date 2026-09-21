@@ -1390,3 +1390,26 @@ coloured arm *does* pay is CPU while typing (29.7–30.8 % against 24.3–27.1 %
 which is the software renderer painting a highlighted row every tick of a scene
 with headroom to spare; it is the number to re-read if a future change moves the
 layers outside the editing guard.
+
+## M12 · a page's typography changes no row's cost, and the one number it does not have (2026-09-21, ADR-0044)
+
+**No RAM gate ran, and the reason is the shape.** A row read a global property
+before this slice and reads a global property after it: `Typography.size-body` was
+a constant binding, `PageType.size-body` is that constant times one factor, and the
+multiply happens once per evaluation of the global rather than once per row. No
+block field, no `DocumentRow` field, no per-row allocation, no new model — so the
+≤1.2× private-bytes gate has nothing here in its own units to resolve. The
+substitute evidence is the pixel kind, and it is the stronger of the two for a
+token change: `sweep31` → `sweep32` moved **1 of 57** scenes, `menu.png` alone at
+1 430 px inside the submenu's own box, with the other **56 byte-identical**. A
+derivation that had leaked past the page into chrome could not produce that
+reading — it would have moved the sidebar in every scene on the set.
+
+**The number this slice does not have**, stated rather than skipped: switching a
+page's font on the 10 000-block bench page is untimed. It is a re-layout of the
+visible window — every realized row's text is measured again in a new family —
+which is the same work a window resize does, and the bench scenes never switch
+style on the large page (the five `style-*` arms run on the sample page, whose
+rows are a few hundred at most). If a future slice puts a style switch anywhere
+on a hot path — per keystroke, per scroll, per page-open on a large document —
+that is the moment this owes a measurement, not before.

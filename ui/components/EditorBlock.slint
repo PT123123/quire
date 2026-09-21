@@ -5,7 +5,7 @@
 
 import { Theme } from "../Theme.slint";
 import { Colors } from "../Colors.slint";
-import { Typography } from "../Typography.slint";
+import { Typography, PageType } from "../Typography.slint";
 import { Icon } from "../Icons.slint";
 import { BlockHandle } from "./BlockHandle.slint";
 import { TableBlock } from "./TableBlock.slint";
@@ -44,15 +44,15 @@ export component EditorBlock inherits Rectangle {
     property <length> pic-height: root.pic-width * pic-aspect;
     // file (kind 15): one line of label in a fixed box. The size is a lookup
     // because it lives in the attachments row, not in the block.
-    property <length> file-height: Typography.size-body * Typography.line-body
+    property <length> file-height: PageType.size-body * PageType.line-body
         + 2 * Theme.spacing-md;
     property <string> file-size: is-file ? UIState.attachment-size(block.attachment) : "";
     // embed (kind 22): two lines of derived text in one box — the provider the
     // address belongs to, and the address the Open button will hand over. Both
     // are functions of the block's own text, so the card cannot disagree with
     // what was typed into it.
-    property <length> embed-height: Typography.size-body * Typography.line-body
-        + Typography.size-caption * Typography.line-body + 2 * Theme.spacing-md;
+    property <length> embed-height: PageType.size-body * PageType.line-body
+        + Typography.size-caption * PageType.line-body + 2 * Theme.spacing-md;
     property <length> embed-inset: Theme.spacing-md + 19px + Theme.spacing-sm;
     property <bool> editing: UIState.editing-id == block.id
         && block.kind != 9 && block.kind != 11 && block.kind != 12
@@ -68,16 +68,16 @@ export component EditorBlock inherits Rectangle {
     property <color> block-bg-color: Colors.block-bg(block.bg);
 
     // font metrics shared by the static Text and the live input
-    property <length> body-font-size: block.kind == 1 ? Typography.size-h1
-        : block.kind == 2 ? Typography.size-h2
-        : block.kind == 3 ? Typography.size-h3
-        : block.kind == 8 ? Typography.size-code
-        : Typography.size-body;
-    property <float> body-line-factor: block.kind == 1 ? Typography.line-h1
-        : block.kind == 2 ? Typography.line-h2
-        : block.kind == 3 ? Typography.line-h3
-        : block.kind == 8 ? Typography.line-code
-        : Typography.line-body;
+    property <length> body-font-size: block.kind == 1 ? PageType.size-h1
+        : block.kind == 2 ? PageType.size-h2
+        : block.kind == 3 ? PageType.size-h3
+        : block.kind == 8 ? PageType.size-code
+        : PageType.size-body;
+    property <float> body-line-factor: block.kind == 1 ? PageType.line-h1
+        : block.kind == 2 ? PageType.line-h2
+        : block.kind == 3 ? PageType.line-h3
+        : block.kind == 8 ? PageType.line-code
+        : PageType.line-body;
 
     property <length> top-margin:
         block.kind == 1 ? Theme.spacing-xl
@@ -232,7 +232,7 @@ export component EditorBlock inherits Rectangle {
         width: 26px;
         visible: block.kind == 10;
         text: "💡";
-        font-size: Typography.size-body;
+        font-size: PageType.size-body;
         vertical-alignment: center;
     }
 
@@ -315,8 +315,8 @@ export component EditorBlock inherits Rectangle {
                     wrap: no-wrap;
                     text: run.text;
                     font-family: run.code ? Typography.mono-font
-                        : run.italic ? "Segoe UI Italic" : Typography.ui-font;
-                    font-size: run.code ? Typography.size-code : body-font-size;
+                        : run.italic ? PageType.italic-font-family : PageType.font-family;
+                    font-size: run.code ? PageType.size-code : body-font-size;
                     font-weight: run.bold ? Typography.weight-bold
                         : (is-heading ? Typography.weight-semibold : Typography.weight-regular);
                     color: run.link ? Colors.accent-text : block-text-color;
@@ -344,7 +344,7 @@ export component EditorBlock inherits Rectangle {
         y: top-margin;
         visible: is-plain && !editing && block.runs.length == 0;
         text: block.text;
-        font-family: Typography.ui-font;
+        font-family: PageType.font-family;
         font-size: body-font-size;
         font-weight: is-heading ? Typography.weight-semibold : Typography.weight-regular;
         color: block.checked && block.kind == 6 ? Colors.text-muted : block-text-color;
@@ -364,7 +364,7 @@ export component EditorBlock inherits Rectangle {
         y: top-margin + (block.kind == 8 ? Theme.spacing-md : 0px)
             + (block.kind == 10 ? Theme.spacing-sm : 0px)
             + (block.kind == 22 ? Theme.spacing-md : 0px);
-        font-family: block.kind == 8 ? Typography.mono-font : Typography.ui-font;
+        font-family: block.kind == 8 ? Typography.mono-font : PageType.font-family;
         font-size: body-font-size;
         font-weight: is-heading ? Typography.weight-semibold : Typography.weight-regular;
         color: block.checked && block.kind == 6 ? Colors.text-muted : block-text-color;
@@ -510,7 +510,7 @@ export component EditorBlock inherits Rectangle {
 
     Rectangle {
         x: content-x + list-indent + 8px;
-        y: top-margin + Typography.size-body * Typography.line-body / 2 - 5px;
+        y: top-margin + PageType.size-body * PageType.line-body / 2 - 5px;
         width: 6px;
         height: 6px;
         border-radius: 3px;
@@ -524,15 +524,15 @@ export component EditorBlock inherits Rectangle {
         width: 22px;
         visible: block.kind == 5;
         text: "\{block.number}.";
-        font-family: Typography.ui-font;
-        font-size: Typography.size-body;
+        font-family: PageType.font-family;
+        font-size: PageType.size-body;
         color: block-text-color;
-        line-height-factor: Typography.line-body;
+        line-height-factor: PageType.line-body;
     }
 
     Rectangle {
         x: content-x + list-indent + 2px;
-        y: top-margin + Typography.size-body * Typography.line-body / 2 - 8px;
+        y: top-margin + PageType.size-body * PageType.line-body / 2 - 8px;
         width: 17px;
         height: 17px;
         visible: block.kind == 6;
@@ -562,7 +562,7 @@ export component EditorBlock inherits Rectangle {
     // keeps the triangle off a section that has nothing to hide.
     Rectangle {
         x: content-x + list-indent;
-        y: top-margin + Typography.size-body * Typography.line-body / 2 - 9px;
+        y: top-margin + PageType.size-body * PageType.line-body / 2 - 9px;
         width: 18px;
         height: 18px;
         border-radius: Theme.radius-xs;
@@ -599,10 +599,10 @@ export component EditorBlock inherits Rectangle {
         width: runs-width;
         visible: block.kind == 7 && !editing && block.runs.length == 0;
         text: block.text;
-        font-family: Typography.ui-font;
-        font-size: Typography.size-body;
+        font-family: PageType.font-family;
+        font-size: PageType.size-body;
         color: block-text-color;
-        line-height-factor: Typography.line-body;
+        line-height-factor: PageType.line-body;
         wrap: word-wrap;
     }
 
@@ -646,9 +646,9 @@ export component EditorBlock inherits Rectangle {
             ? UIState.code-layer(block.text, block.lang, root.code-width, root.char-advance, 0)
             : block.text;
         font-family: Typography.mono-font;
-        font-size: Typography.size-code;
+        font-size: PageType.size-code;
         color: block-text-color;
-        line-height-factor: Typography.line-code;
+        line-height-factor: PageType.line-code;
         wrap: word-wrap;
     }
 
@@ -695,9 +695,9 @@ export component EditorBlock inherits Rectangle {
             text: UIState.code-layer(
                 block.text, block.lang, root.code-width, root.char-advance, self.kind);
             font-family: Typography.mono-font;
-            font-size: Typography.size-code;
+            font-size: PageType.size-code;
             color: Colors.code-token(self.kind);
-            line-height-factor: Typography.line-code;
+            line-height-factor: PageType.line-code;
             wrap: word-wrap;
         }
     }
@@ -728,10 +728,10 @@ export component EditorBlock inherits Rectangle {
         // every row of a page would run the renderer
         text: is-math ? UIState.math-render(block.text == "" ? "$$" : block.text) : "";
         horizontal-alignment: center;
-        font-family: Typography.ui-font;
-        font-size: Typography.size-body;
+        font-family: PageType.font-family;
+        font-size: PageType.size-body;
         color: block-text-color;
-        line-height-factor: Typography.line-body;
+        line-height-factor: PageType.line-body;
         wrap: word-wrap;
     }
 
@@ -772,7 +772,7 @@ export component EditorBlock inherits Rectangle {
             // that does not fit is a long heading, not a second line — the
             // row's height cannot come from the Text inside it, either, because
             // a child of a Rectangle is 100 % of it by default
-            height: Typography.size-body * Typography.line-body + 4px;
+            height: PageType.size-body * PageType.line-body + 4px;
             toc-entry-touch := TouchArea {
                 clicked => {
                     UIState.toc-jump(entry.block);
@@ -786,8 +786,8 @@ export component EditorBlock inherits Rectangle {
                 x: (entry.level - 1) * 16px;
                 width: parent.width - self.x;
                 text: entry.label;
-                font-family: Typography.ui-font;
-                font-size: Typography.size-body;
+                font-family: PageType.font-family;
+                font-size: PageType.size-body;
                 color: Colors.text-primary;
                 vertical-alignment: center;
                 overflow: elide;
@@ -795,8 +795,8 @@ export component EditorBlock inherits Rectangle {
         }
         if block.toc-entries.length == 0 : Text {
             text: "No headings on this page yet";
-            font-family: Typography.ui-font;
-            font-size: Typography.size-body;
+            font-family: PageType.font-family;
+            font-size: PageType.size-body;
             color: Colors.text-muted;
         }
     }
@@ -828,15 +828,15 @@ export component EditorBlock inherits Rectangle {
         embed-label := Text {
             x: root.embed-inset;
             y: Theme.spacing-md;
-            height: Typography.size-body * Typography.line-body;
+            height: PageType.size-body * PageType.line-body;
             width: Math.max(0px, parent.width - self.x - 44px);
             // the card's own words stand aside for the live input, except on an
             // empty one: a caret with nothing beside it reads as a broken box
             visible: is-embed && (!editing || block.text == "");
             text: is-embed ? UIState.embed-label(block.text) : "";
             vertical-alignment: center;
-            font-family: Typography.ui-font;
-            font-size: Typography.size-body;
+            font-family: PageType.font-family;
+            font-size: PageType.size-body;
             font-weight: Typography.weight-semibold;
             color: block-text-color;
             overflow: elide;
@@ -844,7 +844,7 @@ export component EditorBlock inherits Rectangle {
         Text {
             x: embed-label.x;
             y: embed-label.y + embed-label.height;
-            height: Typography.size-caption * Typography.line-body;
+            height: Typography.size-caption * PageType.line-body;
             width: embed-label.width;
             visible: embed-label.visible;
             // the address as the Open button will use it, so what the card
@@ -899,10 +899,10 @@ export component EditorBlock inherits Rectangle {
         width: runs-width;
         visible: block.kind == 10 && !editing && block.runs.length == 0;
         text: block.text;
-        font-family: Typography.ui-font;
-        font-size: Typography.size-body;
+        font-family: PageType.font-family;
+        font-size: PageType.size-body;
         color: block-text-color;
-        line-height-factor: Typography.line-body;
+        line-height-factor: PageType.line-body;
         wrap: word-wrap;
     }
 
@@ -925,7 +925,7 @@ export component EditorBlock inherits Rectangle {
         width: content-width - 26px;
         visible: is-page-ish;
         text: block.text;
-        font-family: Typography.ui-font;
+        font-family: PageType.font-family;
         font-size: body-font-size;
         color: block.page-ref >= 0 ? block-text-color : Colors.text-muted;
         line-height-factor: body-line-factor;
@@ -957,10 +957,10 @@ export component EditorBlock inherits Rectangle {
         width: content-width;
         visible: is-image && pic-aspect <= 0;
         text: block.text + " · no picture";
-        font-family: Typography.ui-font;
-        font-size: Typography.size-body;
+        font-family: PageType.font-family;
+        font-size: PageType.size-body;
         color: Colors.text-muted;
-        line-height-factor: Typography.line-body;
+        line-height-factor: PageType.line-body;
         wrap: word-wrap;
     }
 
@@ -994,8 +994,8 @@ export component EditorBlock inherits Rectangle {
             width: Math.max(0px, parent.width - self.x - 140px);
             vertical-alignment: center;
             text: block.text;
-            font-family: Typography.ui-font;
-            font-size: Typography.size-body;
+            font-family: PageType.font-family;
+            font-size: PageType.size-body;
             color: block-text-color;
             overflow: elide;
         }

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use quire::core::persistence::{Change, Repository};
-use quire::core::types::{Block, BlockId, BlockKind, Lang, OrderKey, Page, PageId};
+use quire::core::types::{Block, BlockId, BlockKind, Lang, OrderKey, Page, PageFont, PageId};
 use quire::services::persistence::{
     FakeClock, PersistenceService, DEFAULT_DEBOUNCE_MS, DEFAULT_SNAPSHOT_INTERVAL_MS,
 };
@@ -35,6 +35,9 @@ fn seeded(path: &Path) -> Arc<SqliteRepository> {
             order: OrderKey::FIRST,
             favorite: false,
             expanded: true,
+            font: PageFont::default(),
+            full_width: false,
+            small_text: false,
         }),
         Change::BlockInserted(Block {
             id: BlockId(1),

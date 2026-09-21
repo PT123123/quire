@@ -154,6 +154,40 @@ fn duplicated_nested_list_keeps_parents_in_the_copy() {
 }
 
 #[test]
+fn a_page_look_is_set_duplicated_and_left_alone_by_its_copy() {
+    let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0, pictures: 0, marks: 0, code: 0 };
+    let state = AppState::new(&args, None);
+    let page = state.open_page.get();
+    state.set_page_font(page, quire::core::PageFont::Serif);
+    state.toggle_page_full_width(page);
+    state.toggle_page_small_text(page);
+    assert_eq!(
+        state.workspace.borrow().page_style(page),
+        Some((quire::core::PageFont::Serif, true, true)),
+        "the three switches are three facts about the page"
+    );
+
+    let copy = state.duplicate_page(page).expect("duplicate");
+    assert_eq!(
+        state.workspace.borrow().page_style(copy),
+        Some((quire::core::PageFont::Serif, true, true)),
+        "a duplicate is a copy of the page, and its look is part of it"
+    );
+
+    // and the two pages own their look separately from here on
+    state.toggle_page_full_width(page);
+    assert_eq!(
+        state.workspace.borrow().page_style(page),
+        Some((quire::core::PageFont::Serif, false, true))
+    );
+    assert_eq!(
+        state.workspace.borrow().page_style(copy),
+        Some((quire::core::PageFont::Serif, true, true)),
+        "flipping the original must not reach into the copy"
+    );
+}
+
+#[test]
 fn delete_open_page_resets_selection() {
     let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0, pictures: 0, marks: 0, code: 0 };
     let state = AppState::new(&args, None);

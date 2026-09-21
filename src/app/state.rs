@@ -10,7 +10,7 @@ use crate::app::workspace::{SearchHit, Workspace, BENCH_ID_BASE, MAX_RECENTS};
 use crate::core::persistence::{Change, Repository};
 use crate::core::{
     Attachment, AttachmentId, Block, BlockId, BlockKind, ColorKind, Command, Document, History, Lang,
-    OrderKey, PageId,
+    OrderKey, PageFont, PageId,
 };
 use crate::services::find_service::FindSession;
 use crate::services::persistence::PersistenceService;
@@ -407,7 +407,9 @@ impl AppState {
         // reproduces exactly this state
         if let (Some(p), true) = (&persistence, persisted.is_none()) {
             let mut batch = Vec::new();
-            for (id, title, parent, favorite, expanded) in workspace.page_seed_rows() {
+            for (id, title, parent, favorite, expanded, font, full_width, small_text) in
+                workspace.page_seed_rows()
+            {
                 batch.push(Change::PageCreated(crate::core::Page {
                     id: PageId(id as u32 as u64),
                     title,
@@ -415,6 +417,9 @@ impl AppState {
                     order: *page_order.get(&id).unwrap_or(&OrderKey::FIRST),
                     favorite,
                     expanded,
+                    font,
+                    full_width,
+                    small_text,
                 }));
             }
             // rows before the blocks that point at them
@@ -656,6 +661,7 @@ impl AppState {
                 .join(","),
         }]);
         self.open_page.set(id);
+        self.apply_page_style();
         self.reproject_blocks();
         // a fresh page starts at the top (the old viewport offset would
         // otherwise leak across pages)
@@ -2221,6 +2227,9 @@ impl AppState {
             order,
             favorite: false,
             expanded: false,
+            font: crate::core::PageFont::default(),
+            full_width: false,
+            small_text: false,
         })]);
         let from = self.open_page.get();
         self.open_page(id);
@@ -2299,6 +2308,7 @@ impl AppState {
                 (copies, map)
             };
             let title = self.workspace.borrow().title_of(nid).unwrap().to_string();
+            let style = self.workspace.borrow().page_style(id).unwrap_or_default();
             let blob = block_search_blob(&title, &project_blocks(&copies, &FindHits::new()));
 
             // order: right after the original when a gap exists, else the
@@ -2348,6 +2358,11 @@ impl AppState {
                 order,
                 favorite: false,
                 expanded: false,
+                // a duplicate is a copy of the page, and its look is part of
+                // it; favorites are not, so that one stays false
+                font: style.0,
+                full_width: style.1,
+                small_text: style.2,
             })];
             for b in &copies {
                 batch.push(Change::BlockInserted(b.clone()));
@@ -2506,6 +2521,9 @@ impl AppState {
                 order,
                 favorite: false,
                 expanded: false,
+                font: crate::core::PageFont::default(),
+                full_width: false,
+                small_text: false,
             }),
             Change::BlockRefSet {
                 id: block_id,
@@ -2655,6 +2673,59 @@ impl AppState {
         true
     }
 
+    /// Tell the editor which page it is drawing (SPEC §三十八). The three
+    /// numbers are the only route a page's look takes: nothing in `ui/` reads
+    /// the workspace, and no block carries a font. Called on every open-page
+    /// change, so a page that never touches the menu still says 0/false/false.
+    pub fn apply_page_style(&self) {
+        let Some(ui) = self.ui.borrow().clone() else {
+            return;
+        };
+        let (font, full_width, small_text) = self
+            .workspace
+            .borrow()
+            .page_style(self.open_page.get())
+            .unwrap_or_default();
+        let g = ui.upgrade().unwrap();
+        g.set_page_font(font.slot());
+        g.set_page_full_width(full_width);
+        g.set_page_small_text(small_text);
+    }
+
+    pub fn set_page_font(&self, id: i32, font: PageFont) {
+        let font = self.workspace.borrow_mut().set_font(id, font);
+        self.record(vec![Change::PageFontSet {
+            id: PageId(id as u32 as u64),
+            font,
+        }]);
+        self.apply_page_style();
+    }
+
+    /// Flip one of the two switches that share `pages.layout`. The pair is
+    /// written because the column is one value; the other switch keeps its bit.
+    fn set_page_layout(&self, id: i32, full_width: bool, small_text: bool) {
+        let (full_width, small_text) = self
+            .workspace
+            .borrow_mut()
+            .set_layout(id, full_width, small_text);
+        self.record(vec![Change::PageLayoutSet {
+            id: PageId(id as u32 as u64),
+            full_width,
+            small_text,
+        }]);
+        self.apply_page_style();
+    }
+
+    pub fn toggle_page_full_width(&self, id: i32) {
+        let (_, fw, st) = self.workspace.borrow().page_style(id).unwrap_or_default();
+        self.set_page_layout(id, !fw, st);
+    }
+
+    pub fn toggle_page_small_text(&self, id: i32) {
+        let (_, fw, st) = self.workspace.borrow().page_style(id).unwrap_or_default();
+        self.set_page_layout(id, fw, !st);
+    }
+
     pub fn toggle_favorite(&self, id: i32) {
         self.workspace.borrow_mut().toggle_favorite(id);
         let favorite = self
@@ -2762,7 +2833,7 @@ impl AppState {
         } else {
             "Add to favorites"
         };
-        let rows = vec![
+        let mut rows = vec![
             MenuRow {
                 id: MENU_NEW_SUBPAGE,
                 label: "New subpage".into(),
@@ -2836,6 +2907,44 @@ impl AppState {
                 check: false,
             },
         ];
+        // The look of the page itself, one submenu deep and above the one
+        // destructive row (SPEC §三十八).
+        rows.insert(
+            rows.len() - 1,
+            row(MENU_PAGE_STYLE, "Style", "palette", false, -1, false),
+        );
+        self.menu.set_vec(rows);
+    }
+
+    /// The page menu's Style submenu: the three switches of SPEC §三十八's
+    /// 页面版式, each showing what this page stores. Deliberately not
+    /// undoable, like the favorite above it — a look is a property of the
+    /// page, and Ctrl+Z on a page you were typing in must not be a font.
+    pub fn fill_page_menu_style(&self, id: i32) {
+        let (font, full_width, small_text) = self
+            .workspace
+            .borrow()
+            .page_style(id)
+            .unwrap_or_default();
+        let mut rows = vec![row(MENU_BACK, "Back", "chevron-left", false, -1, false)];
+        for (index, kind) in PageFont::ALL.iter().enumerate() {
+            let mut menu_row = row(
+                PAGE_FONT_BASE + index as i32,
+                kind.label(),
+                "",
+                false,
+                -1,
+                false,
+            );
+            menu_row.check = *kind == font;
+            rows.push(menu_row);
+        }
+        let mut width = row(MENU_PAGE_FULL_WIDTH, "Full width", "", false, -1, false);
+        width.check = full_width;
+        rows.push(width);
+        let mut small = row(MENU_PAGE_SMALL_TEXT, "Small text", "", false, -1, false);
+        small.check = small_text;
+        rows.push(small);
         self.menu.set_vec(rows);
     }
 
@@ -2921,10 +3030,16 @@ pub const MENU_MOVE_UP: i32 = 6;
 pub const MENU_MOVE_DOWN: i32 = 7;
 pub const MENU_MOVE_TO: i32 = 8;
 pub const MENU_BACK: i32 = 9;
+/// The page menu's "Style" submenu (SPEC §三十八).
+pub const MENU_PAGE_STYLE: i32 = 10;
+pub const MENU_PAGE_FULL_WIDTH: i32 = 11;
+pub const MENU_PAGE_SMALL_TEXT: i32 = 12;
 /// "Top level" target of the page-menu Move-to submenu (root, `None` parent).
 pub const PAGE_MOVE_TO_ROOT: i32 = 499_999;
 /// Page-menu Move-to targets encode the destination page above this base.
 pub const PAGE_MOVE_TO_BASE: i32 = 500_000;
+/// Style-submenu font picks encode the index into `PageFont::ALL`.
+pub const PAGE_FONT_BASE: i32 = 700_000;
 /// SidebarNode id of the Workspace section header — the drag-drop target
 /// that moves a page to the top level. Page rows target themselves.
 pub const WORKSPACE_HEADER_ID: i32 = -100;

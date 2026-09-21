@@ -21,6 +21,12 @@ pub struct Page {
     pub children: Vec<i32>,
     pub favorite: bool,
     pub expanded: bool,
+    /// Page appearance (SPEC §三十八), mirrored from the core page so the
+    /// style menu can show what is on and the editor can be told what to
+    /// draw without a second lookup.
+    pub font: crate::core::PageFont,
+    pub full_width: bool,
+    pub small_text: bool,
     /// Title + block text blob, filled by the app layer; the search source.
     pub search_text: String,
 }
@@ -106,6 +112,9 @@ impl Workspace {
                 children: Vec::new(),
                 favorite: false,
                 expanded: false,
+                font: crate::core::PageFont::default(),
+                full_width: false,
+                small_text: false,
                 search_text: String::new(),
             },
         );
@@ -215,11 +224,25 @@ impl Workspace {
     /// Deep-copy the subtree; the copy lands directly after the original and
     /// is titled "Copy of …". Returns the new root id.
     pub fn duplicate(&mut self, id: i32) -> Option<i32> {
-        let (parent, title) = {
+        let (parent, title, style) = {
             let src = self.pages.get(&id)?;
-            (src.parent, format!("Copy of {}", src.title))
+            (
+                src.parent,
+                format!("Copy of {}", src.title),
+                (src.font, src.full_width, src.small_text),
+            )
         };
         let new_root = self.new_page(&title);
+        // The copy is a copy of the page, and its look is part of the page
+        // (SPEC §三十八) — the persisted side records the same three, and a
+        // session that disagreed with what a restart would show is the defect
+        // this project has been bitten by before.
+        {
+            let dst = self.pages.get_mut(&new_root).expect("just created");
+            dst.font = style.0;
+            dst.full_width = style.1;
+            dst.small_text = style.2;
+        }
         self.attach(new_root, parent, Some(id));
         self.copy_children(id, new_root);
         Some(new_root)
@@ -290,6 +313,38 @@ impl Workspace {
         if let Some(p) = self.pages.get_mut(&id) {
             p.favorite = !p.favorite;
         }
+    }
+
+    /// The page's typeface. Returns what it is now, which is what the caller
+    /// persists and then pushes to the editor.
+    pub fn set_font(&mut self, id: i32, font: crate::core::PageFont) -> crate::core::PageFont {
+        match self.pages.get_mut(&id) {
+            Some(p) => {
+                p.font = font;
+                p.font
+            }
+            None => crate::core::PageFont::default(),
+        }
+    }
+
+    /// The two layout switches, written as the pair the one column holds and
+    /// read back so the caller persists exactly what changed.
+    pub fn set_layout(&mut self, id: i32, full_width: bool, small_text: bool) -> (bool, bool) {
+        match self.pages.get_mut(&id) {
+            Some(p) => {
+                p.full_width = full_width;
+                p.small_text = small_text;
+                (p.full_width, p.small_text)
+            }
+            None => (false, false),
+        }
+    }
+
+    /// What the editor's three page-type inputs need, in one lookup.
+    pub fn page_style(&self, id: i32) -> Option<(crate::core::PageFont, bool, bool)> {
+        self.pages
+            .get(&id)
+            .map(|p| (p.font, p.full_width, p.small_text))
     }
 
     pub fn mark_opened(&mut self, id: i32) {
@@ -476,6 +531,9 @@ impl Workspace {
                     children: Vec::new(),
                     favorite: p.favorite,
                     expanded: p.expanded,
+                    font: p.font,
+                    full_width: p.full_width,
+                    small_text: p.small_text,
                     search_text: String::new(),
                 },
             );
@@ -507,14 +565,25 @@ impl Workspace {
     }
 
     /// Expose the persisted-tree shape for seeding (id, title, parent,
-    /// favorite, expanded) — used by the app layer when recording the
-    /// initial workspace into storage.
-    pub fn page_seed_rows(&self) -> Vec<(i32, String, Option<i32>, bool, bool)> {
+    /// favorite, expanded, font, full width, small text) — used by the app
+    /// layer when recording the initial workspace into storage.
+    pub fn page_seed_rows(
+        &self,
+    ) -> Vec<(i32, String, Option<i32>, bool, bool, crate::core::PageFont, bool, bool)> {
         self.dfs_order()
             .iter()
             .filter_map(|id| {
                 self.pages.get(id).map(|p| {
-                    (p.id, p.title.clone(), p.parent, p.favorite, p.expanded)
+                    (
+                        p.id,
+                        p.title.clone(),
+                        p.parent,
+                        p.favorite,
+                        p.expanded,
+                        p.font,
+                        p.full_width,
+                        p.small_text,
+                    )
                 })
             })
             .collect()
@@ -672,6 +741,29 @@ mod tests {
         let roots = w.tree_rows();
         let pos_orig = roots.iter().position(|r| r.id == 105).unwrap();
         assert_eq!(roots[pos_orig + w.subtree_size(105)].id, copy);
+    }
+
+    #[test]
+    fn page_style_is_three_switches_and_nothing_else() {
+        use crate::core::PageFont;
+        let mut w = ws();
+        // a page nobody touched
+        assert_eq!(
+            w.page_style(105),
+            Some((PageFont::Default, false, false)),
+            "the sample tree stores no look"
+        );
+        assert_eq!(w.set_font(105, PageFont::Serif), PageFont::Serif);
+        assert_eq!(w.set_layout(105, true, false), (true, false));
+        assert_eq!(
+            w.page_style(105),
+            Some((PageFont::Serif, true, false)),
+            "the two switches and the font are three separate facts"
+        );
+        // an id that is not a page answers with the defaults and changes nothing
+        assert_eq!(w.set_font(9999, PageFont::Mono), PageFont::Default);
+        assert_eq!(w.set_layout(9999, true, true), (false, false));
+        assert_eq!(w.page_style(9999), None);
     }
 
     #[test]

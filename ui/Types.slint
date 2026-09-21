@@ -191,6 +191,14 @@ export global UIState {
     in-out property <bool> title-editing: false;
     in-out property <string> page-stats: "";
 
+    // This page's own look (SPEC §三十八), pushed by Rust whenever the open
+    // page changes or the style menu picks. Page-level on purpose: the blocks
+    // store no font and no size, so `Typography`'s PageType derives what draws
+    // them from these three and nothing else.
+    in-out property <int> page-font: 0; // 0 default, 1 serif, 2 mono
+    in-out property <bool> page-full-width: false;
+    in-out property <bool> page-small-text: false;
+
     // in-page find (Ctrl+F)
     in-out property <bool> find-open: false;
     in-out property <string> find-term: "";

@@ -359,8 +359,14 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
             let id = g.get_menu_node_id();
             // submenu navigation swaps the rows and keeps the popup open;
             // the taller Move-to list re-anchors so it stays on the window
-            if action == crate::app::state::MENU_MOVE_TO {
-                s.fill_page_menu_move_to(id);
+            if action == crate::app::state::MENU_MOVE_TO
+                || action == crate::app::state::MENU_PAGE_STYLE
+            {
+                if action == crate::app::state::MENU_MOVE_TO {
+                    s.fill_page_menu_move_to(id);
+                } else {
+                    s.fill_page_menu_style(id);
+                }
                 let menu_h = g.get_menu_rows().row_count() as f32 * 28.0 + 16.0;
                 let y = g.get_menu_y().clamp(
                     48.0,
@@ -413,6 +419,28 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                     }
                 }
                 crate::app::state::MENU_FAVORITE => s.toggle_favorite(id),
+                a if (crate::app::state::PAGE_FONT_BASE
+                    ..crate::app::state::PAGE_FONT_BASE
+                        + crate::core::PageFont::ALL.len() as i32)
+                    .contains(&a) =>
+                {
+                    if id > 0 {
+                        let font = crate::core::PageFont::ALL[(a
+                            - crate::app::state::PAGE_FONT_BASE)
+                            as usize];
+                        s.set_page_font(id, font);
+                    }
+                }
+                crate::app::state::MENU_PAGE_FULL_WIDTH => {
+                    if id > 0 {
+                        s.toggle_page_full_width(id);
+                    }
+                }
+                crate::app::state::MENU_PAGE_SMALL_TEXT => {
+                    if id > 0 {
+                        s.toggle_page_small_text(id);
+                    }
+                }
                 crate::app::state::MENU_DELETE => {
                     let (_title, message) = s.delete_dialog_text(id);
                     g.set_dialog_title("Delete page?".into());
@@ -2157,6 +2185,9 @@ pub fn import_lan_pages(
             order: state.page_order_of(new_id),
             favorite: false,
             expanded: false,
+            font: crate::core::PageFont::default(),
+            full_width: false,
+            small_text: false,
         };
         let changes = {
             let mut doc = state.doc.borrow_mut();
@@ -2355,6 +2386,9 @@ pub fn import_from_path(g: &UIState<'_>, state: &Rc<AppState>, path: &std::path:
         order: state.page_order_of(new_id),
         favorite: false,
         expanded: false,
+        font: crate::core::PageFont::default(),
+        full_width: false,
+        small_text: false,
     };
     let changes = {
         let mut doc = state.doc.borrow_mut();
@@ -3105,6 +3139,31 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             state.find_start("the");
             g.set_find_label(state.find_label().into());
         }
+        // SPEC §三十八's page look, one switch per scene so a moved pixel says
+        // which token moved it. Each arm goes through the same state methods
+        // the Style menu does — including the write to `pages` — because a
+        // scene that set the UI global by hand would prove nothing about the
+        // column the look is stored in.
+        "style-serif" | "style-mono" | "style-small" | "style-full" | "style-tight" => {
+            let page = state.open_page.get();
+            match scene {
+                "style-serif" => state.set_page_font(page, crate::core::PageFont::Serif),
+                "style-mono" => state.set_page_font(page, crate::core::PageFont::Mono),
+                "style-small" => state.toggle_page_small_text(page),
+                "style-full" => state.toggle_page_full_width(page),
+                // both at once: the tier shrinks AND widens, so a line that
+                // used to wrap must say where it stopped
+                _ => {
+                    state.set_page_font(page, crate::core::PageFont::Serif);
+                    state.toggle_page_small_text(page);
+                    state.toggle_page_full_width(page);
+                }
+            }
+        }
+        "dark-style-serif" => {
+            g.set_dark(true);
+            apply_scene(ui, state, "style-serif");
+        }
         "marks" => {
             // seed inline marks on the first paragraph (visual test only,
             // applied directly like an editor toggle would). Offsets are
@@ -3311,6 +3370,18 @@ pub fn apply_scene_overlay(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             // the sidebar menu's Move-to submenu for page 106: Back, Top
             // level, then every legal target (106's own subtree is skipped)
             state.fill_page_menu_move_to(106);
+            g.set_menu_node_id(106);
+            let row_y = state.sidebar_row_y(106) as f32;
+            g.set_menu_y(TREE_TOP_PX + row_y - 4.0);
+            g.set_menu_x(240.0);
+            g.set_menu_open(true);
+        }
+        "page-style" => {
+            // The Style submenu itself, with the checks on the row the page
+            // stores — the only picture of the menu's other half.
+            state.set_page_font(106, crate::core::PageFont::Serif);
+            state.toggle_page_small_text(106);
+            state.fill_page_menu_style(106);
             g.set_menu_node_id(106);
             let row_y = state.sidebar_row_y(106) as f32;
             g.set_menu_y(TREE_TOP_PX + row_y - 4.0);

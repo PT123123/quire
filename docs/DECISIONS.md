@@ -2,6 +2,79 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0044 · A page's look is derived, so no block ever holds a size
+
+Decision: SPEC §三十八's three switches — font (default / serif / mono), full
+width, small text — are stored on the **page** (`pages.font TEXT`,
+`pages.layout INTEGER`, schema v10) and reach the screen through one new global,
+`PageType`, that *derives* the document tier from three `UIState` properties. No
+block gains a size, a family or a flag. Every document-tier call site was
+repointed from `Typography.*` to `PageType.*` — 119 of them across four files —
+and the chrome (sidebar, menus, palette, settings, and a block's own caption
+line) still reads `Typography`, which is why it provably cannot move.
+
+Why a second global instead of overriding at the call sites: the alternative was
+119 ternaries on a page property, i.e. the same token question re-asked at every
+site, which is the rule the type scale exists to enforce. And why not mutate
+`Typography` itself: it is the one place chrome and document share, so a page
+that wants small text would shrink the sidebar with it. `PageType` is a *child*
+of `Typography` — it multiplies the document tier by one factor and re-points
+the family — so the two tiers stay separable and the derivation is readable in
+one file.
+
+The three switches are stored as one string and one bit field, not three columns.
+`font` is TEXT because every other catalogue in this schema is a string
+(`blocks.kind`, `blocks.lang`), and because the failure mode of an integer code is
+that a reordering silently re-points every existing row: `PageFont::try_from_str`
+turns `"comic sans"` into `Default`, so a page written by a future build opens as
+an ordinary page rather than as an error. `layout` is one INTEGER because the
+two switches always travel together — `Change::PageLayoutSet` carries both, the
+menu writes both, and the reader tests two bits — and two BOOLEAN columns would
+add a second `ALTER TABLE` to a step that already has to be conditional on each
+column's absence.
+
+Small text is one factor, 0.87, applied to the whole document tier including the
+headings. That is 13.5 / 15.5 — the ratio between this app's own code and body
+sizes, which keeps the two tiers' relationship intact. Line heights are **not**
+scaled: they are factors of the natural line box, so a smaller face already gets
+a proportionally smaller box, and multiplying them too would tighten leading on
+top of shrinking glyphs.
+
+Two seams needed a second look. Marked runs name an italic *family* rather than
+setting `font-italic`, so a serif page would have italicised its emphasis in
+Segoe while every other word was Georgia — hence `PageType.italic-font-family`.
+And the app-wide `code-probe` measures the monospace advance that the highlight
+layers (ADR-0042) wrap against: it now reads `PageType.size-code`, so a small-text
+page's colour layers stay measured against the glyphs they colour.
+
+Consequences:
+
+* The page menu gained a Style submenu (Back, three fonts with a check on the
+  live one, Full width, Small text) and the whole rest of the sweep is
+  byte-identical: 56 of 57 scenes unchanged, `menu.png` the only mover at 1 430 px
+  inside x 240..423 / y 542..779 — the submenu's own box. A token change that
+  touched chrome would show up as 56 movers.
+* The seven new scenes are the menu's own shot plus six measurements, each taken
+  against `default.png` with a self-vs-self control at 0 px: serif 63 638 px,
+  mono 62 780, small text 55 285, full width 51 533, all three at once 68 779
+  against the serif shot, and the dark arm 63 140. Full width is the only one
+  whose bounding box starts at x 284 (sidebar 260 + `Theme.spacing-xl` 24) where
+  the others start at 390 — that is the gutter moving, and it is the number that
+  separates a real layout switch from a font swap.
+* `duplicate_page` carries the source's style, and `workspace.duplicate` had to be
+  fixed to match: it created the copy with defaults while the persisted
+  `PageCreated` carried the source's look, so a duplicated page read differently
+  before and after a restart.
+* `open_page()` re-applies the three properties, so the derived tier follows
+  selection with no per-page model churn, and a page with no stored look costs
+  three writes of the defaults.
+* Migration 10 adds two columns and no rows: a v9 library's every page reads
+  `font = ''`, `layout = 0`, i.e. exactly what it looked like before, which is
+  what `the_v10_step_adds_the_page_look_to_a_v9_database` insists on.
+* The remaining §三十八 groups are untouched: icon, cover, lock, version history
+  and templates still need their own decisions — `pages.layout` is a bit field
+  with room left, but this ADR does not spend it.
+
 ## ADR-0043 · A find hit is a cell, and its border is the marker
 
 Decision: the in-page find bar (SPEC §二十) paints every occurrence as **one

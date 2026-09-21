@@ -1,10 +1,12 @@
 // Type scale. Windows-first font stack; mono for code blocks.
 
 import { Theme } from "Theme.slint";
+import { UIState } from "Types.slint";
 
 export global Typography {
     out property <string> ui-font: "Segoe UI";
     out property <string> display-font: "Segoe UI Semibold";
+    out property <string> serif-font: "Georgia";
     out property <string> mono-font: "Consolas";
 
     // page chrome
@@ -29,4 +31,50 @@ export global Typography {
     out property <int> weight-medium: 500;
     out property <int> weight-semibold: 600;
     out property <int> weight-bold: 700;
+}
+
+// One page's own document tier (SPEC §三十八). The three switches live on the
+// page, so the scale below is derived and never stored: a block keeps its
+// characters and no block ever carries a font-size of its own. That is why
+// this is a second global beside `Typography` rather than a rewrite of it —
+// the chrome (sidebar, menus, palette, settings) reads `Typography` and must
+// not change when one page goes serif or small.
+//
+// Weights are deliberately not here: 400/500/600/700 ask the family for a
+// face it may not ship, and both serif and mono do have them on Windows.
+export global PageType {
+    // Small text scales the whole document tier, headings included, by one
+    // factor — 13.5/15.5, which is the ratio Notion's own two tiers use.
+    property <float> scale: UIState.page-small-text ? 0.87 : 1;
+
+    out property <bool> full-width: UIState.page-full-width;
+    out property <string> font-family: UIState.page-font == 1
+        ? Typography.serif-font
+        : UIState.page-font == 2
+            ? Typography.mono-font
+            : Typography.ui-font;
+
+    // The same choice in its italic face. The marked runs name the family
+    // rather than setting `font-italic`, so a serif page would otherwise
+    // italicise its emphasis in Segoe while every other word is Georgia.
+    out property <string> italic-font-family: UIState.page-font == 1
+        ? "Georgia Italic"
+        : UIState.page-font == 2
+            ? "Consolas Italic"
+            : "Segoe UI Italic";
+
+    out property <length> size-body: Typography.size-body * scale;
+    out property <length> size-h3: Typography.size-h3 * scale;
+    out property <length> size-h2: Typography.size-h2 * scale;
+    out property <length> size-h1: Typography.size-h1 * scale;
+    out property <length> size-page-title: Typography.size-page-title * scale;
+    out property <length> size-code: Typography.size-code * scale;
+
+    // Line heights are factors of the natural line box, so a smaller face
+    // gets a proportionally smaller box without touching these.
+    out property <float> line-body: Typography.line-body;
+    out property <float> line-h3: Typography.line-h3;
+    out property <float> line-h2: Typography.line-h2;
+    out property <float> line-h1: Typography.line-h1;
+    out property <float> line-code: Typography.line-code;
 }

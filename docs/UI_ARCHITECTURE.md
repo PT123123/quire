@@ -97,11 +97,12 @@ dialog, empty, edit, slash, block-menu, marks, marks-wrap, link, find, find-grid
 find-cols, find-callout, nest, toggle,
 toggle-fold, image, image-half, file, recovered, title-edit, table, table-edit,
 table-marks, columns, columns-3, columns-marks, math, math-inline, toc, embed,
-embed-empty, code-hl
+embed-empty, code-hl, style-serif, style-mono, style-small, style-full,
+style-tight
 plus dark combos (dark-slash, dark-find, dark-marks, dark-link, dark-code-hl,
-dark-block-menu, dark-block-colors, dark-title-edit).
-`benchmarks/scripts/sweep.ps1` holds the authoritative list — 57 scenes as of
-ADR-0043 — and this prose is the summary, so when the two disagree trust the
+dark-block-menu, dark-block-colors, dark-title-edit, dark-style-serif).
+`benchmarks/scripts/sweep.ps1` holds the authoritative list — 64 scenes as of
+ADR-0044 — and this prose is the summary, so when the two disagree trust the
 script. Every visual change ships with re-shot
 scenes; the judge-reviewed set is the regression baseline. `toggle` and
 `toggle-fold` are a pair on purpose: the same section open and closed, so a
@@ -117,6 +118,16 @@ no row of their own and have to ride on the row that paints them (ADR-0028), and
 the third is a frame the runs flexbox did not draw at all until this slice. One
 box, two boxes, two boxes, on purpose — each scene's only claim is that a box
 appears where the delegate had never been asked to paint one.
+The five `style-*` scenes are the token boundary made visible (ADR-0044). A page's
+look is three switches on the page and one derived global (`PageType`) that
+multiplies and re-points the *document* tier; the chrome keeps reading
+`Typography`, so these scenes prove the split in both directions — the body,
+headings and page title move, and the sidebar, menus, palette, settings and every
+block's caption line do not. `style-serif` / `-mono` / `-small` / `-full` are one
+switch each and `style-tight` is all three, so a token that leaked past the page
+would show up as a scene that was supposed to be identical to `default` and is
+not. `dark-style-serif` is the same claim in the other theme, and `page-style` is
+the Style submenu itself.
 `image` and `image-half` are the same pair for the width tier — one picture
 block at 100 % and at 50 %, so a width setting that only moves the label and
 not the raster is caught by the row geometry. `file` is the picture scene's
@@ -272,7 +283,19 @@ in the boxes of a columns layout, two 21×30 inside a callout's tinted frame. Th
 other 52 scenes are byte-identical, which is what "only the rows the bar touched
 get rebuilt" has to look like from outside — and which is also, on its own,
 worthless as evidence for the three new scenes, since none of them existed to move.
-The baseline is `.scratch/sweep31` (57 scenes). The set before it, `.scratch/sweep10`
+`sweep31` → `sweep32` (a page's own typography, ADR-0044) moved **1 of 57** and
+added 7: `menu.png` gained the Style row at 1 430 px inside x 240..423 /
+y 542..779, and the other 56 are byte-identical — which is the whole point of a
+change that repointed **119 call sites** across four `.slint` files. A token that
+had leaked into chrome could not hide: it would have moved the sidebar in every
+scene, and the reading is that it moved nothing outside the page's own text
+column. The six content arms were then measured against `default.png` (control: a
+scene against itself, 0 px) — serif 63 638, mono 62 780, small text 55 285, full
+width 51 533, all three 68 779 against the serif shot, dark serif 63 140 — and the
+gutter is what tells a layout switch from a font swap: the text column starts at
+x 390 in the first three and at **x 284** (= sidebar 260 + `Theme.spacing-xl` 24)
+in the full-width arms.
+The baseline is `.scratch/sweep32` (64 scenes). The set before it, `.scratch/sweep10`
 (42 scenes), re-baselined 37 of them for a
 reason unrelated to tables: `DocumentRow.head` bound `height` without `y` and so
 was centred in its delegate, which had been sitting the page title ~34 px below
@@ -414,7 +437,11 @@ error or a rebuild to understand.
 
 ## Adding a component (checklist)
 
-1. Import tokens only (`Theme`/`Colors`/`Typography`/`Icons`).
+1. Import tokens only (`Theme`/`Colors`/`Typography`/`PageType`/`Icons`).
+   Document-tier sizes and families come from `PageType`, which derives them
+   from the open page's look (ADR-0044); chrome — sidebar, menus, palette,
+   settings, and a block's caption line — reads `Typography` and must never read
+   `PageType`. Nothing in a `.slint` names a font or a size literally.
 2. State comes in via `in` properties from `UIState` models; actions go
    out via `UIState` callbacks. No private copies of shared state.
 3. Popups: `close-policy: no-auto-close`, never read own `is-open`,

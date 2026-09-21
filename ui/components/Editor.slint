@@ -6,7 +6,7 @@
 import { ListView } from "std-widgets.slint";
 import { Theme } from "../Theme.slint";
 import { Colors } from "../Colors.slint";
-import { Typography } from "../Typography.slint";
+import { Typography, PageType } from "../Typography.slint";
 import { Icon } from "../Icons.slint";
 import { EditorBlock } from "./EditorBlock.slint";
 import { IconButton } from "./IconButton.slint";
@@ -50,9 +50,9 @@ component DocumentRow inherits Rectangle {
             width: root.content-width;
             visible: root.first && !UIState.title-editing;
             text: UIState.page-title;
-            font-family: Typography.ui-font;
+            font-family: PageType.font-family;
             font-weight: Typography.weight-bold;
-            font-size: Typography.size-page-title;
+            font-size: PageType.size-page-title;
             // without an explicit factor the text height is the font size
             // only, and descenders (g, y) collide with the first block
             line-height-factor: 1.28;
@@ -66,11 +66,11 @@ component DocumentRow inherits Rectangle {
             enabled: root.first && UIState.title-editing;
             // the preferred height is the font size alone: descenders (g, y)
             // collide with the line box (A4 sweep, title-edit scene)
-            height: max(self.preferred-height, Typography.size-page-title * 1.4);
+            height: max(self.preferred-height, PageType.size-page-title * 1.4);
             text <=> UIState.page-title;
-            font-family: Typography.ui-font;
+            font-family: PageType.font-family;
             font-weight: Typography.weight-bold;
-            font-size: Typography.size-page-title;
+            font-size: PageType.size-page-title;
             line-height-factor: 1.28;
             color: Colors.text-primary;
             single-line: true;
@@ -110,10 +110,15 @@ component DocumentRow inherits Rectangle {
 }
 
 export component Editor inherits Rectangle {
-    // content column centered, min gutter so handles never touch the window edge
-    property <length> gutter: Math.max(
-        Theme.spacing-xl,
-        (root.width - Theme.editor-max-width) / 2);
+    // content column centered, min gutter so handles never touch the window
+    // edge. A full-width page keeps the gutter and drops the centering: the
+    // column is then whatever the window offers, which is the whole point of
+    // the switch (SPEC §三十八).
+    property <length> gutter: PageType.full-width
+        ? Theme.spacing-xl
+        : Math.max(
+            Theme.spacing-xl,
+            (root.width - Theme.editor-max-width) / 2);
 
     background: Colors.background;
 
@@ -238,7 +243,7 @@ export component Editor inherits Rectangle {
         y: -1000px;
         text: "0000000000";
         font-family: Typography.mono-font;
-        font-size: Typography.size-code;
+        font-size: PageType.size-code;
         wrap: no-wrap;
         visible: false;
         changed width => {

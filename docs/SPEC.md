@@ -1859,7 +1859,7 @@ M12 — Page 外观与属性（§三十八）
 完成：
 
 * icon / cover
-* font（default / serif / mono）/ full width / small text
+* font（default / serif / mono）/ full width / small text —— 2026-09-21 已交付，ADR-0044
 * lock
 * version history
 * 模板按钮 + 模板库
@@ -2436,7 +2436,7 @@ synced block：依赖 §四十 的引用基础设施，排在它之后
 
 §十七 的 Page Tree 只管结构，不管页面本身长什么样。本阶段补上。
 
-数据前提：pages 表加列（icon / cover / font / layout / locked），走 §十八 的 migration，schema 版本 +1，旧库必须能无损升上来。
+数据前提：pages 表加列（icon / cover / font / layout / locked），走 §十八 的 migration，schema 版本 +1，旧库必须能无损升上来。—— 2026-09-21 只落了 font + layout 两列（schema v10，ADR-0044）；icon / cover / locked 各自随自己的竖切加列，同样一步一版本。
 
 ## 图标与封面
 
@@ -2446,13 +2446,13 @@ cover：本地图片，可换图 / 移除；封面之上的标题对比度必须
 
 ## 页面版式
 
-font：default / serif / mono 三档，按页生效
+font：default / serif / mono 三档，按页生效 —— 2026-09-21 已交付，ADR-0044（`pages.font`）
 
-full width：页级开关
+full width：页级开关 —— 2026-09-21 已交付，ADR-0044（`pages.layout` bit 1）
 
-small text：页级开关
+small text：页级开关 —— 2026-09-21 已交付，ADR-0044（`pages.layout` bit 2）
 
-三者只作用于当前页的排版 token，不得下沉成 per-block 字号。
+三者只作用于当前页的排版 token，不得下沉成 per-block 字号。—— 交付方式：三档开关存在页上，`PageType` 全局从 `UIState` 派生出文档层的 token，119 处调用点从 `Typography.*` 改读 `PageType.*`，chrome 仍读 `Typography`；block 表与 `Block` 结构一个字段都没加。入口是顶栏 ⋯ 菜单的 Style 子菜单。
 
 ## 锁定与版本历史
 

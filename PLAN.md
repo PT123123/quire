@@ -2076,3 +2076,61 @@ ADR-0028）、`find-cols`（分栏盒子，同上）、`find-callout`（高亮�
 里敲字时格子会不会闪、深色主题下的观感。软件光栅器能证明几何与颜色，证明不了逐键重绘的手感。另外
 「当前命中」和其他命中在画面上仍然不分级（它靠编辑器自己的选中态区分），这是一条独立的设计决定，
 不在这刀里。
+
+## M12 版式 · 一页的长相存在页上，字号一个都没落到块上（2026-09-21，on `master`，ADR-0044）
+
+**缘起**：§三十八 的第一刀，也是 M12 唯一不需要新决策的前半段——font / full width / small text 三档，
+规格已经写死了，包括那句约束：「三者只作用于当前页的排版 token，不得下沉成 per-block 字号」。
+难点全在这句怎么落地。三条路：给每个调用点加三元表达式（119 处，等于把 token 的问题在 119 个地方
+重新问一遍）；直接改 `Typography` 本身（它是 chrome 和文档唯一共用的一层，一页想要小字会把侧边栏
+一起缩小）；再加一个派生的全局。选了第三个。`PageType` 是 `Typography` 的**孩子**——它把文档层的
+字号乘一个系数、把字族换一个来源，两层因此可分，且推导全都在一个文件里读得完。119 处调用点从
+`Typography.*` 改读 `PageType.*`，chrome 一处没动，`Block` 结构一个字段没加。
+
+**存成什么形状**：Schema **v10**，`pages` 两列。`font` 是 TEXT，理由和 `blocks.kind` 是字符串同一个：
+整数码的失败模式是「重排 enum 就把库里每一行的含义悄悄改了」，而 `PageFont::try_from_str` 把
+`"comic sans"` 折成 `Default`，未来某个版本写的页在今天会是一张普通页而不是一次打开失败。
+`layout` 是一个 INTEGER 位段（1 = full width，2 = small text），因为这两个开关永远一起走——
+`Change::PageLayoutSet` 一次带两个、菜单一次写两个、读的时候一次测两位；拆成两个 BOOLEAN 就是在一个
+本来已经要按列判存的步骤里再加一条 `ALTER`。v9 库升上来，每一页读回 `font = ''`、`layout = 0`，
+也就是它升上来之前的样子——这条是 `the_v10_step_adds_the_page_look_to_a_v9_database` 断言的，不是假设的。
+
+**小字是一个系数，不是一组新字号**：0.87，整个文档层一起缩，标题也算。这个数是 13.5 / 15.5，即本应用
+自己的 code : body 比，所以两层之间的相对关系原样保留。行高 token **故意不乘**：它们是自然行盒的系数，
+字面小了行盒本来就跟着小，再乘一次等于缩了字还压行距。
+
+**两个接缝不看一眼就会漏**：一、带标记的 run 是**点名斜体字族**而不是设 `font-italic`，所以 serif 页
+第一版会把强调词用 Segoe 斜体画出来、其余全是 Georgia——补了 `PageType.italic-font-family`。二、全应用
+那个 `code-probe` 量的是等宽字体的步进，而 ADR-0042 的六层颜色是按这个步进断行的；它现在读
+`PageType.size-code`，否则小字页上的颜色层是照原字号排的，会一层层错开。
+
+**复制页带不带长相**：带。这一条抓到一个真 bug——`workspace.duplicate` 用默认值建新页，而持久化的
+`PageCreated` 写的是源页的长相，于是复制出来的页在重启前后读出来不一样。修完之后 session 与重启一致，
+`a_page_look_is_set_duplicated_and_left_alone_by_its_copy` 看着的就是这个不一致。
+
+**入口与撤销**：顶栏 ⋯ → Style 子菜单（Back / 三个字体带勾 / Full width / Small text）。**不进 undo**，
+和它上面的 Favorite 一样：长相是页的属性，不是对页的编辑，在页里打了一段字之后 Ctrl+Z 不该掉出一个字体。
+
+**像素读数（这一刀的证据主体）**：sweep31 → sweep32 动了 **1 of 57**、新增 **7**，其余 **56 逐字节相同**。
+唯一动的是 `menu.png`，1 430 px，全在 x 240..423 / y 542..779——子菜单自己的盒子。这是「改 token 层而
+不碰 chrome」唯一能从外面证明的形式：真漏进 chrome，读数会是 56 张全动。六个内容臂各自对着
+`default.png` 量（control：同一张对自己比，0 px）：serif 63 638、mono 62 780、small 55 285、full 51 533、
+三档全开对 serif 臂 68 779、深色 serif 63 140。分界线在 x：**390** 对 **284**（= 侧栏 260 +
+`Theme.spacing-xl` 24）——前三臂是换字族，只有 full width 那两臂的文字列起点左移了，也就是栏距真的动了。
+这一位数字是把「布局开关」和「换个字体」分开的唯一读数。
+
+**没跑 RAM 闸，理由写在账上**：一行读的是一个全局属性，改前改后形状一样，推导只在全局自己那次求值里
+多一个乘法；块表没加字段、行模型没加字段、每行没有新状态。上面那 56 张逐字节相同就是替代证据。
+
+**验证**：`cargo check --all-targets`、`cargo test --all-targets`（**380 passed / 0 failed / 12 ignored**，
+8 个 target 各报各的）、`cargo build --release`（3m31s）、
+`cargo build --features software --bin quire-shot`，四条零警告；`grep -rn "#\[test\]" src tests | wc -l`
+= 394 = 380 + 12，树上每个测试在册。
+
+**未验证 / 已知边界**：一、真人一次都没点过——Style 子菜单里真点一下 Serif / Full width / Small text 是
+什么手感、切页时三档跟不跟得上、勾选态对不对，全都需要一个真窗口（headless 场景走的是同一批
+setter，但它证明不了鼠标）。二、Georgia / Consolas 是 Windows 自带字体，这一条在 Windows 上成立，
+Android（M9）上不成立，届时 `serif-font` 得跟着平台走。三、版式不进 Markdown 通道：
+`export_page(blocks)` 连页对象都拿不到，导出的 .md 不带这三档，重新导入也回不来——§二十六 的通道
+本来就是内容通道，不是属性通道，这一条是现状而不是遗漏，但如果以后要带 front-matter，得先出决定。
+四、`duplicate_page` 只给被复制的那一页写长相，`copy_children` 带出来的子页仍走默认——本刀没动它。

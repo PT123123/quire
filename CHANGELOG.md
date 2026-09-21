@@ -207,6 +207,14 @@ First functional release: a local, single-file-database notes workspace.
   delete with confirmation; favorites; recent pages; last page restored
   on startup
 - Page title edits in place; word/char count in the editor footer
+- Page look (top bar ⋯ → Style): a page picks its own typeface — Default, Serif
+  or Monospace — and switches Full width and Small text. All three are stored on
+  the page (schema v10: `pages.font`, `pages.layout`), never on a block: one
+  derived token layer applies them to the document tier, so the sidebar, menus,
+  palette and settings keep their own type. Small text shrinks body and headings
+  by the same factor; full width drops the centred column for a left gutter.
+  Not undoable, like Favorite — a look is a property, not an edit — and a
+  duplicated page starts with its source's (ADR-0044)
 - Slash menu ("/") for block types; command palette (Ctrl+K) with page
   jumping, plus Go Back / Go Forward (Alt+← / Alt+→) along the pages
   visited this session — a page deleted since drops out of the history

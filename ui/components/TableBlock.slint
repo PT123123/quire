@@ -14,7 +14,7 @@
 
 import { Theme } from "../Theme.slint";
 import { Colors } from "../Colors.slint";
-import { Typography } from "../Typography.slint";
+import { Typography, PageType } from "../Typography.slint";
 import { Icon } from "../Icons.slint";
 import { BlockRow, TableCell, UIState } from "../Types.slint";
 import { TableEdge } from "./TableEdge.slint";
@@ -100,10 +100,10 @@ export component TableBlock inherits Rectangle {
                     width: parent.width - 2 * root.pad;
                     visible: cell.runs.length == 0 && !is-edit;
                     text: is-edit ? UIState.editing-text : cell.text;
-                    font-family: Typography.ui-font;
-                    font-size: Typography.size-body;
+                    font-family: PageType.font-family;
+                    font-size: PageType.size-body;
                     color: Colors.text-primary;
-                    line-height-factor: Typography.line-body;
+                    line-height-factor: PageType.line-body;
                     wrap: word-wrap;
                 }
 
@@ -146,13 +146,13 @@ export component TableBlock inherits Rectangle {
                                 wrap: no-wrap;
                                 text: run.text;
                                 font-family: run.code ? Typography.mono-font
-                                    : run.italic ? "Segoe UI Italic" : Typography.ui-font;
-                                font-size: run.code ? Typography.size-code
-                                    : Typography.size-body;
+                                    : run.italic ? PageType.italic-font-family : PageType.font-family;
+                                font-size: run.code ? PageType.size-code
+                                    : PageType.size-body;
                                 font-weight: run.bold ? Typography.weight-bold
                                     : Typography.weight-regular;
                                 color: run.link ? Colors.accent-text : Colors.text-primary;
-                                line-height-factor: Typography.line-body;
+                                line-height-factor: PageType.line-body;
                             }
                             if run.strike : Rectangle {
                                 y: (parent.height - 1.2px) / 2;
@@ -177,10 +177,10 @@ export component TableBlock inherits Rectangle {
                     x: root.pad; y: root.pad;
                     width: parent.width - 2 * root.pad;
                     height: self.preferred-height;
-                    font-family: Typography.ui-font;
-                    font-size: Typography.size-body;
+                    font-family: PageType.font-family;
+                    font-size: PageType.size-body;
                     color: Colors.text-primary;
-                    line-height-factor: Typography.line-body;
+                    line-height-factor: PageType.line-body;
                     wrap: word-wrap;
                     single-line: false;
                     text <=> UIState.editing-text;
