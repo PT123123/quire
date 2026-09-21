@@ -33,6 +33,11 @@ to stderr, and `bench.ps1` inlines it as the row's `attachment_cache` field.
 `peak_bytes` is a high-water mark recorded on every cache insert, and `scroll_y`
 is where the programmatic scroll got to — the field is there because a cache
 that never grew is only a finding if the page really moved.
+A renderer comparison runs both binaries in one sitting and refuses to trust
+either arm's identity: `scroll_ab.ps1` pre-flights each one against the
+`renderer` field of its own `first_paint` line, because a skia arm built without
+`--no-default-features` renders through femtovg and would produce a
+femtovg-vs-femtovg batch that looks like an A/B.
 
 ## Scenes
 | id | scene | command |
@@ -45,6 +50,7 @@ that never grew is only a finding if the page really moved.
 | F | continuous scroll | `bench.ps1 -Scroll` (programmatic proxy, below) |
 | G | switch 100 pages | `bench.ps1 -PageSwitch 100` |
 | D+F·P | the same pages with N picture rows | `bench.ps1 -Blocks 10000 -Pictures N [-Scroll -ScrollStep 200]` |
+| F·2 | the scroll arms, both renderers, one sitting | `scroll_ab.ps1` (8 px and 200 px per frame, plus the picture page) |
 
 ## Baseline — M2 (Release, idle ≈ 5 s after window appears)
 
@@ -240,7 +246,7 @@ skia run showed WS 320.9 MB, a one-off worth watching, see follow-ups.)
 | idle CPU ≈ 0 | ✓ 0.58% vg / 0.98% sk of one core, no animation loops |
 | 10 000-block memory delta | ✓ +9 MB private over the empty shell (vg) / +9 MB (sk) — single digits, met |
 | typing smoothness | ✓ 30 keystrokes/s sustained at 1k and 10k blocks, zero dropped; key handler median 47–66 µs, p95 ≤ 122 µs; 120 keystrokes/s also holds (118/s achieved) |
-| scrolling smoothness | ⚠ re-derive before quoting — "continuous scroll of a 10 000-block page: 27.7% (vg) / 18.2% (sk) of one core, no hitching observed" was measured on a scene F that never scrolled (see the M2 reading above and the media batch at the end): both arms are a pinned-at-top repaint loop. femtovg's real arm is now 36.5–38.4%; the skia arm is owed the same re-run |
+| scrolling smoothness | ⚠ re-derive before quoting — "continuous scroll of a 10 000-block page: 27.7% (vg) / 18.2% (sk) of one core, no hitching observed" was measured on a scene F that never scrolled (see the M2 reading above and the media batch at the end): both arms are a pinned-at-top repaint loop. Re-derived 2026-09-21 on the fixed scene, both renderers, one sitting: **36.9–43.1 % (vg) / 31.8–33.7 % (skia/GL)** at a wheel tick, 86.1–87.4 / 66.4–70.3 at a flick — the harness measures CPU, not frames, so "no hitching" was never something it could see, and that half of the row still needs a human scroll |
 | in-page search cost | ✓ FTS query median 0.5 ms @1k blocks, 1.7 ms @10k — sub-frame |
 | page switching | ✓ 100 switches at 0.19–0.20% of one core |
 | no idle work | ✓ idle scenes show 0.0–0.6% with no timers running |
@@ -262,11 +268,15 @@ the default**; skia remains one `--no-default-features --features skia` away
 for scroll-heavy use — plain `--features skia` leaves the femtovg default
 compiled in too, and then it renders with femtovg.
 
-*(2026-09-21: the one arm of this verdict that argues for skia is the scroll
+*(2026-09-21: the one arm of this verdict that argues for skia was the scroll
 number, and scene F was not scrolling — see the M2 reading and the media batch
-at the end. femtovg's memory lead is untouched, so the default stands on the
-stronger half of the argument; "skia for scroll-heavy use" is unproven until
-that arm is re-run.)*
+at the end. That arm has now been re-measured on a scroll that does move, in one
+sitting against its own femtovg control: skia/GL is **still** cheaper to scroll,
+by ≈18 % at a wheel tick and ≈21 % at a flick rather than the third this row
+claimed, for ≈+34…43 MB of working set. femtovg's memory lead is untouched and
+the default stands; "skia for scroll-heavy use" is a proven but smaller offer
+than this paragraph advertised — the table is in* ***M10 · the skia arm of the
+real scroll*** *at the end of this file.)*
 
 ### M7 follow-ups, ranked by value
 
@@ -274,7 +284,12 @@ that arm is re-run.)*
    if skia ever becomes the default; a non-issue for the femtovg default.
 2. **Continuous-scroll CPU** (28% vg / 18% sk at 60 fps): the partial
    renderer already limits damage; only worth revisiting with real input
-   data showing it matters.
+   data showing it matters. *(2026-09-21: both numbers in this row are off a
+   scene that never moved; on the fixed scene the pair is 36.9–43.1 /
+   31.8–33.7 at a wheel tick and 86.1–87.4 / 66.4–70.3 at a flick, so the
+   item is now "a 10 000-row page costs most of a core to flick on the default
+   renderer" — a bigger number, same advice: revisit when real input data says
+   it hurts, and see the M10 scroll rows at the end.)*
 3. **Scroll-to-hit for search/find**: still impossible on this Slint
    (delegates expose no geometry) — recheck per upgrade; the selection-
    based navigation ships meanwhile.
@@ -953,14 +968,75 @@ the visible band plus whatever the ListView realizes for the new offset. No fix
 is claimed here; this is the first honest number for the follow-up that the M7
 list ranked second, and that follow-up now has a baseline to argue against.
 
-**What this batch does not measure.** The skia arm of the new scroll numbers (a
-second target dir and ~15 min; it is what the renderer verdict's one skia-favouring
-line needs, and it is owed there). A real photo library: the fixtures are
+**What this batch does not measure.** ~~The skia arm of the new scroll numbers~~ —
+run the same day, in one sitting with its own femtovg control, in
+*M10 · the skia arm of the real scroll* below. A real photo library: the fixtures are
 1280×720 gradients, and a flat gradient is the *cheapest* PNG there is to
 decode, so every decode figure here is a floor — a phone photo's entropy costs
 more per frame, and the 200-fixture pool is 200 names for the same raster
-because the cache is keyed by path, which is what makes the floor reachable in
+(`create_fixture` does not vary the pixels by id) because the cache is keyed by
+path, which is what makes the floor reachable in
 a seed pass. The camera-original case (a 12 MP file whose `MAX_EDGE` display
 copy is the same 1280-wide raster, so it costs this and buys nothing extra).
 A page of pictures on a HiDPI scale, and a page where the pictures are
 *between* paragraphs the way a real page has them, rather than on a stride.
+
+## M10 · the skia arm of the real scroll (2026-09-21, ADR-0036 follow-up)
+
+The media batch fixed scene F and re-ran femtovg; that left the renderer verdict
+standing on one unproven sentence — since M7, "skia is better at continuous
+scroll" has been the only argument the memory case does not win, and the number
+behind it came from a viewport that never moved. This is that arm, measured on a
+scroll that does.
+
+`benchmarks/scripts/scroll_ab.ps1`: both binaries on disk at once
+(`target\release`, and `target-skia\release` from
+`--no-default-features --features skia-opengl`), scene outer and arm inner so
+machine drift moves both halves of a pair together, and a pre-flight that fails
+the batch if either binary's own `first_paint` line reports the wrong renderer —
+a skia arm built with the default features still renders through femtovg, and
+would otherwise turn this into femtovg against itself. Raw rows:
+`benchmarks/results/2026-09-21-m10-scroll-skia.jsonl` (one seed plus two
+measured passes per arm; the ranges below are the measured passes).
+
+| scene | femtovg WS / private MB | femtovg CPU % | skia/GL WS / private MB | skia/GL CPU % |
+|-------|------------------------:|--------------:|------------------------:|--------------:|
+| F 10 000 rows, 8 px/frame (wheel) | 150.4 – 152.0 / 122.2 – 123.4 | 36.9 – 43.1 | 184.7 – 186.6 / 122.4 – 125.2 | 31.8 – 33.7 |
+| F 10 000 rows, 200 px/frame (flick) | 156.2 – 158.5 / 135.4 – 136.4 | 86.1 – 87.4 | 190.4 – 191.9 / 128.9 – 130.0 | 66.4 – 70.3 |
+| F + 500 pictures, flick | 196.8 – 197.3 / 169.8 – 171.5 | 78.0 – 78.5 | 239.3 – 241.3 / 177.7 – 180.9 | 63.2 – 64.5 |
+
+**The direction survived its instrument; the size of it did not.** skia/GL is
+cheaper to scroll on all three arms — ≈18 % less CPU at a wheel tick, ≈21 % at a
+flick, ≈18 % on the picture page — but the M7 row claimed 18.2 % against 27.7 %,
+a third cheaper, and that gap was two numbers taken off a page sitting still at
+the top. What the real scroll costs is the smaller claim.
+
+**And it is bought in exactly the currency the verdict already named.** skia
+pays ≈+34 MB of working set on a text page and ≈+43 MB on the picture page for
+that CPU. Its *private* bytes are the interesting half: a wash on the wheel arm,
+and 6 MB **lower** than femtovg on the flick arm — i.e. the penalty is in
+shared, GPU-mapped pages, not in heap the process owns. §二十二's priority order
+still resolves this the way it did before: memory outranks everything but UI
+quality, so **femtovg stays the default** — but "skia for scroll-heavy use" is
+no longer an unproven sentence. It is now about a fifth of the scroll's CPU for
++34…43 MB of working set, and someone on a machine that redraws hot can spend
+that knowingly with `--no-default-features --features skia-opengl` — that exact
+feature, because it is the arm measured here, not the default-`skia` build whose
+first-paint notifier is silent on this driver.
+
+**Two controls worth recording.** The femtovg arm here (150.4 – 152.0 MB,
+78.0 – 78.5 % on the picture flick) reproduces the morning batch's independent
+run of the same scenes (150.0 – 150.8 MB, 77.4 – 78.6 %) to within a megabyte
+and half a percent of CPU, which is what says the two batches are the same
+machine on the same day rather than two stories. And the cache line is
+renderer-independent: skia reports **9 rasters and `peak_bytes` 33 177 600** too,
+the identical ceiling the femtovg arms reached — the LRU is in `AppState`, above
+whichever renderer is painting the pixels, so the §三十七 media ceiling does not
+move when the renderer does.
+
+**What this arm does not measure.** Startup (measured separately in the skia
+first-paint baseline: skia ≤44 ms ahead on an empty shell, a tie on 10 000
+blocks), typing, and the idle cost — all three of those already favour femtovg
+and none of them were re-run here. skia's WS creep under typing (the M7
+follow-up's 320 MB vs 128 MB) is still unexplained and still irrelevant while
+femtovg is the default.

@@ -219,6 +219,20 @@ First functional release: a local, single-file-database notes workspace.
   of thing — two offsets that are real must produce two different PNGs — and
   `--scroll-step` sets how far a frame moves, so a flick and a wheel tick are
   separate measurements (ADR-0036)
+- `benchmarks/scripts/scroll_ab.ps1` runs the scroll arms against two binaries in
+  one sitting — the default build and a `--no-default-features --features
+  skia-opengl` one in `target-skia/` — and fails the batch unless each binary's
+  own first-paint line reports the renderer it is supposed to be. That
+  self-identification is the whole point: the skia arm of the renderer verdict
+  had been standing on the same broken scroll as the femtovg one, and a skia
+  build that silently keeps the femtovg default would otherwise produce an A/B
+  of a binary against itself (ADR-0036)
+- The matrix's `-Only` filter now splits a comma list and throws when no scene
+  matched. `powershell -File` passes `-Only A,B` to a `[string[]]` parameter as
+  one string, so a multi-token filter selected nothing, printed nothing and exited
+  0 — a run that measured nothing and said it finished. Two more shapes joined the
+  matrix so every row the media batch published is reproducible from the script:
+  the flick-sized scroll on a text page, and a short page of pictures
 
 ### Known limitations
 - Switching directly from one open menu to another (e.g. ⋮⋮ on a different

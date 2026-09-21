@@ -59,6 +59,27 @@ Consequences:
   an ordinary page, and a scene that adds GPU textures would fail it for the wrong
   reason. ADOPT the same-session control for the batch's own arms (A, D and the
   media shapes all ran in one sitting), which is what the layout batch asked for.
+- **Invalidating a number obliges re-running it, in both arms.** `scroll_ab.ps1`
+  measures the fixed scene against femtovg and skia/GL in one sitting, each
+  binary pre-flighted against its own reported renderer so a skia build that kept
+  the femtovg default cannot pass for an A/B. The result: the verdict's direction
+  survives — skia is ≈18 % cheaper at a wheel tick and ≈21 % at a flick — but the
+  size halves (the M7 row read 18.2 % vs 27.7 % on a page that was not moving),
+  and the price is ≈+34…43 MB of working set while skia's *private* bytes are a
+  wash or lower. femtovg therefore stays the default on the same grounds as
+  before, with "skia for scroll-heavy use" now a proven and smaller offer. The
+  media ceiling turned out to be renderer-independent — skia reports the same 9
+  rasters and the same 33 177 600 peak — because the LRU lives in `AppState`,
+  above whichever renderer is painting.
+- **A filter that matches nothing is not a measurement, and it used to exit 0.**
+  Reproducing the new matrix scenes through `-Only A,B` found that
+  `powershell -File` hands a comma list to a `[string[]]` parameter as **one
+  string**, so a multi-token filter matched no scene, wrote no rows and reported
+  success — the silent-probe shape this harness has been bitten by before.
+  `bench_matrix.ps1` now splits the tokens and throws when nothing matched. The
+  header comment has advertised the two-token form since scene E's follow-ups, so
+  any older batch that claims a `-Only A,B` re-run is worth checking for rows
+  before its numbers get quoted.
 - `create_fixture` writes a gradient, which compresses well and is therefore not a
   photo; the RAM arms above are unaffected (weight is `w·h·4` regardless) but the
   disk footprint and any future decode-time arm are optimistic. Recorded as a

@@ -36,6 +36,9 @@ $scenes = @(
     @{ label = "$Tag-C5000"; command = "--blocks 5000"; args = @{ Blocks = 5000 } },
     @{ label = "$Tag-D10000"; command = "--blocks 10000"; args = @{ Blocks = 10000 } },
     @{ label = "$Tag-F10000"; command = "--blocks 10000 --scroll"; args = @{ Blocks = 10000; Scroll = $true } },
+    # The same scroll at a flick-sized step: a wheel tick and a hard flick are
+    # two different loads on the renderer, so both are on the record.
+    @{ label = "$Tag-F10000-S200"; command = "--blocks 10000 --scroll --scroll-step 200"; args = @{ Blocks = 10000; Scroll = $true; ScrollStep = 200 } },
     # SPEC §三十七's unmeasured shape: the same page with pictures on it. The
     # pool is capped, so P500 and P5000 differ in how often a row re-enters the
     # viewport, not in how many rasters exist on disk.
@@ -47,6 +50,10 @@ $scenes = @(
     @{ label = "$Tag-F10000-P500"; command = "--blocks 10000 --scroll --scroll-step 200 --pictures 500"; args = @{ Blocks = 10000; Scroll = $true; ScrollStep = 200; Pictures = 500 } },
     @{ label = "$Tag-D10000-P5000"; command = "--blocks 10000 --pictures 5000"; args = @{ Blocks = 10000; Pictures = 5000 } },
     @{ label = "$Tag-F10000-P5000"; command = "--blocks 10000 --scroll --scroll-step 200 --pictures 5000"; args = @{ Blocks = 10000; Scroll = $true; ScrollStep = 200; Pictures = 5000 } },
+    # A short page of pictures: the same nine rasters in a cache that drains and
+    # refills every few frames instead of every few hundred rows. If the ceiling
+    # were row-count-driven this arm would move; it does not.
+    @{ label = "$Tag-F1000-P500-S200"; command = "--blocks 1000 --scroll --scroll-step 200 --pictures 500"; args = @{ Blocks = 1000; Scroll = $true; ScrollStep = 200; Pictures = 500 } },
     @{ label = "$Tag-G100"; command = "--page-switch 100"; args = @{ PageSwitch = 100 } },
     @{ label = "$Tag-E1000"; command = "typing 1000 blocks, 30/s, search every 100"; args = @{ Typing = $true; Blocks = 1000; Rate = 30; SearchEvery = 100 } },
     @{ label = "$Tag-E10000"; command = "typing 10000 blocks, 30/s, search every 100"; args = @{ Typing = $true; Blocks = 10000; Rate = 30; SearchEvery = 100 } },
@@ -63,8 +70,16 @@ function Clear-Database([string]$path) {
 
 if (-not (Test-Path $Root)) { New-Item -ItemType Directory -Path $Root | Out-Null }
 
+# `powershell -File script.ps1 -Only A,B` delivers the comma list as ONE string,
+# so a multi-token filter used to match nothing and exit 0 with no rows — the
+# silent-no-op shape this harness has been bitten by before. Split the tokens,
+# and refuse to call a run that matched no scene a success.
+$Only = @($Only | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+$matched = 0
+
 foreach ($scene in $scenes) {
     if ($Only.Count -and -not ($Only | Where-Object { $scene.label -like "*-$_" })) { continue }
+    $matched += 1
     $isTyping = $scene.args.ContainsKey("Typing")
     $base = @{ Exe = $Exe } + $scene.args
     if ($isTyping) {
@@ -95,4 +110,8 @@ foreach ($scene in $scenes) {
         Write-Output $text
         if ($Out -ne "") { Add-Content -Path $Out -Value $text }
     }
+}
+
+if ($matched -eq 0) {
+    throw "no scene matched (Only=[$($Only -join ',')]); tags present: $($scenes.Count). A filter that matches nothing is not a measurement."
 }
