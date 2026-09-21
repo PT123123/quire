@@ -2375,3 +2375,96 @@ Consequences:
   the per-type table above is a specification and not a test; and an exported
   `formula` column inherits D6's recompute correctness, so a wrong formula is a
   wrong file.
+
+## ADR-0066 · The bulk replace keeps the database layer, and a record dies with the page the incoming state dropped
+
+Decision: `replace_all` — the checkpoint, the repair, the LAN pull — replaces the
+**document**: pages, blocks, metadata, settings. The database layer is not part
+of `PersistedState`, and it does not become part of it. But `DELETE FROM pages`
+**cascades** through `db_records.page` (ADR-0063's foreign key), so the six
+tables are read into a snapshot inside the same transaction, before the delete,
+and written back after the new state is in. The rule for what comes back:
+
+* a database, its properties and its views always survive untouched — the bulk
+  path never knew about them and may not quietly lose them;
+* a record survives if it is bare or if the state still has the page it is the
+  face of;
+* a record whose page the incoming state dropped is dropped with its values and
+  its list items, which is ADR-0063's invariant ("a database never holds a row
+  whose page is gone") applied to a path that arrives from SQL rather than from
+  a command.
+
+Why not the alternative of adding records, values and items to `PersistedState`:
+that state is what a checkpoint *is* and what the LAN pull puts on the wire
+(`services::lan_server` sends a `PersistedState`). Filling it with records means
+every row and every cell of every database travels through a checkpoint's memory
+and through the wire format — the exact cost ADR-0067 exists to prevent, and one
+that grows with the tables the bulk path is supposed to know nothing about. The
+bulk path's job is to replace prose; the cascade is the only reason it is
+involved with rows at all, so the fix belongs at the cascade and not in the
+state.
+
+Consequences:
+
+* The bulk path now runs two more statements (a snapshot read and a restore
+  write). It is a rare, already-expensive path: a checkpoint walks every block
+  and every page in the library.
+* A record deleted this way is deleted *whole*: its title lived on the page that
+  went, and nothing resurrects it as a bare record with an empty title (that
+  would be ADR-0063's rejected alternative, arriving through a second door).
+* `attachments` and the database layer are now the two things `replace_all`
+  deliberately carries across; the comment in `replace_all` says so beside the
+  attachment one, because the next reader will ask which rows survive.
+* Still unverified: no test drives a **LAN pull** of a library that has records
+  (`services::lan_server` is off by default and its own slice's tests use states
+  without databases), so the rule above is tested against `replace_all` directly
+  and against the pull only by construction; and the snapshot is held in memory
+  for the duration of the transaction, so a library with a million records pays
+  for it — bounded by the same rebuild the bulk path already does, but not
+  measured.
+
+## ADR-0067 · A row exists only inside a window, so the store never loads records
+
+Decision: the layer that reads is the layer that is asked for a window.
+
+* `load_databases` — the startup read — carries databases, properties and views.
+  It deliberately carries **no records and no cells**: those are the two things
+  whose size is a table's and not a schema's.
+* A view reads rows through `window_rows`, which runs the window D0's projection
+  computed (`core::database::window`) as the query's `LIMIT`/`OFFSET`, and the
+  number of rows that come back *is* the window's length. `record_count` (one
+  `COUNT(*)`) is what the window needs first; D4's filters narrow the same pair
+  rather than adding a path.
+* The list-valued columns (`multi-select`, `files`) are read in a second query
+  bounded by the window's own records, because one row per item would otherwise
+  multiply the window by the longest list in it.
+* `unwindowed_rows` exists, is documented as **the control arm of the
+  measurement** and has no reader in the app. ADR-0065's Markdown export is the
+  one future caller that has a viewport-free reason to ask for a whole table, and
+  it should ask for a streaming read instead.
+* A cell read on its own (`cell`) is a debug and test path; a view reads cells
+  with its window.
+
+Why: SPEC §三十九's first red line — 「10 000 行的库不得全量 realize；视图先算可见窗口再取行」.
+D0 proved the projection exists and is bounded by the viewport (31 rows of
+10 000). A projection is only half the claim: if the load path materialized
+records, then ten databases of 10 000 rows would become 100 000 objects at
+startup and the window would be decoration. Making the window the *only* read
+path is what turns "we compute a window" into "the store is asked for a window".
+
+Consequences:
+
+* The write path does not change shape: a cell is one `Change` (`CellSet`), a row
+  is one `Change` (`RecordCreated` / `RecordDeleted`), and the app never holds a
+  row object it has to keep in sync — which is also why D3's commands must
+  capture the rows they delete in order to undo them.
+* Counting is now on the read path: every window read starts with a `COUNT(*)`
+  for the same database. It is an index walk (`idx_db_records_db_ord`), and it is
+  measured (D1's report) rather than assumed.
+* Keeping rows out of `PersistedState` is what makes ADR-0066's snapshot the
+  smallest possible exception rather than a design change.
+* Still unverified: no UI calls any of this yet, so "the only read path" is a
+  statement about the API and not about a frame; the Markdown export has not been
+  written, so nothing yet proves that an export of a 10 000-row database is
+  acceptable; and the count's cost is measured on an unfiltered database only
+  (D4 owns the filtered number).

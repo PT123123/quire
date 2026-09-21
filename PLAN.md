@@ -2264,3 +2264,62 @@ find 9、markdown 62、persistence 5、search 17、storage 27/2、workspace 14�
 **下一步**：D1 —— `databases` / `db_properties` / `db_views` / `db_records` / `db_values` /
 `db_value_items` 的迁移、repository 读写与 core 对象模型；record 与 page 的所有权契约（含两条删除
 路径的测试）在这里落地。
+
+## Track 3 · D1 数据层（2026-09-22，on `track/3-database`，schema v12–v15，ADR-0066…ADR-0067）
+
+D0 证明了通道（投影先算窗口），D1 让通道**真的从 SQL 里取行**，并把 SPEC §三十九 的四层对象落成表。
+一刀之内交付：六张表 + 四步迁移、`core` 对象模型、`storage` 的读写与窗口查询、record↔page 的生命周期
+契约与测试、重建（关掉再打开逐字段一致），以及本刀欠的性能数字。
+
+**表与迁移**（`src/storage/migrations.rs`，动手前读到的 `CURRENT_VERSION` 是 **11**，采用 **v12–v15**）：
+一次迁移 = 一个可独立回滚的语义单位，所以 v12 = `databases`、v13 = `db_properties`、v14 = `db_records` +
+`db_values` + `db_value_items`（record 与它的值不可能各自存在，是一个单位）、v15 = `db_views`。
+每步都用 `CREATE TABLE IF NOT EXISTS`（`add_page_columns()` 那种「缺哪列补哪列」的收敛范式在 `CREATE`
+上的对应写法），并配「vN-1 库升上来读回原值」的测试：v12/V13/V14/V15 各一条，fixture 走**应用自己的
+写路径**（这样 `ord` 的编码也真的是存储的编码），然后降版本、迁移、断言旧行逐字段没变 + 新表真的可用。
+
+**对象模型与写路径**：`core::database`（D0 的投影旁边）加了 `Database` / `Property` / `PropertyKind` /
+`View` / `ViewLayout` / `Record` / `CellValue` / `DatabaseCatalog` / `RowRequest`。`Change` 在**末尾追加**
+十九个变体（`DatabaseCreated` … `ViewDeleted`），`storage::database_store` 放 SQL，`repository::apply_one`
+的 match 保持 exhaustive（新变体是编译错误，不是悄悄丢的写入）。「空」有唯一表示：没有行——不是空串，
+不是 0；`person` 折成 `text`、未知 kind 折成 `text`、未知 layout 折成 `table`（ADR-0061/0064 的 fold）。
+
+**窗口真的执行了**：`window_rows` 拿 D0 的 `RowWindow::fetch()` 当 `LIMIT`/`OFFSET`，
+`realized_rows` 把 `COUNT(*)` → `core::database::window` → 一次 SQL 串起来；SELECT 里**每个可见属性一个
+`LEFT JOIN`**、标题走 ADR-0063 的 `COALESCE(pages.title, db_values.text)`，列表型（multi-select / files）
+另用一次「只限本窗口 record」的查询，否则一行的三个选项会把窗口乘三。`EXPLAIN QUERY PLAN` 显示计划是
+`SEARCH r USING INDEX idx_db_records_db_ord (db=?)` + 每个值一个 `sqlite_autoindex_db_values_1` 探测。
+
+**数字**（10 000 条 record × 5 列 = 60 000 个 change，release，`benchmarks/results/2026-09-22-track3-d1-window.jsonl`）：
+
+| 读数 | 值（三次运行） |
+|------|----------------|
+| 落库 10 000 行（每行 5 格） | 848 ms → **84.8 µs/行**（另两次 635.8 / 939.8 ms） |
+| 窗口读（顶，`LIMIT 31 OFFSET 0`） | **463.5 µs**（另两次 247.2 / 658.7） |
+| 窗口读（中间，`LIMIT 39 OFFSET 4992`） | 7.5 ms（另两次 5.1 / 8.8） |
+| 窗口读（底，`LIMIT 31 OFFSET 9969`） | 12.9 ms（另两次 8.5 / 13.3） |
+| 对照：一次取回全部 10 000 行 | 56.0 ms、堆 **1 842 780 B**（另两次 46.8 / 69.9 ms，堆逐字节相同） |
+| 窗口那 31 行占堆 | **5 576 B**（与全表 **330×**，三次都是 330–332×） |
+
+**这一刀量出来的真问题**：窗口界住的是**行与字节**（红线那句），不是**工作量**。裸索引走 9 969 行只要
+55.3 µs，所以贵不在 `OFFSET` 的走位，而在 `LEFT JOIN` **在跳过的行上照样执行**：同一个窗口改用游标
+（`(r.ord, r.id) > (?, ?)`，一行一个 key）只要 **251 µs**，比 `OFFSET` 版本的 12.9 ms 快 **51×**。
+读契约（`fetch() -> (limit, offset)` 是 D0 定的）因此欠一笔：D3/D4 拿着真帧的数字把它换成游标。
+
+**record 与 page 的契约**（ADR-0063 落地）：`UNIQUE (page)` 让所有权互相唯一、`ON DELETE CASCADE`
+是 SQL 的兜底、标题只有一个家（有页在 `pages.title`，无页在 `db_values`，读时 `COALESCE`）、新 record
+默认没有页（懒建页，`db_records.page` 大量 NULL 是设计而不是巧合）。两条删除路径的测试都在
+`tests/integration/storage_test.rs` 的 `database_layer` 模块：删 record（一批 `[RecordDeleted,
+PageDeleted]`）与删页面（只有 `PageDeleted`，靠 CASCADE）end in the same state；批量路径
+（`replace_all`）不许把这一层弄丢——ADR-0066 的规则 + 测试，包括「状态里没有的页，它的 record 一起走」。
+
+**验证**：`cargo check --all-targets` 干净（0 warning）；`cargo test --all-targets` 按 target 分开报（见
+报告）；视觉 **changed 0**（纯数据层，没有 `.slint` 被碰）；`cargo build --release` 零警告。
+
+**未验证**（诚实清单）：没有 UI 臂——没有帧、没有 `bench.ps1`、`LIMIT`/`OFFSET` 之外没有别的读路径被
+任何绘制代码调用；`OFFSET` 的时间只在本机、与本刀自己的对照比过；LAN pull 没端到端跑过；改 kind 不迁移
+已存的值（D2 的逐类型转换）；`config` 只被原样存取、没有解析器（D2）；ADR-0065 的 Markdown 导出仍是规格
+（没有代码路径）。
+
+**下一步**：D2 的 property 系统（14 种类型 + 每型往返 + date/number 的数值序），之后 D3 的 table view
+把窗口接到真帧上，并回答上面那个游标问题。
