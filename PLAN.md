@@ -1938,3 +1938,36 @@ true` 兜住不溢出，但没有图证明这读起来是对的。
 占了，缺的是抓标题与 favicon 那一半网络）；synced block 等 §四十。高亮这条不再需要 runs 通道，
 所以 ADR-0041 那三条残留（长标记短语、标记行需更多行、无空格文本）与它无关了。`reveal`（变高
 scroll-into-view）仍不属于批次 C，但 TOC 跳转和 `quire://block` 锚点还在等它。
+
+
+## 工具诚实 · quire-shot 不再冒充 FemtoVG（2026-09-21，on `master`）
+
+批次 C 第四条之后顺手还的账：A4 报告里那条「known limitation, not a defect」——sweep 每张图的
+侧栏页脚都写着 `FemtoVG · GL`，可 `quire-shot` 装的是 `HeadlessPlatform`（Slint 的软件光栅器），
+而 `--features software` 并不会关掉默认的 `femtovg`，于是编译期按 feature 顺序答出来的名字说的是
+一个从没跑过的渲染器。这不是观感问题：sweep 是本项目关于「渲染」的证据，它一直在给自己的证据贴
+错标签——`scroll_ab.ps1` 早就为 skia 臂记过同一个坑（`--features skia` 不关 femtovg）。
+
+**改动**：`src/bin/quire_shot.rs` 在 `controller::wire()` 之后把 `UIState.renderer-name` 覆写成
+`Software · headless`。app 二进制一个字没动——它跑的确实是自己的 feature 选中的后端，页脚写的就是
+对的；只有「自己装 Platform」的那个进程需要说真话。
+
+**验证**：`cargo check --all-targets`、`cargo build --release`、`cargo build --release --features
+software --bin quire-shot` 三条全零警告（ROADMAP 里那句「shot 构建还剩一个 `unused variable: ui`
+警告」已经作废：`render()` 早就不接 `ui` 参数了，这次撤回）。sweep26 → sweep27：54 张**全动**，
+而「全动」正是这一刀的预期——`diffbbox` 说 53 张只动了 `x 96..192 / y 778..784` 里 118…125 个采样
+点（页脚那一行 caption），`settings` 动 244 px 覆盖 `x 96..722 / y 692..784`（页脚 + 对话框的
+Renderer 行）。读这个属性的地方一共两处，变化的框也正好两处，别处一个像素都没有。两张放大裁图
+（`.scratch/shotlabel/`）直接读到旧图 `FemtoVG · GL`、新图 `Software · headless`——两臂各自自证
+身份。新基线 `.scratch/sweep27`（54 张）。
+
+**顺带清掉的文档债**：ROADMAP 的 M8 verification snapshot 多了一节「Re-run at `63a4081`」，把测试
+数（374 / 0 / 11）、三条构建、sweep 结果写清，并明确 installer / portable 两条**这次没重跑**；A4
+的 open list 逐条对代码复核后落成——D1（ADR-0041）、D9（ADR-0033，`ui/` 里已无「later milestone」
+字样）、模态遮罩、`Ctrl+B` 让位给 `Ctrl+\`、渲染器标签，五条全闭；只剩 D7（MEDIUM）与两条对比度
+LOW。D7 这次也拿到了代码证据：`EditorBlock.slint` 里没有任何 find 的引用，所以「caret 不在这一块
+就画不出命中」不是坏掉，是**功能不存在**——它要的是行级命中区间，撞的正是 ADR-0042 绕开的那面
+「一个 Text 一种颜色」的墙，因此按新 feature 排期，不按 bug 修。
+
+**未验证**：`--no-default-features --features software` 这一支 shot 构建没跑过——现在标签与 feature
+无关，所以那个组合不再影响图的正确性，但它的构建时间与产物没量过。

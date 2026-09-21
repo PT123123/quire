@@ -389,7 +389,10 @@ the first timer to run inside the event loop, which lands *before* any frame
 is drawn — an underestimate of paint latency, marked
 `"method":"event_loop_proxy","confidence":"low"` in its own line so it can
 never be confused with the real thing. `renderer_name()` comes from the
-build's own features, so each binary labels itself correctly.
+build's own features, which labels an *app* binary correctly — the one exception
+was `quire-shot`, which installs its own software platform and so was captioning
+its shots `FemtoVG · GL` while no femtovg code ran; it now overwrites the label
+(see `docs/UI_ARCHITECTURE.md`, Visual regression).
 
 **Numbers** (Release, femtovg, 100% scale, warm, 5 + 4 runs, medians):
 

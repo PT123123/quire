@@ -163,6 +163,14 @@ fn run() -> Result<(), String> {
     let state = AppState::new(&args, None);
     controller::bind(&ui, &state);
     controller::wire(&ui, &state);
+    // `renderer_name()` is a compile-time guess about which renderer *feature*
+    // was asked for, and this process did not ask: `HeadlessPlatform` above is
+    // Slint's software rasterizer whatever else is compiled in — a
+    // `--features software` build keeps the `femtovg` default on, which is why
+    // every swept PNG used to caption itself "FemtoVG · GL" over a picture no
+    // GPU drew. The sweep is evidence about a renderer, so it says which one ran.
+    ui.global::<UIState>()
+        .set_renderer_name("Software · headless".into());
     if let Some(scene) = &scene {
         controller::apply_scene(&ui, &state, scene);
     }

@@ -97,8 +97,44 @@ including the `palette` scene, because a shot captures the popup's layout and
 the bug was in what happens when a row is chosen. A green visual gate is
 evidence about drawing, not about behaviour.
 
-One warning does remain, and it is specific to the shot build rather than the
-release build: with `--features software`, `render()` in
-`src/bin/quire_shot.rs:75` takes a `ui` parameter its software path never
-reads (`unused variable: ui`). Harmless — but it is the reason the shot
-binary's build is not silent even when the app's is.
+### Re-run at `63a4081` (2026-09-21), and one stale verdict retired
+
+| gate | command | result |
+|------|---------|--------|
+| tests | `cargo test --all-targets -- --skip clipboard_write_and_read_round_trip_unicode` | **374 passed, 0 failed, 11 ignored** across 10 binaries (the skip is the local clipboard being held by another process) |
+| build | `cargo check --all-targets`, `cargo build --release`, `cargo build --release --features software --bin quire-shot` | all clean, **zero warnings** on all three |
+| visual | `benchmarks/scripts/sweep.ps1 -OutDir .scratch/sweep27 -Baseline .scratch/sweep26` | 54/54 render; **54 of 54 PNGs moved**, every one of them inside `x 96..192 / y 778..784` (plus the Settings row in `settings.png`) — see below |
+| packaging | `install/verify-installer.ps1`, `install/verify-portable.ps1` | **not re-run at this head**; the rows above stand as a 2026-09-20 record |
+
+The paragraph above this one claimed a warning still survives in the shot build
+(`unused variable: ui` at `src/bin/quire_shot.rs:75`). It does not: `render()` now
+takes no `ui` parameter, and the `--features software` build is silent — that
+claim is retracted, and the `--all-targets` row above is the evidence.
+
+What *was* still true in the shot build is the labelling limitation the A4 report
+filed as "known limitation, not a defect", and it has now been fixed rather than
+re-scored: `renderer_name()` answers from the compiled-in features, and
+`--features software` keeps the `femtovg` default on, so every swept PNG carried a
+sidebar footer reading `FemtoVG · GL` over a picture `HeadlessPlatform` — Slint's
+software rasterizer — actually drew. That is not cosmetic here: the sweep is the
+project's evidence *about rendering*, and it had been captioning itself with a
+renderer it never used (the same trap `scroll_ab.ps1` documents for a `--features
+skia` build). `quire-shot` now overwrites the property with `Software · headless`
+after `wire()`, and the app binary is untouched, because the app really does run
+the backend its features select. The re-baseline is the proof of scope: 53 scenes
+moved 118–125 px in the footer's single caption line, `settings` 244 px across that
+line plus the dialog's Renderer row — the two places that read the property, and
+nothing else. `.scratch/sweep27` (54 scenes) is the baseline.
+
+The A4 open list this snapshot used to carry (1 HIGH + 2 MEDIUM + 3 LOW + 1 known
+limitation) is now: **closed** — D1 (marked lines did not wrap, ADR-0041), D9 (the
+empty state's "later milestone" copy, ADR-0033 — no such string is in `ui/`
+anymore), the modal scrim, the `Ctrl+B` palette chord (sidebar is `Ctrl+\`), and
+the renderer label above. **Still open** — D7 · MEDIUM: per-page find reports
+"2 / 16" and paints no individual match. The code is now the evidence for what
+that costs: `ui/components/EditorBlock.slint` has no reference to the find term at
+all, so a hit in a block the caret is not in cannot be drawn — it is a missing
+feature (row-level hit ranges, which is the same one-`Text`-one-colour wall ADR-0042
+went around for code), not a broken one. Plus the two contrast LOWs: the palette
+and search hint rows are the dimmest text in a light UI, and `block-colors`
+green-on-olive / red-on-black are the weakest pairs.

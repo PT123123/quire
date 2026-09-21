@@ -96,11 +96,11 @@ Current set: default, dark, palette, search-notes, menu, rename, settings,
 dialog, empty, edit, slash, block-menu, marks, marks-wrap, link, find, nest, toggle,
 toggle-fold, image, image-half, file, recovered, title-edit, table, table-edit,
 table-marks, columns, columns-3, columns-marks, math, math-inline, toc, embed,
-embed-empty,
-plus dark combos (dark-slash, dark-find, dark-marks, dark-link, dark-block-menu,
-dark-title-edit).
-`benchmarks/scripts/sweep.ps1` holds the authoritative list — 52 scenes as of
-ADR-0041 — and this prose is the summary, so when the two disagree trust the
+embed-empty, code-hl
+plus dark combos (dark-slash, dark-find, dark-marks, dark-link, dark-code-hl,
+dark-block-menu, dark-block-colors, dark-title-edit).
+`benchmarks/scripts/sweep.ps1` holds the authoritative list — 54 scenes as of
+ADR-0042 — and this prose is the summary, so when the two disagree trust the
 script. Every visual change ships with re-shot
 scenes; the judge-reviewed set is the regression baseline. `toggle` and
 `toggle-fold` are a pair on purpose: the same section open and closed, so a
@@ -193,7 +193,20 @@ second time at 760 px wide, where the fixture's long lines really do break. A
 colour census (count the pixels within 3 of each palette slot) is what settles it
 without an eyeball: all five token colours present in both themes, and the same
 five absent from `default` and `dark` down to 4 and 1 stray pixels.
-The baseline is `.scratch/sweep26` (54 scenes). The set before it, `.scratch/sweep10`
+`sweep26` → `sweep27` moved **all 54**, and that is the one sweep whose whole
+purpose was to move them: every shot had been captioning itself `FemtoVG · GL` in
+the sidebar footer while `quire-shot` installs `HeadlessPlatform`, which is Slint's
+software rasterizer whatever features are compiled in (`--features software` keeps
+the `femtovg` default on, so the compile-time `renderer_name()` answered for a
+renderer that never ran). A sweep is evidence *about a renderer*, so the shot
+binary now overwrites the property with `Software · headless` after `wire()`, and
+the app's own label is untouched because the app really does pick the feature it
+was built with. `diffbbox` is what makes that a verdict rather than a claim: 53 of
+the 54 moved 118–125 px inside `x 96..192 / y 778..784` — the footer's one caption
+line — and `settings` moved 244 px across `x 96..722 / y 692..784`, which is that
+same line plus the dialog's Renderer row. Two places read the property; two boxes,
+nothing else.
+The baseline is `.scratch/sweep27` (54 scenes). The set before it, `.scratch/sweep10`
 (42 scenes), re-baselined 37 of them for a
 reason unrelated to tables: `DocumentRow.head` bound `height` without `y` and so
 was centred in its delegate, which had been sitting the page title ~34 px below
