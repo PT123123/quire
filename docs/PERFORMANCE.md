@@ -1207,3 +1207,44 @@ a 10 000-row page costs to *draw* — the published UI numbers stay what they
 were: the typing row's key-handler median 47–66 µs and the storage row's
 debounced 32-change `apply` median 3.42 ms. What it does settle is that the
 contents block's own work is not where the time goes.
+
+## M11 · a link card is below what the gate can resolve (2026-09-21, ADR-0040)
+
+The embed card adds no column, no model field and no per-row allocation: the two
+lines it paints are the result of a string function over text the row already
+carries. The gate was run to confirm that, not to discover it.
+
+**The gate, third time the same way.** Scene D (10 000 blocks, no embed anywhere
+in it), a pinned database per arm, arms alternating in one sitting, both exes
+identified by md5 and size before either ran (raw rows
+`benchmarks/results/2026-09-21-m11-embed-ram.jsonl`):
+
+| arm | exe | steady WS MB | steady private MB |
+|-----|-----|-------------:|------------------:|
+| control `4fa2b7b` | md5 `9c5e153f…`, 22 017 024 B | 136.7 / 137.0 | 110.9 / 112.1 |
+| embed (this tree) | md5 `19aea07c…`, 22 072 320 B | 138.2 / 138.9 | 111.8 / 112.3 |
+
+**1.005× the control's private bytes.** The 0.55 MB gap between the two means is
+less than half the 1.2 MB spread inside the control arm alone, so this sitting
+cannot separate the card from noise either — and that is now three consecutive
+kinds (math 1.016×, toc 1.007×, embed 1.005×) landing in the same place, which
+says something about the instrument as much as about the slices: the gate's floor
+is roughly 1 MB of private bytes on this scene, and a change whose whole per-row
+cost is two string functions is *under the floor*, not merely small. Each arm's
+first run (109.7 / 111.3 private, startup 807 / 1104 ms) is the pass that seeds
+its database and is excluded. Idle CPU went the other way — control 4.29–5.85 %,
+this tree 3.12–4.09 % — which is the same non-result stated for the counter that
+has the widest noise band. The exe grew 55 296 B.
+
+**What the gate cannot see, and why nothing was measured for it instead.** Scene
+D has no embed, so `embed-label` and `embed-url` are never called by any run in
+the table above. The card's real cost is bounded by construction rather than by a
+reading: the two bindings are guarded by `is-embed` (`… ? UIState.embed-label(…)
+: ""`), so a row that is not a card evaluates the ternary and does not cross into
+Rust — the ADR-0038 lesson, applied to a callback instead of a renderer — and a
+row that *is* a card pays it once per repaint of a viewport that holds twenty-odd
+rows, not once per row of the document. No timing was taken, because there is no
+10 000-row multiplication left to fear: unlike the contents block, which walks
+the page once per projection, the card's work has no page in it. The unmeasured
+part is the one nothing can measure headless — what the operating system does
+with the address after the Open button hands it over.

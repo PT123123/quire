@@ -773,6 +773,13 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
     // the row, and the conversion is a function of it.
     ui.global::<UIState>()
         .on_math_render(move |src| crate::core::math::to_unicode(&src).into());
+    // embed card (SPEC §三十七 批次 C): the same shape as the math row — the
+    // address is the block's own text, and both lines the card shows are
+    // functions of it. Nothing here looks anything up.
+    ui.global::<UIState>()
+        .on_embed_label(move |url| crate::core::embed::describe(&url).into());
+    ui.global::<UIState>()
+        .on_embed_url(move |url| crate::core::embed::with_scheme(&url).into());
     {
         let gw = gw.clone();
         let s = state.clone();
@@ -1691,7 +1698,16 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                 }
                 return;
             }
-            // Windows shell open; cfg-gated so other targets simply no-op
+            // Windows shell open; cfg-gated so other targets simply no-op.
+            // Only an address a browser understands gets this far: a link's
+            // target is data that arrives from a file, and `start` will run a
+            // path as readily as it opens a url — so a local path, a share or
+            // an unknown protocol is the document's own business, not the
+            // command line's. (SPEC §三十七 批次 C, ADR-0040; the embed card
+            // is what made this worth fixing, since it puts a button on it.)
+            if !crate::core::embed::is_openable(&url) {
+                return;
+            }
             #[cfg(target_os = "windows")]
             {
                 let _ = std::process::Command::new("cmd")
@@ -2882,6 +2898,50 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
                 id,
                 kind: crate::core::BlockKind::Toc,
             });
+            state.reproject_blocks();
+        }
+        // SPEC §三十七 批次 C: a link as a card. The intro line becomes the
+        // block and carries an address with a `www.`, a query and a fragment, so
+        // both lines the card paints are derived from something shaped like a
+        // real link — and the headline is a provider the card knows.
+        "embed" => {
+            let page = core_page_id(state.open_page.get());
+            let target = {
+                let d = state.doc.borrow();
+                d.page_blocks(page)
+                    .iter()
+                    .find(|b| b.kind == crate::core::BlockKind::Paragraph && !b.text.is_empty())
+                    .map(|b| b.id)
+            };
+            let Some(id) = target else { return };
+            let _ = state.exec_on_open_page(Command::SetBlockType {
+                id,
+                kind: crate::core::BlockKind::Embed,
+            });
+            let _ = state.exec_editor(Command::ReplaceText {
+                id,
+                text: "https://www.youtube.com/watch?v=dQw4w9WgXcQ#t=1s".into(),
+            });
+            state.reproject_blocks();
+        }
+        // …and the card before anything is typed into it. This is the state
+        // every embed starts in, and the only one with no address to lay out,
+        // so it is where a card that collapses to nothing would show up.
+        "embed-empty" => {
+            let page = core_page_id(state.open_page.get());
+            let target = {
+                let d = state.doc.borrow();
+                d.page_blocks(page)
+                    .iter()
+                    .find(|b| b.kind == crate::core::BlockKind::Paragraph && !b.text.is_empty())
+                    .map(|b| b.id)
+            };
+            let Some(id) = target else { return };
+            let _ = state.exec_on_open_page(Command::SetBlockType {
+                id,
+                kind: crate::core::BlockKind::Embed,
+            });
+            let _ = state.exec_editor(Command::ReplaceText { id, text: "".into() });
             state.reproject_blocks();
         }
         "find" => {

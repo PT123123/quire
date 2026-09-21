@@ -33,6 +33,7 @@ export component EditorBlock inherits Rectangle {
     property <bool> is-columns: block.kind == 18;
     property <bool> is-math: block.kind == 20;
     property <bool> is-toc: block.kind == 21;
+    property <bool> is-embed: block.kind == 22;
     // picture (kind 14): the row's height comes from the raster's ratio, which
     // Rust knows from the attachments row. 0 means there is no picture to
     // show — a missing file or an attachment from another library — and the
@@ -46,6 +47,13 @@ export component EditorBlock inherits Rectangle {
     property <length> file-height: Typography.size-body * Typography.line-body
         + 2 * Theme.spacing-md;
     property <string> file-size: is-file ? UIState.attachment-size(block.attachment) : "";
+    // embed (kind 22): two lines of derived text in one box — the provider the
+    // address belongs to, and the address the Open button will hand over. Both
+    // are functions of the block's own text, so the card cannot disagree with
+    // what was typed into it.
+    property <length> embed-height: Typography.size-body * Typography.line-body
+        + Typography.size-caption * Typography.line-body + 2 * Theme.spacing-md;
+    property <length> embed-inset: Theme.spacing-md + 19px + Theme.spacing-sm;
     property <bool> editing: UIState.editing-id == block.id
         && block.kind != 9 && block.kind != 11 && block.kind != 12
         && block.kind != 14 && block.kind != 15 && block.kind != 16
@@ -77,6 +85,7 @@ export component EditorBlock inherits Rectangle {
         : block.kind == 3 || block.kind == 9 || block.kind == 10
             || block.kind == 14 || block.kind == 15 || block.kind == 16
             || block.kind == 18 || block.kind == 20 || block.kind == 21
+            || block.kind == 22
             ? Theme.spacing-md
         : 0px;
 
@@ -84,13 +93,15 @@ export component EditorBlock inherits Rectangle {
         + (is-list ? 26px : 0px)
         + root.fold-gutter
         + (block.kind == 7 ? Theme.spacing-md : 0px)
-        + (block.kind == 10 ? 40px : 0px);
+        + (block.kind == 10 ? 40px : 0px)
+        + (block.kind == 22 ? root.embed-inset : 0px);
     property <length> input-width: content-width
         - (is-list ? 26px : 0px)
         - root.fold-gutter
         - (block.kind == 7 ? Theme.spacing-md : 0px)
         - (block.kind == 10 ? 40px : 0px)
-        - (block.kind == 8 ? 2 * Theme.spacing-md : 0px);
+        - (block.kind == 8 ? 2 * Theme.spacing-md : 0px)
+        - (block.kind == 22 ? root.embed-inset + 34px + Theme.spacing-sm : 0px);
 
     // Text with an explicit width + wrap sizes itself (height-for-width);
     // while editing, the live input's height takes over.
@@ -99,12 +110,17 @@ export component EditorBlock inherits Rectangle {
                 ? edit-input.height + 2 * Theme.spacing-md
                 : block.kind == 10
                 ? edit-input.height + 2 * Theme.spacing-sm
+                : block.kind == 22
+                // the card keeps its two-line box while the address is being
+                // typed, so clicking it to edit does not move the page below
+                ? Math.max(root.embed-height, edit-input.height + 2 * Theme.spacing-md)
                 : edit-input.height + (block.kind == 7 ? Theme.spacing-xs : 0px))
         : block.kind == 7 ? quote-text.height + Theme.spacing-xs
         : block.kind == 8 ? code-text.height + 2 * Theme.spacing-md
         : block.kind == 10 ? callout-text.height + 2 * Theme.spacing-sm
         : block.kind == 20 ? math-text.height + 2 * Theme.spacing-sm
         : block.kind == 21 ? toc-list.preferred-height + 2 * Theme.spacing-sm
+        : block.kind == 22 ? root.embed-height
         : block.kind == 9 ? 20px
         : block.kind == 14 ? (pic-aspect > 0 ? pic-height : missing-text.height)
         : block.kind == 15 ? root.file-height
@@ -288,7 +304,8 @@ export component EditorBlock inherits Rectangle {
         // the row, which derives its height from this input (loop)
         height: self.preferred-height;
         y: top-margin + (block.kind == 8 ? Theme.spacing-md : 0px)
-            + (block.kind == 10 ? Theme.spacing-sm : 0px);
+            + (block.kind == 10 ? Theme.spacing-sm : 0px)
+            + (block.kind == 22 ? Theme.spacing-md : 0px);
         font-family: block.kind == 8 ? Typography.mono-font : Typography.ui-font;
         font-size: body-font-size;
         font-weight: is-heading ? Typography.weight-semibold : Typography.weight-regular;
@@ -651,6 +668,88 @@ export component EditorBlock inherits Rectangle {
             font-family: Typography.ui-font;
             font-size: Typography.size-body;
             color: Colors.text-muted;
+        }
+    }
+
+    // embed (kind 22): a link shown as a card, because SPEC §二 and §三十三
+    // rule out the WebView that would otherwise be sitting in this box. The
+    // address is the block's own text — click the card and that is what you
+    // edit — and the two lines are derived from it, so there is no second copy
+    // of the link to fall out of step. The one action leaves the app.
+    Rectangle {
+        x: content-x;
+        y: top-margin;
+        width: content-width;
+        height: root.body-height;
+        visible: is-embed;
+        border-radius: Theme.radius-md;
+        border-width: 1px;
+        border-color: ta.has-hover ? Colors.border-strong : Colors.border;
+        background: block.bg > 0 ? block-bg-color : Colors.code-background;
+
+        Icon {
+            x: Theme.spacing-md;
+            y: (parent.height - self.height) / 2;
+            name: "link";
+            size: 19px;
+            stroke-width: 1.6px;
+            color: Colors.text-secondary;
+        }
+        embed-label := Text {
+            x: root.embed-inset;
+            y: Theme.spacing-md;
+            height: Typography.size-body * Typography.line-body;
+            width: Math.max(0px, parent.width - self.x - 44px);
+            // the card's own words stand aside for the live input, except on an
+            // empty one: a caret with nothing beside it reads as a broken box
+            visible: is-embed && (!editing || block.text == "");
+            text: is-embed ? UIState.embed-label(block.text) : "";
+            vertical-alignment: center;
+            font-family: Typography.ui-font;
+            font-size: Typography.size-body;
+            font-weight: Typography.weight-semibold;
+            color: block-text-color;
+            overflow: elide;
+        }
+        Text {
+            x: embed-label.x;
+            y: embed-label.y + embed-label.height;
+            height: Typography.size-caption * Typography.line-body;
+            width: embed-label.width;
+            visible: embed-label.visible;
+            // the address as the Open button will use it, so what the card
+            // shows is what pressing it does — a bare domain reads as https://
+            text: is-embed ? (block.text == ""
+                ? "No address yet" : UIState.embed-url(block.text)) : "";
+            vertical-alignment: center;
+            font-family: Typography.ui-font;
+            font-size: Typography.size-caption;
+            color: Colors.text-muted;
+            overflow: elide;
+        }
+        // Always drawn, like the file block's two: a card that offers nothing
+        // to press reads as a broken embed.
+        Rectangle {
+            x: parent.width - 34px;
+            y: (parent.height - self.height) / 2;
+            width: 26px;
+            height: 26px;
+            border-radius: Theme.radius-xs;
+            background: embed-open-ta.has-hover ? Colors.surface-hover : transparent;
+            animate background { duration: Theme.duration-instant; }
+            Icon {
+                x: 4px; y: 4px;
+                name: "arrow-right";
+                size: 18px;
+                stroke-width: 1.7px;
+                color: Colors.text-secondary;
+            }
+            embed-open-ta := TouchArea {
+                mouse-cursor: MouseCursor.pointer;
+                clicked => {
+                    UIState.open-link(UIState.embed-url(block.text));
+                }
+            }
         }
     }
 

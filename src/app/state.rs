@@ -2837,6 +2837,11 @@ const SLASH_ITEMS: &[(BlockKind, &str, &str)] = &[
         "Table of contents",
         "Links to this page's headings",
     ),
+    (
+        BlockKind::Embed,
+        "Embed",
+        "A link as a card — paste an address",
+    ),
     (BlockKind::Divider, "Divider", "Visual separator — or type ---"),
 ];
 
@@ -2873,6 +2878,11 @@ const INSERT_ITEMS: &[(i32, &str, &str)] = &[
         kind_to_int(BlockKind::Toc),
         "Table of contents",
         "Links to this page's headings",
+    ),
+    (
+        kind_to_int(BlockKind::Embed),
+        "Embed",
+        "A link as a card, opened in the browser",
     ),
     (-1, "Table view", "Database table · later"),
     (-1, "Board", "Board view · later"),
@@ -2935,6 +2945,7 @@ pub fn kind_from_int(kind: i32) -> BlockKind {
         19 => BlockKind::Column,
         20 => BlockKind::Math,
         21 => BlockKind::Toc,
+        22 => BlockKind::Embed,
         _ => BlockKind::Paragraph,
     }
 }
@@ -2962,6 +2973,7 @@ const fn kind_to_int(kind: BlockKind) -> i32 {
         BlockKind::Column => 19,
         BlockKind::Math => 20,
         BlockKind::Toc => 21,
+        BlockKind::Embed => 22,
         BlockKind::Paragraph => 0,
     }
 }
@@ -3470,6 +3482,7 @@ pub const BLOCK_COLUMNS: i32 = 18;
 pub const BLOCK_COLUMN: i32 = 19;
 pub const BLOCK_MATH: i32 = 20;
 pub const BLOCK_TOC: i32 = 21;
+pub const BLOCK_EMBED: i32 = 22;
 
 fn block(kind: i32, text: &str) -> BlockRow {
     BlockRow {

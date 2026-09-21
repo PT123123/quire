@@ -95,11 +95,11 @@ the overlay half so headless two-pass renders see their transitions.
 Current set: default, dark, palette, search-notes, menu, rename, settings,
 dialog, empty, edit, slash, block-menu, marks, link, find, nest, toggle,
 toggle-fold, image, image-half, file, recovered, title-edit, table, table-edit,
-columns, columns-3, math, math-inline, toc,
+columns, columns-3, math, math-inline, toc, embed, embed-empty,
 plus dark combos (dark-slash, dark-find, dark-marks, dark-link, dark-block-menu,
 dark-title-edit).
-`benchmarks/scripts/sweep.ps1` holds the authoritative list — 47 scenes as of
-ADR-0039 — and this prose is the summary, so when the two disagree trust the
+`benchmarks/scripts/sweep.ps1` holds the authoritative list — 49 scenes as of
+ADR-0040 — and this prose is the summary, so when the two disagree trust the
 script. Every visual change ships with re-shot
 scenes; the judge-reviewed set is the regression baseline. `toggle` and
 `toggle-fold` are a pair on purpose: the same section open and closed, so a
@@ -145,7 +145,18 @@ the scene cannot show is the click — `quire-shot` does not hit TouchAreas — 
 hover feedback and the caret landing in the listed heading are human-verified,
 and so is the jump's known limit: it selects the heading without scrolling the
 viewport (see ADR-0039).
-The baseline is `.scratch/sweep22` (47 scenes). The set before it, `.scratch/sweep10`
+`embed` and `embed-empty` are the derived-text pair for a link (ADR-0040): the
+same card with an address in it and with nothing in it. Both scenes convert the
+intro paragraph rather than seeding a row, for the ADR-0039 reason, and the pair
+exists because the two lines of the card come from two different functions — one
+that names who the address belongs to, one that shows what pressing Open will
+hand the system. The empty arm is the one that catches a fallback that never
+fires: a card with no address has to read as a card ("Embed / No address yet"),
+not as a blank box with a button in it. Neither scene presses that button —
+`quire-shot` does not hit TouchAreas, and a headless press would launch a real
+browser — so the actual hand-off, the mid-edit card while an address is being
+typed, and the arrow's hover state are human-verified.
+The baseline is `.scratch/sweep23` (49 scenes). The set before it, `.scratch/sweep10`
 (42 scenes), re-baselined 37 of them for a
 reason unrelated to tables: `DocumentRow.head` bound `height` without `y` and so
 was centred in its delegate, which had been sitting the page title ~34 px below
@@ -172,6 +183,15 @@ list does). Nothing else moved — `settings` in particular, whose shortcut row
 this slice did not touch — and the two `EditorBlock` edits that ride along (the
 box's top margin, the pointer cursor) changed no scene because both are guarded
 by `block.kind == 21`, which is the whole point of the new scene.
+`sweep22` → `sweep23` (embed card) moved 3 of those 47 and added 2: `slash` and
+`dark-slash` at 774 / 2 528 px inside `x 340..618 / y 596..650` — the same menu
+band as the last two rows, one row lower because the list grew again — and
+`plus` at 1 062 px inside `x 612..860 / y 656..792`, the insert menu's own band.
+`dark-slash`'s box is identical to `slash`'s down to the pixel, which is the
+evidence that one verdict covers the pair. Nothing else moved, `toc` and `math`
+in particular, and the four `EditorBlock` edits that ride along (the row's top
+margin, the body height, the input's x and width) changed no scene because every
+one of them is guarded by `block.kind == 22`.
 A re-sweep after a
 layout change is judged by diffing, not by looking:
 `benchmarks/scripts/diffbbox.ps1 -OldDir A -NewDir B` reports the bounding box

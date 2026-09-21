@@ -2,6 +2,79 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0040 · A link card derives its two lines at paint time and hands the address to the system
+
+Decision: `BlockKind::Embed` (row id 22, database string `"embed"`) stores the
+address in `blocks.text` and nothing else. The card's two lines are computed
+while drawing, through two pure callbacks on `UIState` — `embed-label(string)`
+and `embed-url(string)` — whose Rust side is `core::embed::describe` and
+`with_scheme`: the headline is the provider the host belongs to (21 named hosts,
+plus Google's products read from either the subdomain or the first path
+segment), or the host itself when nothing matches, or `Embed`/`Link`/`Email` for
+the three shapes that have no host to name. The second line is the address the
+Open button will actually use, so a bare `example.com/a` reads as
+`https://example.com/a`. Clicking the card edits `block.text` the way a paragraph
+does; clicking the arrow fires `open-link` and leaves the app. There is no
+WebView, no fetch, no favicon and no oEmbed (SPEC §二 and §三十三), which means
+the card *is* the feature rather than a stand-in for one. Markdown writes the
+address alone on a line; import reads back only a line that is one token and
+carries an explicit `http(s)://`.
+
+Why: a link block that stored a title would be a copy of something that can
+change, with no way to refresh it and no owner to invalidate it — the same
+argument ADR-0039 makes for the contents block, and here it is cheaper still
+because the derived value is a string function rather than a page walk. Storing
+the raw address in the existing `text` column, rather than a url field or a JSON
+payload, is what keeps this the fourth new kind in a row with no migration. And
+the bare-address Markdown shape is the one a GFM renderer already turns into a
+link: a `<…>` wrapper or a `<!-- quire:embed:… -->` marker would be an extra
+thing to corrupt when the text is not a well-formed address, and it would render
+as nothing everywhere else.
+
+Consequences:
+- **No migration, as a checked fact.** `user_version` stays 8. There are now 23
+  block kinds, `BlockKind::ALL` lists them, and an unknown kind is still
+  corruption-on-load, so an older build that meets an embed fails loudly instead
+  of dropping the row.
+- **Nothing is added to the row model.** The card's lines are pure callbacks
+  evaluated for the rows that draw them, so a page with no embed pays nothing
+  and a page with one pays two string functions per visible embed row — the
+  ADR-0038 lesson applied where the alternative was per-row model fields.
+- **The address is exported verbatim, without inline-mark rendering.** A url is
+  full of `_ * ~ &`, and running it through the mark renderer would both change
+  the address and make the card open something else than it shows.
+- **Import is deliberately narrower than export.** `is_bare_address` demands one
+  token and an explicit scheme, so "see https://example.com for details" stays a
+  paragraph. The control test asserts exactly that, because the easy way to make
+  the round trip pass is to widen the rule and lose prose.
+- **A link's target is data, so the shell branch is now allowlisted.**
+  `open-link` reaches `cmd /C start` on Windows, and `start` will *run* a path, a
+  UNC share or an installed protocol as readily as it opens a url. `core::embed::
+  is_openable` (http/https/mailto) now gates that branch. This is defence in
+  depth, not a fix: a compiled probe showed std quotes the argument, so
+  `… & echo PWNED` reached `start` as one literal string and did not split — the
+  injection was never there. What did change is behaviour: `file:///…`,
+  `\\share\x`, `javascript:…` and a bare `C:\…\calc.exe` in a link now do
+  nothing at all, which is the intended trade for a document that can arrive
+  from an import or the LAN server.
+- **The gate found nothing again.** Control `4fa2b7b` from a clean worktree
+  (md5 `9c5e153f…`, 22 017 024 B) versus this tree (md5 `19aea07c…`,
+  22 072 320 B), scene D at 10 000 blocks, arms alternating, one pinned database
+  each (raw rows `benchmarks/results/2026-09-21-m11-embed-ram.jsonl`). Steady
+  private bytes: control 110.9 / 112.1, this tree 111.8 / 112.3 — **1.005×**,
+  inside the ≤1.2× gate, and the 0.55 MB gap between the two means is *smaller
+  than the 1.2 MB spread inside the control arm alone*, so the reading is no
+  measurable cost rather than a small one. Each arm's first run (109.7 / 111.3,
+  startup 807 / 1104 ms) is the pass that seeds its database and is excluded. The
+  exe grew 55 296 B for one module, two callbacks and the card.
+- **Pixels.** `sweep22` → `sweep23`, 49 scenes: 3 moved, 2 new (`embed`,
+  `embed-empty`), 44 byte-identical. The three are the menus that gained a row —
+  see `docs/UI_ARCHITECTURE.md` for the boxes.
+- **Still needs a human window.** No headless scene presses Open, so these are
+  unverified by this build: the browser actually coming up, the card mid-edit
+  (typing an address and watching the headline re-derive), hover on the arrow,
+  the dark-theme card, and Turn into → Embed → back to Text.
+
 ## ADR-0039 · A contents block stores that it is one, and reads its list off the page
 
 Decision: `BlockKind::Toc` (row id 21, database string `"toc"`) holds no

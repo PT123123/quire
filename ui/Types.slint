@@ -71,7 +71,7 @@ export struct TocEntry {
 
 export struct BlockRow {
     id: int,
-    kind: int, // 0 para, 1 h1, 2 h2, 3 h3, 4 bullet, 5 numbered, 6 todo, 7 quote, 8 code, 9 divider, 10 callout, 11 page, 12 link, 13 toggle, 14 image, 15 file, 16 table, 18 columns, 20 math, 21 toc (17 = table_cell, 19 = column: containers' children, never a row)
+    kind: int, // 0 para, 1 h1, 2 h2, 3 h3, 4 bullet, 5 numbered, 6 todo, 7 quote, 8 code, 9 divider, 10 callout, 11 page, 12 link, 13 toggle, 14 image, 15 file, 16 table, 18 columns, 20 math, 21 toc, 22 embed (17 = table_cell, 19 = column: containers' children, never a row)
     text: string,
     checked: bool,
     number: int,
@@ -301,6 +301,12 @@ export global UIState {
     // because the conversion is a pure function of text the row already has,
     // and the document keeps the source the user edits — never the picture.
     pure callback math-render(string) -> string;
+    // embed (SPEC §三十七 批次 C): the two lines of a link card, both derived
+    // from the address the block stores — who it belongs to, and what the Open
+    // button will actually hand to the system. Nothing is fetched: the card is
+    // the whole feature (§二 / §三十三 rule out a WebView).
+    pure callback embed-label(string) -> string;
+    pure callback embed-url(string) -> string;
     callback attachment-opened(int);
     callback attachment-saved(int);
     callback block-activate(int);

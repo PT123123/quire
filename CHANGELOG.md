@@ -32,7 +32,7 @@ First functional release: a local, single-file-database notes workspace.
 - "+" handle opens Notion's insert menu: it creates the empty line below
   and shows the full block list (Text, Page, To-do, Headings, Bulleted /
   Numbered, Quote, Divider, Callout, Code, Toggle list, Image, File, Table,
-  Columns, Math, Table of contents) — picking a
+  Columns, Math, Table of contents, Embed) — picking a
   row converts the new line, clicking away or Escape keeps the empty line,
   typing filters the menu. The database views (Table view, Board, Gallery,
   List, Calendar, Timeline) appear as muted "later" placeholders and
@@ -102,6 +102,19 @@ First functional release: a local, single-file-database notes workspace.
   text of its own; converting a line into one keeps that line's words stored but
   unpainted, the way a divider does, so turning it back gives them back. Markdown
   writes and reads a single `<!-- quire:toc -->` marker line
+- Embed block: a link shown as a card, from the insert menu, the slash menu or
+  Turn into. The block stores the address and nothing else — the card's headline
+  (YouTube, Figma, Google Maps, GitHub, or the host itself for a site the app has
+  never heard of) and the address line under it are both read off that text as it
+  paints, so there is no second copy of the link to go out of step. The arrow
+  hands the address to your browser; nothing is fetched, no page is embedded and
+  no favicon is downloaded, which is what keeps a card cheaper than the iframe it
+  stands in for. Click the card and the address is what you edit — the headline
+  changes as you type it, and an empty card says "Embed / No address yet" rather
+  than showing a blank box. Markdown writes the bare address on its own line, so
+  the file reads as a link in any other renderer; import turns a line back into a
+  card only when it is one address and nothing else, so a sentence that happens to
+  contain a url stays a sentence
 - Fixed a marked line with room to spare painting its runs apart. A paragraph's
   inline marks render as side-by-side runs, and the row laid them out with
   Slint's default `alignment: stretch`, so any leftover width was divided among
@@ -208,6 +221,11 @@ First functional release: a local, single-file-database notes workspace.
 - An attached file opens in whatever the system has registered for its type
   (one `ShellExecuteW` call — no `windows` crate, no subprocess), and saves
   back out to any path picked in a Save-as dialog
+- A link — inline, in a link block or on an embed card — leaves the app only
+  when it is an address a browser understands: http, https or mailto. A local
+  path, a network share, `file://` or a protocol the shell happens to have
+  registered now does nothing, because a link's target is data that arrives
+  from a file and the shell will *run* a path as readily as it opens a url
 - Installer (Inno Setup): per-user, Start menu + desktop shortcuts,
   optional `.md` "Open with" association; `--open <path>` dispatch
 - GPU rendering (FemtoVG default; Skia / wgpu builds selectable); idle
@@ -282,6 +300,14 @@ First functional release: a local, single-file-database notes workspace.
   nothing about a row that walks the page every time it is projected. Measured
   separately — 10 000 rows project in ≈38 ms with or without a 1 000-line list —
   and the delta is inside the noise of its own control
+- The embed card is the third slice to run that comparison, and it lands in the
+  same place: **1.005×** on private bytes, a 0.55 MB gap between the arms against
+  the control arm's own 1.2 MB spread (rows
+  `benchmarks/results/2026-09-21-m11-embed-ram.jsonl`). Three kinds in a row
+  inside one megabyte says the gate has a *floor*, not that all three slices are
+  free: a change whose whole per-row cost is a string function is below what this
+  instrument resolves, and `docs/PERFORMANCE.md` now says that instead of
+  publishing a ratio that only looks like a measurement
 
 ### Known limitations
 - Switching directly from one open menu to another (e.g. ⋮⋮ on a different
@@ -336,6 +362,14 @@ First functional release: a local, single-file-database notes workspace.
   option, and a long heading is elided to one line rather than wrapped. Clicking a
   line moves the caret, not the scrollbar — a heading below the fold still needs a
   wheel turn first, which is the same limit a `quire://block/` anchor has
+- An embed card says who a link belongs to, not what it is: no title, no preview,
+  no favicon and nothing fetched, because the app has no WebView and no network
+  client by design. A site outside the 21 names it knows is labelled with its own
+  host, and a Google url is read as its product from the subdomain or the first
+  path segment — anything else behind google.com says "Google". And since this
+  slice, a link whose target is not http, https or mailto opens nothing at all:
+  `file://`, a local path and a network share are the shapes a document can carry
+  that a shell would run rather than open
 - Markdown reads tables as plain text: export writes GitHub-flavoured
   tables, and importing one back gives a paragraph per row. Deliberate and
   pinned by a test — the importer is line-at-a-time and a table needs

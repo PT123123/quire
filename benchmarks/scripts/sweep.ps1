@@ -33,6 +33,7 @@ $all = @(
     "table", "table-edit",
     "math", "math-inline",
     "toc",
+    "embed", "embed-empty",
     "columns", "columns-3",
     "slash", "plus", "block-menu", "move-to", "page-move-to", "text-color",
     "bg-color", "link", "menu", "palette", "palette-nav", "search", "search-notes",

@@ -1660,3 +1660,84 @@ exe 大了 88 064 B：一个 enum arm、一个 struct、一个 callback、一个
 WebView 与 JS 运行时），而高亮那条硬要求（长代码块打字延迟不可测）大概会复用 math 与这次
 的同一份 runs 通道。`reveal` 不属于批次 C 的任何一条，但 TOC 和 `quire://block` 锚点现在都
 在等它，谁做谁受益。
+
+## M11 批次 C · slice 3 — embed：卡片只存地址，两行是画的时候现算的（2026-09-21，on `master`，ADR-0040）
+
+批次 C 六条里的第三条，兑现的正是上一批结尾那句「embed 只需要一张不含网络的卡」。SPEC
+§二/§三十三 禁 WebView 与 JS 运行时，这次没有绕那道禁令，也没有把它当成降级：一行文档的
+代价仍然是 `blocks.kind` 里的一个字符串 `"embed"` 加地址本身，`user_version` 依旧停在
+**8**。
+
+**改动面**：`src/core/embed.rs`（新增）、`src/core/mod.rs`、`src/core/types.rs`、
+`src/app/state.rs`、`src/app/controller.rs`、`ui/Types.slint`、
+`ui/components/EditorBlock.slint`、`src/services/export_service.rs`、
+`src/services/import_service.rs`、`tests/integration/markdown_test.rs`、
+`benchmarks/scripts/sweep.ps1`。
+
+**六条决定**：
+
+1. **`BlockKind::Embed` 是 int 22**，库里字符串 `"embed"`，`text` 存的就是地址本身，不新增
+   列 ⇒ `user_version` 仍是 **8**，这是第五个不需要迁移的 kind。未知 kind 依旧按「加载即
+   损坏」处理，所以老版本打开一个带 embed 的库会响亮地失败，而不是悄悄丢一行。
+2. **卡片那两行走 `UIState` 的两个 pure callback**（`embed-label` / `embed-url`，Rust 侧
+   `core::embed::describe` / `with_scheme`），不加 model 字段——ADR-0038 的教训照搬过来。
+   绑定被 `is-embed ? … : ""` 守住，因为 `visible: false` 不阻止 binding 运行。21 个已收录
+   站点，google.com 既认子域也认第一段 path；认不出来的域名就以域名本身当标签；没有域名可
+   说的三种形状分别是 `Embed`（空）/ `Link`（一句散文）/ `Email`（mailto）。
+3. **卡片可以编辑（和 toc 相反）**：点卡片改的就是地址，边打字标题边重算；空卡说
+   「Embed / No address yet」而不是一个空盒子。没有 WebView（SPEC §二/§三十三），所以「卡 +
+   交给系统打开」就是功能全部，不是降级形态。
+4. **Markdown 是一行裸地址**：GFM 本来就把它渲染成链接，尖括号或注释标记只是多一个「文本不
+   是合法地址时会写坏」的东西；导入侧 `is_bare_address` 只认「整行一个 token 且带显式
+   `http(s)://`」。
+5. **导出走 code / divider / math 那条 verbatim 分支**，不过 inline-mark 渲染器——url 里全
+   是 `_ * ~ &`。
+6. **`open-link` 的 shell 分支前面加了 scheme 白名单** `core::embed::is_openable`
+   （http/https/mailto）。**这条要写清楚不是修漏洞**：编译探针证明 std 会给参数加引号，
+   `… & echo PWNED` 是作为一个整体字面串到达 `start` 的，注入从来不存在；真正变的是行为
+   ——`file:///…`、`\\share\x`、`javascript:…` 和裸 `C:\…\calc.exe` 现在什么都不做，因为
+   链接目标是「从文件里来的数据」，而 `start` 运行路径和打开 url 一样乐意。
+
+**自己写的测试抓到两个真 bug**（改的是代码不是断言）：`maps.google.com/?q=x` 读成
+"Google"（product 只从 path 读）；`HTTPS://WWW.Site.COM` 没去掉 `www.`（先去前缀再小写）。
+另外 `TextInput` 在 Slint 1.18 没有 `placeholder-text` 属性，编译失败后把空卡提示改成由两个
+`Text` 的 `visible` 表达。
+
+**验证**：`cargo check --all-targets` 干净；`cargo test --all-targets -- --skip
+clipboard_write_and_read_round_trip_unicode` → **352 passed / 0 failed / 10 ignored**（上一批
+340 / 0 / 10，这次 +8 条 `core::embed` 单测 +4 条 markdown）；markdown 那一个 target 单独跑
+61 passed；`cargo build --release` 零警告。新测试里最值钱的是控制断言：句子里的 url 仍然是
+句子（`an_address_in_a_sentence_stays_a_sentence`），以及 `evilyoutube.com` 不算 YouTube
+（整标签后缀匹配）。跳掉的那条仍是本 session 环境的剪贴板独占（`OpenClipboard` err=5）。
+
+**性能**：闸按上一批立的规矩第三次跑——control `4fa2b7b` 在 `git worktree` 里编
+（`src/core/embed.rs` 不在），两臂同一 sitting 交替跑 scene D，各自先用 md5 + 大小自证身份
+（control md5 `9c5e153f…` 22 017 024 B，本树 `19aea07c…` 22 072 320 B）：control 稳态
+136.7 / 137.0 WS · 110.9 / 112.1 private，本树 138.2 / 138.9 · 111.8 / 112.3 ⇒ **1.005×**。
+两臂均值之差 0.55 MB 小于 control 臂内部 1.2 MB 散布，所以仍是「量不出来」。种子那次
+（109.7 / 111.3，startup 807 / 1104 ms）不进稳态。idle CPU 这次是本树更低（3.12–4.09 vs
+4.29–5.85），这是同一个「分不出」的另一种写法。exe 大了 55 296 B。**没有做计时**：卡片不像
+目录要扫页，它的活里没有「页」这个量——这是构造上界，不是读数。一个方法结论进了
+`docs/PERFORMANCE.md`：三批连在 1 MB 内 ⇒ 闸有 ≈1 MB 的下限，低于它的 per-row 成本该写成
+「分辨不出」，而不是报一个看着像测量的比值。数据
+`benchmarks/results/2026-09-21-m11-embed-ram.jsonl`。
+
+**像素**：`.scratch/sweep22` → `.scratch/sweep23`，47 张里动 3 张、新增 2 张（`embed`、
+`embed-empty`）、44 张 byte-identical。bbox 全在改动能解释的带内：`slash` 774 px 与
+`dark-slash` 2 528 px 同在 `x 340..618 / y 596..650`（比上一批的带低一档，因为菜单又多了一
+行）、`plus` 1 062 px 在 `x 612..860 / y 656..792`；`dark-slash` 的框和 `slash` 逐像素相同，
+所以一条判决覆盖一对。两张新 scene 仍然走「把样例页第一段转换成 embed」而不是往 fixture 里
+加行——44 张不动就是这句话的控制断言。判图前先看的是 manifest 哈希 diff，不是肉眼。49 张是
+新基线。
+
+**未验证**：①**人眼**按一次 Open——浏览器真起来、卡片编辑中（边打边重算标题）、arrow 的
+hover、暗色主题的卡、Turn into Embed 再转回 Text，`quire_shot` 不点 TouchArea，所以这条链路
+一个像素都没有（headless 点它会真的开浏览器）。②`is_openable` 之后 `file://` 一类链接「点了
+没反应」是不是用户要的行为——行为改了，没有测试能证明这被接受。③未收录域名的标签宽度（长
+host 在卡里 elide 的读感）。④bookmark 的边界：SPEC §三十七 里它仍然是「抓标题与 favicon」，
+这次没有替它做网络那一半，卡片形状已经在那儿了。
+
+**批次 C 还剩**：highlight / bookmark / synced block。建议顺序不变：代码高亮 → bookmark →
+synced block；高亮的硬要求（长代码块打字延迟不可测）大概会复用 math 与 TOC 的同一份 runs
+通道，bookmark 现在只差一个 TLS 客户端，synced block 等 §四十。`reveal` 仍不属于批次 C 任何
+一条，但 TOC 和 `quire://block` 锚点还在等它。
