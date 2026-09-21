@@ -318,6 +318,8 @@ export global UIState {
     in-out property <bool> storage-available: false;
     callback open-data-folder();
     callback backup-now();
+    // settings §三十七: drop the attachment rows and files nothing references
+    callback reclaim-attachments();
     // page-tree drag (SPEC §八): drag a page row onto another page (or the
     // Workspace header) to move it; page-drop-target-id drives the hover
     // highlight on the row being landed into

@@ -2,6 +2,87 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0037 · Orphaned attachments get one reclamation path, and it cannot outrun undo
+
+Decision: `reclaim_attachments()` in `AppState`, reachable as a **Reclaim**
+button on the settings dialog's STORAGE row, deletes every `attachments` row
+nothing can reach any more and, once the row is gone, the files beside it. The
+reachable set is deliberately wider than "what is on screen": every block of
+every page in `Document` (not just the open one), every attachment id named
+inside any `Entry` on any page's undo **or** redo stack, and the block sitting in
+the internal clipboard. It is the only emitter of the new
+`Change::AttachmentDeleted`, and it reports through the same `db-notice` toast as
+"Back up". The ordering rules are the substance: flush the debounced queue first,
+write the row deletions synchronously, then delete bytes.
+
+Why: orphans have three producers and no consumer. Undo removes a *reference*
+and never the file, which `Change::AttachmentAdded` has said out loud since
+ADR-0029 ("an orphaned picture is recoverable, a deleted one is not");
+`delete_page` is not an undo step, so its pictures are unreachable the moment
+the page goes; and `replace_all` leaves the whole table alone because it cannot
+see the incoming references — the comment there called the cost "orphans, which
+no user action can see". A local-first app with no cloud quota can live with
+that for a while, but not forever, and the file it cannot see is the one it
+cannot explain. The scan errs generous because the two failure directions are
+not symmetric: leaving an orphan costs disk, deleting a picture Ctrl+Z was about
+to restore costs the user's bytes.
+
+Consequences:
+- **The undo contract is unchanged, and now has to be proved.** A step still on
+  the stack protects its ids from the sweep, in both directions — redo is one
+  keystroke from putting a block back exactly like undo is. `History` grew the
+  enumeration API it never had (`referenced_attachments()`), because until now
+  nothing outside the module needed to know what the stacks hold.
+- **The cap is the boundary of the promise.** 100 steps per page is what a
+  picture is protected for, not "forever". `both_stacks_protect_and_the_cap_ends_
+  the_protection` pins that boundary, and the settings row says in one line what
+  the button deletes, because a toast is not a warning the user reads first.
+- **One reader for "does this change name an attachment".**
+  `core::persistence::attachment_ids_in` matches the arms that carry an id
+  (`BlockInserted`, `BlockAttachmentSet`, `AttachmentAdded`) and nothing else, so
+  the undo-shape tests and the reclaim cannot disagree about which arms count.
+  `BlockDeleted` is not one of them: it is the change that *drops* a reference,
+  and its undo carries the `BlockInserted` that names the id again.
+- **Rows before bytes, queue before either.** Applying a DELETE out of order
+  ahead of a still-queued `AttachmentAdded` would re-create the row after the
+  sweep deleted the files it points at — a permanent dangling reference. So the
+  reclaim flushes first and refuses to sweep if that write fails. A failure in
+  the other direction only leaves bytes no row claims, which the next sweep
+  removes.
+- **What it does not reclaim: a file with no row.** A directory sweep looks
+  tempting and is the one way to lose a library: if `load_attachments` failed
+  this session, the in-memory book is empty, every file on disk looks
+  unreferenced, and "I cannot see the references" would be answered by deleting
+  them. The reclaim therefore reads the book and never the folder, so a broken
+  load removes nothing. Unrowed bytes stay a known limitation.
+- The decode cache gives its weight back for a deleted row (`evict_image`), so
+  the 32 MiB ceiling ADR-0036 measured keeps accounting for rasters that can
+  still be asked for.
+- A reclaimed id can be **minted again** after a restart: `next_attachment_id`
+  is `max(row ids)+1` at load, so reclaiming the highest row lets the next
+  session reuse that number and its `<id>.png` name. Inside one session it
+  cannot happen, and the session's own cache entry is evicted, so no stale
+  raster survives the reuse.
+- **It runs on the UI thread, so its cost is a frozen window and it was
+  measured.** 1 000 orphans sweep in 549.9 / 556.7 / 567.6 ms (raw rows
+  `benchmarks/results/2026-09-21-m10-reclaim-timing.jsonl`; an independent
+  earlier batch read 530.6 / 542.3 / 573.0), and the same call with an empty
+  book reads 0.0 ms — so the reachability scan is not on the clock and ≈0.55 ms
+  per orphan is the `DELETE` transaction plus the `remove_file` calls,
+  unattributed between them. That is a fraction of a second to a couple of
+  seconds for a library a user actually accumulates, which is why there is no
+  progress UI: the notice bar is the feedback, and a second click on a sweep
+  that already ran deletes nothing new. Numbers in `docs/PERFORMANCE.md`.
+- **The sweep cannot show the new button, and showed the row's other half
+  anyway.** `storage-available` is false for the headless shot tool (it builds
+  `AppState::new(&args, None)`), so no scene renders Reclaim — the settings
+  dialog with a real database still needs a human window. What the re-sweep did
+  catch is that a `visible: false` item keeps its slot in a Slint layout: the
+  two hidden buttons were already costing the label width (it elided two words
+  early) and the third made it worse, while the hidden caption below them cost a
+  band of empty height. Both are visible in sweep17's `settings.png`; the row's
+  actions are conditional children now, and sweep18 is the baseline.
+
 ## ADR-0036 · A picture page is measured by scrolling it, and the scroll had the wrong sign
 
 Decision: give the media benchmark a real scene instead of another deferred
@@ -396,8 +477,9 @@ the rasters. Markdown export writes `[name](quire://attachment/<id>)`, a
 *link* rather than the picture's `![](...)`, and that is the one place the two
 kinds differ in the exporter: the importer has no picture shape but it does have
 a link shape, so a file's reference survives an export/import round trip and a
-picture's does not. Still open here: orphaned bytes (no FK, no cascade, same
-gap as pictures), clipboard-bitmap paste, and the PDF first-page thumbnail,
+picture's does not. Still open here when this was written: orphaned bytes (no
+FK, no cascade, same gap as pictures — ADR-0037 gives it one reclamation
+path), clipboard-bitmap paste (ADR-0035), and the PDF first-page thumbnail,
 which the user deferred on 2026-09-20 — until it lands a PDF and a `.zip` look
 identical apart from their names. Verified headlessly, not by eye: 36 of 40
 scenes byte-identical against the previous sweep, `slash`/`plus`/`dark-slash`
@@ -447,9 +529,9 @@ Markdown export writes `![name](quire://attachment/<id>)`; the importer has no
 picture shape, so the line survives as literal text and the file name is never
 lost — the reference goes out, nothing comes back, which is the same asymmetry
 §三十七 accepted for toggle folds (ADR-0030 gives `file` the link form, so that
-one does round-trip). Still open in this kind: pasting a clipboard bitmap
-(needs a `CF_DIBV5` reader in `platform/`), and the PDF first-page thumbnail,
-which reuses this store unchanged.
+one does round-trip). Of what this kind left open, the clipboard-bitmap paste
+has since landed (ADR-0035); the PDF first-page thumbnail reuses this store
+unchanged and is what the user deferred on 2026-09-20.
 
 ## ADR-0028 · A folded subtree gets zero realized rows, so row indexes stop being model indexes
 

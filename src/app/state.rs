@@ -1778,6 +1778,19 @@ impl AppState {
             .set(self.attachment_cache_peak.get().max(total));
     }
 
+    /// Drop one raster from the decode cache and give its weight back. Only the
+    /// reclaim needs it: the budget loop otherwise decides when a picture
+    /// leaves, and here the file itself is gone, so a later `image_for` for a
+    /// reused id must not find the old bytes still cached (SPEC §三十七,
+    /// ADR-0037).
+    fn evict_image(&self, key: i64) {
+        let Some(old) = self.attachment_images.borrow_mut().remove(&key) else {
+            return;
+        };
+        self.attachment_cache_bytes
+            .set(self.attachment_cache_bytes.get() - old.bytes);
+    }
+
     /// One line the bench harness reads from stderr: what the decode cache
     /// holds now and the high-water mark it reached, plus where the scroll got
     /// to — a picture cache that never grew is only a finding if the page
@@ -1825,6 +1838,90 @@ impl AppState {
             },
             None => Ok("running in memory — nothing to back up".into()),
         }
+    }
+
+    /// Reclaim the attachments nothing can reach any more (SPEC §三十七,
+    /// ADR-0037): delete the `attachments` rows and, once the row is gone, the
+    /// files beside them.
+    ///
+    /// "Reachable" is deliberately generous — every block of every page in the
+    /// document, every id inside an outstanding undo *or* redo step, and the
+    /// copied block in the internal clipboard. A reclaim that leaves an orphan
+    /// behind costs disk; one that deletes a picture Ctrl+Z was about to bring
+    /// back costs the user's bytes, so the scan errs to the former.
+    ///
+    /// It works from the loaded book, never from a directory listing: if the
+    /// rows failed to load this session the book is empty and the sweep removes
+    /// nothing, which is the only honest answer to "I cannot see the references".
+    pub fn reclaim_attachments(&self) -> Result<String, String> {
+        let Some(repo) = self.repo.as_ref().filter(|r| r.path().is_some()) else {
+            return Ok("running in memory — nothing to reclaim".into());
+        };
+        // Queue first, sweep second. The debounced writer may still hold an
+        // `AttachmentAdded` for a picture this session has already dropped from
+        // the document; applying a DELETE out of order ahead of it would leave
+        // the row *behind* pointing at files this call is about to remove.
+        if let Some(p) = &self.persistence {
+            if let Err(e) = p.force_flush() {
+                return Err(format!("the queued edits could not be written ({e})"));
+            }
+        }
+
+        let mut live: std::collections::BTreeSet<i64> = self
+            .doc
+            .borrow()
+            .all_blocks()
+            .filter_map(|b| b.attachment)
+            .map(|a| a.as_u64() as i64)
+            .collect();
+        live.extend(self.history.borrow().referenced_attachments());
+        if let Some(id) = self.clipboard.borrow().as_ref().and_then(|b| b.attachment) {
+            live.insert(id.as_u64() as i64);
+        }
+
+        let doomed: Vec<Attachment> = self
+            .attachments
+            .borrow()
+            .values()
+            .filter(|a| !live.contains(&(a.id.as_u64() as i64)))
+            .cloned()
+            .collect();
+        if doomed.is_empty() {
+            return Ok("no unused attachments to remove".into());
+        }
+
+        let changes: Vec<Change> = doomed
+            .iter()
+            .map(|a| Change::AttachmentDeleted { id: a.id })
+            .collect();
+        // Rows before bytes: a failed write leaves the picture exactly where it
+        // was, while a failed delete only leaves bytes no row claims.
+        repo.apply(&changes).map_err(|e| e.to_string())?;
+
+        let mut freed = 0i64;
+        let mut stuck: Vec<String> = Vec::new();
+        for att in &doomed {
+            let key = att.id.as_u64() as i64;
+            stuck.extend(self.store.remove(att));
+            self.attachments.borrow_mut().remove(&key);
+            self.evict_image(key);
+            freed += att.bytes.max(0);
+        }
+
+        let removed = doomed.len();
+        let mut notice = format!(
+            "{removed} unused attachment{} removed ({})",
+            if removed == 1 { "" } else { "s" },
+            crate::services::attachment_store::format_size(freed),
+        );
+        if !stuck.is_empty() {
+            notice.push_str(&format!(
+                ", but {} file{} could not be deleted",
+                stuck.len(),
+                if stuck.len() == 1 { "" } else { "s" }
+            ));
+        }
+        Ok(notice)
     }
 
     /// Plan+apply several commands as ONE undo step, refresh the rows.
@@ -4256,5 +4353,303 @@ mod tests {
         assert_eq!(state.blocks.row_count(), 2);
         assert_eq!(state.blocks.row_data(0).unwrap().kind, BLOCK_IMAGE);
         assert!(on_disk.exists(), "undo never deletes bytes another block may still point at");
+    }
+
+    // --- reclaim (SPEC §三十七, ADR-0037) ---
+
+    // The signatures here spell out their paths: the helpers below are used by
+    // several tests and a `use` in a function body does not reach a signature.
+    fn scratch_repo(
+        dir: &crate::testing::ScratchDir,
+    ) -> std::sync::Arc<crate::storage::SqliteRepository> {
+        std::sync::Arc::new(
+            crate::storage::SqliteRepository::open(&dir.path().join("library.db")).unwrap(),
+        )
+    }
+
+    fn plain_args() -> super::HandleArgs {
+        super::HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0, pictures: 0 }
+    }
+
+    /// A fresh session on a real database: one page with `n` pictures on it,
+    /// oldest first, each with its row in the database and its bytes in the
+    /// scratch folder. Per picture the caller gets back
+    /// `(attachment id, file name, block id)`.
+    fn session_with_pictures(
+        dir: &crate::testing::ScratchDir,
+        n: usize,
+    ) -> (
+        std::rc::Rc<super::AppState>,
+        std::sync::Arc<crate::storage::SqliteRepository>,
+        i32,
+        Vec<(i64, String, i32)>,
+    ) {
+        use crate::core::BlockKind;
+
+        let repo = scratch_repo(dir);
+        let state = super::AppState::new(&plain_args(), Some(repo.clone()));
+        let page = state.create_page(None);
+        let mut anchor = state.start_page().expect("the page takes its first block");
+        let mut pics = Vec::new();
+        for _ in 0..n {
+            let att = state
+                .store
+                .import_bytes(state.claim_attachment_id(), "sample", &png_bytes(24, 18))
+                .unwrap();
+            assert!(state.insert_attachment(anchor, att.clone(), BlockKind::Image));
+            let block = {
+                let doc = state.doc.borrow();
+                let found = doc
+                    .all_blocks()
+                    .find(|b| b.attachment == Some(att.id))
+                    .expect("the row carries the pointer")
+                    .id;
+                found.0 as i32
+            };
+            anchor = block;
+            pics.push((att.id.as_u64() as i64, att.file.clone(), block));
+        }
+        (state, repo, page, pics)
+    }
+
+    #[test]
+    fn a_reclaim_leaves_alone_everything_undo_can_still_bring_back() {
+        use super::BLOCK_IMAGE;
+        use crate::core::{BlockId, Command};
+        use crate::testing::ScratchDir;
+        use slint::Model;
+
+        let dir = ScratchDir::new("reclaim-undo");
+        let attach_dir = dir.path().join("attachments");
+        let (state, _repo, _page, pics) = session_with_pictures(&dir, 2);
+
+        // drop the second picture's row: reference gone, row and bytes stay
+        state
+            .exec_on_open_page(Command::DeleteBlock { id: BlockId(pics[1].2 as u64) })
+            .expect("a picture block deletes");
+        assert_eq!(
+            state.reclaim_attachments().unwrap(),
+            "no unused attachments to remove",
+            "the undo step holds the only other pointer to it"
+        );
+        assert!(attach_dir.join(&pics[1].1).is_file(), "nothing was deleted");
+
+        // the protection is not theoretical: Ctrl+Z puts the row back and the
+        // picture still has bytes to show
+        state.undo_open_page();
+        let kinds: Vec<i32> = (0..state.blocks.row_count())
+            .filter_map(|i| state.blocks.row_data(i).map(|r| r.kind))
+            .collect();
+        assert_eq!(kinds.iter().filter(|k| **k == BLOCK_IMAGE).count(), 2);
+        assert_eq!(state.image_for(pics[1].0 as i32).size().width, 24);
+    }
+
+    #[test]
+    fn a_restarted_session_reclaims_the_picture_its_predecessor_deleted() {
+        use super::AppState;
+        use crate::core::{BlockId, Command};
+        use crate::testing::ScratchDir;
+
+        let dir = ScratchDir::new("reclaim-restart");
+        let attach_dir = dir.path().join("attachments");
+        let (state, repo, _page, pics) = session_with_pictures(&dir, 2);
+        state
+            .exec_on_open_page(Command::DeleteBlock { id: BlockId(pics[1].2 as u64) })
+            .expect("a picture block deletes");
+        state.persistence_force_flush();
+        drop(state);
+        // control: the orphan is really in the database, or the sweep below
+        // would be proving nothing
+        assert_eq!(repo.load_attachments().unwrap().len(), 2);
+        drop(repo);
+
+        let repo = scratch_repo(&dir);
+        let state = AppState::new(&plain_args(), Some(repo.clone()));
+        assert_eq!(state.attachments.borrow().len(), 2, "a new session sees both rows");
+        // the dead row is on no screen, but a decode of it costs the cache
+        // weight, and the reclaim has to hand that back
+        assert!(state.image_for(pics[1].0 as i32).size().width > 0);
+        assert!(state.attachment_cache_bytes.get() > 0);
+
+        let notice = state.reclaim_attachments().unwrap();
+        assert!(notice.starts_with("1 unused attachment removed ("), "{notice}");
+        assert!(state.attachments.borrow().contains_key(&pics[0].0), "the live row stays");
+        assert!(!state.attachments.borrow().contains_key(&pics[1].0));
+        assert!(attach_dir.join(&pics[0].1).is_file(), "and nothing else went");
+        assert!(!attach_dir.join(&pics[1].1).exists(), "its bytes went with its row");
+        assert_eq!(repo.load_attachments().unwrap().len(), 1, "the row left the database too");
+        assert_eq!(state.attachment_cache_bytes.get(), 0, "the decode cache paid back");
+        assert_eq!(
+            state.image_for(pics[1].0 as i32).size().width,
+            0,
+            "a reclaimed id paints blank, not the bytes it used to name"
+        );
+    }
+
+    /// The clipboard is the third pointer a block list cannot show. This needs
+    /// a session that did not paste the picture itself — otherwise the undo
+    /// stack is protecting it and the clipboard is never tested.
+    #[test]
+    fn a_copied_picture_survives_losing_its_page_to_a_reclaim() {
+        use super::AppState;
+        use crate::testing::ScratchDir;
+        use slint::Model;
+
+        let dir = ScratchDir::new("reclaim-clipboard");
+        let (state, repo, page, pics) = session_with_pictures(&dir, 1);
+        state.persistence_force_flush();
+        assert_eq!(repo.load_attachments().unwrap().len(), 1, "control: the row is in the db");
+        drop(state);
+        drop(repo);
+
+        let repo = scratch_repo(&dir);
+        let state = AppState::new(&plain_args(), Some(repo));
+        state.open_page(page);
+        let rows: Vec<i32> = (0..state.blocks.row_count())
+            .filter_map(|i| state.blocks.row_data(i).map(|r| r.id))
+            .collect();
+        assert!(rows.contains(&pics[0].2), "control: the page loaded with its picture row");
+        state.copy_block(pics[0].2);
+        state.create_page(None);
+        state.delete_page(page);
+        assert_eq!(
+            state.reclaim_attachments().unwrap(),
+            "no unused attachments to remove",
+            "pasting the copied row is still one keystroke away"
+        );
+        let target = state.start_page().expect("the new page takes a block");
+        assert!(state.paste_below(target), "the copied row lands");
+        assert_eq!(state.image_for(pics[0].0 as i32).size().width, 24, "and its bytes were never touched");
+    }
+
+    #[test]
+    fn a_deleted_pages_picture_is_reclaimable_without_a_restart() {
+        use super::AppState;
+        use crate::testing::ScratchDir;
+
+        let dir = ScratchDir::new("reclaim-page");
+        let attach_dir = dir.path().join("attachments");
+        let (state, repo, page, pics) = session_with_pictures(&dir, 1);
+        state.persistence_force_flush();
+        drop(state);
+        drop(repo);
+
+        let repo = scratch_repo(&dir);
+        let state = AppState::new(&plain_args(), Some(repo.clone()));
+        state.create_page(None); // deleting a page needs one left to be open
+        // the bool is "was the open page among those removed", not "did it work"
+        state.delete_page(page);
+        let notice = state.reclaim_attachments().unwrap();
+        assert!(notice.starts_with("1 unused attachment removed ("), "{notice}");
+        assert!(!attach_dir.join(&pics[0].1).exists());
+        assert_eq!(repo.load_attachments().unwrap().len(), 0, "the row went with the page");
+    }
+
+    /// The half-orphan: a row whose bytes were deleted by hand. A missing file
+    /// is not a failure for the sweep — clearing the row is the whole point.
+    #[test]
+    fn a_row_whose_bytes_are_already_gone_is_still_removed() {
+        use super::AppState;
+        use crate::testing::ScratchDir;
+
+        let dir = ScratchDir::new("reclaim-half-orphan");
+        let attach_dir = dir.path().join("attachments");
+        let (state, repo, page, pics) = session_with_pictures(&dir, 1);
+        state.persistence_force_flush();
+        std::fs::remove_file(attach_dir.join(&pics[0].1)).unwrap();
+        drop(state);
+        drop(repo);
+
+        let repo = scratch_repo(&dir);
+        let state = AppState::new(&plain_args(), Some(repo.clone()));
+        state.create_page(None);
+        state.delete_page(page);
+        let notice = state.reclaim_attachments().unwrap();
+        assert!(notice.starts_with("1 unused attachment removed ("), "{notice}");
+        assert!(
+            !notice.contains("could not be deleted"),
+            "a file that was already gone is not a stuck file: {notice}"
+        );
+        assert_eq!(repo.load_attachments().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn a_session_without_a_file_has_nothing_to_reclaim() {
+        use super::AppState;
+
+        let state = AppState::new(&plain_args(), None);
+        assert_eq!(
+            state.reclaim_attachments().unwrap(),
+            "running in memory — nothing to reclaim"
+        );
+        let repo = std::sync::Arc::new(crate::storage::SqliteRepository::in_memory().unwrap());
+        let state = AppState::new(&plain_args(), Some(repo));
+        assert_eq!(
+            state.reclaim_attachments().unwrap(),
+            "running in memory — nothing to reclaim"
+        );
+    }
+
+    /// Reclaim runs on the UI thread, so its cost is how long a click freezes
+    /// the window. Prints two arms in one sitting, so they share a disk cache:
+    /// sweeping a library of 1 000 orphans, and the same call afterwards with
+    /// nothing left to do (the floor — queue flush over an empty book).
+    #[test]
+    #[ignore = "prints a timing measurement"]
+    fn a_reclaim_of_a_thousand_orphans_is_timed() {
+        use crate::core::persistence::{Change, Repository};
+        use crate::testing::ScratchDir;
+        use std::time::Instant;
+
+        const N: usize = 1000;
+        let dir = ScratchDir::new("reclaim-timing");
+        let repo = scratch_repo(&dir);
+        let state = super::AppState::new(&plain_args(), Some(repo.clone()));
+        // the shape of a library nobody ever reclaimed: a row and bytes for
+        // every one of them, and no block pointing at any
+        let setup = Instant::now();
+        for _ in 0..N {
+            let att = state
+                .store
+                .import_bytes(state.claim_attachment_id(), "orphan", &png_bytes(24, 18))
+                .unwrap();
+            repo.apply(&[Change::AttachmentAdded(att.clone())]).unwrap();
+            state
+                .attachments
+                .borrow_mut()
+                .insert(att.id.as_u64() as i64, att);
+        }
+        let setup_ms = setup.elapsed().as_secs_f64() * 1000.0;
+
+        // control: the sweep can only be fast if there really was work here
+        let attach_dir = dir.path().join("attachments");
+        let on_disk = std::fs::read_dir(&attach_dir).unwrap().count();
+        assert_eq!(on_disk, N, "the folder has one file per orphan");
+        assert_eq!(
+            repo.load_attachments().unwrap().len(),
+            N,
+            "and the table has one row per file"
+        );
+
+        let swept = Instant::now();
+        let report = state.reclaim_attachments().unwrap();
+        let sweep_ms = swept.elapsed().as_secs_f64() * 1000.0;
+        assert_eq!(
+            std::fs::read_dir(&attach_dir).unwrap().count(),
+            0,
+            "and the sweep took them all"
+        );
+        assert_eq!(repo.load_attachments().unwrap().len(), 0);
+
+        let second = Instant::now();
+        assert_eq!(
+            state.reclaim_attachments().unwrap(),
+            "no unused attachments to remove"
+        );
+        let scan_ms = second.elapsed().as_secs_f64() * 1000.0;
+
+        println!(
+            r#"{{"scene":"reclaim-timing","orphans":{N},"setup_ms":{setup_ms:.1},"sweep_ms":{sweep_ms:.1},"scan_ms":{scan_ms:.1},"report":"{report}"}}"#
+        );
     }
 }

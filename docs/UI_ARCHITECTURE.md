@@ -125,11 +125,17 @@ third word where the second one was. `diffbbox.ps1` measured that pair at 1 111
 changed pixels, and every one of them inside the layout's own band (y 205..221),
 which is the evidence that the flexbox re-flowed rather than the scene drifting. The layout's hover strip is
 kept out of the sweep for the same reason the grid's is.
-The baseline is `.scratch/sweep12` (44 scenes). The set before it, `.scratch/sweep10`
+The baseline is `.scratch/sweep18` (44 scenes). The set before it, `.scratch/sweep10`
 (42 scenes), re-baselined 37 of them for a
 reason unrelated to tables: `DocumentRow.head` bound `height` without `y` and so
 was centred in its delegate, which had been sitting the page title ~34 px below
-its binding in every scene ever shipped (see the trap below). A re-sweep after a
+its binding in every scene ever shipped (see the trap below). Since then
+`.scratch/sweep14` → `sweep15` → `sweep16` each moved 0 of 44 scenes — the
+clipboard paste and the media bench batch touched no UI, and that zero is the
+reading rather than an assertion — and `sweep16` → `sweep18` moved
+`settings.png` alone, which is the one scene the Reclaim button belongs to
+(`sweep17` is the same dialog with the layout defect below still in it).
+A re-sweep after a
 layout change is judged by diffing, not by looking:
 `benchmarks/scripts/diffbbox.ps1 -OldDir A -NewDir B` reports the bounding box
 of changed pixels per scene, and if every box lands inside the region the change
@@ -153,6 +159,17 @@ title; both cost a rebuild to find and neither is in the docs where you look.
   delegate's real geometry is `parent.y` (the ListView's row offset) plus the
   in-row arithmetic you wrote; that is why `EditorBlock` is handed `row-y`
   instead of measuring itself.
+* **A `visible: false` item keeps its slot in a layout.** It is not removed from
+  the parent's `HorizontalLayout`/`VerticalLayout`: it still contributes its
+  height (or width) and its spacing, and the remaining siblings get the
+  leftover. The settings dialog's STORAGE row proved it — adding a third
+  conditional Button and hiding a two-line caption under the same flag left the
+  hidden caption's ~40 px of height in the row and squeezed the labels until
+  "Running in memory — no database attached" elided to three words, all of it
+  invisible in the code and pixel-evident in `settings.png`. Anything that
+  appears or disappears with a condition is a child of the condition, not a
+  child of the layout with a `visible:` binding:
+  `if UIState.storage-available : HorizontalLayout { … }`.
 
 ## Slint language traps (1.18)
 

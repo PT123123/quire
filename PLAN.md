@@ -1384,3 +1384,87 @@ scene 在外、arm 在内，让机器漂移同时移动一对里的两边；开�
 掉帧，所以这一条只能由人眼定）。之后按 docs 上剩的账走：孤立附件回收，或进批次 C 的
 math——批次 C 六条里只有 math 不撞平台墙。
 
+
+## M10 批次 A · 孤立附件回收：Settings → STORAGE → Reclaim（2026-09-21，on `master`，ADR-0037）
+
+批次 A 剩的两条账，这次收的是**孤立附件**那条（PDF 首页缩略图仍按 2026-09-20 的用户指
+示推迟）。
+
+**改动面**：`Change::AttachmentDeleted { id }`（`core/persistence.rs`，只有回收会发它，
+任何命令计划都不会），以及新的单一读者 `attachment_ids_in()`；`Document::all_blocks()`；
+`History::referenced_attachments()`（历史模块第一次对外界交代栈里有什么）；
+`SqliteRepository` 的 DELETE 分支；`AttachmentStore::remove()`（`file` 与 `thumb` 都处
+理，`NotFound` 不算失败，删不掉的文件名回传给提示条）；`AppState::reclaim_attachments()`
++ `evict_image()`；`controller.rs` 的 `on_reclaim_attachments`；`ui/Types.slint` 一个
+callback；`SettingsDialog.slint` 的 STORAGE 行多一个 **Reclaim** 按钮和一行说明。没有迁
+移，schema 停在 v8。
+
+**四条决定**：
+
+1. **可达集合故意比屏幕上有的宽**：所有页面的所有块 ∪ 每一页 undo **和 redo** 栈里的每
+   一个附件 id ∪ 复制板上那一块。因为两个失败方向不对称——留下孤儿只损失磁盘，删掉一张
+   Ctrl+Z 正要还原的图损失的是用户的数据。
+2. **顺序就是内容**：先 `force_flush()` 把防抖队列写空，再同步删行，最后删文件。反过来
+   做，一条还躺在队列里的 `AttachmentAdded` 会在 DELETE 之后重放，造出一行**指向已经不存
+   在的文件**的永久引用。写失败就整体放弃；删文件失败只是留下没有行认领的字节，下次扫描
+   还会清掉。
+3. **绝不列目录**。这条看着最省事、也最致命：如果这一次 `load_attachments` 失败，内存里
+   的账本是空的，磁盘上每个文件都「没人引用」，于是「我看不见引用」被回答成「把它们全删
+   了」。回收只读账本，所以加载坏掉时它删不掉任何东西。代价写在 Known limitations：**没
+   有行的文件回收不了**。
+4. **100 步上限就是承诺的边界**，不写「永远」。`both_stacks_protect_and_the_cap_ends_the_
+   protection` 把这条边界钉住（100 步全保，第 101 步松开最早那个 id），而按钮旁边那一行
+   字必须先被读到——提示条是一次 toast，不是一句警告。
+
+**验证**：`cargo check --all-targets` 干净；`cargo test --all-targets -- --skip
+clipboard_write_and_read_round_trip_unicode` → **312 passed / 0 failed / 8 ignored**（剪
+贴板那一条见下；它跑起来的 session 就是 313 passed / 8 ignored，比上批 305 多 8 条断言 +
+1 条打印型计时）；`cargo build --release --all-targets` 零警告。**一条与本切片无关的失
+败**：`platform::tests::clipboard_write_and_read_round_trip_unicode` 现在这台机器上过不了，
+`copy_to_clipboard` 返回 false。原因不在我们的代码里：一段**不经过本仓库任何函数**的 C#
+探针（`user32!OpenClipboard`）在这个 shell 里连续 12 秒每次都是 `ERROR_ACCESS_DENIED`
+（5）、`GetClipboardOwner()` 为 0，也就是当前有别的进程独占着剪贴板；而 `git diff` 证明
+`src/platform/*` 这批一行都没改。所以它是这个 session 的失败，不是构建的失败——Quire 自己
+的 Ctrl+C 现在同样会静默失败，这一点值得用户留意（不是这批引入的）。新测试：`history.rs`
+1 条（两条栈都保护、id 只数一次、CAP 收尾）；`state.rs` 6 条，
+全部在 `ScratchDir` 里开**真库**——撤销能还原的图不动、重启之后新 session 能回收前任删掉
+的那张、复制板上的图在它那一页被删后再活下来、同一 session 里删整页即可回收（不用重启）、
+行还在文件已经没了的孤儿也把行删掉并且报出那个文件名、内存态 session 直接答「无可回
+收」；`storage_test.rs` 1 条（DELETE 幂等，且删行不碰块上那条悬空引用）。控制断言：先证
+明这一页**确实带着那一行图**再断言它活着，否则「什么都没删」会因为「什么都没加载」而通
+过。
+
+**性能**：这批欠的不是 RAM 臂（没有新 kind、没有新列、没有新的每行状态，bench scene 看
+不见它），而是**一次点击在 UI 线程上冻多久**——回收是这台应用里唯一一个在 UI 线程上扫磁盘
+的功能。所以量的是那个：`a_reclaim_of_a_thousand_orphans_is_timed`（`#[ignore]`，打一行
+JSON）在 `ScratchDir` 里造 1 000 张「有行、有文件、没有任何块指向它」的附件，再计时。存进
+`benchmarks/results/2026-09-21-m10-reclaim-timing.jsonl` 的那三个 sitting：**549.9 /
+556.7 / 567.6 ms**，每张孤儿约 0.55 ms；另有一批独立先跑的读数 530.6 / 542.3 /
+573.0 ms，批间漂移和批内一样大。同一句调用在空账本上是 **0.0 ms**，所以可达性扫描没有在时
+钟上，那 0.55 s 全在「1 000 条 DELETE 装一个事务 + 1 000 次 `remove_file`」里，两者谁占多
+数没归因。控制断言在数字前面：先证文件夹里确有 1 000 个文件、表里确有 1 000 行，扫完再证
+两者都为 0——否则「快」和「这里本来就没东西」无法区分。顺带一个仪表器的教训：第一次跑它用
+了 `--exact` 加裸测试名，**一个测试都没匹配、打印 0 passed、退出码 0**，看着像绿了。写进
+`docs/PERFORMANCE.md`。
+
+**像素**：`.scratch/sweep16` → `.scratch/sweep18`，44 张里只有 `settings.png` 变，而这一变化正是这次要加的按钮。中间那一版（sweep17）是一次真缺陷，而且是像素抓出来的：同一个
+flag 下第三个 `visible:` Button 和被隐藏的说明 Text 都**留在布局里占位**——隐藏的两行文
+字吃掉约 40 px 高度，隐藏按钮抢走标签宽度，于是「Running in memory — no database
+attached」被截成三个词（bbox `x 440..838 / y 0..798`，10 908 px）。改成条件子元素
+（`if UIState.storage-available : …`）后消失，规则写进 `docs/UI_ARCHITECTURE.md` §"Slint
+geometry traps"。headless 拍不到新按钮本身：`quire_shot` 建的是 `AppState::new(&args,
+None)`，`storage-available` 恒为 false。
+
+**未验证**：①**真人点一次 Reclaim**。headless 拍不到这个按钮——`quire_shot` 建的是
+`AppState::new(&args, None)`，`storage-available` 恒为 false，所以带真库的设置对话框只能由
+人眼确认（按钮在不在、那一行说明读不读得清、提示条报的数字对不对）。②真实库里孤儿的形
+状：计时用的是 1 000 个 24×18 的小 PNG（173 KiB 总），文件名与数量都对，但真实附件的**大
+小**分布没有进过这条测量；删文件的代价随数量走、不随大小走，所以这条影响的是磁盘回收的
+字节数而不是延迟。③Windows 上「文件被别的程序占用」那条分支（`remove` 返回卡住的文件
+名）只有单元测试的合成形状，没有真的锁住一个 `.png` 再扫一次。
+
+**批次 A 的账现在只剩一条**：PDF 首页缩略图（2026-09-20 用户指示推迟，渲染路线待定）。
+另外批次 B 欠的**同 session control build** 仍然挂着——回收这一批不改任何 delegate，所以
+这次没有把它再欠一遍，但也没有还。下一步按 SPEC §三十七 进批次 C（highlight / bookmark /
+embed / math / TOC / synced block），批次 C 六条里只有 math 不撞平台墙（高亮要 inline runs
+的单行通道、TOC 要跳转、bookmark / embed 要有 TLS 客户端），开工前再确认一次。

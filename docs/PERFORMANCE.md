@@ -1040,3 +1040,48 @@ blocks), typing, and the idle cost — all three of those already favour femtovg
 and none of them were re-run here. skia's WS creep under typing (the M7
 follow-up's 320 MB vs 128 MB) is still unexplained and still irrelevant while
 femtovg is the default.
+
+## M10 · what one Reclaim click costs (2026-09-21, ADR-0037)
+
+The settings dialog's new button deletes files, so it is the one place in the app
+that runs a disk sweep on the UI thread. The number that owes an answer is not
+RAM (no block kind, no model field, no per-row state — nothing a bench scene
+could see) but the freeze a click causes, and that is measurable without a
+window: `a_reclaim_of_a_thousand_orphans_is_timed` (`#[ignore]`, prints one JSON
+line) builds a scratch library of 1 000 `attachments` rows with bytes on disk
+and no block pointing at any of them, then times the sweep.
+
+Three sittings, one process each, release profile (raw rows:
+`benchmarks/results/2026-09-21-m10-reclaim-timing.jsonl`):
+
+| arm | ms |
+|-----|---:|
+| sweep of 1 000 orphans | 549.9 / 556.7 / 567.6 |
+| the same call with nothing to delete | 0.0 |
+| (setup: writing the 1 000 files and rows) | 3 934.7 / 4 623.8 / 6 110.4 |
+
+**≈0.55 ms per orphan, and the reachability scan is not on the clock.** An
+earlier, independent batch of three sittings read 530.6 / 542.3 / 573.0 ms, so
+the spread between batches is about the same as the spread inside one. The
+floor arm is a call with an empty book — flush, walk every block of every page,
+ask the history what its stacks hold, find nothing — and it reads 0.0 ms, so the
+whole 0.55 s belongs to the deletion: one transaction of 1 000 `DELETE`s plus
+1 000 `remove_file` calls. Which of those two dominates is not attributed here.
+The setup row is the same shape seen from the other side, and it is not this
+slice's cost — it is 1 000 separate `apply` calls, each its own transaction,
+which is how the test fills a library and is not how the app attaches pictures.
+
+**The control is the row before the number**: the test asserts 1 000 files in
+the folder and 1 000 rows in the table before the sweep, and 0 of each after.
+Without that, "fast" would be indistinguishable from "there was nothing here",
+and a filter that matches no test prints `0 passed` and exits 0 — the first run
+of this measurement did exactly that (`--exact` against a bare test name) and
+looked like a green result.
+
+**What it means for the button.** A library that a user built up over months and
+never reclaimed is on the order of hundreds or low thousands of attachments, so
+one click is expected to cost a fraction of a second up to a couple of seconds —
+long enough that the notice bar's count is the feedback, short enough that it
+does not need a progress UI. A sweep is also idempotent and non-destructive to
+anything referenced, so a user who thinks the window has hung and clicks again
+loses nothing.

@@ -219,20 +219,42 @@ export component SettingsDialog inherits PopupWindow {
                         overflow: elide;
                     }
                 }
-                Button {
-                    text: "Folder";
-                    visible: UIState.storage-available;
-                    clicked => {
-                        UIState.open-data-folder();
+                // A `visible: false` item keeps its slot in a Slint layout, so
+                // these three are conditional children instead: hidden, they
+                // still stole width from the label above (it elided two words
+                // earlier) and the caption below them still cost a band of
+                // empty height — both in sweep17's settings.png.
+                if UIState.storage-available : HorizontalLayout {
+                    spacing: Theme.spacing-sm;
+                    Button {
+                        text: "Folder";
+                        clicked => {
+                            UIState.open-data-folder();
+                        }
+                    }
+                    Button {
+                        text: "Back up";
+                        clicked => {
+                            UIState.backup-now();
+                        }
+                    }
+                    Button {
+                        text: "Reclaim";
+                        clicked => {
+                            UIState.reclaim-attachments();
+                        }
                     }
                 }
-                Button {
-                    text: "Back up";
-                    visible: UIState.storage-available;
-                    clicked => {
-                        UIState.backup-now();
-                    }
-                }
+            }
+            // one line about the only button here that deletes anything: the
+            // notice it reports through is a toast, so the rule has to be
+            // readable before the click (SPEC §三十七, ADR-0037)
+            if UIState.storage-available : Text {
+                text: "Reclaim removes pictures and files that no block, undo step or the copied block points at.";
+                font-family: Typography.ui-font;
+                font-size: Typography.size-caption;
+                color: Colors.text-muted;
+                wrap: word-wrap;
             }
 
             Rectangle { height: 1px; background: Colors.border; }

@@ -927,6 +927,18 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
             g.set_db_notice(text.into());
         });
     }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_reclaim_attachments(move || {
+            let g = gw.upgrade().unwrap();
+            let text = match s.reclaim_attachments() {
+                Ok(msg) => msg,
+                Err(e) => format!("Reclaim failed: {e}"),
+            };
+            g.set_db_notice(text.into());
+        });
+    }
 
     // debounce the typing commit: each keystroke restarts the timer; the
     // Timer must outlive this scope (leaked, like the bench timers). The table

@@ -158,6 +158,14 @@ First functional release: a local, single-file-database notes workspace.
   and the row is only a reference — a reference whose file row is gone still
   loads the library and renders as a missing picture. A file is copied in
   without being read, so nothing about attaching one scales with its size
+- Settings → STORAGE can **reclaim** the attachments nothing points at any
+  more: the rows go first (`Change::AttachmentDeleted`, which no command plan
+  emits), then the files beside them, and the notice bar reports how many and
+  how many bytes. "Nothing points at" counts every page's blocks, every step
+  still on any page's undo *or* redo stack, and the copied block — so the
+  100-step undo cap is how long a picture is protected, and the sweep reads
+  only the rows this session loaded, never the folder. It runs on the UI
+  thread and costs about half a second per thousand attachments
 - An unclean end (panic, kill, native crash, power loss) is recognized on
   the next start: the notice bar says so and the fact is queryable in the
   metadata table (a panic additionally keeps its report)
@@ -166,7 +174,7 @@ First functional release: a local, single-file-database notes workspace.
 - Frameless window with custom title bar, light + dark themes (persisted)
 - Window size remembered; last-opened page restored
 - Settings: appearance, LAN sharing, the database folder (open it in
-  Explorer, take a backup on demand)
+  Explorer, take a backup on demand, reclaim unused attachments)
 - Markdown export/import (page level, inline marks round-trip)
 - "Copy Page as Markdown" (command palette): the page through the
   exporter onto the clipboard, CJK-safe (Win32 FFI write path)
@@ -255,10 +263,15 @@ First functional release: a local, single-file-database notes workspace.
   arm are optimistic against a real camera original. A clipboard picture other
   than a bitmap (a `file://` HTML image, an SVG) is not read — only
   `CF_DIB`/`CF_DIBV5`
-- Attachments are never garbage-collected: deleting the last block that
-  points at a stored file leaves the bytes in the `attachments` folder.
-  Same for pictures and files, and it is deliberate for now — undo has to
-  be able to bring a reference back without touching disk
+- Attachments are reclaimed by hand, never on their own: Settings → STORAGE
+  → Reclaim deletes the stored files no block, undo step or the copied block
+  points at, and nothing runs it for you — a picture is protected for the
+  100 undo steps of its page, and after that it waits for the click. And
+  because the sweep reads only the rows this session loaded from the
+  database, a file in the `attachments` folder whose row is already gone
+  stays on disk: it is invisible to the count, and deleting it would mean
+  listing the folder, which a session that failed to load its attachments
+  would get terribly wrong
 - A PDF attaches and opens, but shows no first-page thumbnail: it looks
   like any other file apart from its name. Deferred by explicit decision
   2026-09-20; the renderer route for it is still undecided
