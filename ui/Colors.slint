@@ -14,6 +14,20 @@ export global Colors {
     out property <color> surface-overlay: Theme.dark ? #212127 : #ffffff;
     out property <color> code-background: Theme.dark ? #101014 : #f6f6f4;
 
+    // ---- page cover (SPEC §三十八 "图标与封面", ADR-0047) ----
+    // The veil the title sits on. Its job is arithmetic, not taste: §二十一's
+    // floor has to hold for a picture this project never sees and cannot
+    // choose. White on the worst pixel a photo can produce -- pure white -- is
+    // 6.19:1 once this composites over it. The alpha is a byte (0x9e = 158), so
+    // the composite is exact rather than approximate: 255 - 158 = 97 sRGB, a
+    // relative luminance of 0.1195. That is the number `contrast_probe.ps1`
+    // reads off the rendered `page-cover-white` scene rather than the number
+    // quoted here, and every darker picture scores better. The alpha floor for
+    // 4.5:1 alone is 0.535, so this keeps headroom for the theme's #e7e7ea-tier
+    // ink too. It is the same value in both themes because the thing it has to
+    // beat is the picture, not the palette.
+    out property <color> cover-scrim: #0000009e;
+
     // ---- text ----
     out property <color> text-primary: Theme.dark ? #e7e7ea : #1f2328;
     out property <color> text-secondary: Theme.dark ? #b4b4bb : #5f6569;

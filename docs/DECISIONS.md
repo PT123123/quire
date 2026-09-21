@@ -2,6 +2,74 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0047 · A cover stores the attachment, and the veil's worst case is arithmetic
+
+Decision: SPEC §三十八's cover is stored as `pages.cover INTEGER NULL` (schema
+**v12**) holding **an `AttachmentId`** — never a path, never a filename. The
+bytes stay the attachment store's, exactly as they do for an image block. The
+hero draws them in a band (`Typography.size-cover-height` 168 px) with the page
+title inside the band's bottom edge, under one fixed veil
+(`Colors.cover-scrim` = `#0000009e`), and the ink over that veil is
+`Colors.text-on-accent` for **both** the title and the page's own emoji. Entry
+point: page ⋯ → **Set cover** / **Change cover** (one id, the label answers
+"is there one?") and **Remove cover**, which only exists when there is. Like
+Style and icon, setting a cover is not a Ctrl+Z step, and a duplicated page
+starts with its source's.
+
+Why an id and not a path is the same answer ADR-0046 paid to reach: §三十七's
+reclaim deletes "the attachments nothing points at", and it can only answer that
+question out of the database. A path in a column is a string no sweep can resolve
+back to a file, so the user's cover would be the next reclaim's casualty. The
+column is therefore **nullable rather than `DEFAULT 0`** — `''` is unambiguous
+for an emoji because no emoji is empty, while `0` is a perfectly good attachment
+id, so "no cover" had to stay a third thing. The referencer list got two entries
+rather than one: `workspace::cover_ids()` joins the reclaim sweep beside the
+blocks, and `Change::PageCoverSet` answers `attachment_ids_in`, because an
+outstanding undo step is still a pointer — the test that pins this deletes an
+image block, restarts the session so undo no longer votes, and requires the
+picture to survive *as the page's cover* and then to go as soon as the page lets
+go.
+
+Why one fixed veil instead of reading the picture: §三十八 requires the title's
+contrast to pass §二十一 and forbids 最弱配色, but the app cannot ask an arbitrary
+JPEG what its brightest pixel is without decoding it at hero size on every page
+open, and a per-page adaptive colour would be a derived value wanting storage that
+ADR-0039 refuses to give it. A constant veil makes the requirement arithmetic with
+a bound that holds for every picture: the scrim is black at α = 0.6196, and because
+that α is a byte (`0x9e` = 158) the composite is exact — **any** photo pixel lands
+at ≤ 255 − 158 = **97** sRGB, a relative luminance ≤ 0.1195, and white ink on that
+is **6.19:1**, against a 4.5:1 floor whose own threshold is α ≥ 0.535. The worst
+case is a pure-white picture, so
+`create_solid_fixture` writes exactly one and `page-cover-white` /
+`dark-page-cover-white` are the control scenes; `benchmarks/scripts/contrast_probe.ps1`
+then reads the rendered PNG and reports the ratio off pixels (worst ground
+`#616161`, 152 002 px measured), with a known-answer arm inside it — 21:1, 1:1 and
+6.19:1 — and a synthetic must-fail scene at 1.61:1 so the gate is shown to be able
+to say no.
+
+Consequences:
+
+* A picture has no typeface, so the two band constants live in `Typography`, not
+  in the per-page `PageType` — but the band's *height* is derived:
+  `max(168px, hero bottom + spacing-md)`, because an icon above the title pushes
+  the whole hero down and a constant band would leave the white ink standing on
+  the page background, which is the one thing the veil cannot protect.
+* The first pixel pass found a defect this ADR had not anticipated: the hero's
+  emoji still read `Colors.text-primary`, i.e. a `#1f2328` rocket on a `#232439`
+  photo — relative luminances 0.0165 against 0.0191, a **1.04:1** ratio, i.e.
+  invisible. It now takes the same conditional as the title.
+  The headless software renderer draws an emoji as a monochrome glyph so this is
+  measurable; the GPU renderers draw colour bitmaps and ignore `color`, so that
+  arm is still a hand test (as it has been since ADR-0045).
+* Track 1's migration priority (v11–v13) is spent here: v12 is the cover, and any
+  draft numbered 12 or higher has to move up.
+* The cover stays out of the Markdown channel (§二十六 carries content, and a
+  page's picture is not its content) and out of undo, both per ADR-0044's rule for
+  a look.
+* The page menu is now eleven rows and its popup was already taller than the space
+  below its anchor at ten, so the one baseline scene that moved (`menu.png`, 9
+  sampled px) moved as the ListView's **scrollbar thumb**, not as a clipped row.
+
 ## ADR-0046 · A page's icon is an emoji, and a picture goes on the cover instead
 
 Decision: SPEC §三十八 asks for "icon：emoji 选择器 **+ 本地图片**". The emoji half

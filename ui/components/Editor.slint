@@ -29,6 +29,15 @@ component DocumentRow inherits Rectangle {
         ? 0px
         : icon.preferred-height + Theme.spacing-md;
 
+    // Where the hero starts. Without a cover this is the hero spacing the
+    // document has always had, and the two constants below never come into it;
+    // with one, the title is drawn inside the band's bottom edge, because
+    // §三十八 asks for the title *on* the cover and not above it.
+    property <bool> cover-on: root.first && UIState.page-cover-id > 0;
+    property <length> hero-top: root.cover-on
+        ? Typography.size-cover-height - Typography.size-cover-overlap
+        : Theme.spacing-hero;
+
     head := Rectangle {
         // Both x and y are spelled out on purpose. A Rectangle that binds
         // `height` but leaves `y` alone is centred in its parent, and this
@@ -38,24 +47,61 @@ component DocumentRow inherits Rectangle {
         y: 0px;
         width: parent.width;
         height: root.first
-            ? Theme.spacing-hero + root.icon-height + title.height + Theme.spacing-lg
+            ? root.hero-top + root.icon-height + title.height + Theme.spacing-lg
             : 0px;
+
+        // The page's cover (SPEC §三十八, ADR-0047): the attachment the page
+        // points at, cropped to the band, under a veil the title is measured
+        // against. It ends below the hero rather than at a fixed height, so the
+        // white ink is never left standing on the page background -- an icon on
+        // top of the title pushes the whole hero down, and the band follows.
+        cover := Rectangle {
+            x: 0px;
+            y: 0px;
+            width: parent.width;
+            height: max(
+                Typography.size-cover-height,
+                root.hero-top + root.icon-height + title.height + Theme.spacing-md);
+            visible: root.cover-on;
+            clip: true;
+
+            Image {
+                x: 0; y: 0;
+                width: parent.width; height: parent.height;
+                image-fit: ImageFit.cover;
+                // the same callback an image row uses: one attachment, one
+                // decoded raster, however many things point at it
+                source: UIState.image-for(UIState.page-cover-id);
+            }
+            scrim := Rectangle {
+                x: 0; y: 0;
+                width: parent.width; height: parent.height;
+                background: Colors.cover-scrim;
+            }
+        }
 
         icon := Text {
             x: root.content-x;
-            y: Theme.spacing-hero;
+            y: root.hero-top;
             width: root.content-width;
             visible: root.first && UIState.page-icon != "";
             text: UIState.page-icon;
             font-family: Typography.emoji-font;
             font-size: PageType.size-page-icon;
-            color: Colors.text-primary;
+            // The headless software renderer draws an emoji as a monochrome
+            // glyph in this colour, so over a cover the icon is text and takes
+            // the same rule as the title: the measured first pass left a #1f2328
+            // rocket on a #232439 photo -- 0.0165 against 0.0191 relative
+            // luminance, 1.04:1, i.e. invisible. On the GPU renderers the emoji
+            // is its own colour bitmap and this is ignored, which is why the
+            // hand test still owes it a look.
+            color: root.cover-on ? Colors.text-on-accent : Colors.text-primary;
         }
 
         // click the big title to rename in place (Notion-style)
         title-ta := TouchArea {
             x: root.content-x;
-            y: Theme.spacing-hero + root.icon-height;
+            y: root.hero-top + root.icon-height;
             width: root.content-width;
             height: root.first ? title.height : 0px;
             enabled: root.first && !UIState.title-editing;
@@ -67,7 +113,7 @@ component DocumentRow inherits Rectangle {
         }
         title := Text {
             x: root.content-x;
-            y: Theme.spacing-hero + root.icon-height;
+            y: root.hero-top + root.icon-height;
             width: root.content-width;
             visible: root.first && !UIState.title-editing;
             text: UIState.page-title;
@@ -77,11 +123,12 @@ component DocumentRow inherits Rectangle {
             // without an explicit factor the text height is the font size
             // only, and descenders (g, y) collide with the first block
             line-height-factor: 1.28;
-            color: Colors.text-primary;
+            // over a cover the ink has to be the one the veil was computed for
+            color: root.cover-on ? Colors.text-on-accent : Colors.text-primary;
         }
         title-input := TextInput {
             x: root.content-x;
-            y: Theme.spacing-hero + root.icon-height;
+            y: root.hero-top + root.icon-height;
             width: root.content-width;
             visible: root.first && UIState.title-editing;
             enabled: root.first && UIState.title-editing;
@@ -93,7 +140,7 @@ component DocumentRow inherits Rectangle {
             font-weight: Typography.weight-bold;
             font-size: PageType.size-page-title;
             line-height-factor: 1.28;
-            color: Colors.text-primary;
+            color: root.cover-on ? Colors.text-on-accent : Colors.text-primary;
             single-line: true;
             selection-foreground-color: Colors.text-primary;
             selection-background-color: Colors.selection;

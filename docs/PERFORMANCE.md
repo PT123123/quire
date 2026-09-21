@@ -1441,3 +1441,50 @@ traps and both show up in that number: putting the emoji in a *second* box besid
 a parent's chevron pushed every parent's label one indent past its own children,
 and applying the initial to Favorites / Recent replaced the star and the clock —
 either one would have read as movers past x 53 in all 64.
+
+## M12 · a cover is one picture in one place, so the gate is about the budget it joins (2026-09-22, ADR-0047)
+
+**No RAM gate ran, and this time the reason is that there is a cap to point at
+rather than a shape to argue about.** A cover is not per-row work: one `Image`
+element, inside the hero band, on the one row that is the page's own title. It
+adds no column to `DocumentRow`, no field to a block, and nothing that runs per
+frame or per keystroke. What it does add is **one entry in a cache that already
+exists and is already bounded** — `image_for` is the same callback an image row
+calls (state.rs:1898), so a cover's raster is weighted into
+`MAX_ATTACHMENT_CACHE_BYTES = 32 MiB` and evicted least-recently-realized like any
+other picture, over Slint's own 5 MiB path-keyed decode cache. A page with a cover
+and no image blocks behaves exactly like the same page with one image block at the
+top, which is the cheapest thing this feature could have been, and it is the
+direct consequence of storing an `AttachmentId` rather than a path: the display
+copy at `MAX_EDGE = 1280` is the only raster the app knows how to load, and the
+hero asks for it through the door that already has a budget in front of it.
+
+**The one number that moved per page-open** is a `cover_of(id)` read and an
+`image_for(cover-id)` call, both of which happen once when a page is loaded, next
+to the `UIState.page-icon` write from the previous slice. An uncached miss costs
+one `load_from_path` on a ≤ 1280-edge file; a hit is a hash lookup and a clone of
+a handle. On `id <= 0` — which is what "no cover" reads as, the reason the column
+is NULL and 0 stays a valid id — `image_for` returns `Image::default()` before
+touching the store, so all 67 baseline scenes, none of which carries a cover, take
+that short path and pay nothing, which is what their byte-identical hashes are the
+evidence for.
+
+**The reclaim sweep got one pass longer.** `cover_ids()` walks the in-memory page
+map (workspace.rs:416 — no SQL, the pages are already loaded) so a page's picture
+stops looking like garbage. That sweep is the M10 maintenance pass, not a per-frame
+path, and one more O(pages) walk over a map the tree already renders is not the
+thing this file worries about; the alternative — a cover that can be deleted out
+from under a live page — is a correctness bug wearing the costume of a saving.
+
+**Substitute evidence, and it is the quiet kind: `sweep33` → `sweep35` moved 1 of
+67.** 66 scenes byte-identical with `menu.png` the single mover at 9 sampled px in
+one column (x 414, y 706..722) — the page menu's scrollbar thumb, not a layout
+change. A cover decode that had leaked into the wrong path would have moved the
+hero band in every scene on the set. That reading is also why the slice's real
+defect was findable at all: `page-cover-icon.png` was the *only* one of the five
+new scenes to change when the fix landed, which is what makes it the A/B pair
+rather than a re-shoot.
+
+**The number still owed** is the one the M10 image section already conceded: a
+bench scene that seeds N pictures and scrolls them. A cover does not pay that off
+— it adds one picture to the same page and the scene would want it anyway.

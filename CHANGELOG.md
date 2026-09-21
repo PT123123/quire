@@ -224,6 +224,20 @@ First functional release: a local, single-file-database notes workspace.
   first letter at 46px. Like Style, setting one is not an undo step, and a
   duplicated page starts with its source's (ADR-0045). An icon is an emoji only —
   a picture belongs on the cover, not in a 16 px slot (ADR-0046)
+- Page cover (top bar ⋯ → Set cover): a local picture behind the page title, with
+  Change cover and Remove cover beside it. The page stores an attachment reference
+  (schema v12: `pages.cover`, nullable), never a path, so the STORAGE reclaim can
+  tell that the page still draws those bytes. A fixed dark veil sits between the
+  picture and the title, which is what makes the title's contrast a bound rather
+  than an opinion: white ink measures **6.19:1** over the worst picture a user can
+  pick — a pure-white one — with room to spare over the 4.5:1 floor (which needs
+  only α ≥ 0.535, and this veil is α 0.6196).
+  `benchmarks/scripts/contrast_probe.ps1` reads that number off the
+  rendered screenshot, self-checks its arithmetic, and ships with a scene built to
+  fail so the gate is shown able to say no. The page's own emoji takes the same
+  rule (it measured 1.04:1 before this was caught on pixels). Like Style and the
+  icon, setting a cover is not an undo step, and a duplicated page starts with its
+  source's (ADR-0047)
 - Slash menu ("/") for block types; command palette (Ctrl+K) with page
   jumping, plus Go Back / Go Forward (Alt+← / Alt+→) along the pages
   visited this session — a page deleted since drops out of the history
@@ -237,11 +251,14 @@ First functional release: a local, single-file-database notes workspace.
 
 ### Persistence & reliability
 - SQLite (bundled, no server): pages, blocks, marks, colors, attachments,
-  settings, metadata (schema v1–v9)
+  settings, metadata (schema v1–v12)
 - Debounced batched writes; Ctrl+S forces a save; close saves too
 - Rotating snapshots on every open (5 generations), restore-at-open when
   the main file is damaged, damaged file quarantined (`.corrupt`)
-- Startup integrity checks; schema migrations (v1–v9)
+- Startup integrity checks; schema migrations (v1–v12). The steps that only add a
+  column share one helper and each guard on its own column's absence, so a
+  half-migrated file — one somebody edited by hand, or restored to the middle of a
+  sequence — converges instead of erroring on a duplicate column name
 - Picture and file bytes live in an `attachments` folder beside the database
   and the row is only a reference — a reference whose file row is gone still
   loads the library and renders as a missing picture. A file is copied in

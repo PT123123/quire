@@ -98,12 +98,12 @@ find-cols, find-callout, nest, toggle,
 toggle-fold, image, image-half, file, recovered, title-edit, table, table-edit,
 table-marks, columns, columns-3, columns-marks, math, math-inline, toc, embed,
 embed-empty, code-hl, style-serif, style-mono, style-small, style-full,
-style-tight, page-icon, icon-picker
+style-tight, page-icon, icon-picker, page-cover, page-cover-white, page-cover-icon
 plus dark combos (dark-slash, dark-find, dark-marks, dark-link, dark-code-hl,
 dark-block-menu, dark-block-colors, dark-title-edit, dark-style-serif,
-dark-page-icon).
-`benchmarks/scripts/sweep.ps1` holds the authoritative list — 67 scenes as of
-ADR-0045 — and this prose is the summary, so when the two disagree trust the
+dark-page-icon, dark-page-cover, dark-page-cover-white).
+`benchmarks/scripts/sweep.ps1` holds the authoritative list — 72 scenes as of
+ADR-0047 — and this prose is the summary, so when the two disagree trust the
 script. Every visual change ships with re-shot
 scenes; the judge-reviewed set is the regression baseline. `toggle` and
 `toggle-fold` are a pair on purpose: the same section open and closed, so a
@@ -317,7 +317,32 @@ y 365..713 (the 16 px slot at depths 0..2), and re-running the same pass from
 x 53 rightward returns **0 px in 63 of the 64** with `menu.png` alone at 345 px
 inside x 254..415 / y 723..775 — its own popup, one row taller. Had the new slot
 cost an indent, 64 scenes would have moved past x 53.
-The baseline is `.scratch/sweep33` (67 scenes). The set before it, `.scratch/sweep32`
+`sweep33` → `sweep35` (a page's cover, ADR-0047) moved **1 of 67** and added 5 —
+not the stillset this file has seen (the highlight sweep moved 0 of 52), but the
+expected kind of still: a cover is a property of one page, and no other scene has
+one. `menu.png` is the mover, 9
+sampled px in the single column x 414 at y 706..722, i.e. the ListView's
+**scrollbar thumb** sliding down as the page menu grew from ten rows to eleven —
+the popup was already clamped by `min(rows*30+8, window-h - menu-y - 20)` before
+this slice, so an extra row cannot clip anything and the only pixel it can move is
+the thumb. Reading it as "the popup got shorter" is the trap; the crop says thumb.
+The five new scenes carry the evidence instead: `page-cover` (a real picture) and
+`page-cover-white` (a pure-white one, the provable worst case for the veil) in
+light and dark, plus `page-cover-icon`, which exists because the hero emoji is a
+second ink over the same ground and was the slice's only defect — the first pass
+left it at `Colors.text-primary`, `#1f2328` on a `#232439` photo, 1.04:1.
+`benchmarks/scripts/contrast_probe.ps1` is the gate that found it and the one that
+clears it: it reads a rendered PNG rather than a stylesheet, self-tests its own
+arithmetic against three known answers (21:1, 1:1, 6.19:1), refuses a scene that
+does not contain the claimed ink (exit 2, not a silent pass), and is demonstrated
+to be able to say no on a synthetic `#CCCCCC` ground (1.61:1, exit 1). Measured on
+the real renders: **6.19:1** for the white cover in both themes and 14.04:1 /
+14.09:1 for the photograph, against a 4.5:1 floor.
+The baseline is `.scratch/sweep35` (72 scenes). Note that `.scratch/` is
+gitignored *per worktree*, so a `sweepNN` in one checkout is not the same bytes as
+the same number in another; the name is a convention, not an address.
+The set before it, `.scratch/sweep33`
+(67 scenes), and before that `.scratch/sweep32`
 (64 scenes), and before that `.scratch/sweep10`
 (42 scenes), re-baselined 37 of them for a
 reason unrelated to tables: `DocumentRow.head` bound `height` without `y` and so

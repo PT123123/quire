@@ -2,7 +2,7 @@
 
 `docs/AGENT_HANDOFF.md` 第 8 行写了「四条同时开就必须各给一个 `git worktree` + 独立
 `CARGO_TARGET_DIR`」，但没人落成文档，也没人真开过。现在开了一个，把**实测出来的**
- recipe、数字和两个反直觉的坑记在这里。四条 track 的 agent 都该读这一页。
+ recipe、数字和三个反直觉的坑记在这里。四条 track 的 agent 都该读这一页。
 
 本节所有数字都是本机（`C:` 953 G / **已用 96 %**，46 G 剩余）在 commit `78ddf35`
 上量到的，不是估的。
@@ -67,7 +67,33 @@ sweep 的输出目录建议显式给：`-OutDir .scratch/sweep-<slice>`。它落
 （`<主仓库根>/.scratch/sweep33`），因为相对路径会从 worktree 根算起，那里没有 `sweep33`。
 `<主仓库根>` 就是你 clone 的那个目录；本文不写死它的绝对路径，下同。
 
-## 4 · 坑二：磁盘只有 46 G，而一个能跑像素闸的 worktree 就要 4.9 G
+## 3b · 坑二：`-OutDir` 给**绝对**路径，sweep 一声不响地什么都不产出
+
+同一条相对路径的病，长在另一头。`sweep.ps1:20` 是 `$ErrorActionPreference =
+"SilentlyContinue"`，而保存那一行写的是：
+
+```powershell
+$img.Save((Join-Path (Get-Location) $png), ...)
+```
+
+`$png` 已经带上 `$OutDir` 了。所以 `-OutDir` 给**绝对**路径时，`Join-Path CWD
+D:/abs/x.png` 拼出一个根本不存在的混合路径，`Save` 抛错，而 `SilentlyContinue`
+把错误吃掉——**每张图都没落盘，退出码 0，一行输出都没有**。现场表现为
+`manifest.txt` 里 72 行的 md5 全是空，跟基线一比就成了「变了 3 张、新增 5 张」这种
+鬼话。这一次真的差点把 `menu.png` 的一个滚动条滑块读成一次弹窗尺寸变更。
+
+**结论：`-OutDir` 一律给相对路径**（`.scratch/sweepNN`），绝对路径只在**读**基线时给
+（`-Baseline` / `diffbbox.ps1 -OldDir`）。跑完第一件事不是看 diff，是数产物：
+
+```bash
+ls .scratch/sweepNN/*.png | wc -l                    # 要等于场景数，不是 0
+grep -cE '^  [a-z]' .scratch/sweepNN/manifest.txt     # 空 md5 的行数，必须是 0
+```
+
+同理适用于任何 `SilentlyContinue` 的脚本：**静默不是阴性**。这条和
+「先怀疑自己的验证脚本」是同一件事的两个面。
+
+## 4 · 坑三：磁盘只有 46 G，而一个能跑像素闸的 worktree 就要 4.9 G
 
 实测，全新的 worktree：
 
@@ -84,6 +110,14 @@ sweep 的输出目录建议显式给：`-OutDir .scratch/sweep-<slice>`。它落
 - 一条 track 一个 worktree，**用完删**；`just clean` 只清当前目录的 `target`。
 - 空间紧张时先 `du -sh .scratch/wt/*/target` 看谁最肥，再决定删哪个。
 
+**收口时的实测，比上面那条估计更贵**：`t1` 这条 track 走完 `check --all-targets` +
+`test --all-targets` + `build --release --all-targets` + `build --features software --bin
+quire-shot` 之后，`du -sh target` = **13 G**（不是估的 10–12 G），本机 `C:` 剩余从写这一节
+时的 46 G 掉到 **23 G（98 % 已用）**。含义很直接：**还能再开一个走完全程的 worktree，开不
+起第二个**。所以四条全开的老建议在今天这台机器上不成立，实际可行的组合是「一条全量 +
+两三条只 `cargo check`（1.4 G 那种）」。track 收口、推上去之后**立刻** `git worktree
+remove`，那 13 G 是别人下一条 track 的立足之地。
+
 ## 5 · 像素基线是跨 worktree 可复现的（已验证，不是假设）
 
 在 `.scratch/wt/t1` 里跑 `default` + `page-icon` 两场，和主仓库的基线逐字节相同：
@@ -98,6 +132,13 @@ e311ea18f180c2c7a2e09a62c938973e  .scratch/wt/t1/.scratch/sweep-smoke/page-icon.
 `78ddf35` 这一版的 headless 软件渲染是确定性的。**含义**：你可以把主仓库的 `sweep33`
 当 control，在 worktree 里跑 new，两边交替，RAM/像素闸的对照成立；但 `sweep33` 那份
 基线本身不会被 clone 进 worktree，需要绝对路径引用。
+
+**同名不是同物**。`.scratch/` 按 worktree 各自一份且都被 ignore，所以
+`<主仓库根>/.scratch/sweep35` 和 `.scratch/wt/t1/.scratch/sweep35` 是两个毫无关系的目录
+——今天主仓库那个 `sweep35` 里躺着 14 张别的 track 的半成品，而文档里说「baseline 是
+sweep35」指的是 72 张那一份。**引用一个基线时要带上它在哪个 worktree**，或者干脆比较
+md5 而不是比较名字。这也是为什么 `docs/UI_ARCHITECTURE.md` 里那句「baseline is
+`.scratch/sweepNN`」只是一句约定，不是一个地址。
 
 ## 6 · 提交回 master 的规矩（共享工作树里仍然要）
 
@@ -120,7 +161,16 @@ worktree 里提交是干净的（只有一个 HEAD、只有你的改动）。**p
 | 位置 | 分支 | 归谁 | 状态 |
 |------|------|------|------|
 | 主工作树（仓库根本身） | `track/3-database`（HEAD） | 共享，四个 agent 都往里写 | 脏：挂着 T2/T3 的未提交改动 |
-| `.scratch/wt/t1` | `track/1-page-appearance` | Track 1（icon 切片收口的这一位） | 干净，`78ddf35`，`target/` 4.9 G，sweep 已跑通 |
-| （尚无） | — | Track 2 / 3 / 4 | 建议按 §2 各开一个，别在主工作树里建目录 |
+| `.scratch/wt/t1` | `track/1-page-appearance` | Track 1（版式 → icon → cover 三刀在这里收口） | cover 一刀在此收口：`target/` **13 G**，sweep 到 **72 张**（基线 `sweep35`，只存在于这个 worktree 的 `.scratch/` 里），像素闸与 `contrast_probe.ps1` 都在这条上跑通 |
+| （尚无） | — | Track 2 / 4 | 建议按 §2 各开一个，别在主工作树里建目录；**先读 §4 最后那段**，全量 worktree 开不起两个 |
 
-master 与 `origin/master` 都在 `78ddf35`。
+master 与 `origin/master` 在 `78ddf35`（本节写下时的值；Track 1 的 cover 一刀随后把 master
+往前挪，那一刀的 sha 以 `git log --oneline -1` 为准，不要以这里为准）。
+
+**给 Track 3 的一条**：`pages.cover` 花掉了 schema **v12**（ADR-0047），`CURRENT_VERSION`
+现在是 12。你那份草案里编号 12–15 的迁移步骤要整体往上挪一位起（database 那列如果是按
+v12 写的，改成 v13）。别指望撞号会替你报错得很清楚：`ensure_current`（migrations.rs:391）
+只在**进函数时**读一次 `user_version`，循环里的判断是 `migration.version <= from`，所以两
+个都登记成 12 的步骤会**按注册顺序连着跑两遍**——撞在重复列名上就是一次
+`migration <label> failed`，而被 `add_page_columns` 那种判存守卫挡下来的话就一句都不报，
+最后写进 `user_version` 的是注册得靠后的那个。两种都不是你想要的信号。

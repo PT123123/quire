@@ -462,6 +462,16 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                         g.set_icon_picker_open(true);
                     }
                 }
+                crate::app::state::MENU_PAGE_COVER => {
+                    if id > 0 {
+                        pick_cover(&g, &s, id);
+                    }
+                }
+                crate::app::state::MENU_PAGE_COVER_REMOVE => {
+                    if id > 0 {
+                        s.set_page_cover(id, None);
+                    }
+                }
                 crate::app::state::MENU_DELETE => {
                     let (_title, message) = s.delete_dialog_text(id);
                     g.set_dialog_title("Delete page?".into());
@@ -2227,6 +2237,7 @@ pub fn import_lan_pages(
             full_width: false,
             small_text: false,
             icon: String::new(),
+            cover: None,
         };
         let changes = {
             let mut doc = state.doc.borrow_mut();
@@ -2311,6 +2322,25 @@ fn pick_attachment(
             }
             .into(),
         );
+    }
+}
+
+/// The cover picker (SPEC §三十八 "图标与封面"). Same picture filter as an image
+/// row — the decoder reads four formats and nothing else — and the same import,
+/// because a cover is not a second kind of file: it is one more thing that
+/// points at the attachment table.
+fn pick_cover(g: &UIState<'_>, s: &Rc<AppState>, page: i32) {
+    let Some(path) = rfd::FileDialog::new()
+        .set_title("Choose a cover")
+        .add_filter("Pictures", &["png", "jpg", "jpeg", "bmp", "gif"])
+        .pick_file()
+    else {
+        return;
+    };
+    let id = s.claim_attachment_id();
+    match s.store.import_file(id, &path) {
+        Ok(att) => s.set_page_cover_from(page, att),
+        Err(e) => g.set_db_notice(e.to_string().into()),
     }
 }
 
@@ -2429,6 +2459,7 @@ pub fn import_from_path(g: &UIState<'_>, state: &Rc<AppState>, path: &std::path:
         full_width: false,
         small_text: false,
         icon: String::new(),
+        cover: None,
     };
     let changes = {
         let mut doc = state.doc.borrow_mut();
@@ -3214,6 +3245,33 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
         "dark-page-icon" => {
             g.set_dark(true);
             apply_scene(ui, state, "page-icon");
+        }
+        // The page's cover (SPEC §三十八, ADR-0047), written through the state
+        // method the picker calls. `page-cover-white` is the arithmetic control:
+        // the brightest picture a user can pick is a white one, so that scene
+        // holds the worst contrast the scrim ever has to carry — a pass there is
+        // a pass everywhere, and a failure there is not a taste argument.
+        // `page-cover-icon` is the band's other shape, with the hero tall.
+        "page-cover" | "page-cover-white" | "page-cover-icon" => {
+            let aid = state.claim_attachment_id();
+            let fixture = if scene == "page-cover-white" {
+                state.store.create_solid_fixture(aid, 1280, 400, [255, 255, 255])
+            } else {
+                state.store.create_fixture(aid, 1280, 400)
+            };
+            let Some(att) = fixture else { return };
+            state.set_page_cover_from(state.open_page.get(), att);
+            if scene == "page-cover-icon" {
+                state.set_page_icon(state.open_page.get(), "\u{1f680}");
+            }
+        }
+        "dark-page-cover" => {
+            g.set_dark(true);
+            apply_scene(ui, state, "page-cover");
+        }
+        "dark-page-cover-white" => {
+            g.set_dark(true);
+            apply_scene(ui, state, "page-cover-white");
         }
         "marks" => {
             // seed inline marks on the first paragraph (visual test only,

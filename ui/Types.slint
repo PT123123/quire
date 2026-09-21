@@ -206,6 +206,11 @@ export global UIState {
     // nothing: unlike the sidebar slot, this one does not fall back to the
     // title's first character, because the title is 40px below it.
     in-out property <string> page-icon: "";
+    // The open page's cover (SPEC §三十八): the attachment id it points at, 0
+    // for none. An id and not an `image` so the band never decodes a picture
+    // for a page that has no cover, and so a cover plus an image row of the same
+    // attachment costs the raster cache once.
+    in-out property <int> page-cover-id: 0;
 
     // in-page find (Ctrl+F)
     in-out property <bool> find-open: false;

@@ -421,6 +421,7 @@ impl AppState {
                     full_width,
                     small_text,
                     icon,
+                    cover: None,
                 }));
             }
             // rows before the blocks that point at them
@@ -2006,8 +2007,9 @@ impl AppState {
     /// files beside them.
     ///
     /// "Reachable" is deliberately generous — every block of every page in the
-    /// document, every id inside an outstanding undo *or* redo step, and the
-    /// copied block in the internal clipboard. A reclaim that leaves an orphan
+    /// document, every cover the tree's pages point at, every id inside an
+    /// outstanding undo *or* redo step, and the copied block in the internal
+    /// clipboard. A reclaim that leaves an orphan
     /// behind costs disk; one that deletes a picture Ctrl+Z was about to bring
     /// back costs the user's bytes, so the scan errs to the former.
     ///
@@ -2036,6 +2038,11 @@ impl AppState {
             .map(|a| a.as_u64() as i64)
             .collect();
         live.extend(self.history.borrow().referenced_attachments());
+        // A cover is a page pointing at a file (SPEC §三十八, ADR-0046's whole
+        // objection to an icon that is a picture). The book, not the open page:
+        // a sweep that frees bytes another page still draws would be a data
+        // loss disguised as housekeeping.
+        live.extend(self.workspace.borrow().cover_ids());
         if let Some(id) = self.clipboard.borrow().as_ref().and_then(|b| b.attachment) {
             live.insert(id.as_u64() as i64);
         }
@@ -2244,6 +2251,7 @@ impl AppState {
             full_width: false,
             small_text: false,
             icon: String::new(),
+            cover: None,
         })]);
         let from = self.open_page.get();
         self.open_page(id);
@@ -2324,6 +2332,7 @@ impl AppState {
             let title = self.workspace.borrow().title_of(nid).unwrap().to_string();
             let style = self.workspace.borrow().page_style(id).unwrap_or_default();
             let icon = self.workspace.borrow().icon_of(id);
+            let cover = self.workspace.borrow().cover_of(id);
             let blob = block_search_blob(&title, &project_blocks(&copies, &FindHits::new()));
 
             // order: right after the original when a gap exists, else the
@@ -2379,6 +2388,7 @@ impl AppState {
                 full_width: style.1,
                 small_text: style.2,
                 icon,
+                cover,
             })];
             for b in &copies {
                 batch.push(Change::BlockInserted(b.clone()));
@@ -2541,6 +2551,7 @@ impl AppState {
                 full_width: false,
                 small_text: false,
                 icon: String::new(),
+                cover: None,
             }),
             Change::BlockRefSet {
                 id: block_id,
@@ -2698,12 +2709,18 @@ impl AppState {
         let Some(ui) = self.ui.borrow().clone() else {
             return;
         };
-        let (font, full_width, small_text, icon) = {
+        let (font, full_width, small_text, icon, cover) = {
             let ws = self.workspace.borrow();
             let (font, full_width, small_text) = ws
                 .page_style(self.open_page.get())
                 .unwrap_or_default();
-            (font, full_width, small_text, ws.icon_of(self.open_page.get()))
+            (
+                font,
+                full_width,
+                small_text,
+                ws.icon_of(self.open_page.get()),
+                ws.cover_of(self.open_page.get()),
+            )
         };
         let g = ui.upgrade().unwrap();
         g.set_page_font(font.slot());
@@ -2715,6 +2732,11 @@ impl AppState {
         // generic page glyph today and §三十八 wants it to say something about
         // *this* page.
         g.set_page_icon(icon.into());
+        // An id, not the raster: the band asks for its own picture through the
+        // same `image-for` callback an image row uses, so one attachment held by
+        // a page and a block is decoded once, and a page with no cover never
+        // evaluates the binding at all.
+        g.set_page_cover_id(cover.map(|a| a.as_u64() as i32).unwrap_or(0));
     }
 
     pub fn set_page_font(&self, id: i32, font: PageFont) {
@@ -2738,6 +2760,41 @@ impl AppState {
         }]);
         self.apply_page_style();
         self.rebuild_sidebar();
+    }
+
+    /// Set — or with `None` clear — the page's cover (SPEC §三十八). Persisted
+    /// like the icon and outside undo for the same reason. Swapping a cover
+    /// leaves its predecessor's bytes on disk on purpose, exactly the way
+    /// replacing an image block does: the sweep in §三十七 is what frees them,
+    /// once nothing — no block, and now no page — points at them.
+    pub fn set_page_cover(&self, id: i32, cover: Option<crate::core::AttachmentId>) {
+        let cover = self.workspace.borrow_mut().set_cover(id, cover);
+        self.record(vec![Change::PageCoverSet {
+            id: PageId(id as u32 as u64),
+            cover,
+        }]);
+        self.apply_page_style();
+    }
+
+    /// Land a picture this session just imported behind the title (SPEC
+    /// §三十八). The row is written before the page points at it — the same
+    /// order a block's picture keeps, so a crash between the two leaves an
+    /// orphan for the reclaim rather than a cover with nothing behind it.
+    pub fn set_page_cover_from(&self, id: i32, attachment: Attachment) {
+        let cover = attachment.id;
+        self.attachments
+            .borrow_mut()
+            .insert(cover.as_u64() as i64, attachment);
+        self.workspace.borrow_mut().set_cover(id, Some(cover));
+        self.record(vec![
+            Change::AttachmentAdded(self.attachments.borrow()[&(cover.as_u64() as i64)]
+                .clone()),
+            Change::PageCoverSet {
+                id: PageId(id as u32 as u64),
+                cover: Some(cover),
+            },
+        ]);
+        self.apply_page_style();
     }
 
     /// Load the emoji grid with the picker's whole list and point it at `id`.
@@ -2976,6 +3033,31 @@ impl AppState {
             rows.len() - 2,
             row(MENU_PAGE_ICON, "Set icon", "smile", false, -1, false),
         );
+        // The cover sits beside the icon because it is the same kind of fact
+        // about the page. Its label answers "is there one?", and the removal
+        // only exists when there is — a greyed-out entry is a question, and
+        // this menu is already long enough.
+        let has_cover = ws.cover_of(id).is_some();
+        let mut look = vec![row(
+            MENU_PAGE_COVER,
+            if has_cover { "Change cover" } else { "Set cover" },
+            "image",
+            false,
+            -1,
+            false,
+        )];
+        if has_cover {
+            look.push(row(
+                MENU_PAGE_COVER_REMOVE,
+                "Remove cover",
+                "trash",
+                false,
+                -1,
+                false,
+            ));
+        }
+        let at = rows.len() - 2;
+        rows.splice(at..at, look);
         self.menu.set_vec(rows);
     }
 
@@ -3099,6 +3181,11 @@ pub const MENU_PAGE_FULL_WIDTH: i32 = 11;
 pub const MENU_PAGE_SMALL_TEXT: i32 = 12;
 /// The page menu's "Set icon" row, which opens the emoji grid (SPEC §三十八).
 pub const MENU_PAGE_ICON: i32 = 13;
+/// The page menu's cover rows (SPEC §三十八 "图标与封面"). "Set cover" and
+/// "Change cover" are one id — both open the picture picker and store whatever
+/// comes back — and the remove only appears when the page has a cover.
+pub const MENU_PAGE_COVER: i32 = 14;
+pub const MENU_PAGE_COVER_REMOVE: i32 = 15;
 /// "Top level" target of the page-menu Move-to submenu (root, `None` parent).
 pub const PAGE_MOVE_TO_ROOT: i32 = 499_999;
 /// Page-menu Move-to targets encode the destination page above this base.
@@ -5567,6 +5654,64 @@ mod tests {
         assert!(notice.starts_with("1 unused attachment removed ("), "{notice}");
         assert!(!attach_dir.join(&pics[0].1).exists());
         assert_eq!(repo.load_attachments().unwrap().len(), 0, "the row went with the page");
+    }
+
+    /// A cover is a **page** pointing at a file, and until SPEC §三十八 the
+    /// sweep asked only the blocks about who points at anything — which is the
+    /// objection ADR-0046 raised against a picture in the icon slot. Two halves:
+    /// bytes no block holds must survive because the page draws them, and once
+    /// the page lets go, in a session whose undo stack no longer remembers
+    /// them, they are as orphan as any other.
+    #[test]
+    fn a_pages_cover_keeps_its_bytes_through_a_reclaim() {
+        use super::AppState;
+        use crate::core::{BlockId, Command};
+        use crate::testing::ScratchDir;
+
+        let dir = ScratchDir::new("reclaim-cover");
+        let attach_dir = dir.path().join("attachments");
+        let (state, repo, page, pics) = session_with_pictures(&dir, 1);
+        let cover = state
+            .store
+            .create_fixture(state.claim_attachment_id(), 640, 400)
+            .expect("a cover fixture");
+        let cover_file = cover.file.clone();
+        state.set_page_cover_from(page, cover);
+        state
+            .exec_on_open_page(Command::DeleteBlock {
+                id: BlockId(pics[0].2 as u64),
+            })
+            .expect("a picture block deletes");
+        state.persistence_force_flush();
+
+        // The restart is the point: the undo stack that still holds a vote for
+        // the deleted block is gone, so what survives now survives on the page.
+        drop(state);
+        drop(repo);
+        let repo = scratch_repo(&dir);
+        let state = AppState::new(&plain_args(), Some(repo.clone()));
+        let notice = state.reclaim_attachments().unwrap();
+        assert!(
+            notice.starts_with("1 unused attachment removed"),
+            "{notice}"
+        );
+        assert!(!attach_dir.join(&pics[0].1).exists(), "the block's picture went");
+        assert!(
+            attach_dir.join(&cover_file).is_file(),
+            "the cover's bytes are the page's, not nobody's"
+        );
+        assert_eq!(repo.load_attachments().unwrap().len(), 1);
+
+        state.set_page_cover(page, None);
+        let notice = state.reclaim_attachments().unwrap();
+        assert!(
+            notice.starts_with("1 unused attachment removed"),
+            "{notice}"
+        );
+        assert!(
+            !attach_dir.join(&cover_file).exists(),
+            "the page let go, so the sweep could too"
+        );
     }
 
     /// The half-orphan: a row whose bytes were deleted by hand. A missing file

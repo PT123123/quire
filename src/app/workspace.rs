@@ -30,6 +30,10 @@ pub struct Page {
     /// The page's own emoji (SPEC §三十八 "图标与封面"); empty means unset and
     /// the sidebar shows the title's first character.
     pub icon: String,
+    /// The page's cover (same section): the attachment it draws behind the
+    /// title, mirrored from the core page so the editor can be told what to
+    /// draw — and so the reclaim can ask, per page, who still points at a file.
+    pub cover: Option<crate::core::AttachmentId>,
     /// Title + block text blob, filled by the app layer; the search source.
     pub search_text: String,
 }
@@ -119,6 +123,7 @@ impl Workspace {
                 full_width: false,
                 small_text: false,
                 icon: String::new(),
+                cover: None,
                 search_text: String::new(),
             },
         );
@@ -233,7 +238,13 @@ impl Workspace {
             (
                 src.parent,
                 format!("Copy of {}", src.title),
-                (src.font, src.full_width, src.small_text, src.icon.clone()),
+                (
+                    src.font,
+                    src.full_width,
+                    src.small_text,
+                    src.icon.clone(),
+                    src.cover,
+                ),
             )
         };
         let new_root = self.new_page(&title);
@@ -247,6 +258,10 @@ impl Workspace {
             dst.full_width = style.1;
             dst.small_text = style.2;
             dst.icon = style.3;
+            // The cover travels with it: a copy that pointed at the same
+            // attachment as its source is two referencers, not one, and the
+            // reclaim has to be told that before it sweeps the bytes.
+            dst.cover = style.4;
         }
         self.attach(new_root, parent, Some(id));
         self.copy_children(id, new_root);
@@ -371,6 +386,39 @@ impl Workspace {
     /// title's own first character at 60px is an echo, not a placeholder.
     pub fn icon_of(&self, id: i32) -> String {
         self.pages.get(&id).map(|p| p.icon.clone()).unwrap_or_default()
+    }
+
+    /// The page's cover, as the attachment id it points at (`None` = no band).
+    /// Set and read back like the icon, so the caller persists what moved;
+    /// `None` clears. The workspace hands out an id, never a path — decoding is
+    /// the attachment store's job and so is deciding whether the bytes live on.
+    pub fn set_cover(
+        &mut self,
+        id: i32,
+        cover: Option<crate::core::AttachmentId>,
+    ) -> Option<crate::core::AttachmentId> {
+        match self.pages.get_mut(&id) {
+            Some(p) => {
+                p.cover = cover;
+                p.cover
+            }
+            None => None,
+        }
+    }
+
+    pub fn cover_of(&self, id: i32) -> Option<crate::core::AttachmentId> {
+        self.pages.get(&id).and_then(|p| p.cover)
+    }
+
+    /// Every attachment some page in this tree uses as its cover. §三十七's
+    /// reclaim asked only the blocks who pointed at a file, and a page could
+    /// legitimately answer "nobody" while drawing that file behind its title.
+    pub fn cover_ids(&self) -> Vec<i64> {
+        self.pages
+            .values()
+            .filter_map(|p| p.cover)
+            .map(|a| a.as_u64() as i64)
+            .collect()
     }
 
     pub fn mark_opened(&mut self, id: i32) {
@@ -561,6 +609,7 @@ impl Workspace {
                     full_width: p.full_width,
                     small_text: p.small_text,
                     icon: p.icon.clone(),
+                    cover: p.cover,
                     search_text: String::new(),
                 },
             );
@@ -820,6 +869,36 @@ mod tests {
         assert_eq!(w.icon_of(copy), "\u{1F680}", "and the copy keeps its own");
         assert_eq!(w.set_icon(9999, "?"), "", "an unknown page stores nothing");
         assert_eq!(w.icon_of(9999), "");
+    }
+
+    #[test]
+    fn a_page_cover_points_at_an_attachment_and_survives_a_copy() {
+        let mut w = ws();
+        assert_eq!(w.cover_of(105), None, "the sample tree has no covers");
+        assert_eq!(
+            w.cover_ids(),
+            Vec::new(),
+            "so the reclaim has nothing to hear from the tree yet"
+        );
+        let seven = Some(crate::core::AttachmentId(7));
+        assert_eq!(w.set_cover(105, seven), seven);
+        assert_eq!(w.cover_of(105), seven);
+        assert_eq!(
+            w.cover_ids(),
+            vec![7],
+            "the sweep asks the whole tree, not the open page"
+        );
+        let copy = w.duplicate(105).expect("duplicate");
+        assert_eq!(
+            w.cover_of(copy),
+            seven,
+            "a copy is a second referencer, pointing at the same bytes"
+        );
+        assert_eq!(w.cover_ids(), vec![7, 7], "and the sweep hears it twice");
+        // clearing one page must not free what the other still draws
+        assert_eq!(w.set_cover(105, None), None);
+        assert_eq!(w.cover_ids(), vec![7]);
+        assert_eq!(w.set_cover(9999, None), None, "an unknown page stores nothing");
     }
 
     #[test]

@@ -21,6 +21,13 @@ export global Typography {
     out property <length> size-ui-lg: 14px;     // palette items
     out property <length> size-icon-sidebar: 13px; // a page's emoji, in its row
     out property <length> size-icon-picker: 19px;  // one cell of the emoji grid
+    // A page's cover band (SPEC §三十八, ADR-0047). Deliberately not on
+    // `PageType`: small text shrinks a page's type, and a picture has no
+    // typeface. `size-cover-overlap` is the part of the band the hero title is
+    // drawn inside -- the requirement is that the title sits *on* the cover, so
+    // the band is not merely a strip above it.
+    out property <length> size-cover-height: 168px;
+    out property <length> size-cover-overlap: 68px;
 
     // document
     out property <length> size-body: 15.5px;
