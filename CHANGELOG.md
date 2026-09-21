@@ -122,6 +122,19 @@ First functional release: a local, single-file-database notes workspace.
   line the sweep had ever shot. Every marked line in the then-44-scene baseline
   overflowed its frame instead, so nothing showed it before. The fix is on all
   three run rows — block, table cell, column line — and moved none of them
+- A paragraph carrying inline marks now wraps like a plain one. This was the
+  documented platform wall: Slint `Text` has no inline formatting, so marks paint
+  as separate runs, a run was one whole stretch of text, and a layout cell cannot
+  break — a marked paragraph ran off the edge and was clipped mid-word while the
+  identical unmarked paragraph wrapped. `build_runs` now cuts every *unmarked*
+  stretch to one word per run and the row lays the runs out with a wrapping
+  `FlexboxLayout`, so the breaks land where the words do; marked stretches stay
+  one cell, because an underline, a code box or a link's click target split at
+  every space is worse than the bold phrase it still cannot break (ADR-0041).
+  What it costs, measured rather than assumed: ≈2.8 ms per projection of a
+  10 000-row page whose every tenth line is marked (and nothing on an unmarked
+  page), 1.031× the control's memory on that same page, and ≈3 px of extra line
+  spread on a marked line whose words were already fitting
 - Fixed the page title sitting below where it is bound. The row's title band
   sets its height but used to leave `y` alone, and Slint centres such a child
   vertically in its parent — harmless while every first block was one line
@@ -264,6 +277,13 @@ First functional release: a local, single-file-database notes workspace.
   would not be measuring pictures — and the app prints its own decode cache
   figures (`--dump-state`, one JSON line on stderr) because a process memory
   counter cannot see a cache whose unit is one raster
+- `--marks N` does the same for the other fixture scene D never had: it bolds the
+  second word of every `rows/N`-th row, so a 10 000-block page can carry 1 000
+  marked paragraphs and the RAM gate can see the runs channel at all. Without it
+  the gate was blind — scene D has no marks, so a change to marked rendering
+  measured 1.00× of nothing. `--dump-state` now also reports what it built
+  (`gs+atlas-blocks=10024 marked=1000`), which lets each arm of an A/B prove its
+  own fixture instead of taking the bench script's label on faith
 - Scene F — continuous scroll — had never scrolled. Slint measures a list's
   content offset *negative* going down, and the harness timer was adding, so
   every frame wrote a value the clamp rounded straight back to zero: the scroll
@@ -320,8 +340,11 @@ First functional release: a local, single-file-database notes workspace.
   one of the rows it lists
 - Block colors are cosmetic: they do not survive a Markdown export/import
   round trip, and Callout blocks export as quotes
-- Inline-mark paragraphs render runs on one line (no cross-run reflow —
-  Slint `Text` has no inline formatting yet)
+- Inline-mark paragraphs wrap between words now, and still clip in two shapes:
+  a marked phrase longer than the line (a mark is one unbreakable cell), and a
+  marked line that needs more lines than the same words unmarked — bold and mono
+  are wider, and the row's height is measured from the plain text
+  (Slint `Text` has no inline formatting yet)
 - Pictures: replacing a stored file on disk in place needs a
   restart to show up. A page of pictures is now measured while it scrolls — the
   decode cache holds nine 1280×720 rasters and stops there by weight, and an

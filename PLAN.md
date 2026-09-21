@@ -1741,3 +1741,87 @@ host 在卡里 elide 的读感）。④bookmark 的边界：SPEC §三十七 里
 synced block；高亮的硬要求（长代码块打字延迟不可测）大概会复用 math 与 TOC 的同一份 runs
 通道，bookmark 现在只差一个 TLS 客户端，synced block 等 §四十。`reveal` 仍不属于批次 C 任何
 一条，但 TOC 和 `quire://block` 锚点还在等它。
+
+
+## M8 收尾 · A4 最后一个 HIGH — 带标记的一行现在按词断行（2026-09-21，on `master`，ADR-0041）
+
+批次 C 三条之间插进来的这一刀，还的是 M8 的账：A4 视觉清扫从 `42cb158` 起就挂着一条 HIGH，
+「带 inline marks 的段落丢掉换行、在词中间被裁掉，而同样一段文字不加粗时是正常换行的」。它一直被
+写成「Slint 平台墙」，于是这一批先去看墙是不是真的——是真的（Slint 1.18 的 `Text` 没有
+`TextFormat`、没有 per-run style），但墙后面还剩一条能走的路：**一个 layout 单元不可断行，那就
+让单元等于一个词**。
+
+**改动面**：`src/app/state.rs`（`build_runs` + 两条单测 + 一条 `#[ignore]` 计时）、
+`ui/components/EditorBlock.slint`、`ui/components/TableBlock.slint`、
+`ui/components/ColumnItemRow.slint`、`src/app/controller.rs`（3 个 scene）、
+`src/main.rs` / `src/bin/quire_typing.rs` / `src/bin/quire_shot.rs`（`--marks`）、
+`benchmarks/scripts/sweep.ps1`、`benchmarks/scripts/bench.ps1`、
+`tests/integration/{persistence,workspace}_test.rs`（`HandleArgs` 字面量）。
+
+**六条决定**：
+
+1. **只切未标记的片段**：`build_runs` 在无标记的连续文本里每个词起头切一刀，标记片段一个 cell
+   到底。理由写进注释了——下划线、code 底框、链接的点击目标按空格切开，比它断不了的那个粗体短
+   语更糟。
+2. **空白跟着它前面的词**，所以 cell 拼回去就是原文，逐字节。两条新测试一条钉死期望的 cell 列
+   表（`["one ", "two ", "three ", "bold words", " four ", "five"]`），一条覆盖「标记在行首 /
+   CJK / 标记在行尾」并断言拼回与无空 cell。
+3. **三处画 runs 的 delegate 一起换成 `FlexboxLayout { flex-wrap: wrap }`**：块行、表格单元格、
+   分栏里的行。只改第一处等于把同一面墙留在另外两个表面上。
+4. **行高权威不动**，仍是旁边那个不可见的 plain `Text`（同字同宽，量的就是行数），runs 容器
+   `clip: true` 在那个高度上。先试过把 `body-height` 绑到 flex 自己的 `preferred-height`：**Slint
+   编译错误 `Cannot access id 'runs-flex'`**——`if` 里声明的元素在 `if` 外面不可引用；把 `if` 提
+   出来让 flex 常驻，代价是 10 000 行 bench 页每行两个 item。所以断行点从 Rust 侧给。
+5. **harness 先修再量**：scene D 一个标记都没有，直接跑闸会得到「1.00× 的空气」。于是
+   `--marks N`（每 `rows/N` 行把第二个词加粗）进了 main / quire-typing / bench.ps1，
+   `--dump-state` 多印一行 `marked=N`，让每条臂报出自己真正建了什么。
+6. **不迁移、不加 kind、不加 model 字段**：`user_version` 仍是 8，runs 通道仍是
+   `Vec<TextRun>`，存储 / undo / Markdown / LAN 导出全都不知道这次改动。
+
+**墙移到了哪儿，还剩什么**（这句必须写准）：①一个长过一行的标记短语仍然裁；②一行标记文字比同样
+词数的未标记文字**需要更多行**时仍然裁（粗体和 mono 更宽，而高度是 plain text 量的）；③没有
+ASCII 空格的文本（中文段落）仍是一个 mark 一个 cell，因为切词用的是 `is_ascii_whitespace`。这三
+条现在是窄例，不是常态，`docs/EDITOR_ARCHITECTURE.md` §"Platform wall" 逐条写着。
+
+**验证**：`cargo check --all-targets` 干净；`cargo test --all-targets -- --skip
+clipboard_write_and_read_round_trip_unicode` → **354 passed / 0 failed / 11 ignored**（HEAD 是
+352 / 0 / 10，这次 +2 单测 +1 条 `#[ignore]` 计时）；`cargo build --release` 零警告。跳掉的仍
+是本机环境的剪贴板独占（`OpenClipboard` err=5）。计时那条试过搬成独立的 `[[test]]` target（这样
+往 control worktree 里复制时不必改被测文件），最后没有搬：ADR-0039 的投影数字已经是 lib 里同一种
+`#[ignore]` 测试，多一个 target 换不到一致性，而且复制的只是 `#[cfg(test)]` 代码，不碰被测路径。
+
+**性能**：闸跑了**两批**（原始行 `benchmarks/results/2026-09-21-m8-wordwrap-ram.jsonl`，12
+行）。control = `2c5a25f` 在 clean worktree 里编，**只**把 bench 旋钮搬过去，所以它的 runs 还是
+一行裁掉的（md5 `cdf6da5a…` 22 074 368 B）。scene D 10 000 行 / 1 000 行带标记，两臂交替，各自
+pinned db，每臂种子那次不计：第一批（本树 `f59edb1b…` 22 081 024 B）control 112.7 / 111.4 →
+本树 115.2 / 115.9 ⇒ **1.031×**；第二批（表格与分栏 delegate 也改完，`4f9205ca…` 22 087 680 B）
+control 114.3 / 111.1 → 本树 114.8 / 115.7 ⇒ **1.023×**。两批都在 ≤1.2× 内，但诚实的读法是：
+两臂均值差 2.5…3.5 MB **小于 control 臂自己在第二批的 3.6 MB 散布**，所以这是「贴着闸的分辨率」。
+数字有形状：一条 bench 标记行从 3 个 run 变 11 个 cell，一个 cell 就是一个带自己 `Text` 的
+item。投影侧另有一条两臂同 sitting 的计时（`#[ignore]`，release，50 轮 `project_blocks`）：
+未标记 41.686 / 41.504 ms（两臂差 0.4 %，这就是「同一台机器同一份 fixture」的控制），1 000 行
+标记 44.147 (+2.461) / 46.942 (+5.438) ⇒ 切词大约 **+2.8 ms / 万次投影**，即每条标记行
+≈2.8 µs，**全页无标记时是 0**——这也是 `block.runs.length > 0` 那道守卫留着的原因。
+
+**像素**：`.scratch/sweep23` → `.scratch/sweep24`，49 → 50 张：动 3、新增 1（`marks-wrap`）、
+46 张 byte-identical。`marks` 与 `dark-marks` 1 942 / 1 918 px 落在同一个框
+`x 390..1148 / y 196..240`（一段被裁成一行 → 两整行）。`math-inline` 动 360 px 在
+`x 420..664 / y 194..210`——这张本来该「完全不动」，所以又补了两个探针：位移探针（找能把差值归零
+的 dx/dy）说它不是平移，ink-edge 扫描说它是**最右有墨列从 661 变成 664**，即一行按词测量比按整
+串测量多出 ≈3 px 的间隙累积（每个间隙不到 1 px）。`.scratch/sweep24` → `.scratch/sweep25`，
+52 张：**已有 50 张动 0 张**，新增 2 张（`table-marks`、`columns-marks`）——那个 0 不是证据，
+两张新图才是：grid 的 fixture 每格一个词、layout 的是「Column 1 / Column 2」，两处 delegate 改
+完没有任何一张图会失败，于是各造一个「塞进最窄的盒子、句子长到必须换行、中间一个粗体短语」的
+scene。`marks-wrap` 同理，而且它的 needle 全改成 `.expect("needle present")`：早先
+`unwrap_or(0)` 把「break between cells」拼错成找不到时，静默标到了偏移 0，画面看着仍然像那么回
+事。判图前看的仍是 manifest 哈希 diff。52 张是新基线。
+
+**未验证**：①**人眼**——在换行后的标记行里点一下 caret 落在哪、编辑中标记段长高一行、链接现在
+只有一个词那么宽（hover 目标与「一个词的 underline 算不算 bug」）、中文标记段落（还是整段一
+cell）、表格格与分栏里编辑时的行高。②`--marks` 只喂 bold，italic/code/link 混排的内存形状没
+量。③两批比值之差（1.031 / 1.023）本身没有解释，只能记成噪声。
+
+**批次 C 还剩**：highlight / bookmark / synced block。**高亮前面那面墙没了**——per-token 的颜
+色 run 现在能断行，这条正是它当初排不进来的理由；bookmark 仍差一个 TLS 客户端（embed 已经把卡
+片形状占了，缺的是抓标题与 favicon 那一半网络），synced block 等 §四十。`reveal`（变高
+scroll-into-view）不属于批次 C，但 TOC 跳转和 `quire://block` 锚点还在等它。

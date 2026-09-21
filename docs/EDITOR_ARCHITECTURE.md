@@ -26,15 +26,32 @@ give no absolute geometry) — navigation is selection-based.
 
 ## Platform wall: inline rich text rendering
 
-Slint `Text` has no inline formatting (no per-run style, no decoration).
-Marks are therefore rendered as a HorizontalLayout of per-mark runs with
-`clip: true`. Consequences, accepted for now:
+Slint `Text` has no inline formatting (no per-run style, no decoration, no
+`TextFormat`). Marks are therefore rendered as per-run items inside a wrapping
+`FlexboxLayout` with `clip: true` (ADR-0041) — in all three places that draw
+runs: a block line, a table cell, a line inside a column box — and each row's
+height authority is still the invisible plain `Text` beside it. What that buys,
+and what it still cannot do:
 
-- runs do not reflow across each other — a marked paragraph wraps per run,
-  so long marked text shows reflow artifacts;
+- a marked paragraph **breaks between words**, like an unmarked one: `build_runs`
+  cuts every unmarked stretch to one word per run, because a layout cell cannot
+  break and a per-mark run was one unbreakable item — that was the original
+  "loses its word wrap, clipped mid-word" defect;
+- a **marked stretch stays atomic**: an underline, a code box or a link split at
+  every space is worse than the long phrase it cannot break, and a link's click
+  target has to stay one run. So a marked phrase longer than the line still
+  clips, and text with no ASCII spaces (CJK) still gets one cell per mark;
+- a marked line that needs **more lines than the same words unmarked** still
+  clips at `plain-text.height` — bold and mono are wider than regular. Giving
+  the runs container its own height is not available: an element declared
+  inside an `if` cannot be referenced from outside it (`Cannot access id
+  'runs-flex'`), and hoisting the `if` costs two items on every row of a 10 000
+  block page;
 - italic uses the "Segoe UI Italic" family name (no font-style property);
 - strike is a 1px Rectangle overlay; code runs get the code background;
-- the live TextInput always shows plain text (marks visible when blurred).
+- the live TextInput always shows plain text (marks visible when blurred), and
+  the runs overlay is `!editing`-guarded, so a focused block is measured and
+  wrapped by the input itself.
 
 When Slint ships rich text support, `build_runs` in state.rs and the runs
 layout in EditorBlock.slint are the only two seams to replace.

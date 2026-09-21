@@ -1248,3 +1248,71 @@ rows, not once per row of the document. No timing was taken, because there is no
 the page once per projection, the card's work has no page in it. The unmeasured
 part is the one nothing can measure headless — what the operating system does
 with the address after the Open button hands it over.
+
+## M8 · the marked line finally wraps, and the gate had to be built first (2026-09-21, ADR-0041)
+
+The oldest open finding in the project is A4's one HIGH: a paragraph carrying
+inline marks lost its word wrap and was clipped mid-word, while the identical
+unmarked paragraph wrapped. It is fixed — unmarked stretches are cut to one word
+per run and the three surfaces that draw runs lay them out in a wrapping
+flexbox — and the measurement half of the slice is mostly about the instrument.
+
+**Scene D could not see this change at all.** The bench page has no marks in it,
+so a gate run over it would have reported ≈1.00× for a change whose whole cost
+is in marked rows, which is a ratio that only looks like a measurement. So
+`--marks N` was added to the harness first: it bolds the second word of every
+`rows/N`-th row, and `--dump-state` now prints what the app actually built
+(`gs+atlas-blocks=10024 marked=1000`) so each arm identifies its own fixture
+instead of taking the bench script's label on faith. Every one of the twelve rows
+below carries that line.
+
+**The gate, twice, in one sitting each.** Scene D, 10 000 blocks with 1 000 of
+them marked, control = `2c5a25f` from a clean worktree with only the bench knob
+ported (so its runs still render on one clipped line), pinned database per arm,
+arms alternating, seeding run excluded (raw rows
+`benchmarks/results/2026-09-21-m8-wordwrap-ram.jsonl`):
+
+| batch | arm | exe | steady WS MB | steady private MB |
+|-------|-----|-----|-------------:|------------------:|
+| 1 | control `2c5a25f` | md5 `cdf6da5a…`, 22 074 368 B | 137.4 / 135.7 | 112.7 / 111.4 |
+| 1 | this tree | md5 `f59edb1b…`, 22 081 024 B | 139.4 / 140.7 | 115.2 / 115.9 |
+| 2 | control (same exe) | md5 `cdf6da5a…` | 138.9 / 137.1 | 114.3 / 111.1 |
+| 2 | this tree, all three delegates | md5 `4f9205ca…`, 22 087 680 B | 139.9 / 141.8 | 114.8 / 115.7 |
+
+**1.031× then 1.023×** — inside the ≤1.2× gate both times, and both readings sit
+at the instrument's floor: the +2.5…3.5 MB between the two means in each batch is
+smaller than the 3.6 MB the *control* arm spread across by itself in batch 2. The
+number has a shape though, which is why it is published rather than waved away:
+a marked bench row goes from 3 runs to 11 cells, and a cell is a layout item
+with its own measured `Text`, so 1 000 rows × 8 extra items is exactly the kind
+of cost that should show up as a few MB and not as a doubling. Batch 2 is also
+the control for the two delegates scene D never realizes — the table and column
+rows joined the change between the batches and moved the reading by nothing
+bigger than the noise.
+
+**What the word cut costs the projection, measured on both arms.** An
+`#[ignore]`d release timing test, 50 rounds of `project_blocks` over 10 000 rows,
+run once per arm in the same sitting:
+
+| arm | 10 000 unmarked rows | same page, 1 000 rows marked | the marks cost |
+|-----|---------------------:|-----------------------------:|---------------:|
+| control `2c5a25f` | 41.686 ms | 44.147 ms | +2.461 ms |
+| this tree | 41.504 ms | 46.942 ms | +5.438 ms |
+
+The unmarked columns agreeing to 0.4 % is the control that both arms saw the same
+fixture on the same machine. The word cut is therefore ≈2.8 ms per projection of
+a page whose every tenth line carries a mark — ≈2.8 µs per marked line, and
+*zero* on a page with no marks anywhere, which is the common case and the reason
+the guard stays `block.runs.length > 0` rather than an always-present flex.
+
+**Pixels cost nothing to check and one thing to argue with.** `sweep23` →
+`sweep24` (50 scenes): 3 moved, 46 byte-identical, 1 new. `marks` and
+`dark-marks` at 1 942 / 1 918 sampled px inside the same box
+(`x 390..1148 / y 196..240`). `math-inline` at 360 px inside
+`x 420..664 / y 194..210` — a line that already fit, so it should not have
+moved; an ink-edge scan put the right-most painted column at 661 before and 664
+after, ≈3 px of extra spread from measuring eleven words separately instead of
+one string, i.e. sub-pixel per gap. `sweep24` → `sweep25` (52 scenes): 0 of the
+50 existing scenes moved and 2 new ones (`table-marks`, `columns-marks`) had to
+be added, because the grid and layout fixtures hold no marks and the two
+delegate edits were otherwise unverifiable.

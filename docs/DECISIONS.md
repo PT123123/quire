@@ -2,6 +2,117 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0041 · A marked line breaks where its words do, because a run is one layout cell
+
+Decision: `build_runs` (src/app/state.rs) emits one run per **word** inside an
+unmarked stretch, and leaves a marked stretch whole; all three places that draw
+runs — `ui/components/EditorBlock.slint`, `TableBlock.slint`,
+`ColumnItemRow.slint` — become `FlexboxLayout { flex-wrap: wrap }` where they
+were a `HorizontalLayout`. Nothing else about the channel changes: each row's
+height is still the invisible plain `Text` beside it — the one that already
+measures the line count for unmarked text at the same width — the runs box is
+still `clip: true` at that height, and the live `TextInput` still shows plain
+text while the block is focused. Whitespace stays attached to the word it
+follows, so the cells re-join to the original string byte for byte, which is
+what the two new tests assert (one with a fixed expected cell list, one over a
+leading mark, CJK text and a mark at the end).
+
+Why: Slint 1.18 `Text` has no inline formatting at all — no per-run style, no
+decoration, no `TextFormat` — so a mark can only be painted as a separate item,
+and that was the documented platform wall (`docs/EDITOR_ARCHITECTURE.md`
+§"Platform wall", A4's one open HIGH): a paragraph carrying marks lost its word
+wrap and clipped mid-word, while the identical unmarked paragraph wrapped. A
+layout cell cannot break, so the old per-mark run "the same delegate that
+paints a ten thousand line page" was one unbreakable item. Cutting the plain
+stretches to words hands the flexbox the same break opportunities the shaper
+has. Marked stretches stay atomic on purpose: a link split at every space gives
+each fragment its own underline and its own click target, and a code span split
+per word is a row of separate boxes.
+
+Consequences:
+- **The wall moved; it did not vanish.** Two shapes still clip, and both are
+  now the *narrow* case rather than the normal one: a marked phrase long enough
+  to exceed the line on its own, and a marked line whose runs need more lines
+  than the same words unmarked — bold and mono are wider than regular, and the
+  height authority is the plain-text measure, so the extra line has nowhere to
+  go. Fixing the second means giving the runs container its own height, which
+  this slice tried first: binding `body-height` to the flex's
+  `preferred-height` is a Slint compile error (`Cannot access id 'runs-flex'` —
+  an element declared inside an `if` cannot be named from outside it), and
+  hoisting the `if` so the flex always exists costs two items on all 10 000
+  bench rows. The word cut is the version that fits the existing geometry.
+- **No migration, no new kind, no model field.** `user_version` stays 8, the
+  runs channel is still `Vec<TextRun>`, and storage, undo, Markdown and the LAN
+  export are untouched — this is one pure function's output shape and one
+  layout element.
+- **The gate had to be fixed before it could be read.** Scene D has no marks at
+  all, so the old 10 000-block RAM gate was blind to this change; publishing its
+  ratio would have been a measurement that only looked like one. So the harness
+  gained `--marks N` (main.rs, `HandleArgs.marks`, `bench_marks`, quire-typing,
+  `bench.ps1 -Marks`) and `--dump-state` now prints `marked=N`, which lets each
+  arm prove its own fixture instead of taking the script's label on faith. All
+  twelve rows read `gs+atlas-blocks=10024 marked=1000`.
+- **Gate: 1.03× and 1.02× the control's private bytes, in two batches** (raw
+  rows `benchmarks/results/2026-09-21-m8-wordwrap-ram.jsonl`, 12 of them).
+  Control = `2c5a25f` built in a clean worktree with *only* the bench knob
+  ported, so its runs still render on one line (md5 `cdf6da5a…`, 22 074 368 B).
+  Scene D, 10 000 blocks, 1 000 of them marked, arms alternating, one pinned
+  database per arm, each arm's seeding run excluded:
+  batch 1 (this tree md5 `f59edb1b…`, 22 081 024 B) control 112.7 / 111.4 →
+  this tree 115.2 / 115.9 = **1.031×**; batch 2, after the table and column
+  delegates joined (`4f9205ca…`, 22 087 680 B) control 114.3 / 111.1 → this
+  tree 114.8 / 115.7 = **1.023×**. Both are well inside the ≤1.2× gate, and the
+  honest reading is at the gate's own resolution: the +2.5…3.5 MB between the
+  two means is smaller than the 3.6 MB the *control* arm spread across by itself
+  in batch 2. What the two batches do pin down is that the paragraph change has
+  a shape — the marked rows go from 3 runs to 11 cells each, and a cell is an
+  item with its own measured `Text` — and that the two delegates scene D never
+  realizes cost nothing on it, which is exactly what they should.
+- **The projection cost of the cut, measured in both arms** (an `#[ignore]`d
+  timing test in `state.rs`'s module — the same shape ADR-0039's projection
+  number takes, and re-taken at another commit by copying that one test into a
+  worktree, which is `#[cfg(test)]` code and touches nothing under measurement;
+  50 rounds of `project_blocks` over 10 000 rows): unmarked 41.686 ms control /
+  41.504 ms this tree — the two arms agree to 0.4 %, which is the control that
+  the fixture and the machine are the same — and 1 000 rows marked 44.147
+  (+2.461) / 46.942 (+5.438). So the word cut costs ≈2.8 ms per projection of a
+  page whose every tenth line carries a mark, ≈2.8 µs per marked line, and
+  nothing at all on an unmarked page.
+- **Pixels.** `sweep23` → `sweep24`, 49 → 50 scenes: 3 moved, 46 byte-identical,
+  1 new. `marks` and `dark-marks` both at 1 918–1 942 sampled px inside
+  x 390..1148 / y 196..240 — one paragraph band, and the new shot shows the
+  marked line as two complete lines instead of one clipped one. `math-inline`
+  moved 360 px inside x 420..664 / y 194..210, which needed a second probe
+  because it is the scene where the change should be invisible: an ink-edge scan
+  puts the right-most glyph column at 661 before and 664 after, i.e. ≈3 px of
+  extra line spread from measuring words separately instead of one 40-word
+  string — sub-pixel per gap, and the shift probe says it is not a translation
+  (a pure dx/dy shift does not zero the difference). New scene `marks-wrap`
+  exists precisely because the old `marks` fixture could not show four lines of
+  mixed marks: a ~380-char sentence with a bold phrase, an italic word, a code
+  span and a link, and its needles now `.expect("needle present")` instead of
+  `unwrap_or(0)` — silently marking offset 0 is how `marks` once demoed the
+  wrong words.
+- **Pixels, second half: the other two run rows, and a zero that had to be
+  argued with.** `sweep24` → `sweep25` moved **0 of the 50** existing scenes and
+  added 2 (`table-marks`, `columns-marks`). That zero is not the evidence — the
+  two new shots are, because a wrapped cell and a wrapped column line are
+  exactly what no scene in the baseline contained: the grid's fixture holds one
+  word per cell and the layout's holds "Column 1 / Column 2", so the delegates
+  changed and nothing was there to show it. Both new scenes put an over-long
+  marked sentence into the narrowest box each surface has — the cell at a third
+  of the grid, the line at half the page — and both render their wrapped lines
+  with the bold phrase on the line the shaper put it on, the row grown to
+  `cell-text.height` / `plain-text.height` around them. A scene that could not
+  fail is how this slice would have shipped a silent no-op.
+- **Still needs a human window.** No headless scene proves: clicking to a caret
+  position on a *wrapped* marked line (the overlay is hidden while editing, so
+  the mapping is plain-text, but it should be watched), a marked paragraph that
+  grows a line while you type in it, a link whose cell is now one word rather
+  than the whole phrase (hover target, and whether a single-word underline
+  reads as a bug), and a marked CJK paragraph, which has no ASCII spaces to cut
+  on and therefore keeps the old one-cell-per-mark behaviour entirely.
+
 ## ADR-0040 · A link card derives its two lines at paint time and hands the address to the system
 
 Decision: `BlockKind::Embed` (row id 22, database string `"embed"`) stores the

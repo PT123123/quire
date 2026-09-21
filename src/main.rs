@@ -18,6 +18,10 @@ pub struct LaunchArgs {
     pub bench_pages: usize,
     /// Scene D/F with media: image rows on the bench page (--pictures N).
     pub pictures: usize,
+    /// Scene D with inline marks: rows of the bench page carrying a bold mark
+    /// (--marks N). Without it the bench page has no marks at all, and the
+    /// runs channel a marked line is drawn from stays invisible to the gate.
+    pub marks: usize,
     /// Scene F: programmatic continuous scroll (--scroll).
     pub scroll: bool,
     /// Scene F: how far one frame advances (--scroll-step, default 8 px). A
@@ -55,6 +59,7 @@ fn parse_launch_args() -> LaunchArgs {
         auto_exit_secs: 0.0,
         bench_pages: 0,
         pictures: 0,
+        marks: 0,
         scroll: false,
         scroll_step: 8.0,
         scene: None,
@@ -83,6 +88,10 @@ fn parse_launch_args() -> LaunchArgs {
             }
             ("--pictures", Some(v)) => {
                 a.pictures = v.parse().unwrap_or(0);
+                i += 1;
+            }
+            ("--marks", Some(v)) => {
+                a.marks = v.parse().unwrap_or(0);
                 i += 1;
             }
             ("--scroll", _) => {
@@ -339,6 +348,7 @@ fn real_main(start: std::time::Instant) -> Result<(), String> {
         auto_exit_secs: launch.auto_exit_secs,
         bench_pages: launch.bench_pages,
         pictures: launch.pictures,
+        marks: launch.marks,
     };
     let ui = AppWindow::new().map_err(|e| e.to_string())?;
     mark("appwindow_new");
@@ -422,15 +432,18 @@ fn real_main(start: std::time::Instant) -> Result<(), String> {
 
     if launch.dump_state {
         let pages = state.workspace.borrow().page_count();
-        let blocks = {
+        let (blocks, marked) = {
             let d = state.doc.borrow();
             let mut n = 0;
+            let mut marked = 0;
             for pid in [102, 105] {
-                n += d.page_blocks(quire::core::PageId(pid)).len();
+                let rows = d.page_blocks(quire::core::PageId(pid));
+                n += rows.len();
+                marked += rows.iter().filter(|b| !b.marks.is_empty()).count();
             }
-            n
+            (n, marked)
         };
-        eprintln!("dump-state: pages={pages} gs+atlas-blocks={blocks}");
+        eprintln!("dump-state: pages={pages} gs+atlas-blocks={blocks} marked={marked}");
     }
 
     if args.auto_exit_secs > 0.0 {

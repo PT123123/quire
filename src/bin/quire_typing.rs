@@ -33,6 +33,8 @@ struct Args {
     duration: f64,
     /// Run one full-text query every N keystrokes and time it (0 = off).
     search_every: usize,
+    /// Rows of the page that carry a bold mark (0 = none, as ever).
+    marks: usize,
     /// Database file to type against (default: in-memory).
     db: Option<std::path::PathBuf>,
     /// Print one line per keystroke to stderr.
@@ -58,6 +60,7 @@ impl Args {
             rate: get("--rate", 30.0).max(0.1),
             duration: get("--duration", 8.0),
             search_every: get("--search-every", 0.0) as usize,
+            marks: get("--marks", 0.0) as usize,
             db: parse_str(argv, "--db").map(std::path::PathBuf::from),
             verbose: argv.iter().any(|a| a == "--verbose"),
         }
@@ -176,6 +179,7 @@ fn run() -> Result<(), String> {
         auto_exit_secs: 0.0,
         bench_pages: 0,
         pictures: 0,
+        marks: args.marks,
     };
     let state = AppState::new(&handle, Some(repo.clone()));
     controller::bind(&ui, &state);

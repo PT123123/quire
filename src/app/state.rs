@@ -178,6 +178,10 @@ pub struct HandleArgs {
     /// Scene D/F with media: how many of the bench page's rows are pictures
     /// (SPEC §三十七's gate for a page of images being scrolled).
     pub pictures: usize,
+    /// Scene D with inline marks: how many of the bench page's rows carry a
+    /// bold mark. A page with no marks cannot show what the runs channel costs,
+    /// and scene D has none without this.
+    pub marks: usize,
 }
 
 /// Build the mock/bench session (fresh database or no persistence).
@@ -298,6 +302,7 @@ impl AppState {
             let rows = mock_blocks_bench(args.blocks);
             let mut core_blocks = rows_to_blocks(PAGE_ATLAS, rows, &mut doc);
             bench_pictures(&mut core_blocks, args.pictures);
+            bench_marks(&mut core_blocks, args.marks);
             doc.set_page_blocks(core_page_id(PAGE_ATLAS), core_blocks);
             let _ = title;
         }
@@ -3032,9 +3037,10 @@ fn rows_to_blocks(page: i32, rows: Vec<BlockRow>, doc: &mut Document) -> Vec<Blo
         .collect()
 }
 
-/// Split text into per-mark runs. Runs are single-line rendered (Slint Text
-/// has no inline rich formatting — documented limitation, see
-/// docs/EDITOR_ARCHITECTURE.md).
+/// Split text into runs: one per mark change, and one per word inside an
+/// unmarked stretch. The delegate lays the runs out with a wrapping flexbox
+/// and a run is one cell, so it cannot break — cutting the plain stretches
+/// to words is what gives a marked line anywhere to wrap (ADR-0041).
 fn build_runs(text: &str, marks: &[crate::core::Mark]) -> Vec<TextRun> {
     if marks.is_empty() || text.is_empty() {
         return Vec::new();
@@ -3050,6 +3056,29 @@ fn build_runs(text: &str, marks: &[crate::core::Mark]) -> Vec<TextRun> {
     }
     bounds.sort_unstable();
     bounds.dedup();
+    let covered = |s: usize, e: usize| marks.iter().any(|m| m.start <= s && m.end >= e);
+    let mut split: Vec<usize> = Vec::with_capacity(bounds.len() + 8);
+    split.push(bounds[0]);
+    for w in bounds.windows(2) {
+        let (s, e) = (w[0], w[1]);
+        if s < e && !covered(s, e) {
+            // cut at the start of every word but the first, so the whitespace
+            // that ends a word stays on it — the cell then reads as the shaper
+            // reads it: word, then the break, then the space it hung on.
+            let mut word = false;
+            let mut prev_ws = true;
+            for (i, ch) in text[s..e].char_indices() {
+                let ws = ch.is_ascii_whitespace();
+                if word && !ws && prev_ws {
+                    split.push(s + i);
+                }
+                word |= !ws;
+                prev_ws = ws;
+            }
+        }
+        split.push(e);
+    }
+    bounds = split;
     bounds
         .windows(2)
         .filter_map(|w| {
@@ -3708,6 +3737,35 @@ fn bench_pictures(blocks: &mut [Block], pictures: usize) {
     }
 }
 
+/// Bold the second word of every `stride`-th bench row, so the bench page has
+/// marked paragraphs and the gate can see the runs channel at all (ADR-0041).
+/// A row with no space to bold — the Chinese fixture line — is left alone,
+/// which is the point: it takes no runs.
+fn bench_marks(blocks: &mut [Block], marks: usize) {
+    if marks == 0 {
+        return;
+    }
+    let stride = (blocks.len() / marks.min(blocks.len())).max(1);
+    for (i, b) in blocks.iter_mut().enumerate() {
+        if i % stride != stride - 1 {
+            continue;
+        }
+        let t = b.text.as_str();
+        let Some(start) = t.find(' ').map(|p| p + 1) else {
+            continue;
+        };
+        let Some(rel) = t[start..].find(' ') else {
+            continue;
+        };
+        b.marks = vec![crate::core::Mark {
+            start,
+            end: start + rel,
+            kind: crate::core::MarkKind::Bold,
+            url: String::new(),
+        }];
+    }
+}
+
 /// Title + block texts, the blob the search scans.
 fn block_search_blob(title: &str, blocks: &[BlockRow]) -> String {
     let mut blob = String::from(title);
@@ -4074,6 +4132,142 @@ mod tests {
         );
     }
 
+    /// What the word cut costs a projection: the same 10 000 rows, once with
+    /// no marks at all and once with a bold mark on every tenth row, so 1 000
+    /// paragraphs go from three runs to fifteen. Printed, not asserted — its
+    /// number is the A/B between the two arms of the RAM gate, and only the
+    /// control build still has the three-run shape.
+    #[test]
+    #[ignore = "prints a timing; run with --release"]
+    fn cost_of_a_marked_page_on_the_projection() {
+        use crate::core::{BlockKind, Mark, MarkKind};
+        use std::time::Instant;
+        let rounds = 50u32;
+        let build = |marked: bool| -> Vec<crate::core::Block> {
+            (0..10_000u64)
+                .map(|i| {
+                    let mut b = blk(
+                        i + 2,
+                        None,
+                        i,
+                        BlockKind::Paragraph,
+                        false,
+                        "Pack my box with five dozen liquor jugs, then verify rendering.",
+                    );
+                    if marked && i % 10 == 3 {
+                        let t = b.text.as_str();
+                        let start = t.find(' ').unwrap() + 1;
+                        let end = start + t[start..].find(' ').unwrap();
+                        b.marks = vec![Mark {
+                            start,
+                            end,
+                            kind: MarkKind::Bold,
+                            url: String::new(),
+                        }];
+                    }
+                    b
+                })
+                .collect()
+        };
+        let time = |blocks: &[crate::core::Block]| {
+            let t = Instant::now();
+            for _ in 0..rounds {
+                std::hint::black_box(super::project_blocks(blocks).len());
+            }
+            t.elapsed().as_secs_f64() * 1e3 / rounds as f64
+        };
+        let (plain, with_marks) = (time(&build(false)), time(&build(true)));
+        println!(
+            "projection: 10 000 unmarked rows {plain:.3} ms, 1 000 of them marked \
+             {with_marks:.3} ms (+{:.3} ms)",
+            with_marks - plain
+        );
+    }
+
+    /// A run is one flex cell, and a cell cannot break — so the unmarked
+    /// stretches of a marked line are cut to a word each, which is where a
+    /// marked paragraph wraps (ADR-0041). Marked stretches stay whole: an
+    /// underline or code box split at every space is worse than the long bold
+    /// phrase it cannot break, and a link's click target has to stay one run.
+    #[test]
+    fn a_marked_line_is_cut_to_words_between_the_marks() {
+        use crate::core::{Mark, MarkKind};
+        let text = "one two three bold words four five";
+        let span = |s: &str| text.find(s).unwrap();
+        let marks = [Mark {
+            start: span("bold"),
+            end: span("bold") + "bold words".len(),
+            kind: MarkKind::Bold,
+            url: String::new(),
+        }];
+        let runs = super::build_runs(text, &marks);
+        let cells: Vec<&str> = runs.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(
+            cells,
+            vec!["one ", "two ", "three ", "bold words", " four ", "five"],
+            "the marked stretch stays one cell, the plain stretches do not"
+        );
+        // only a stretch that opens right after a mark carries its space, and
+        // that is one cell wide — the words inside a stretch start clean
+        assert!(cells[1..4].iter().all(|c| !c.starts_with(' ')));
+        assert_eq!(
+            runs.iter()
+                .map(|r| (r.bold, r.italic, r.strike, r.code, r.link))
+                .filter(|f| *f != (false, false, false, false, false))
+                .count(),
+            1,
+            "a mark leaked onto a plain word"
+        );
+        // cutting is a re-join, never a rewrite
+        let back: String = runs.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(back, text);
+    }
+
+    /// Two shapes the cut must survive: a mark that opens the line, and text
+    /// whose words are not ASCII.
+    #[test]
+    fn the_word_cut_joins_back_to_the_text_it_came_from() {
+        use crate::core::{Mark, MarkKind};
+        for (text, marks) in [
+            (
+                "code here and  more",
+                vec![Mark {
+                    start: 0,
+                    end: 4,
+                    kind: MarkKind::Code,
+                    url: String::new(),
+                }],
+            ),
+            (
+                "写作与中文测试 link 结尾",
+                vec![Mark {
+                    start: "写作与中文测试 ".len(),
+                    end: "写作与中文测试 link".len(),
+                    kind: MarkKind::Italic,
+                    url: String::new(),
+                }],
+            ),
+            // a mark whose end is the end of the line leaves no tail to cut
+            (
+                "tail only",
+                vec![Mark {
+                    start: 5,
+                    end: 9,
+                    kind: MarkKind::Strike,
+                    url: String::new(),
+                }],
+            ),
+        ] {
+            let runs = super::build_runs(text, &marks);
+            let back: String = runs.iter().map(|r| r.text.as_str()).collect();
+            assert_eq!(back, text, "the runs of {text:?} do not re-join");
+            assert!(
+                runs.iter().all(|r| !r.text.is_empty()),
+                "an empty cell in {text:?} costs an item and paints nothing"
+            );
+        }
+    }
+
     /// SPEC §十六 names these two as palette commands, and the id a row
     /// carries is exactly what the dispatch matches on — a drifted row is a
     /// silently dead command, which is how the id >= 9 shadowing bug hid.
@@ -4191,7 +4385,7 @@ mod tests {
         use crate::core::AttachmentId;
 
         let state = AppState::new(
-            &HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0, pictures: 0 },
+            &HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0, pictures: 0, marks: 0 },
             None,
         );
         // No database, so the store is the temp fallback; the high id range
@@ -4324,7 +4518,7 @@ mod tests {
 
         let dir = ScratchDir::new("pictures");
         let db = dir.path().join("library.db");
-        let args = HandleArgs { blocks: 60, auto_exit_secs: 0.0, bench_pages: 0, pictures: 20 };
+        let args = HandleArgs { blocks: 60, auto_exit_secs: 0.0, bench_pages: 0, pictures: 20, marks: 0 };
 
         let first = AppState::new(&args, Some(std::sync::Arc::new(
             crate::storage::SqliteRepository::open(&db).unwrap(),
@@ -4486,7 +4680,7 @@ mod tests {
             crate::storage::SqliteRepository::open(&dir.path().join("library.db")).unwrap(),
         );
         let state =
-            AppState::new(&HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0, pictures: 0 }, Some(repo));
+            AppState::new(&HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0, pictures: 0, marks: 0 }, Some(repo));
 
         state.create_page(None);
         let empty = state.start_page().expect("an empty page takes a paragraph");
@@ -4553,7 +4747,7 @@ mod tests {
     }
 
     fn plain_args() -> super::HandleArgs {
-        super::HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0, pictures: 0 }
+        super::HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0, pictures: 0, marks: 0 }
     }
 
     /// A fresh session on a real database: one page with `n` pictures on it,

@@ -213,15 +213,18 @@ export component EditorBlock inherits Rectangle {
     }
 
     // inline-mark runs (M6). Slint Text has no inline formatting, so a
-    // marked block renders as side-by-side runs (single line, clipped —
-    // documented limitation). Unmarked blocks keep the wrapping Text.
+    // marked block renders as runs laid side by side by a wrapping flexbox:
+    // each run is one cell and a line breaks between cells. Rust cuts the
+    // unmarked stretches to a word per run, which is where the breaks come
+    // from (ADR-0041). Unmarked blocks keep the wrapping Text.
     if is-plain && !editing && block.runs.length > 0 : Rectangle {
         x: content-x + list-indent + (is-list ? 26px : 0px) + root.fold-gutter;
         width: content-width - list-indent - (is-list ? 26px : 0px) - root.fold-gutter;
         y: top-margin;
         height: plain-text.height;
         clip: true;
-        HorizontalLayout {
+        FlexboxLayout {
+            flex-wrap: wrap;
             // start, not the default stretch: a short marked line leaves
             // space in the frame, and a stretching layout spends it as gaps
             // between the runs instead of leaving it at the end

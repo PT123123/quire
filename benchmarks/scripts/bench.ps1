@@ -7,6 +7,7 @@ param(
     [double]$ScrollStep = 0,  # scene F: px per frame (0 = the app's own 8 px)
     [int]$PageSwitch = 0,     # scene G: switch between N bench pages
     [int]$Pictures = 0,       # scene D/F with media: image rows on the page
+    [int]$Marks = 0,          # scene D with marks: rows carrying a bold mark
     [switch]$Typing,          # scene E: run quire-typing against $Exe
     [double]$Rate = 30,       # scene E: keystrokes per second
     [int]$SearchEvery = 0,    # scene E: one full-text query every N strokes
@@ -30,6 +31,7 @@ if ($Typing) {
     }
     $childArgs = @("--blocks", "$Blocks", "--rate", "$Rate", "--duration", "$($IdleSeconds + 3)", "--db", "$dbFile")
     if ($SearchEvery -gt 0) { $childArgs += @("--search-every", "$SearchEvery") }
+    if ($Marks -gt 0) { $childArgs += @("--marks", "$Marks") }
     $reportFile = Join-Path $env:TEMP "quire-typing-$Label.json"
     if (Test-Path $reportFile) { Remove-Item $reportFile }
 } else {
@@ -42,6 +44,7 @@ if ($Typing) {
     # the app prints its decode cache itself and `--dump-state` is the switch
     # that asks for it.
     if ($Pictures -gt 0) { $childArgs += @("--pictures", "$Pictures", "--dump-state") }
+    if ($Marks -gt 0) { $childArgs += @("--marks", "$Marks", "--dump-state") }
     # A pinned file keeps the run out of the app's real library, and a pinned
     # *empty* file is what makes the second pass a load rather than a seed.
     if ($PinnedDb -ne "") { $childArgs += @("--db", $PinnedDb) }
@@ -51,7 +54,7 @@ $sw = [System.Diagnostics.Stopwatch]::StartNew()
 # The app's own report lines go to stderr; only a media scene asks for one, so
 # only a media scene takes the handle.
 $cacheFile = ""
-if ($Pictures -gt 0) {
+if ($Pictures -gt 0 -or $Marks -gt 0) {
     $cacheFile = Join-Path $env:TEMP "quire-cache-$Label.txt"
     if (Test-Path $cacheFile) { Remove-Item $cacheFile }
 }
@@ -97,10 +100,15 @@ if ($reportFile -ne "" -and (Test-Path $reportFile)) {
     if ($line) { $typingReport = $line.Trim() }
 }
 $cacheReport = "null"
+$dumpState = "null"
 if ($cacheFile -ne "") {
     if (Test-Path $cacheFile) {
         $line = (Get-Content $cacheFile | Where-Object { $_ -like '*"event":"attachment_cache"*' } | Select-Object -Last 1)
         if ($line) { $cacheReport = $line.Trim() }
+        # what the app says it built, so an arm proves its own fixture instead
+        # of taking this script's label on faith
+        $dump = (Get-Content $cacheFile | Where-Object { $_ -like 'dump-state:*' } | Select-Object -Last 1)
+        if ($dump) { $dumpState = '"' + ($dump.Trim() -replace '\\', '\\') + '"' }
         Remove-Item -Path $cacheFile -Force
     }
 }
@@ -117,4 +125,4 @@ $jsonLabel = $Label -replace '\\', '\\'
 $jsonDb = $PinnedDb
 if ($dbFile -ne "") { $jsonDb = $dbFile }
 $jsonDb = $jsonDb -replace '\\', '\\'
-"{`"label`":`"$jsonLabel`",`"exe`":`"$jsonExe`",`"db`":`"$jsonDb`",`"blocks`":$Blocks,`"startup_ms`":$startupMs,`"idle_cpu_pct`":$cpuPct,`"ram_workingset_mb`":$ramMB,`"ram_private_mb`":$privMB,`"exit_code`":$ec,`"typing`":$typingReport,`"attachment_cache`":$cacheReport}"
+"{`"label`":`"$jsonLabel`",`"exe`":`"$jsonExe`",`"db`":`"$jsonDb`",`"blocks`":$Blocks,`"startup_ms`":$startupMs,`"idle_cpu_pct`":$cpuPct,`"ram_workingset_mb`":$ramMB,`"ram_private_mb`":$privMB,`"exit_code`":$ec,`"typing`":$typingReport,`"attachment_cache`":$cacheReport,`"dump_state`":$dumpState}"

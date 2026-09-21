@@ -315,16 +315,19 @@ export component ColumnItemRow inherits Rectangle {
         wrap: word-wrap;
     }
 
-    // marked text: runs side by side, clipped to one line (Slint Text has no
-    // inline formatting) — the documented limitation, shared with the rows
+    // marked text: one run per word and per mark, wrapped by a flexbox. A run
+    // is one layout cell and a cell cannot break, so the break opportunities
+    // come from Rust (ADR-0041); the height is `plain-text`'s — the same text
+    // at the same width, invisible here and still the row's measure
     run-frame := Rectangle {
         x: root.gutter;
         y: root.top-margin;
         width: root.text-width;
-        height: run-row.min-height;
+        height: plain-text.height;
         visible: root.is-text-line && !is-edit && item.runs.length > 0;
         clip: true;
-        run-row := HorizontalLayout {
+        run-row := FlexboxLayout {
+            flex-wrap: wrap;
             alignment: start;
             spacing: 0px;
             for run in item.runs : Rectangle {

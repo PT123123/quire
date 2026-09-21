@@ -93,8 +93,8 @@ export component TableBlock inherits Rectangle {
                 }
 
                 // unmarked cells wrap (the only place a cell's text is drawn);
-                // marked cells fall to the run row below, clipped to one line
-                // like every other marked block
+                // a marked cell is drawn by the run row below and this Text
+                // stays invisible, which is still what measures the row
                 cell-text := Text {
                     x: root.pad; y: root.pad;
                     width: parent.width - 2 * root.pad;
@@ -107,16 +107,20 @@ export component TableBlock inherits Rectangle {
                     wrap: word-wrap;
                 }
 
-                // marked cells fall to this run row, clipped to one line like
-                // every other marked block (Slint clips a Rectangle, not a
+                // marked cells fall to this run row. A run is one layout cell
+                // and a cell cannot break, so the wrap comes from Rust cutting
+                // the unmarked stretches to words (ADR-0041); the row's height
+                // stays `cell-text`'s, which is the same text at the same width
+                // and already measures the row (Slint clips a Rectangle, not a
                 // layout, so the frame is its own element)
                 Rectangle {
                     x: root.pad; y: root.pad;
                     width: parent.width - 2 * root.pad;
-                    height: run-row.min-height;
+                    height: cell-text.height;
                     visible: cell.runs.length > 0 && !is-edit;
                     clip: true;
-                    run-row := HorizontalLayout {
+                    run-row := FlexboxLayout {
+                        flex-wrap: wrap;
                         alignment: start;
                         spacing: 0px;
                         for run in cell.runs : Rectangle {

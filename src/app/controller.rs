@@ -2724,8 +2724,9 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
         // SPEC §三十七 批次 B: a grid sitting in the page. `table-edit` is the
         // same table with the caret in one cell, so the pair proves both the
         // resting shape and that a cell can take the editor at all — the
-        // second is the one a static model could fake.
-        "table" | "table-edit" => {
+        // second is the one a static model could fake. `table-marks` is the
+        // third question: a marked cell, which is drawn by a different row.
+        "table" | "table-edit" | "table-marks" => {
             let page = core_page_id(state.open_page.get());
             let target = {
                 let d = state.doc.borrow();
@@ -2755,6 +2756,28 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
                     text: (*word).into(),
                 });
             }
+            if scene == "table-marks" {
+                // one cell whose words cannot fit its column: a marked cell is
+                // drawn by the run row, and whether that row wraps is a
+                // different question from whether a paragraph's does
+                // (ADR-0041)
+                let Some(cell) = cells.first().copied() else { return };
+                let text = "Revenue grew because the team shipped the second half of the plan.";
+                let _ = state.exec_editor(Command::ReplaceText {
+                    id: cell,
+                    text: text.into(),
+                });
+                let marks = vec![crate::core::Mark {
+                    start: text.find("the team").expect("needle present"),
+                    end: text.find("the team").expect("needle present") + "the team".len(),
+                    kind: crate::core::MarkKind::Bold,
+                    url: String::new(),
+                }];
+                state.doc.borrow_mut().apply(&[crate::core::Change::BlockMarksSet {
+                    id: cell,
+                    marks,
+                }]);
+            }
             state.reproject_blocks();
             if scene == "table-edit" {
                 if let Some(cell) = cells.get(3) {
@@ -2765,8 +2788,9 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
         // SPEC §三十七 批次 B: a layout tiling the page. `columns-3` is the same
         // layout after the strip's "Add column", so the pair proves the boxes
         // really re-tile — a static model could show a count that never moved
-        // the widths.
-        "columns" | "columns-3" => {
+        // the widths. `columns-marks` puts an over-long marked line in the
+        // first box, which is the third place runs are drawn.
+        "columns" | "columns-3" | "columns-marks" => {
             let page = core_page_id(state.open_page.get());
             let target = {
                 let d = state.doc.borrow();
@@ -2822,6 +2846,31 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
                         text: format!("Column {}", n + 1).into(),
                     });
                 }
+            }
+            if scene == "columns-marks" {
+                // the third run consumer: a line inside a box, at half the page
+                // width, with more words than fit (ADR-0041)
+                let first_line = {
+                    let d = state.doc.borrow();
+                    d.page_blocks(page)
+                        .iter()
+                        .filter(|b| b.parent == boxes.first().copied())
+                        .min_by_key(|b| b.order)
+                        .map(|b| b.id)
+                };
+                let Some(id) = first_line else { return };
+                let text = "Two boxes, and a sentence that has to break inside one of them.";
+                let _ = state.exec_editor(Command::ReplaceText { id, text: text.into() });
+                let marks = vec![crate::core::Mark {
+                    start: text.find("has to break").expect("needle present"),
+                    end: text.find("has to break").expect("needle present") + "has to break".len(),
+                    kind: crate::core::MarkKind::Bold,
+                    url: String::new(),
+                }];
+                state.doc.borrow_mut().apply(&[crate::core::Change::BlockMarksSet {
+                    id,
+                    marks,
+                }]);
             }
             state.reproject_blocks();
         }
@@ -2994,6 +3043,49 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
                     .doc
                     .borrow_mut()
                     .apply(&[crate::core::Change::BlockMarksSet { id, marks }]);
+                state.reproject_blocks();
+            }
+        }
+        "marks-wrap" => {
+            // A marked paragraph long enough to need several lines (ADR-0041):
+            // `marks` is one line deep, and the wall this scene watches is the
+            // one below the first — where the runs break, and whether the row
+            // is tall enough to show all of it.
+            let page = core_page_id(state.open_page.get());
+            let text = "The landing page is a fixture and not a promise: every line of it is painted by the same delegate that paints a ten thousand line page, so what wraps here wraps there. A bold phrase in the middle of a sentence, an italic word, a code span like cargo build --release, and a link all arrive as runs, and a run is one cell of a layout that breaks between cells.";
+            let target = {
+                let d = state.doc.borrow();
+                d.page_blocks(page)
+                    .iter()
+                    .find(|b| b.kind == crate::core::BlockKind::Paragraph && !b.text.is_empty())
+                    .map(|b| b.id)
+            };
+            if let Some(id) = target {
+                // a needle that misses must not silently mark the head of the
+                // line — that is how `marks` once demoed the wrong words
+                let span = |needle: &str, kind: crate::core::MarkKind| crate::core::Mark {
+                    start: text.find(needle).expect("needle present"),
+                    end: text.find(needle).expect("needle present") + needle.len(),
+                    kind,
+                    url: if kind == crate::core::MarkKind::Link {
+                        "https://example.com".into()
+                    } else {
+                        String::new()
+                    },
+                };
+                let marks = vec![
+                    span("and not a promise", crate::core::MarkKind::Bold),
+                    span("delegate", crate::core::MarkKind::Italic),
+                    span("cargo build --release", crate::core::MarkKind::Code),
+                    span("breaks between cells", crate::core::MarkKind::Link),
+                ];
+                state.doc.borrow_mut().apply(&[
+                    crate::core::Change::BlockTextSet {
+                        id,
+                        text: text.into(),
+                    },
+                    crate::core::Change::BlockMarksSet { id, marks },
+                ]);
                 state.reproject_blocks();
             }
         }

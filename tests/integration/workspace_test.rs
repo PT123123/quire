@@ -40,7 +40,7 @@ fn recents_cap_and_order() {
 fn search_finds_unopened_page_content() {
     // content blobs are filled at construction, so search works before a
     // page is ever opened
-    let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0, pictures: 0 };
+    let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0, pictures: 0, marks: 0 };
     let state = AppState::new(&args, None);
     let hits = state.workspace.borrow().search("字体回退");
     assert!(
@@ -51,7 +51,7 @@ fn search_finds_unopened_page_content() {
 
 #[test]
 fn sidebar_projection_shape() {
-    let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0, pictures: 0 };
+    let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0, pictures: 0, marks: 0 };
     let state = AppState::new(&args, None);
     let rows = state.build_sidebar_rows();
     // sections in order, y offsets strictly increasing, no duplicate ids
@@ -72,7 +72,7 @@ fn sidebar_projection_shape() {
 
 #[test]
 fn create_then_open_page_lands_empty() {
-    let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0, pictures: 0 };
+    let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0, pictures: 0, marks: 0 };
     let state = AppState::new(&args, None);
     let id = state.create_page(None);
     assert_eq!(state.open_page.get(), id);
@@ -91,7 +91,7 @@ fn create_then_open_page_lands_empty() {
 #[test]
 fn duplicated_nested_list_keeps_parents_in_the_copy() {
     // page with a bullet + a nested child (parent pointer inside the page)
-    let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0, pictures: 0 };
+    let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0, pictures: 0, marks: 0 };
     let state = AppState::new(&args, None);
     let page = state.create_page(None);
     let root = quire::core::BlockId(9_000_000_001);
@@ -153,7 +153,7 @@ fn duplicated_nested_list_keeps_parents_in_the_copy() {
 
 #[test]
 fn delete_open_page_resets_selection() {
-    let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0, pictures: 0 };
+    let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0, pictures: 0, marks: 0 };
     let state = AppState::new(&args, None);
     let id = state.create_page(None);
     assert!(state.delete_page(id), "deleting the open page is reported");
@@ -168,7 +168,7 @@ fn delete_open_page_resets_selection() {
 fn move_page_reparents_refuses_cycles_and_swaps_siblings() {
     use quire::app::state::PAGE_ATLAS;
 
-    let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0, pictures: 0 };
+    let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0, pictures: 0, marks: 0 };
     let state = AppState::new(&args, None);
 
     // reparent: Atlas moves under Getting Started, appended last
@@ -208,7 +208,7 @@ fn move_page_reparents_refuses_cycles_and_swaps_siblings() {
 
 #[test]
 fn duplicate_reserves_its_id_range() {
-    let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0, pictures: 0 };
+    let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0, pictures: 0, marks: 0 };
     let state = AppState::new(&args, None);
     let copy = state
         .duplicate_page(PAGE_GETTING_STARTED)
@@ -238,7 +238,7 @@ fn the_page_picker_lists_pages_and_the_link_conversion_guards_its_inputs() {
     use quire::app::state::PAGE_ATLAS;
     use slint::Model;
 
-    let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0, pictures: 0 };
+    let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0, pictures: 0, marks: 0 };
     let state = AppState::new(&args, None);
 
     // the picker lists every page in tree order; typing filters by title
@@ -304,7 +304,7 @@ fn page_tree_drag_moves_pages_and_refuses_illegal_lands() {
     use quire::app::state::PAGE_ATLAS;
     use slint::Model;
 
-    let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0, pictures: 0 };
+    let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0, pictures: 0, marks: 0 };
     let state = AppState::new(&args, None);
     let rows = state.sidebar_model().row_count() as i32;
 
@@ -349,7 +349,7 @@ fn page_tree_drag_moves_pages_and_refuses_illegal_lands() {
 
 #[test]
 fn duplicate_appends_consistently_when_the_gap_is_exhausted() {
-    let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0, pictures: 0 };
+    let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0, pictures: 0, marks: 0 };
     let state = AppState::new(&args, None);
 
     // two fresh roots get consecutive order keys, so duplicating the first
@@ -382,7 +382,7 @@ fn a_folded_section_shifts_drag_landings_but_not_row_numbers() {
     use quire::app::state::project_blocks;
     use quire::core::{Block, BlockId, BlockKind, ColorKind, OrderKey};
 
-    let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0, pictures: 0 };
+    let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0, pictures: 0, marks: 0 };
     let state = AppState::new(&args, None);
     let page = state.create_page(None);
     let pid = core_page_id(page);

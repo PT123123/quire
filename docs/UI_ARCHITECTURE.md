@@ -93,13 +93,14 @@ renderer (`quire-shot`, ADR-0011) into `.scratch/shots/latest.png`. Scenes
 live in `controller::apply_scene` + `apply_scene_overlay` — popups open in
 the overlay half so headless two-pass renders see their transitions.
 Current set: default, dark, palette, search-notes, menu, rename, settings,
-dialog, empty, edit, slash, block-menu, marks, link, find, nest, toggle,
+dialog, empty, edit, slash, block-menu, marks, marks-wrap, link, find, nest, toggle,
 toggle-fold, image, image-half, file, recovered, title-edit, table, table-edit,
-columns, columns-3, math, math-inline, toc, embed, embed-empty,
+table-marks, columns, columns-3, columns-marks, math, math-inline, toc, embed,
+embed-empty,
 plus dark combos (dark-slash, dark-find, dark-marks, dark-link, dark-block-menu,
 dark-title-edit).
-`benchmarks/scripts/sweep.ps1` holds the authoritative list — 49 scenes as of
-ADR-0040 — and this prose is the summary, so when the two disagree trust the
+`benchmarks/scripts/sweep.ps1` holds the authoritative list — 52 scenes as of
+ADR-0041 — and this prose is the summary, so when the two disagree trust the
 script. Every visual change ships with re-shot
 scenes; the judge-reviewed set is the regression baseline. `toggle` and
 `toggle-fold` are a pair on purpose: the same section open and closed, so a
@@ -156,7 +157,30 @@ not as a blank box with a button in it. Neither scene presses that button —
 `quire-shot` does not hit TouchAreas, and a headless press would launch a real
 browser — so the actual hand-off, the mid-edit card while an address is being
 typed, and the arrow's hover state are human-verified.
-The baseline is `.scratch/sweep23` (49 scenes). The set before it, `.scratch/sweep10`
+`marks` and `marks-wrap` are the same feature at two lengths (ADR-0041): a
+marked paragraph that overflows its frame, and one long enough to need four
+lines of it. The pair exists because the wall this slice moved was exactly a
+wrap, and one line of runs cannot show a wrap happening — `marks` alone proved
+only that the runs still paint, which is why the second scene had to be added
+beside the fix rather than instead of it. `marks-wrap` carries one bold phrase,
+one italic word, one code span and one link in the same sentence, so a break
+that lands in the wrong place shows up as a decoration that no longer sits on
+its own words. Its fixture derives every mark offset from the text with
+`.expect("needle present")`: the first version used `unwrap_or(0)`, and a needle
+that missed ("break between cells" for "breaks between cells") silently marked
+offset 0, which is how a scene comes to demo the wrong words and still look
+plausible.
+`table-marks` and `columns-marks` are the same feature on its other two surfaces
+(ADR-0041). A marked line is drawn by three different delegates — a block, a
+table cell, a line inside a column box — and the grid's fixture holds one word
+per cell while the layout's holds "Column 1 / Column 2", so neither of those two
+had ever seen a run that needed wrapping. Each new scene overwrites the
+narrowest box it can reach with a sentence too long for it and one bold phrase
+inside: the cell at a third of the grid, the line at half the page. They joined
+the set because the delegate edits they cover moved **0 of the 50** scenes that
+already existed — a correct reading of that zero requires a shot that would have
+failed, and there was none.
+The baseline is `.scratch/sweep25` (52 scenes). The set before it, `.scratch/sweep10`
 (42 scenes), re-baselined 37 of them for a
 reason unrelated to tables: `DocumentRow.head` bound `height` without `y` and so
 was centred in its delegate, which had been sitting the page title ~34 px below
@@ -192,6 +216,22 @@ evidence that one verdict covers the pair. Nothing else moved, `toc` and `math`
 in particular, and the four `EditorBlock` edits that ride along (the row's top
 margin, the body height, the input's x and width) changed no scene because every
 one of them is guarded by `block.kind == 22`.
+`sweep23` → `sweep24` (marked lines wrap) moved 3 of those 49 and added 1:
+`marks` and `dark-marks` at 1 942 / 1 918 px inside the *same* box,
+`x 390..1148 / y 196..240` — one paragraph band, two lines tall instead of one
+clipped line, and `dark-marks` matching its light twin to the pixel again — plus
+`math-inline` at 360 px inside `x 420..664 / y 194..210`. That third one is the
+scene that had to be argued with: a marked line that already fit on one line
+should not have moved at all, and it had. A shift probe (try dx/dy offsets, look
+for the offset that zeroes the difference) said it was not a translation, and an
+ink-edge scan said what it was — the right-most painted column went from 661 to
+664, ≈3 px of extra spread across the gaps of a line now measured word by word
+rather than as one string. Sub-pixel per gap, so the verdict is "wider by the
+rounding of eleven measurements", not "broken". 46 scenes were byte-identical,
+the two `table` and both `columns` scenes among them — and their being identical
+is a statement about their fixtures, which hold no marks at all, not about the
+change: the next sweep had to prove that the same wrap reaches those delegates
+(`sweep24` → `sweep25`, above).
 A re-sweep after a
 layout change is judged by diffing, not by looking:
 `benchmarks/scripts/diffbbox.ps1 -OldDir A -NewDir B` reports the bounding box
