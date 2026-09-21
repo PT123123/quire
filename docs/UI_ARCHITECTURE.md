@@ -98,11 +98,12 @@ find-cols, find-callout, nest, toggle,
 toggle-fold, image, image-half, file, recovered, title-edit, table, table-edit,
 table-marks, columns, columns-3, columns-marks, math, math-inline, toc, embed,
 embed-empty, code-hl, style-serif, style-mono, style-small, style-full,
-style-tight
+style-tight, page-icon, icon-picker
 plus dark combos (dark-slash, dark-find, dark-marks, dark-link, dark-code-hl,
-dark-block-menu, dark-block-colors, dark-title-edit, dark-style-serif).
-`benchmarks/scripts/sweep.ps1` holds the authoritative list — 64 scenes as of
-ADR-0044 — and this prose is the summary, so when the two disagree trust the
+dark-block-menu, dark-block-colors, dark-title-edit, dark-style-serif,
+dark-page-icon).
+`benchmarks/scripts/sweep.ps1` holds the authoritative list — 67 scenes as of
+ADR-0045 — and this prose is the summary, so when the two disagree trust the
 script. Every visual change ships with re-shot
 scenes; the judge-reviewed set is the regression baseline. `toggle` and
 `toggle-fold` are a pair on purpose: the same section open and closed, so a
@@ -128,6 +129,18 @@ switch each and `style-tight` is all three, so a token that leaked past the page
 would show up as a scene that was supposed to be identical to `default` and is
 not. `dark-style-serif` is the same claim in the other theme, and `page-style` is
 the Style submenu itself.
+The three `*-icon` / `page-icon` scenes are ADR-0045's, and they carry a
+different kind of evidence from every other group here: they are the slice whose
+*baseline* moved on purpose. Setting an icon adds a `Text` above the title and
+reserves its height in the head, so `page-icon` is that one row; `icon-picker` is
+the 8×12 grid over an iconless page (the state a user is in when they reach for
+it), and `dark-page-icon` exists because the headless software renderer draws
+emoji monochrome, so the dark theme is where "is the mark still legible" gets
+answered. The slice's real proof is the 64 scenes that were already there: every
+one of them changed, because an iconless tree row now shows its title's first
+character where it used to show a generic page glyph — and the diff stays inside
+the 16 px icon column (x 13..52), with **0 px** beyond x 53 in 63 of them. A row
+whose label had shifted its indent would have shown up as 64 movers past x 53.
 `image` and `image-half` are the same pair for the width tier — one picture
 block at 100 % and at 50 %, so a width setting that only moves the label and
 not the raster is caught by the row geometry. `file` is the picture scene's
@@ -295,7 +308,17 @@ width 51 533, all three 68 779 against the serif shot, dark serif 63 140 — and
 gutter is what tells a layout switch from a font swap: the text column starts at
 x 390 in the first three and at **x 284** (= sidebar 260 + `Theme.spacing-xl` 24)
 in the full-width arms.
-The baseline is `.scratch/sweep32` (64 scenes). The set before it, `.scratch/sweep10`
+`sweep32` → `sweep33` (a page's own icon, ADR-0045) moved **64 of 64** and added
+3 — the first baseline in this file that moves everywhere on purpose, because
+every iconless tree row now paints its title's first character where it used to
+paint a generic page glyph. The reading is the shape of the movers, not their
+count: 72 937 px in total, the modal scene 1 153 px inside x 13..52 /
+y 365..713 (the 16 px slot at depths 0..2), and re-running the same pass from
+x 53 rightward returns **0 px in 63 of the 64** with `menu.png` alone at 345 px
+inside x 254..415 / y 723..775 — its own popup, one row taller. Had the new slot
+cost an indent, 64 scenes would have moved past x 53.
+The baseline is `.scratch/sweep33` (67 scenes). The set before it, `.scratch/sweep32`
+(64 scenes), and before that `.scratch/sweep10`
 (42 scenes), re-baselined 37 of them for a
 reason unrelated to tables: `DocumentRow.head` bound `height` without `y` and so
 was centred in its delegate, which had been sitting the page title ~34 px below

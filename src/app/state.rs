@@ -407,7 +407,7 @@ impl AppState {
         // reproduces exactly this state
         if let (Some(p), true) = (&persistence, persisted.is_none()) {
             let mut batch = Vec::new();
-            for (id, title, parent, favorite, expanded, font, full_width, small_text) in
+            for (id, title, parent, favorite, expanded, font, full_width, small_text, icon) in
                 workspace.page_seed_rows()
             {
                 batch.push(Change::PageCreated(crate::core::Page {
@@ -420,6 +420,7 @@ impl AppState {
                     font,
                     full_width,
                     small_text,
+                    icon,
                 }));
             }
             // rows before the blocks that point at them
@@ -556,14 +557,22 @@ impl AppState {
         if !favorites.is_empty() {
             push(&mut rows, &mut y, header("Favorites"));
             for (id, title) in favorites {
-                push(&mut rows, &mut y, leaf_row(id, &title, "favorite", false));
+                push(
+                    &mut rows,
+                    &mut y,
+                    leaf_row(id, &title, "favorite", false, icon_mark(&ws, id)),
+                );
             }
         }
         let recents = ws.recents();
         if !recents.is_empty() {
             push(&mut rows, &mut y, header("Recent"));
             for (id, title) in recents.iter().take(MAX_RECENTS) {
-                push(&mut rows, &mut y, leaf_row(*id, title, "recent", false));
+                push(
+                    &mut rows,
+                    &mut y,
+                    leaf_row(*id, title, "recent", false, icon_mark(&ws, *id)),
+                );
             }
         }
 
@@ -579,11 +588,14 @@ impl AppState {
                 has_children: false,
                 selected: false,
                 y: 0,
+                icon: "".into(),
             },
         );
         for r in ws.tree_rows() {
+            let icon = icon_slot(&ws, r.id, &r.label);
             rows.push(SidebarNode {
                 id: r.id,
+                icon,
                 label: r.label.into(),
                 kind: "page".into(),
                 depth: r.depth,
@@ -604,6 +616,7 @@ impl AppState {
             has_children: false,
             selected: false,
             y: y,
+            icon: "".into(),
         });
         rows
     }
@@ -2230,6 +2243,7 @@ impl AppState {
             font: crate::core::PageFont::default(),
             full_width: false,
             small_text: false,
+            icon: String::new(),
         })]);
         let from = self.open_page.get();
         self.open_page(id);
@@ -2309,6 +2323,7 @@ impl AppState {
             };
             let title = self.workspace.borrow().title_of(nid).unwrap().to_string();
             let style = self.workspace.borrow().page_style(id).unwrap_or_default();
+            let icon = self.workspace.borrow().icon_of(id);
             let blob = block_search_blob(&title, &project_blocks(&copies, &FindHits::new()));
 
             // order: right after the original when a gap exists, else the
@@ -2363,6 +2378,7 @@ impl AppState {
                 font: style.0,
                 full_width: style.1,
                 small_text: style.2,
+                icon,
             })];
             for b in &copies {
                 batch.push(Change::BlockInserted(b.clone()));
@@ -2524,6 +2540,7 @@ impl AppState {
                 font: crate::core::PageFont::default(),
                 full_width: false,
                 small_text: false,
+                icon: String::new(),
             }),
             Change::BlockRefSet {
                 id: block_id,
@@ -2673,23 +2690,31 @@ impl AppState {
         true
     }
 
-    /// Tell the editor which page it is drawing (SPEC §三十八). The three
-    /// numbers are the only route a page's look takes: nothing in `ui/` reads
-    /// the workspace, and no block carries a font. Called on every open-page
+    /// Tell the editor which page it is drawing (SPEC §三十八). The four values
+    /// are the only route a page's look takes: nothing in `ui/` reads the
+    /// workspace, and no block carries a font. Called on every open-page
     /// change, so a page that never touches the menu still says 0/false/false.
     pub fn apply_page_style(&self) {
         let Some(ui) = self.ui.borrow().clone() else {
             return;
         };
-        let (font, full_width, small_text) = self
-            .workspace
-            .borrow()
-            .page_style(self.open_page.get())
-            .unwrap_or_default();
+        let (font, full_width, small_text, icon) = {
+            let ws = self.workspace.borrow();
+            let (font, full_width, small_text) = ws
+                .page_style(self.open_page.get())
+                .unwrap_or_default();
+            (font, full_width, small_text, ws.icon_of(self.open_page.get()))
+        };
         let g = ui.upgrade().unwrap();
         g.set_page_font(font.slot());
         g.set_page_full_width(full_width);
         g.set_page_small_text(small_text);
+        // The stored emoji, which for an iconless page is nothing: the editor
+        // leaves the slot out rather than echoing the title's first character
+        // at 60px. The sidebar does substitute that, because its slot is a
+        // generic page glyph today and §三十八 wants it to say something about
+        // *this* page.
+        g.set_page_icon(icon.into());
     }
 
     pub fn set_page_font(&self, id: i32, font: PageFont) {
@@ -2699,6 +2724,39 @@ impl AppState {
             font,
         }]);
         self.apply_page_style();
+    }
+
+    /// Set — or with `""` clear — the page's icon (SPEC §三十八). Persisted,
+    /// like the font, and deliberately outside undo: a look is a property of
+    /// the page, not an edit to it. The sidebar redraws because every row's
+    /// slot now answers something about its own page.
+    pub fn set_page_icon(&self, id: i32, icon: &str) {
+        let icon = self.workspace.borrow_mut().set_icon(id, icon);
+        self.record(vec![Change::PageIconSet {
+            id: PageId(id as u32 as u64),
+            icon,
+        }]);
+        self.apply_page_style();
+        self.rebuild_sidebar();
+    }
+
+    /// Load the emoji grid with the picker's whole list and point it at `id`.
+    /// The list is copied out of `core::icon::PICKER` — the .slint side holds no
+    /// emoji of its own, so the grid cannot drift from what storage accepts,
+    /// and adding a row to the catalogue is a one-line change there.
+    pub fn fill_icon_picker(&self, id: i32) {
+        let Some(ui) = self.ui.borrow().clone() else {
+            return;
+        };
+        let g = ui.upgrade().unwrap();
+        let items: Vec<slint::SharedString> = crate::core::icon::PICKER
+            .iter()
+            .map(|glyph| (*glyph).into())
+            .collect();
+        g.set_icon_picker_items(slint::ModelRc::from(std::rc::Rc::new(
+            slint::VecModel::from(items),
+        )));
+        g.set_icon_picker_page(id);
     }
 
     /// Flip one of the two switches that share `pages.layout`. The pair is
@@ -2907,11 +2965,16 @@ impl AppState {
                 check: false,
             },
         ];
-        // The look of the page itself, one submenu deep and above the one
-        // destructive row (SPEC §三十八).
+        // The look of the page itself, and above the one destructive row
+        // (SPEC §三十八): the icon opens the emoji grid, the style submenu
+        // holds the three switches.
         rows.insert(
             rows.len() - 1,
             row(MENU_PAGE_STYLE, "Style", "palette", false, -1, false),
+        );
+        rows.insert(
+            rows.len() - 2,
+            row(MENU_PAGE_ICON, "Set icon", "smile", false, -1, false),
         );
         self.menu.set_vec(rows);
     }
@@ -3034,6 +3097,8 @@ pub const MENU_BACK: i32 = 9;
 pub const MENU_PAGE_STYLE: i32 = 10;
 pub const MENU_PAGE_FULL_WIDTH: i32 = 11;
 pub const MENU_PAGE_SMALL_TEXT: i32 = 12;
+/// The page menu's "Set icon" row, which opens the emoji grid (SPEC §三十八).
+pub const MENU_PAGE_ICON: i32 = 13;
 /// "Top level" target of the page-menu Move-to submenu (root, `None` parent).
 pub const PAGE_MOVE_TO_ROOT: i32 = 499_999;
 /// Page-menu Move-to targets encode the destination page above this base.
@@ -3054,10 +3119,17 @@ fn header(label: &str) -> SidebarNode {
         has_children: false,
         selected: false,
         y: 0,
+        icon: "".into(),
     }
 }
 
-fn leaf_row(id: i32, label: &str, kind: &str, selected: bool) -> SidebarNode {
+fn leaf_row(
+    id: i32,
+    label: &str,
+    kind: &str,
+    selected: bool,
+    icon: slint::SharedString,
+) -> SidebarNode {
     SidebarNode {
         id,
         label: label.into(),
@@ -3067,7 +3139,23 @@ fn leaf_row(id: i32, label: &str, kind: &str, selected: bool) -> SidebarNode {
         has_children: false,
         selected,
         y: 0,
+        icon,
     }
+}
+
+/// What one tree row's slot draws (SPEC §三十八): the page's own emoji, or the
+/// placeholder an iconless page falls back to. A section header and the
+/// "New page" row pass no id and keep the vector glyph the delegate draws.
+fn icon_slot(ws: &Workspace, id: i32, title: &str) -> slint::SharedString {
+    crate::core::icon::slot(&ws.icon_of(id), title).into()
+}
+
+/// What a Favorites / Recent row draws: the page's emoji **only**. The
+/// first-character placeholder belongs to the tree, where it replaces a
+/// generic page glyph; in a shortcut list it would erase the star and the
+/// clock that say which section the row is in.
+fn icon_mark(ws: &Workspace, id: i32) -> slint::SharedString {
+    ws.icon_of(id).into()
 }
 
 // ---- block content ----
@@ -5586,6 +5674,70 @@ mod tests {
 
         println!(
             r#"{{"scene":"reclaim-timing","orphans":{N},"setup_ms":{setup_ms:.1},"sweep_ms":{sweep_ms:.1},"scan_ms":{scan_ms:.1},"report":"{report}"}}"#
+        );
+    }
+
+    /// What the sidebar's 16px slot draws (SPEC §三十八). Two rules, and the
+    /// second one is the reason this test exists: the first-character
+    /// placeholder belongs to the tree, where it replaces a generic page
+    /// glyph, and not to Favorites / Recent, where it would erase the star and
+    /// the clock that say which section the row is in.
+    #[test]
+    fn the_sidebar_slot_takes_the_emoji_and_only_the_tree_takes_the_placeholder() {
+        use super::AppState;
+        use slint::Model as _;
+
+        let state = AppState::new(&plain_args(), None);
+        // A page can be in the sidebar twice — as a favorite or a recent, and
+        // as its own tree row — and the two answer differently, so the lookup
+        // is by both id and kind.
+        let slot_of = |id: i32, kind: &str| -> Option<String> {
+            let model = &state.sidebar;
+            (0..model.row_count())
+                .filter_map(|i| model.row_data(i))
+                .find(|r| r.id == id && r.kind == kind)
+                .map(|r| r.icon.to_string())
+        };
+
+        let leaf = (0..state.sidebar.row_count())
+            .filter_map(|i| state.sidebar.row_data(i))
+            .find(|r| r.kind == "page" && !r.has_children)
+            .expect("the seed has a leaf page");
+        let placeholder = leaf.label.chars().next().unwrap().to_string();
+        assert_eq!(
+            slot_of(leaf.id, "page"),
+            Some(placeholder.clone()),
+            "an iconless leaf shows its title's first character"
+        );
+        assert_eq!(
+            (0..state.sidebar.row_count())
+                .filter_map(|i| state.sidebar.row_data(i))
+                .find(|r| r.kind == "favorite")
+                .map(|r| r.icon.to_string()),
+            Some(String::new()),
+            "a favorite with no icon keeps its star"
+        );
+
+        // A fresh session opens on a page that is not in the tree at all, so
+        // the write is driven through a page the tree does show: the leaf
+        // found above.
+        state.set_page_icon(leaf.id, "\u{1F680}");
+        assert_eq!(
+            slot_of(leaf.id, "page"),
+            Some("\u{1F680}".into()),
+            "the emoji beats the placeholder"
+        );
+        assert_eq!(
+            slot_of(leaf.id, "favorite"),
+            Some("\u{1F680}".into()),
+            "and the shortcut to the same page carries it too"
+        );
+        state.set_page_icon(leaf.id, "");
+        assert_eq!(slot_of(leaf.id, "page"), Some(placeholder), "clearing it falls back");
+        assert_eq!(
+            slot_of(leaf.id, "favorite"),
+            Some(String::new()),
+            "and a cleared favorite is a star again"
         );
     }
 }

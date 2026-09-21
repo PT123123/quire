@@ -1413,3 +1413,31 @@ style on the large page (the five `style-*` arms run on the sample page, whose
 rows are a few hundred at most). If a future slice puts a style switch anywhere
 on a hot path — per keystroke, per scroll, per page-open on a large document —
 that is the moment this owes a measurement, not before.
+
+## M12 · a page's icon costs two small strings per sidebar rebuild, and no bench (2026-09-22, ADR-0045)
+
+**No RAM gate ran, and the reason is the shape.** The stored value is one short
+string per page, read twice on the paths that matter: once when a page opens
+(`apply_page_style` writes `UIState.page-icon`), and once per sidebar row per
+rebuild (`icon_slot` clones the stored emoji, then falls back to the title's
+initial). That is two allocations where the row previously made none for the
+slot — but the same row already cloned its title into `label`, so the rebuild's
+allocation *class* is unchanged and its count grows by a constant factor on a
+path that runs on tree mutations, not per frame or per keystroke. The picker is
+the one new allocation with a size worth writing down: `fill_icon_picker` copies
+96 `&str` out of `core::icon::PICKER` into a `VecModel` of `SharedString` — a few
+kilobytes, once per menu activation, dropped when the popup closes.
+
+**The substitute is the pixel kind, and this slice's reading is the unusual one:
+64 of 64 scenes moved.** They were supposed to — an iconless tree row now paints
+its title's first character where it painted a generic page glyph, so a baseline
+that stayed still would mean the feature did not render. What separates that from
+"a change leaked everywhere" is where the pixels are: 72 937 px in total, the
+modal scene at 1 153 px inside **x 13..52 / y 365..713** (the 16 px slot at depths
+0..2), and the same pass restricted to **x 53 → 1 279** returns **0 px for 63 of
+the 64 scenes**, `menu.png` alone at 345 px inside x 254..415 / y 723..775 for its
+own one-row-taller popup. The two traps this slice actually had were geometry
+traps and both show up in that number: putting the emoji in a *second* box beside
+a parent's chevron pushed every parent's label one indent past its own children,
+and applying the initial to Favorites / Recent replaced the star and the clock —
+either one would have read as movers past x 53 in all 64.

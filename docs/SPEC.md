@@ -195,6 +195,7 @@ components/
     IconButton.slint
     Tooltip.slint
     ContextMenu.slint
+    IconPicker.slint
     Dialog.slint
 
 blocks/
@@ -1858,7 +1859,7 @@ M12 — Page 外观与属性（§三十八）
 
 完成：
 
-* icon / cover
+* icon / cover —— icon 的 emoji 一半 2026-09-22 已交付，ADR-0045（`pages.icon`）；cover 和本地图片 icon 还没有
 * font（default / serif / mono）/ full width / small text —— 2026-09-21 已交付，ADR-0044
 * lock
 * version history
@@ -2436,11 +2437,13 @@ synced block：依赖 §四十 的引用基础设施，排在它之后
 
 §十七 的 Page Tree 只管结构，不管页面本身长什么样。本阶段补上。
 
-数据前提：pages 表加列（icon / cover / font / layout / locked），走 §十八 的 migration，schema 版本 +1，旧库必须能无损升上来。—— 2026-09-21 只落了 font + layout 两列（schema v10，ADR-0044）；icon / cover / locked 各自随自己的竖切加列，同样一步一版本。
+数据前提：pages 表加列（icon / cover / font / layout / locked），走 §十八 的 migration，schema 版本 +1，旧库必须能无损升上来。—— 2026-09-21 落了 font + layout 两列（schema v10，ADR-0044），2026-09-22 落了 icon 一列（schema v11，ADR-0045）；cover / locked 各自随自己的竖切加列，同样一步一版本。三步共用一个 `add_page_columns`，所以一个半途的库（有人手工加过列、或从备份恢复到步骤中间）是收敛而不是报错。
 
 ## 图标与封面
 
-icon：emoji 选择器 + 本地图片；未设置时用标题首字符占位，侧边栏与页面标题同步显示
+icon：emoji 选择器 + 本地图片；未设置时用标题首字符占位，侧边栏与页面标题同步显示 —— 2026-09-22 交付 emoji 选择器那一半，ADR-0045（`pages.icon`，存 emoji 本身而不是选择器的下标）。本地图片未做。
+
+「占位」这句按位置读成三条，因为三处的空槽含义不同（ADR-0045）：树里的行 = 标题首字符（那里的槽原本是一个跟这页无关的通用页图标，首字符才「说了点这页的事」）；Favorites / Recent 的行 = 只显示存下来的 emoji，没有就保留星形与时钟（那两处的图标是「这一节是什么」的记号，被首字符吃掉是丢信息不是占位）；编辑器大标题上方 = 什么都不画（把标题首字符再放大 60px 画一遍是回声，不是占位）。「同步显示」落在写入路径上：一次 `set_page_icon` 同时刷新 hero 与整棵侧边栏，两处读的是同一个存储值。
 
 cover：本地图片，可换图 / 移除；封面之上的标题对比度必须过 §二十一 的可读性要求，不得用最弱配色
 

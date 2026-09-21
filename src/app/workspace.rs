@@ -27,6 +27,9 @@ pub struct Page {
     pub font: crate::core::PageFont,
     pub full_width: bool,
     pub small_text: bool,
+    /// The page's own emoji (SPEC §三十八 "图标与封面"); empty means unset and
+    /// the sidebar shows the title's first character.
+    pub icon: String,
     /// Title + block text blob, filled by the app layer; the search source.
     pub search_text: String,
 }
@@ -115,6 +118,7 @@ impl Workspace {
                 font: crate::core::PageFont::default(),
                 full_width: false,
                 small_text: false,
+                icon: String::new(),
                 search_text: String::new(),
             },
         );
@@ -229,19 +233,20 @@ impl Workspace {
             (
                 src.parent,
                 format!("Copy of {}", src.title),
-                (src.font, src.full_width, src.small_text),
+                (src.font, src.full_width, src.small_text, src.icon.clone()),
             )
         };
         let new_root = self.new_page(&title);
         // The copy is a copy of the page, and its look is part of the page
-        // (SPEC §三十八) — the persisted side records the same three, and a
-        // session that disagreed with what a restart would show is the defect
-        // this project has been bitten by before.
+        // (SPEC §三十八) — the persisted side records the same, and a session
+        // that disagreed with what a restart would show is the defect this
+        // project has been bitten by before.
         {
             let dst = self.pages.get_mut(&new_root).expect("just created");
             dst.font = style.0;
             dst.full_width = style.1;
             dst.small_text = style.2;
+            dst.icon = style.3;
         }
         self.attach(new_root, parent, Some(id));
         self.copy_children(id, new_root);
@@ -345,6 +350,27 @@ impl Workspace {
         self.pages
             .get(&id)
             .map(|p| (p.font, p.full_width, p.small_text))
+    }
+
+    /// The page's own emoji, written and read back so the caller persists what
+    /// actually changed. Empty clears it, which is what "no icon" means here —
+    /// the sidebar then shows the title's first character.
+    pub fn set_icon(&mut self, id: i32, icon: &str) -> String {
+        match self.pages.get_mut(&id) {
+            Some(p) => {
+                p.icon = icon.to_string();
+                p.icon.clone()
+            }
+            None => String::new(),
+        }
+    }
+
+    /// What the page stores, `""` for none. The caller decides what an empty
+    /// slot shows: the sidebar substitutes the title's first character, the
+    /// editor shows nothing above a title that has no icon — repeating the
+    /// title's own first character at 60px is an echo, not a placeholder.
+    pub fn icon_of(&self, id: i32) -> String {
+        self.pages.get(&id).map(|p| p.icon.clone()).unwrap_or_default()
     }
 
     pub fn mark_opened(&mut self, id: i32) {
@@ -534,6 +560,7 @@ impl Workspace {
                     font: p.font,
                     full_width: p.full_width,
                     small_text: p.small_text,
+                    icon: p.icon.clone(),
                     search_text: String::new(),
                 },
             );
@@ -565,11 +592,14 @@ impl Workspace {
     }
 
     /// Expose the persisted-tree shape for seeding (id, title, parent,
-    /// favorite, expanded, font, full width, small text) — used by the app
-    /// layer when recording the initial workspace into storage.
+    /// favorite, expanded, font, full width, small text, icon) — used by the
+    /// app layer when recording the initial workspace into storage. Every
+    /// appearance field is here even though nothing sets one before seeding:
+    /// a row this list drops is a page property a restart would lose.
     pub fn page_seed_rows(
         &self,
-    ) -> Vec<(i32, String, Option<i32>, bool, bool, crate::core::PageFont, bool, bool)> {
+    ) -> Vec<(i32, String, Option<i32>, bool, bool, crate::core::PageFont, bool, bool, String)>
+    {
         self.dfs_order()
             .iter()
             .filter_map(|id| {
@@ -583,6 +613,7 @@ impl Workspace {
                         p.font,
                         p.full_width,
                         p.small_text,
+                        p.icon.clone(),
                     )
                 })
             })
@@ -764,6 +795,31 @@ mod tests {
         assert_eq!(w.set_font(9999, PageFont::Mono), PageFont::Default);
         assert_eq!(w.set_layout(9999, true, true), (false, false));
         assert_eq!(w.page_style(9999), None);
+    }
+
+    #[test]
+    fn a_page_icon_is_set_cleared_and_carried_by_a_copy() {
+        let mut w = ws();
+        assert_eq!(w.icon_of(105), "", "the sample tree has no icons");
+        assert_eq!(w.set_icon(105, "\u{1F680}"), "\u{1F680}");
+        assert_eq!(w.icon_of(105), "\u{1F680}");
+        // the look and the icon are separate facts: one does not imply another
+        assert_eq!(
+            w.page_style(105),
+            Some((crate::core::PageFont::Default, false, false))
+        );
+        let copy = w.duplicate(105).expect("duplicate");
+        assert_eq!(
+            w.icon_of(copy),
+            "\u{1F680}",
+            "a copy that lost its icon would disagree with the PageCreated written for it"
+        );
+        // clearing is a write, not a delete
+        assert_eq!(w.set_icon(105, ""), "");
+        assert_eq!(w.icon_of(105), "");
+        assert_eq!(w.icon_of(copy), "\u{1F680}", "and the copy keeps its own");
+        assert_eq!(w.set_icon(9999, "?"), "", "an unknown page stores nothing");
+        assert_eq!(w.icon_of(9999), "");
     }
 
     #[test]

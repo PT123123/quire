@@ -23,7 +23,8 @@ export component AppShell inherits Rectangle {
         || UIState.settings-open
         || UIState.link-open
         || UIState.slash-open
-        || UIState.block-menu-open-id >= 0;
+        || UIState.block-menu-open-id >= 0
+        || UIState.icon-picker-open;
 
     // The three cards that block the page underneath them, as opposed to the
     // popups that hang off an element the user is already looking at. Only
@@ -104,6 +105,7 @@ export component AppShell inherits Rectangle {
                 UIState.link-open = false;
                 UIState.slash-open = false;
                 UIState.block-menu-open-id = -1;
+                UIState.icon-picker-open = false;
             }
         }
     }

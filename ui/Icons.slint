@@ -499,6 +499,44 @@ component IcImage {
     }
 }
 
+// The page menu's "Set icon" row (SPEC §三十八): a face, because the thing it
+// opens is the emoji grid. The picture-frame glyph stays free for the cover.
+component IcSmile {
+    in property <brush> color: Colors.text-secondary;
+    in property <length> size: 16px;
+    width: size; height: size;
+    Path {
+        width: parent.width; height: parent.height;
+        viewbox-x: 0; viewbox-y: 0; viewbox-width: 24; viewbox-height: 24;
+        stroke: color; stroke-width: 1.8px;
+        stroke-line-cap: round; stroke-line-join: round;
+        fill: transparent;
+        MoveTo { x: 12; y: 4; }
+        ArcTo { radius-x: 8; radius-y: 8; x: 12; y: 20; }
+        ArcTo { radius-x: 8; radius-y: 8; x: 12; y: 4; }
+        // the smile is a curve, not an arc: an ArcTo here has no sweep flag to
+        // ask for, and would happily bulge upwards into a frown
+        MoveTo { x: 8.5; y: 14; }
+        CubicTo { control-1-x: 9.8; control-1-y: 16.8; control-2-x: 14.2; control-2-y: 16.8; x: 15.5; y: 14; }
+    }
+    Rectangle {
+        x: root.size * 8.2 / 24;
+        y: root.size * 9 / 24;
+        width: root.size * 1.8 / 24;
+        height: root.size * 1.8 / 24;
+        border-radius: root.size / 24;
+        background: color;
+    }
+    Rectangle {
+        x: root.size * 14 / 24;
+        y: root.size * 9 / 24;
+        width: root.size * 1.8 / 24;
+        height: root.size * 1.8 / 24;
+        border-radius: root.size / 24;
+        background: color;
+    }
+}
+
 export component Icon {
     in property <string> name;
     in property <length> size: 16px;
@@ -537,4 +575,5 @@ export component Icon {
     IcArrowLeft { visible: root.name == "arrow-left"; size: root.size; color: root.color; }
     IcArrowRight { visible: root.name == "arrow-right"; size: root.size; color: root.color; }
     IcPalette { visible: root.name == "palette"; size: root.size; color: root.color; }
+    IcSmile { visible: root.name == "smile"; size: root.size; color: root.color; }
 }

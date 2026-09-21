@@ -38,6 +38,7 @@ fn seeded(path: &Path) -> Arc<SqliteRepository> {
             font: PageFont::default(),
             full_width: false,
             small_text: false,
+            icon: String::new(),
         }),
         Change::BlockInserted(Block {
             id: BlockId(1),

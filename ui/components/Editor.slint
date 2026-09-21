@@ -21,6 +21,14 @@ component DocumentRow inherits Rectangle {
 
     height: head.height + body.height + (block.tail ? Theme.spacing-hero * 2 : 0px);
 
+    // The page's own emoji, above its title (SPEC §三十八). It takes no space
+    // at all until one is set, so the 56k rows below it measure exactly as
+    // they did before this slice. Display only: the picker opens from the
+    // page's ⋯ menu, whose anchor the controller already knows.
+    property <length> icon-height: UIState.page-icon == ""
+        ? 0px
+        : icon.preferred-height + Theme.spacing-md;
+
     head := Rectangle {
         // Both x and y are spelled out on purpose. A Rectangle that binds
         // `height` but leaves `y` alone is centred in its parent, and this
@@ -29,12 +37,25 @@ component DocumentRow inherits Rectangle {
         x: 0px;
         y: 0px;
         width: parent.width;
-        height: root.first ? Theme.spacing-hero + title.height + Theme.spacing-lg : 0px;
+        height: root.first
+            ? Theme.spacing-hero + root.icon-height + title.height + Theme.spacing-lg
+            : 0px;
+
+        icon := Text {
+            x: root.content-x;
+            y: Theme.spacing-hero;
+            width: root.content-width;
+            visible: root.first && UIState.page-icon != "";
+            text: UIState.page-icon;
+            font-family: Typography.emoji-font;
+            font-size: PageType.size-page-icon;
+            color: Colors.text-primary;
+        }
 
         // click the big title to rename in place (Notion-style)
         title-ta := TouchArea {
             x: root.content-x;
-            y: Theme.spacing-hero;
+            y: Theme.spacing-hero + root.icon-height;
             width: root.content-width;
             height: root.first ? title.height : 0px;
             enabled: root.first && !UIState.title-editing;
@@ -46,7 +67,7 @@ component DocumentRow inherits Rectangle {
         }
         title := Text {
             x: root.content-x;
-            y: Theme.spacing-hero;
+            y: Theme.spacing-hero + root.icon-height;
             width: root.content-width;
             visible: root.first && !UIState.title-editing;
             text: UIState.page-title;
@@ -60,7 +81,7 @@ component DocumentRow inherits Rectangle {
         }
         title-input := TextInput {
             x: root.content-x;
-            y: Theme.spacing-hero;
+            y: Theme.spacing-hero + root.icon-height;
             width: root.content-width;
             visible: root.first && UIState.title-editing;
             enabled: root.first && UIState.title-editing;

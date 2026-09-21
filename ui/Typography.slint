@@ -8,11 +8,19 @@ export global Typography {
     out property <string> display-font: "Segoe UI Semibold";
     out property <string> serif-font: "Georgia";
     out property <string> mono-font: "Consolas";
+    // Color emoji on Windows resolve against this face. It is asked for by
+    // name because a `Text` here would otherwise fall back to Segoe UI, which
+    // carries monochrome glyphs for the same code points. The page's icon is
+    // the character itself (SPEC §三十八), so this is the one place naming the
+    // face that draws it.
+    out property <string> emoji-font: "Segoe UI Emoji";
 
     // page chrome
     out property <length> size-caption: 11px;   // section labels, hints
     out property <length> size-ui: 13px;        // sidebar rows, menus, buttons
     out property <length> size-ui-lg: 14px;     // palette items
+    out property <length> size-icon-sidebar: 13px; // a page's emoji, in its row
+    out property <length> size-icon-picker: 19px;  // one cell of the emoji grid
 
     // document
     out property <length> size-body: 15.5px;
@@ -69,6 +77,9 @@ export global PageType {
     out property <length> size-h1: Typography.size-h1 * scale;
     out property <length> size-page-title: Typography.size-page-title * scale;
     out property <length> size-code: Typography.size-code * scale;
+    // The page's own emoji, above its title (SPEC §三十八). Document tier, so
+    // small text shrinks it along with everything else on the page.
+    out property <length> size-page-icon: 46px * scale;
 
     // Line heights are factors of the natural line box, so a smaller face
     // gets a proportionally smaller box without touching these.

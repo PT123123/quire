@@ -215,6 +215,14 @@ First functional release: a local, single-file-database notes workspace.
   by the same factor; full width drops the centred column for a left gutter.
   Not undoable, like Favorite — a look is a property, not an edit — and a
   duplicated page starts with its source's (ADR-0044)
+- Page icon (top bar ⋯ → Set icon): a 96-emoji grid, twelve rows of eight, plus a
+  None row to clear it. The page stores the emoji itself (schema v11:
+  `pages.icon`), not the grid's index, so the catalogue can grow without
+  rewriting anybody's page. An unset page shows its title's first character in the
+  sidebar tree — the shortcuts keep their star and clock until a page really has
+  an icon, and the page title shows nothing above itself rather than its own
+  first letter at 46px. Like Style, setting one is not an undo step, and a
+  duplicated page starts with its source's (ADR-0045)
 - Slash menu ("/") for block types; command palette (Ctrl+K) with page
   jumping, plus Go Back / Go Forward (Alt+← / Alt+→) along the pages
   visited this session — a page deleted since drops out of the history

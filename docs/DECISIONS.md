@@ -2,6 +2,92 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0045 · A page's icon is the emoji itself, and the placeholder is read three ways
+
+Decision: SPEC §三十八's icon is stored as `pages.icon TEXT NOT NULL DEFAULT ''`
+(schema v11) holding **the emoji character**, not an index into the picker. The
+picker's whole catalogue lives in Rust (`core::icon::PICKER`, 96 emoji in 12 rows
+of 8, with `PER_ROW` shared with the `.slint` grid) and is copied into a
+`ModelRc` at open, so no `.slint` file names an emoji. Entry point: page ⋯ →
+**Set icon**, which replaces the menu with a `IconPicker` popup rather than
+nesting under it.
+
+Why the glyph and not an index: an index makes the catalogue a wire format, so
+adding one emoji in the middle silently re-points every page written before it.
+Storing the glyph means this list can grow, shrink or reorder and nobody's page
+changes — which is also why the entries are written as `char` escapes in the
+source, several being a base code point plus a variation selector that an
+"invisible characters" cleanup pass would quietly drop.
+
+The harder decision is what "未设置时用标题首字符占位" means in three places,
+because the empty slot does not mean the same thing in all of them:
+
+* **Tree rows** show the title's first character (`icon::slot`). That slot held
+  a generic page glyph, which said nothing about *this* page; an initial says
+  something.
+* **Favorites / Recent rows** show the stored emoji *only*, and otherwise keep
+  the star and the clock. Those two marks are the section's own identity — a
+  placeholder there erases information rather than standing in for missing
+  information. Hence two functions, `slot` and `icon_mark`, not one.
+* **The editor hero** draws nothing above an iconless title. Repeating the
+  title's first character at 46 px directly above the title at 40 px is an echo,
+  not a placeholder.
+
+The initial is the first non-whitespace **scalar value**, not the first grapheme:
+a title opening on a ZWJ sequence would split, which for a 16 px slot is a
+cosmetic risk taken on record rather than a new unicode dependency.
+
+Migration 11 is one conditional `ALTER TABLE` and no rows, and it goes through a
+new shared `add_page_columns(conn, &[(&str, &str)])` that migration 10's body was
+rewritten to call too. The helper exists because every late `pages` column asks
+the same question ("is it there yet?"), and a partially-migrated file — a column
+an older build added by hand, a backup restored mid-step — should converge
+instead of erroring on a duplicate name.
+
+Consequences:
+
+* The sidebar's parent rows had to give up a second box: a parent already spends
+  its 16 px slot on the chevron, and adding an icon box next to it pushed every
+  parent's label one indent past its own children. The emoji now shares the
+  chevron's box and hands it back on hover, so the tree's geometry is unchanged
+  for every row that has no icon.
+* Emoji are drawn through one named face, `Typography.emoji-font`
+  ("Segoe UI Emoji"), which is the only place in `.slint` that names a font —
+  Slint resolves per glyph, and the token exists to make the choice visible
+  rather than to be load-bearing. Under the headless **software** renderer the
+  emoji come out monochrome and follow the text colour, so `dark-page-icon` was
+  added to the sweep to answer whether the mark survives the dark theme. The GPU
+  renderers were **not** measured here — whether they paint the colour layers is
+  a hand-test item, not a claim in this file.
+* Setting and clearing an icon are persisted as `Change::PageIconSet` and are
+  **not** on the Ctrl+Z stack, same as Favorite and Style before them: a property
+  of the page is not an edit to the document. `duplicate` carries the source's
+  icon in memory and in the persisted `PageCreated`, which is the bug ADR-0044
+  caught once already.
+* The picker's grid is data, so the `.slint` side has no emoji list to drift:
+  `fill_icon_picker` copies `PICKER` into the model on every open, and adding a
+  row to the catalogue is a one-line change in one file.
+* Gate: **no RAM bench owed**, and the reason is the shape — one short string per
+  page, one property write on open, and one `Text` per row that replaced a `Text`
+  that was already there. The pixel evidence is the substitute, and it is the
+  wide kind: **all 64 existing scenes moved**, 72 937 px between them, because
+  every iconless tree row now shows an initial where it showed a generic glyph.
+  The movers are the icon column and nothing else — the modal scene is
+  1 153 px inside **x 13..52 / y 365..713**, which is the 16 px slot at depths
+  0–2 — and re-running the same comparison restricted to **x 53 and beyond**
+  returns **0 px for 63 of the 64 scenes**, with `menu.png` the exception at
+  345 px inside x 254..415 / y 723..775 (its own popup, one row taller). So the
+  labels did not shift a pixel — the indent fix below is measured, not assumed —
+  and the document area moved by zero everywhere, which is the number that says
+  an iconless row costs exactly what it cost before.
+* Sweep 64 → **67** scenes (baseline `.scratch/sweep33`): `page-icon`, `icon-picker`
+  and a dark arm. The picker scene deliberately opens on an iconless page, since
+  that is the state a user is in when they reach for it.
+* Remaining §三十八 groups: **cover**, the **local-image** half of icon, **lock**,
+  **version history** (still owes the disk-and-RAM retention numbers), **templates**.
+  The hero icon is display-only this slice — the hover "Add icon" affordance and
+  a cover behind the title belong to the next one.
+
 ## ADR-0044 · A page's look is derived, so no block ever holds a size
 
 Decision: SPEC §三十八's three switches — font (default / serif / mono), full

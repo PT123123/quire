@@ -1,0 +1,126 @@
+// The page icon's emoji grid (SPEC §三十八 "图标与封面"). Opened from the page
+// menu, and anchored where that menu was. The list of glyphs is the whole of
+// `core::icon::PICKER`, copied out by Rust so the grid is one flat model and
+// this file names no emoji at all — which also means the picker cannot drift
+// from what storage accepts.
+//
+// Closing is driven by UIState.icon-picker-open; outside clicks and Escape
+// dismiss through the popup policy, and AppWindow mirrors the popup's
+// `is-open` back into UIState (a popup must not read its own `is-open` —
+// slint 1.18 const-prop crash).
+
+import { Theme } from "../Theme.slint";
+import { Colors } from "../Colors.slint";
+import { Typography } from "../Typography.slint";
+import { UIState } from "../Types.slint";
+
+export component IconPicker inherits PopupWindow {
+    // The grid is a fixed number of columns, and the list it draws is a whole
+    // number of rows (core::icon guarantees both), so the height below is the
+    // grid's real height rather than a guess that clips the last row.
+    property <int> columns: 8;
+    property <length> cell: 30px;
+    property <int> rows: (UIState.icon-picker-items.length + self.columns - 1)
+        / self.columns;
+
+    width: root.columns * root.cell + 8px;
+    // one "None" row above the grid; clamped to the space under the anchor so
+    // a short window scrolls the grid instead of pushing it off screen
+    height: min(
+        (self.rows + 1) * root.cell + 8px,
+        max(UIState.window-h - UIState.icon-picker-y - 20px, 140px),
+    );
+    close-policy: PopupClosePolicy.close-on-click-outside;
+
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+
+        Rectangle {
+            x: 2px; y: 3px;
+            width: parent.width - 4px;
+            height: parent.height - 5px;
+            border-radius: Theme.radius-md + 2px;
+            background: Colors.shadow;
+        }
+        Rectangle {
+            width: parent.width;
+            height: parent.height;
+            border-radius: Theme.radius-md;
+            background: Colors.surface-overlay;
+            border-width: 1px;
+            border-color: Colors.border;
+        }
+
+        // Clearing an icon is a pick like any other: the "" it passes is what
+        // the page then stores, and the sidebar goes back to the title's
+        // first character.
+        none-row := Rectangle {
+            x: 4px; y: 4px;
+            width: parent.width - 8px;
+            height: root.cell;
+            border-radius: Theme.radius-sm;
+            background: none-ta.has-hover ? Colors.surface-hover : transparent;
+            animate background { duration: Theme.duration-instant; }
+
+            Text {
+                x: Theme.spacing-sm;
+                width: parent.width - 2 * Theme.spacing-sm;
+                height: parent.height;
+                text: "None";
+                font-family: Typography.ui-font;
+                font-size: Typography.size-ui;
+                color: none-ta.has-hover ? Colors.text-primary : Colors.text-secondary;
+                vertical-alignment: center;
+            }
+            none-ta := TouchArea {
+                mouse-cursor: MouseCursor.pointer;
+                clicked => {
+                    UIState.icon-picked("");
+                }
+            }
+        }
+
+        Flickable {
+            x: 4px;
+            y: none-row.y + none-row.height;
+            width: parent.width - 8px;
+            height: parent.height - none-row.height - 12px;
+            content-height: grid.height;
+
+            grid := FlexboxLayout {
+                width: parent.width;
+                height: self.preferred-height;
+                flex-wrap: wrap;
+                alignment: start;
+                spacing: 0px;
+
+                for glyph in UIState.icon-picker-items : Rectangle {
+                    width: root.cell;
+                    height: root.cell;
+                    vertical-stretch: 0;
+                    horizontal-stretch: 0;
+                    border-radius: Theme.radius-sm;
+                    background: glyph-ta.has-hover ? Colors.surface-hover : transparent;
+                    animate background { duration: Theme.duration-instant; }
+
+                    Text {
+                        width: parent.width;
+                        height: parent.height;
+                        text: glyph;
+                        font-family: Typography.emoji-font;
+                        font-size: Typography.size-icon-picker;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    glyph-ta := TouchArea {
+                        mouse-cursor: MouseCursor.pointer;
+                        clicked => {
+                            UIState.icon-picked(glyph);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

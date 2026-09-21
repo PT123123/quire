@@ -41,7 +41,22 @@ export component SidebarItem inherits Rectangle {
             if is-page && node.has-children : Rectangle {
                 width: 16px;
                 height: 16px;
+                // A parent shows its own emoji here and gives the slot to the
+                // expander while the pointer is on it. The second option -- a
+                // slot for each -- pushed every parent's label one indent past
+                // its children, which is how the tree lost its shape.
+                if node.icon != "" : Text {
+                    visible: !chev-ta.has-hover;
+                    width: parent.width;
+                    height: parent.height;
+                    text: node.icon;
+                    font-family: Typography.emoji-font;
+                    font-size: Typography.size-icon-sidebar;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
                 Icon {
+                    visible: chev-ta.has-hover || node.icon == "";
                     width: 14px;
                     height: 14px;
                     size: 14px;
@@ -55,17 +70,30 @@ export component SidebarItem inherits Rectangle {
                     }
                 }
             }
-            if !(is-page && node.has-children) : Icon {
-                width: 15px;
-                height: 15px;
-                size: 15px;
-                name: is-new-page ? "plus"
-                    : node.kind == "favorite" ? "star"
-                    : node.kind == "recent" ? "clock"
-                    : "page";
-                color: is-new-page ? Colors.text-muted
-                    : node.selected ? Colors.accent-text
-                    : (ta.has-hover ? Colors.text-secondary : Colors.text-muted);
+            if !(is-page && node.has-children) : Rectangle {
+                width: 16px;
+                height: 16px;
+                if node.icon != "" : Text {
+                    width: parent.width;
+                    height: parent.height;
+                    text: node.icon;
+                    font-family: Typography.emoji-font;
+                    font-size: Typography.size-icon-sidebar;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                if node.icon == "" : Icon {
+                    width: 15px;
+                    height: 15px;
+                    size: 15px;
+                    name: is-new-page ? "plus"
+                        : node.kind == "favorite" ? "star"
+                        : node.kind == "recent" ? "clock"
+                        : "page";
+                    color: is-new-page ? Colors.text-muted
+                        : node.selected ? Colors.accent-text
+                        : (ta.has-hover ? Colors.text-secondary : Colors.text-muted);
+                }
             }
         }
 

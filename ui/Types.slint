@@ -10,6 +10,10 @@ export struct SidebarNode {
     has-children: bool,
     selected: bool,
     y: int,         // cumulative px offset in the tree area (menu anchoring)
+    // What this row's 16px slot draws (SPEC §三十八): the page's own emoji, or
+    // the title's first character when it has none. Empty for a section header
+    // and the "New page" row, which keep their vector glyph.
+    icon: string,
 }
 
 export struct TextRun {
@@ -198,6 +202,10 @@ export global UIState {
     in-out property <int> page-font: 0; // 0 default, 1 serif, 2 mono
     in-out property <bool> page-full-width: false;
     in-out property <bool> page-small-text: false;
+    // The open page's own emoji above its title (SPEC §三十八). Empty draws
+    // nothing: unlike the sidebar slot, this one does not fall back to the
+    // title's first character, because the title is 40px below it.
+    in-out property <string> page-icon: "";
 
     // in-page find (Ctrl+F)
     in-out property <bool> find-open: false;
@@ -233,12 +241,22 @@ export global UIState {
     in-out property <int> search-selected-id: -1;
     in-out property <[SearchRow]> search-rows;
 
-    // context menu (shared by sidebar rows and the TopBar ⋯ button)
+    // page menu (shared by sidebar rows and the TopBar ⋯ button)
     in-out property <bool> menu-open: false;
     in-out property <int> menu-node-id: -1;
     in-out property <length> menu-x: 240px;
     in-out property <length> menu-y: 100px;
     in-out property <[MenuRow]> menu-rows;
+
+    // the page icon's emoji grid (SPEC §三十八). Opened from the page menu, so
+    // the page it edits travels with it; the items are the picker's whole
+    // list, which Rust copies out of `core::icon::PICKER` rather than
+    // repeating in .slint.
+    in-out property <bool> icon-picker-open: false;
+    in-out property <int> icon-picker-page: -1;
+    in-out property <length> icon-picker-x: 240px;
+    in-out property <length> icon-picker-y: 100px;
+    in-out property <[string]> icon-picker-items;
 
     // dialogs
     in-out property <bool> dialog-open: false;
@@ -410,6 +428,8 @@ export global UIState {
     callback rename-committed(int, string);
     callback rename-cancelled();
     callback menu-action(int);
+    // the emoji grid picked one; "" is its "None" cell, which clears the icon
+    callback icon-picked(string);
     callback search-open-requested();
     callback search-query-changed();
     callback search-move(int);

@@ -441,6 +441,27 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                         s.toggle_page_small_text(id);
                     }
                 }
+                // The emoji grid replaces this menu rather than nesting under
+                // it: it is the taller of the two, and it is anchored at the
+                // same place, so keeping the menu open would put one popup
+                // behind the other.
+                crate::app::state::MENU_PAGE_ICON => {
+                    if id > 0 {
+                        s.fill_icon_picker(id);
+                        // the grid is 8 cells wide and 13 rows tall; a short
+                        // window clips it, and the popup scrolls the rest
+                        g.set_icon_picker_x(
+                            g.get_menu_x()
+                                .min((g.get_window_w() - 256.0).max(8.0)),
+                        );
+                        g.set_icon_picker_y(
+                            g.get_menu_y()
+                                .max(48.0)
+                                .min((g.get_window_h() - 160.0).max(48.0)),
+                        );
+                        g.set_icon_picker_open(true);
+                    }
+                }
                 crate::app::state::MENU_DELETE => {
                     let (_title, message) = s.delete_dialog_text(id);
                     g.set_dialog_title("Delete page?".into());
@@ -448,6 +469,23 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                     g.set_dialog_open(true);
                 }
                 _ => {}
+            }
+        });
+    }
+
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_icon_picked(move |glyph| {
+            let g = gw.upgrade().unwrap();
+            let id = g.get_icon_picker_page();
+            // the pick closes the grid either way; "" is its "None" cell, and
+            // picking it on a page with no icon is a write of the empty string
+            // the storage layer already treats as "unset"
+            g.set_icon_picker_open(false);
+            g.set_icon_picker_page(-1);
+            if id > 0 {
+                s.set_page_icon(id, glyph.as_str());
             }
         });
     }
@@ -2188,6 +2226,7 @@ pub fn import_lan_pages(
             font: crate::core::PageFont::default(),
             full_width: false,
             small_text: false,
+            icon: String::new(),
         };
         let changes = {
             let mut doc = state.doc.borrow_mut();
@@ -2389,6 +2428,7 @@ pub fn import_from_path(g: &UIState<'_>, state: &Rc<AppState>, path: &std::path:
         font: crate::core::PageFont::default(),
         full_width: false,
         small_text: false,
+        icon: String::new(),
     };
     let changes = {
         let mut doc = state.doc.borrow_mut();
@@ -3164,6 +3204,17 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             g.set_dark(true);
             apply_scene(ui, state, "style-serif");
         }
+        // The page's emoji in the two places it draws: above its own title and
+        // in its sidebar row. Set through the state method the picker calls,
+        // so the shot proves the write as well as the pixels. The sidebar slot
+        // is the interesting one: it carries the emoji into the dark.
+        "page-icon" => {
+            state.set_page_icon(state.open_page.get(), "\u{1f680}");
+        }
+        "dark-page-icon" => {
+            g.set_dark(true);
+            apply_scene(ui, state, "page-icon");
+        }
         "marks" => {
             // seed inline marks on the first paragraph (visual test only,
             // applied directly like an editor toggle would). Offsets are
@@ -3387,6 +3438,20 @@ pub fn apply_scene_overlay(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             g.set_menu_y(TREE_TOP_PX + row_y - 4.0);
             g.set_menu_x(240.0);
             g.set_menu_open(true);
+        }
+        "page-icon" => {
+            // The page's emoji in the two places it draws: above its own
+            // title and in its sidebar row. Set through the state method the
+            // picker calls, so the shot proves the write as well as pixels.
+            let page = state.open_page.get();
+            state.set_page_icon(page, "\u{1f680}");
+        }
+        "icon-picker" => {
+            let page = state.open_page.get();
+            state.fill_icon_picker(page);
+            g.set_icon_picker_x(240.);
+            g.set_icon_picker_y(TREE_TOP_PX + state.sidebar_row_y(page) as f32);
+            g.set_icon_picker_open(true);
         }
         "dialog" => {
             let (_title, message) = state.delete_dialog_text(105);
