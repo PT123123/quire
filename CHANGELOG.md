@@ -181,7 +181,16 @@ First functional release: a local, single-file-database notes workspace.
 - A brand-new page can be written in: click the "This page is empty" panel, or
   press Enter in the title, and the page makes its own first paragraph, focused
   and one undo step away from gone (ADR-0033)
+- Code blocks can be coloured: the block's own ⋮ → Language menu picks the
+  language (Rust / Python / JavaScript / TypeScript / Markdown / JSON / Bash) and
+  the block paints five token colours over its own text — keyword, comment,
+  string, number, name. Only the language is stored; the colours are derived while
+  drawing, so a keystroke never lexes and a block being edited shows plain text
+  (ADR-0042). A Markdown fence's info string carries it both ways (`rs` in,
+  `rust` out), a rich paste keeps it, and a language this build cannot lex is no
+  colour rather than a broken block
 - Per-page find bar (Ctrl+F) with hit counter and selection navigation
+
 - Undo/redo (Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z) — per page, command-based
 
 ### Workspace
@@ -202,11 +211,11 @@ First functional release: a local, single-file-database notes workspace.
 
 ### Persistence & reliability
 - SQLite (bundled, no server): pages, blocks, marks, colors, attachments,
-  settings, metadata (schema v1–v8)
+  settings, metadata (schema v1–v9)
 - Debounced batched writes; Ctrl+S forces a save; close saves too
 - Rotating snapshots on every open (5 generations), restore-at-open when
   the main file is damaged, damaged file quarantined (`.corrupt`)
-- Startup integrity checks; schema migrations (v1–v8)
+- Startup integrity checks; schema migrations (v1–v9)
 - Picture and file bytes live in an `attachments` folder beside the database
   and the row is only a reference — a reference whose file row is gone still
   loads the library and renders as a missing picture. A file is copied in

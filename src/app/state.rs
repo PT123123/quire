@@ -9,7 +9,7 @@
 use crate::app::workspace::{SearchHit, Workspace, BENCH_ID_BASE, MAX_RECENTS};
 use crate::core::persistence::{Change, Repository};
 use crate::core::{
-    Attachment, AttachmentId, Block, BlockId, BlockKind, ColorKind, Command, Document, History,
+    Attachment, AttachmentId, Block, BlockId, BlockKind, ColorKind, Command, Document, History, Lang,
     OrderKey, PageId,
 };
 use crate::services::find_service::FindSession;
@@ -182,6 +182,10 @@ pub struct HandleArgs {
     /// bold mark. A page with no marks cannot show what the runs channel costs,
     /// and scene D has none without this.
     pub marks: usize,
+    /// Scene D with highlighted code: how many of the bench page's rows are
+    /// coloured code blocks (SPEC §三十七 批次 C's gate — a page of code
+    /// scrolling, with six layers of text behind every visible block).
+    pub code: usize,
 }
 
 /// Build the mock/bench session (fresh database or no persistence).
@@ -303,6 +307,7 @@ impl AppState {
             let mut core_blocks = rows_to_blocks(PAGE_ATLAS, rows, &mut doc);
             bench_pictures(&mut core_blocks, args.pictures);
             bench_marks(&mut core_blocks, args.marks);
+            bench_code(&mut core_blocks, args.code);
             doc.set_page_blocks(core_page_id(PAGE_ATLAS), core_blocks);
             let _ = title;
         }
@@ -1067,6 +1072,8 @@ impl AppState {
     pub const COLOR_BG_BASE: i32 = 300_000;
     /// Plus the display width in percent, so the id carries the pick.
     pub const IMAGE_WIDTH_BASE: i32 = 500_000;
+    /// Plus the index into `Lang::ALL`, same reason.
+    pub const CODE_LANG_BASE: i32 = 600_000;
 
 
     /// Fill the handle menu for one block — Notion's ⋮⋮ set, minus the
@@ -1075,11 +1082,11 @@ impl AppState {
     /// internal clipboard holds a block. Submenus swap the rows and keep
     /// the popup open; the controller routes action ids:
     ///   1..8    root actions + Turn into (7) + Back (8)
-    ///   9..13   copy link / Move to / Text color / Background color opens,
-    ///           and Image width (13, pictures only)
+    ///   9..14   copy link / Move to / Text color / Background color opens,
+    ///           Image width (13, pictures only) and Language (14, code only)
     ///   100+k   Turn-into target kinds
     ///   MOVE_TO_BASE+pid / COLOR_TEXT_BASE+slot / COLOR_BG_BASE+slot
-    ///   IMAGE_WIDTH_BASE+percent
+    ///   IMAGE_WIDTH_BASE+percent / CODE_LANG_BASE+index of `Lang::ALL`
     pub fn fill_block_menu(&self, id: i32) {
         let mut rows = vec![
             row(7, "Turn into", "chevron-right", false, -1, false),
@@ -1094,6 +1101,9 @@ impl AppState {
         ];
         if self.block_kind(id) == Some(BlockKind::Image) {
             rows.insert(1, row(13, "Image width", "chevron-right", false, -1, false));
+        }
+        if self.block_kind(id) == Some(BlockKind::Code) {
+            rows.insert(1, row(14, "Language", "chevron-right", false, -1, false));
         }
         if self.clipboard.borrow().is_some() {
             rows.push(row(5, "Paste below", "import", false, -1, false));
@@ -1122,6 +1132,33 @@ impl AppState {
                 false,
             );
             menu_row.check = current == Some(percent);
+            rows.push(menu_row);
+        }
+        self.block_menu.set_vec(rows);
+    }
+
+    /// Language submenu for a code block (SPEC §三十七 批次 C). Every language
+    /// this build can lex, plus the plain one so a wrong pick is undoable by
+    /// picking it. The check marks what the block stores, and stays on the row
+    /// the user just clicked: colour is a preview-able property, like the
+    /// palette two rows above it.
+    pub fn fill_block_menu_code_lang(&self, id: i32) {
+        let current = self
+            .doc
+            .borrow()
+            .block(BlockId(id.max(0) as u64))
+            .map(|b| b.lang);
+        let mut rows = vec![row(8, "Back", "chevron-left", false, -1, false)];
+        for (index, lang) in Lang::ALL.iter().enumerate() {
+            let mut menu_row = row(
+                AppState::CODE_LANG_BASE + index as i32,
+                lang.label(),
+                "",
+                false,
+                -1,
+                false,
+            );
+            menu_row.check = current == Some(*lang);
             rows.push(menu_row);
         }
         self.block_menu.set_vec(rows);
@@ -1734,6 +1771,17 @@ impl AppState {
         .is_some()
     }
 
+    /// The language a code block colours itself with (SPEC §三十七 批次 C). A
+    /// command, like the width two lines above: a pick is an edit, and undo has
+    /// to be able to take it back.
+    pub fn set_code_lang(&self, id: i32, lang: Lang) -> bool {
+        self.exec_on_open_page(Command::SetCodeLang {
+            id: BlockId(id as u64),
+            lang,
+        })
+        .is_some()
+    }
+
     /// The raster behind an image row, decoded the first time it is asked for.
     /// This is a callback rather than a model field precisely so it is asked
     /// only for rows the ListView realizes: a page with five hundred pictures
@@ -2009,7 +2057,11 @@ impl AppState {
                 anchor = nid.as_u64() as i32;
                 nid
             };
-            let _ = target;
+            // A pasted fence's info string is part of what was copied, so it
+            // rides over the same way `checked` and the marks do.
+            if p.lang != Lang::Plain {
+                let _ = self.exec_on_open_page(Command::SetCodeLang { id: target, lang: p.lang });
+            }
         }
         true
     }
@@ -3032,6 +3084,7 @@ fn rows_to_blocks(page: i32, rows: Vec<BlockRow>, doc: &mut Document) -> Vec<Blo
                 attachment: None,
                 img_percent: 100,
                 columns: 0,
+                lang: Lang::Plain,
             }
         })
         .collect()
@@ -3457,6 +3510,9 @@ pub fn project_blocks(blocks: &[Block]) -> Vec<BlockRow> {
                 can_fold: blocks.iter().any(|x| x.parent == Some(b.id))
                     && !matches!(b.kind, BlockKind::Table | BlockKind::Columns),
                 columns: b.columns as i32,
+                // the language is only ever read back through `code-layer`, so
+                // the row carries the stored string rather than a code
+                lang: b.lang.as_str().into(),
                 // the guards are the whole cost of these fields: both walks
                 // scan the page, so calling them for every row would make the
                 // projection quadratic on a 10 000-block page
@@ -3531,6 +3587,7 @@ fn block(kind: i32, text: &str) -> BlockRow {
         img_percent: 100,
         can_fold: false,
         columns: 0,
+        lang: "".into(),
         table_cells: ModelRc::from(Rc::new(VecModel::from(Vec::new()))),
         column_items: ModelRc::from(Rc::new(VecModel::from(Vec::new()))),
         column_boxes: ModelRc::from(Rc::new(VecModel::from(Vec::new()))),
@@ -3766,6 +3823,50 @@ fn bench_marks(blocks: &mut [Block], marks: usize) {
     }
 }
 
+/// A code block that reads like source: a comment line, keywords, a string,
+/// numbers, an identifier-heavy line long enough to need a break, and two CJK
+/// words so the rule for characters this model cannot size is on the page for
+/// the gate to price. Same fixture on every row, because the gate measures the
+/// layers, not the lexer's interest in novelty.
+const BENCH_CODE_LINES: [&str; 7] = [
+    r#"// measure the bytes a page of code actually costs"#,
+    r#"fn measure(config: &Config) -> Result<u32, Error> {"#,
+    r#"    let mut total = 0; // running bytes, in pages"#,
+    r#"    for row in config.rows.iter().take(4096) { total += row.private_bytes; }"#,
+    r#"    println!("合计 {total} 字节 across {} rows", config.rows.len());"#,
+    r#"    log::trace!("done"); Ok(total)"#,
+    r#"}"#,
+];
+
+/// The code fixture the bench page scrolls, spelled out. The `code-hl`
+/// screenshot scene paints the same text, so the memory gate and the pixels
+/// look at one block rather than two that can drift apart.
+pub fn bench_code_source() -> String {
+    BENCH_CODE_LINES.join("\n")
+}
+
+/// Turn every `stride`-th row of the bench page into a highlighted code block
+/// (--code N, SPEC §三十七 批次 C). The languages rotate over everything the
+/// lexer knows except `Plain`: an uncoloured block costs six fewer `Text`s, so
+/// leaving one in the ring would under-price exactly what is being gated.
+fn bench_code(blocks: &mut [Block], code: usize) {
+    if code == 0 {
+        return;
+    }
+    let stride = (blocks.len() / code.min(blocks.len())).max(1);
+    let langs: Vec<Lang> = Lang::ALL.iter().copied().filter(|l| *l != Lang::Plain).collect();
+    let mut taken = 0;
+    for (i, b) in blocks.iter_mut().enumerate() {
+        if i % stride != stride - 1 {
+            continue;
+        }
+        b.kind = BlockKind::Code;
+        b.text = bench_code_source();
+        b.lang = langs[taken % langs.len()];
+        taken += 1;
+    }
+}
+
 /// Title + block texts, the blob the search scans.
 fn block_search_blob(title: &str, blocks: &[BlockRow]) -> String {
     let mut blob = String::from(title);
@@ -3924,7 +4025,7 @@ fn fuzzy_subsequence(query: &str, target: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        mock_commands, palette_action, NavHistory, CMD_NAV_BACK, CMD_NAV_FORWARD,
+        mock_commands, palette_action, Lang, NavHistory, CMD_NAV_BACK, CMD_NAV_FORWARD,
         CMD_PAGE_BASE, NAV_MAX, PaletteAction,
     };
     use crate::app::workspace::Workspace;
@@ -3956,6 +4057,7 @@ mod tests {
             attachment: None,
             img_percent: 100,
             columns: 0,
+            lang: Lang::Plain,
         }
     }
 
@@ -4385,7 +4487,7 @@ mod tests {
         use crate::core::AttachmentId;
 
         let state = AppState::new(
-            &HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0, pictures: 0, marks: 0 },
+            &HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0, pictures: 0, marks: 0, code: 0 },
             None,
         );
         // No database, so the store is the temp fallback; the high id range
@@ -4478,6 +4580,7 @@ mod tests {
                 attachment: None,
                 img_percent: 100,
                 columns: 0,
+                lang: Lang::Plain,
             })
             .collect();
         bench_pictures(&mut blocks, 250);
@@ -4518,7 +4621,7 @@ mod tests {
 
         let dir = ScratchDir::new("pictures");
         let db = dir.path().join("library.db");
-        let args = HandleArgs { blocks: 60, auto_exit_secs: 0.0, bench_pages: 0, pictures: 20, marks: 0 };
+        let args = HandleArgs { blocks: 60, auto_exit_secs: 0.0, bench_pages: 0, pictures: 20, marks: 0, code: 0 };
 
         let first = AppState::new(&args, Some(std::sync::Arc::new(
             crate::storage::SqliteRepository::open(&db).unwrap(),
@@ -4574,6 +4677,7 @@ mod tests {
             attachment: None,
             img_percent: 100,
             columns: if kind == BlockKind::Table { 3 } else { 0 },
+            lang: Lang::Plain,
         };
         let cell = |id: u64, text: &str| mk(id, Some(8), BlockKind::TableCell, text);
         let mut blocks = vec![
@@ -4680,7 +4784,7 @@ mod tests {
             crate::storage::SqliteRepository::open(&dir.path().join("library.db")).unwrap(),
         );
         let state =
-            AppState::new(&HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0, pictures: 0, marks: 0 }, Some(repo));
+            AppState::new(&HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0, pictures: 0, marks: 0, code: 0 }, Some(repo));
 
         state.create_page(None);
         let empty = state.start_page().expect("an empty page takes a paragraph");
@@ -4747,7 +4851,7 @@ mod tests {
     }
 
     fn plain_args() -> super::HandleArgs {
-        super::HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0, pictures: 0, marks: 0 }
+        super::HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0, pictures: 0, marks: 0, code: 0 }
     }
 
     /// A fresh session on a real database: one page with `n` pictures on it,

@@ -551,6 +551,21 @@ export component EditorBlock inherits Rectangle {
         wrap: word-wrap;
     }
 
+    // code (kind 8) highlight (SPEC §三十七 批次 C).
+    //
+    // The frame the block's text lives in, which is also the live input's frame
+    // for this kind: the two have to break lines in the same places, so the row
+    // cannot reflow under the caret.
+    property <length> code-width: input-width;
+    // A language is what makes a block coloured: an unstored one is plain text
+    // and gets none of the layers below.
+    property <bool> is-highlighted: block.kind == 8 && block.lang != "";
+    // One character of the mono font, measured once for the app by Editor.slint.
+    // Its quotient with `code-width` is the column budget the lexer wraps to;
+    // 0 before that first measurement means "add no breaks", which is the safe
+    // answer — Slint still wraps the text, and every layer shares that.
+    property <length> char-advance: UIState.code-advance;
+
     Rectangle {
         x: content-x;
         y: top-margin;
@@ -565,14 +580,71 @@ export component EditorBlock inherits Rectangle {
     code-text := Text {
         x: content-x + Theme.spacing-md;
         y: top-margin + Theme.spacing-md;
-        width: content-width - 2 * Theme.spacing-md;
+        width: root.code-width;
         visible: block.kind == 8 && !editing;
-        text: block.text;
+        // The block's own colour is one layer of the highlight like any other,
+        // and it is the layer the row measures itself with — the height a code
+        // block costs comes from the same string the colours are stacked on, so
+        // no second layout has to agree with the first. Unguided, the `: ""`
+        // branch keeps every other row of the page from running the lexer.
+        text: block.kind == 8 && block.lang != ""
+            ? UIState.code-layer(block.text, block.lang, root.code-width, root.char-advance, 0)
+            : block.text;
         font-family: Typography.mono-font;
         font-size: Typography.size-code;
         color: block-text-color;
         line-height-factor: Typography.line-code;
         wrap: word-wrap;
+    }
+
+    // code highlight (SPEC §三十七 批次 C). Slint Text paints one colour, so a
+    // coloured block is five `Text`s of the same text stacked on each other, and
+    // what makes them line up is that each is the whole block with everything of
+    // a different colour blanked (core::highlight). They are the same length and
+    // break at the same hard newlines, so the layer that measures the row above
+    // is also one of them, and nothing here depends on a layout engine agreeing
+    // with another.
+    //
+    // A conditional element, not a `visible:` flag: `visible` does not stop a
+    // binding from running, so five lexer calls would fire on every repaint of
+    // every row of the page to paint a rectangle nobody sees.
+    if root.is-highlighted && !editing : Rectangle {
+        x: code-text.x;
+        y: code-text.y;
+        width: root.code-width;
+        height: code-text.height;
+        // The model assumes a monospace font, and this is the floor under that
+        // assumption: if the theme's font is not quite one, a layer ends up
+        // taller than the measure and the row keeps the measure's height.
+        clip: true;
+        // Drawn in the order 1, 3, 4, 5 and then 2, so the comment colour is on
+        // top: a character no layer may blank (anything that is not ASCII, whose
+        // width this model cannot know) is copied into all of them, and prose is
+        // what is most likely to be one.
+        for kl in 5 : Text {
+            property <int> kind: kl == 0
+                ? 1
+                : kl == 1
+                ? 3
+                : kl == 2
+                ? 4
+                : kl == 3
+                ? 5
+                : 2;
+            // The same width the measuring layer has, not the element's natural
+            // one: a `Text` with no width never wraps, so a layer would break
+            // only at the lexer's hard newlines while the row above it breaks
+            // wherever Slint's own wrap does too — and the two would drift a
+            // line apart, which is what the first shot of this scene showed.
+            width: root.code-width;
+            text: UIState.code-layer(
+                block.text, block.lang, root.code-width, root.char-advance, self.kind);
+            font-family: Typography.mono-font;
+            font-size: Typography.size-code;
+            color: Colors.code-token(self.kind);
+            line-height-factor: Typography.line-code;
+            wrap: word-wrap;
+        }
     }
 
     // math (kind 20): the formula, centred in a box like a code block's. What

@@ -22,6 +22,9 @@ pub struct LaunchArgs {
     /// (--marks N). Without it the bench page has no marks at all, and the
     /// runs channel a marked line is drawn from stays invisible to the gate.
     pub marks: usize,
+    /// Scene D with highlighted code: code rows on the bench page
+    /// (--code N), each carrying a language so its layers are drawn.
+    pub code: usize,
     /// Scene F: programmatic continuous scroll (--scroll).
     pub scroll: bool,
     /// Scene F: how far one frame advances (--scroll-step, default 8 px). A
@@ -60,6 +63,7 @@ fn parse_launch_args() -> LaunchArgs {
         bench_pages: 0,
         pictures: 0,
         marks: 0,
+        code: 0,
         scroll: false,
         scroll_step: 8.0,
         scene: None,
@@ -92,6 +96,10 @@ fn parse_launch_args() -> LaunchArgs {
             }
             ("--marks", Some(v)) => {
                 a.marks = v.parse().unwrap_or(0);
+                i += 1;
+            }
+            ("--code", Some(v)) => {
+                a.code = v.parse().unwrap_or(0);
                 i += 1;
             }
             ("--scroll", _) => {
@@ -349,6 +357,7 @@ fn real_main(start: std::time::Instant) -> Result<(), String> {
         bench_pages: launch.bench_pages,
         pictures: launch.pictures,
         marks: launch.marks,
+        code: launch.code,
     };
     let ui = AppWindow::new().map_err(|e| e.to_string())?;
     mark("appwindow_new");
@@ -432,18 +441,22 @@ fn real_main(start: std::time::Instant) -> Result<(), String> {
 
     if launch.dump_state {
         let pages = state.workspace.borrow().page_count();
-        let (blocks, marked) = {
+        let (blocks, marked, coloured) = {
             let d = state.doc.borrow();
             let mut n = 0;
             let mut marked = 0;
+            let mut coloured = 0;
             for pid in [102, 105] {
                 let rows = d.page_blocks(quire::core::PageId(pid));
                 n += rows.len();
                 marked += rows.iter().filter(|b| !b.marks.is_empty()).count();
+                coloured += rows.iter().filter(|b| b.lang != quire::core::Lang::Plain).count();
             }
-            (n, marked)
+            (n, marked, coloured)
         };
-        eprintln!("dump-state: pages={pages} gs+atlas-blocks={blocks} marked={marked}");
+        // `coloured` is the highlight arm's identity: a binary without the
+        // language field has no such count to print.
+        eprintln!("dump-state: pages={pages} gs+atlas-blocks={blocks} marked={marked} coloured={coloured}");
     }
 
     if args.auto_exit_secs > 0.0 {

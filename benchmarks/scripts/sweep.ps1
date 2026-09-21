@@ -34,11 +34,12 @@ $all = @(
     "math", "math-inline",
     "toc",
     "embed", "embed-empty",
+    "code-hl",
     "columns", "columns-3", "columns-marks",
     "slash", "plus", "block-menu", "move-to", "page-move-to", "text-color",
     "bg-color", "link", "menu", "palette", "palette-nav", "search", "search-notes",
     "dialog", "settings",
-    "dark", "dark-slash", "dark-find", "dark-marks", "dark-link",
+    "dark", "dark-slash", "dark-find", "dark-marks", "dark-link", "dark-code-hl",
     "dark-block-menu", "dark-block-colors", "dark-title-edit"
 )
 $targets = if ($Scenes -eq "") { $all } else { $Scenes -split ',' }

@@ -180,7 +180,20 @@ inside: the cell at a third of the grid, the line at half the page. They joined
 the set because the delegate edits they cover moved **0 of the 50** scenes that
 already existed — a correct reading of that zero requires a shot that would have
 failed, and there was none.
-The baseline is `.scratch/sweep25` (52 scenes). The set before it, `.scratch/sweep10`
+`sweep25` → `sweep26` (code highlight) moved **0 of the 52** and added 2:
+`code-hl` and `dark-code-hl` — one fixture (the same seven lines the memory bench
+feeds itself) as a Rust block, and the same block in the dark theme. That zero is
+the reading this time, not a hope: the Language row lives in a code block's ⋮ menu
+only, so no swept menu band could move, and the six layers hang off a guard that is
+false on every swept row. What the two new scenes are for is the thing no hash can
+say — that the colours land on the characters they colour. The first shot of
+`code-hl` did not: every layer was a line above the text it stacks on, because a
+`Text` with no width never wraps (the trap below), and the fix had to be proved a
+second time at 760 px wide, where the fixture's long lines really do break. A
+colour census (count the pixels within 3 of each palette slot) is what settles it
+without an eyeball: all five token colours present in both themes, and the same
+five absent from `default` and `dark` down to 4 and 1 stray pixels.
+The baseline is `.scratch/sweep26` (54 scenes). The set before it, `.scratch/sweep10`
 (42 scenes), re-baselined 37 of them for a
 reason unrelated to tables: `DocumentRow.head` bound `height` without `y` and so
 was centred in its delegate, which had been sitting the page title ~34 px below
@@ -282,6 +295,15 @@ title; both cost a rebuild to find and neither is in the docs where you look.
   guard the *binding*, not just the visibility: `is-math ? render(…) : ""`.
   Unguarded, a 10 000-row page calls the renderer 10 000 times per projection to
   paint nothing on 9 999 of them.
+* **A `Text` with no bound `width` does not wrap.** Its width becomes its
+  `preferred-width` — the whole string on one line — so `wrap: word-wrap` has no
+  frame to break inside and only the newlines the string itself carries. The five highlight
+  layers of ADR-0042 each carry the same text as the layer that measures the row,
+  and none of them had a width: the measure wrapped, the colours did not, and the
+  first `code-hl` shot came back with every token painted one line above its own
+  characters. Bind the same width on every layer, and prove it with a fixture that
+  has a line long enough to wrap — with nothing to wrap, all six agree and the
+  scene passes while the feature is broken.
 
 ## Slint language traps (1.18)
 

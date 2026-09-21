@@ -159,7 +159,7 @@ fn run() -> Result<(), String> {
     let ui = AppWindow::new().map_err(|e| e.to_string())?;
     ui.window().set_size(PhysicalSize::new(w, h));
 
-    let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0, pictures: 0, marks: 0 };
+    let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0, pictures: 0, marks: 0, code: 0 };
     let state = AppState::new(&args, None);
     controller::bind(&ui, &state);
     controller::wire(&ui, &state);

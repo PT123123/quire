@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use quire::core::persistence::{Change, Repository};
-use quire::core::types::{Block, BlockId, BlockKind, OrderKey, Page, PageId};
+use quire::core::types::{Block, BlockId, BlockKind, Lang, OrderKey, Page, PageId};
 use quire::services::persistence::{
     FakeClock, PersistenceService, DEFAULT_DEBOUNCE_MS, DEFAULT_SNAPSHOT_INTERVAL_MS,
 };
@@ -52,6 +52,7 @@ fn seeded(path: &Path) -> Arc<SqliteRepository> {
         attachment: None,
         img_percent: 100,
         columns: 0,
+        lang: Lang::Plain,
         }),
     ])
     .unwrap();
@@ -111,6 +112,7 @@ fn shutdown_flush_then_next_session_loads_it() {
         attachment: None,
         img_percent: 100,
         columns: 0,
+        lang: Lang::Plain,
         })]);
         clock.set(10); // nowhere near due — this is the Ctrl+S/quit path
         svc.force_flush().unwrap();
@@ -230,7 +232,7 @@ fn settings_storage_row_reports_the_folder_and_snapshots_on_demand() {
 
     let (_dir, path) = temp_db("settings-storage-row");
     let repo = seeded(&path);
-    let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0, pictures: 0, marks: 0 };
+    let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0, pictures: 0, marks: 0, code: 0 };
     let state = AppState::new(&args, Some(repo.clone()));
 
     // the storage row shows the database's parent directory

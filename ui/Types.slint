@@ -86,6 +86,7 @@ export struct BlockRow {
     attachment: int, // attachments row an image (14) or file (15) points at; 0 = none
     img-percent: int, // image display width, percent of the editor column
     columns: int, // table (16) or columns (18) box count; 0 = neither
+    lang: string, // code (8): the language its colour keys on; "" = no colour
     // a table's cells, row-major: cell (r,c) is `table-cells[r * columns + c]`
     table-cells: [TableCell],
     // a columns layout's content, grouped by box in box order
@@ -307,6 +308,21 @@ export global UIState {
     // the whole feature (§二 / §三十三 rule out a WebView).
     pure callback embed-label(string) -> string;
     pure callback embed-url(string) -> string;
+    // code highlight (SPEC §三十七 批次 C): one colour of a code block, as the
+    // whole text of a `Text` that paints it. The lexer answers "which colour is
+    // this character", and the blanking that leaves every other character of
+    // that colour out is what lets five `Text`s of different colours sit on
+    // each other glyph for glyph — with no layout to keep in step, because the
+    // row's own measure is one of them (`kind` 0). The two lengths are the row's
+    // width and the font's character advance, whose quotient is how many
+    // characters fit on a line: the newlines this adds are derived, never
+    // stored, exactly like the maths above.
+    pure callback code-layer(string, string, length, length, int) -> string;
+    // How wide one character of the mono font is, measured once by the editor
+    // (a `Text` there writes it) and read by every code row. The lexer cannot
+    // know a font's metrics from Rust, and the number has to be the same for
+    // every layer of a block — which is why it lives here and not per row.
+    in-out property <length> code-advance: 0px;
     callback attachment-opened(int);
     callback attachment-saved(int);
     callback block-activate(int);

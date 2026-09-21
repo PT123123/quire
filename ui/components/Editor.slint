@@ -228,6 +228,24 @@ export component Editor inherits Rectangle {
         color: Colors.text-muted;
     }
 
+    // The highlight counts characters, so it needs the width of one of them —
+    // and the only honest source for that number is the font, asked once here
+    // for the whole app. Not inside a row: which rows the list view realizes
+    // depends on the scroll position, and where a block's lines break must not.
+    // Ten digits because a fractional advance rounds better over a run.
+    code-probe := Text {
+        x: -1000px;
+        y: -1000px;
+        text: "0000000000";
+        font-family: Typography.mono-font;
+        font-size: Typography.size-code;
+        wrap: no-wrap;
+        visible: false;
+        changed width => {
+            UIState.code-advance = self.width / 10;
+        }
+    }
+
     // The scroll position mirror lets the bench harness drive the same
     // viewport a mouse wheel would (scene F); normal wheel use still works
     // because Flickable writes its internal changes back through the

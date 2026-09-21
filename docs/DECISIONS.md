@@ -2,6 +2,71 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0042 · One colour is one layer, not one run
+
+Decision: a highlighted code block paints as **six copies of the same string**.
+`core::highlight::layer(text, lang, frame, advance, kind)` lexes the block, gives
+every character one of six colours, and returns the whole block with every
+character that is not `kind` replaced by `U+00A0` — plus a hard newline wherever a
+line passes a column budget (`floor(frame / advance)`; ASCII is one column, a tab
+eight, anything else two). `code-text` asks for kind 0 and five `Text`s in one
+conditional `Rectangle` ask for the other five, drawn 1, 3, 4, 5 and then 2. All
+six have the same length, the same characters per line and the same hard newlines,
+so they stack glyph for glyph and no second layout engine has to agree with the
+first.
+The row's height stays `code-text`'s, which is the point of counting kind 0 as a
+layer: the string that measures the row is one of the strings that colour it.
+
+Two seams hold it up. The advance of one character comes from **one** invisible
+probe `Text` in `Editor.slint` that writes `UIState.code-advance` from a `changed
+width` handler — not from a row, because which rows a `ListView` realizes depends
+on the scroll position and where a block's lines break must not; `0px` before the
+first measurement means "add no hard breaks", which is the safe answer since
+Slint still wraps. And the colours are `Colors.code-token`, which maps the five
+token kinds onto five slots of the block palette this app already has (keyword =
+purple, comment = gray, string = green, number = orange, name = blue) rather than
+shipping a second palette tuned for the same two backgrounds.
+
+Language is the one new fact a block stores: `Lang` (Plain / Rust / Python / Js /
+Ts / Md / Json / Bash) in `blocks.lang`, migration v9, undoable as
+`Change::BlockLangSet`, picked from a Language submenu that only a code block's
+⋮⋮ menu shows, and carried by the fence's info string in both Markdown directions
+(```` ```rs ```` comes back as Rust and leaves as ```` ```rust ````; a language with
+no lexer folds to `Plain`, which is no colour rather than a broken block).
+
+Why: Slint 1.18 `Text` paints one colour, and ADR-0041 had just made the runs
+channel break at word boundaries — but a run is still one layout *cell*, so a
+per-token colour could not wrap and highlight was parked behind that wall. Six
+whole-block strings dodge the wall instead of climbing it: wrapping is Slint's
+job on each layer, the lexer never has to know about words, and typing pays
+nothing because the layers exist only while the block is not being edited
+(`is-highlighted && !editing`), so no keystroke lexes.
+
+Consequences:
+
+* **A character whose width this model cannot know is copied rather than blanked.**
+  A non-ASCII character goes into all six layers verbatim, so on a line that
+  carries both a comment and non-ASCII prose the comment colour wins — it is drawn
+  last. That is the documented boundary (a CJK comment reads gray, a CJK string
+  reads green, a CJK string on a commented line reads gray), and it errs towards
+  showing the character rather than towards the wrong colour.
+* **The model assumes a monospace font**, and `clip: true` on the layer Rectangle is
+  the floor under that assumption: if the theme's font is not quite one, a layer
+  ends up taller than the measure and the row keeps the measure's height.
+* **Two defects that only a shot could catch, both invisible in the code.** A layer
+  `Text` with no `width` does not wrap — it breaks only at the lexer's hard
+  newlines — so the five layers drifted a line away from the measuring layer, and
+  the first `code-hl` shot printed text that read as scrambled. The fix is
+  `width: root.code-width` on every layer. And `visible: false` does not stop a
+  binding from running, so those five lexer calls fired on every repaint of every
+  row of the page until the Rectangle became a conditional element. Both rules are
+  now in `docs/UI_ARCHITECTURE.md` with the box they showed up in.
+* Six `Text` elements on a highlighted row (the measuring layer plus five colours);
+  a plain code block has one, and every other row of the page gains none, because
+  the `if` that guards the layers is the same guard the six are behind.
+* No JS/WASM runtime and no new dependency, which is what SPEC §三十七 asked for.
+  The lexer is ~800 lines of switch over six language families; a real tokenizer
+  would be its own ADR.
 ## ADR-0041 · A marked line breaks where its words do, because a run is one layout cell
 
 Decision: `build_runs` (src/app/state.rs) emits one run per **word** inside an

@@ -35,6 +35,7 @@ struct Args {
     search_every: usize,
     /// Rows of the page that carry a bold mark (0 = none, as ever).
     marks: usize,
+    code: usize,
     /// Database file to type against (default: in-memory).
     db: Option<std::path::PathBuf>,
     /// Print one line per keystroke to stderr.
@@ -61,6 +62,7 @@ impl Args {
             duration: get("--duration", 8.0),
             search_every: get("--search-every", 0.0) as usize,
             marks: get("--marks", 0.0) as usize,
+            code: get("--code", 0.0) as usize,
             db: parse_str(argv, "--db").map(std::path::PathBuf::from),
             verbose: argv.iter().any(|a| a == "--verbose"),
         }
@@ -180,6 +182,7 @@ fn run() -> Result<(), String> {
         bench_pages: 0,
         pictures: 0,
         marks: args.marks,
+        code: args.code,
     };
     let state = AppState::new(&handle, Some(repo.clone()));
     controller::bind(&ui, &state);

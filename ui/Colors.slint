@@ -63,6 +63,20 @@ export global Colors {
         return Theme.dark ? #e06d66 : #d44c47;
     }
 
+    // code highlight (SPEC §三十七 批次 C): the colour of one layer of a code
+    // block, keyed by core::highlight::Kind. Notion's own code colours are a
+    // second palette, and this app already has one — the block swatches are
+    // tuned for the same two backgrounds, so a keyword here is a purple block
+    // there. 0 is the block's own colour and never comes through here: that
+    // layer is the row's `code-text`, which paints `block-text-color`.
+    public pure function code-token(kind: int) -> color {
+        if (kind == 1) { return Colors.block-text(7); }  // keyword: purple
+        if (kind == 2) { return Colors.block-text(1); }  // comment: gray
+        if (kind == 3) { return Colors.block-text(5); }  // string: green
+        if (kind == 4) { return Colors.block-text(3); }  // number: orange
+        return Colors.block-text(6);                     // name: blue
+    }
+
     // row background tints
     public pure function block-bg(slot: int) -> color {
         if (slot <= 0) { return transparent; }

@@ -1825,3 +1825,116 @@ cell）、表格格与分栏里编辑时的行高。②`--marks` 只喂 bold，i
 色 run 现在能断行，这条正是它当初排不进来的理由；bookmark 仍差一个 TLS 客户端（embed 已经把卡
 片形状占了，缺的是抓标题与 favicon 那一半网络），synced block 等 §四十。`reveal`（变高
 scroll-into-view）不属于批次 C，但 TOC 跳转和 `quire://block` 锚点还在等它。
+（写在下条之后的更正：**「墙没了」不是高亮能走 runs 通道的意思**——ADR-0042 最后没走那条路，
+理由在下条第 1 条。）
+
+## M11 批次 C · slice 4 — code 高亮：一个颜色是一层，不是一段 run（2026-09-21，on `master`，ADR-0042）
+
+SPEC §三十七 批次 C 的第四条，也是这批里唯一先撞墙再绕过去的那条。上一条结尾说「高亮前面那面
+墙没了」，指的是 ADR-0041 让 run 能断行；真去量 token 的时候发现墙其实还在，只是换了个位置：
+**token 不是词**。一条字符串字面量可以跨行，一段注释可以，一条模板串也可以，而 ADR-0041 的 cell
+按 `is_ascii_whitespace` 切，切出来的单元天生不含换行。所以 per-token 上色走 runs 通道的话，
+一个 token 要么占满一整个 layout 单元（跨行时无法断），要么被按空格切开（字符串里的空格就不是
+颜色的一部分了）。两条都不要，于是改成一整块字符串叠六层。
+
+**改动面**：`src/core/highlight.rs`（新增，1 005 行，含 16 条单测）、`src/core/types.rs`
+（`Lang` + `Block.lang`）、`src/core/{command,history,persistence,mod}.rs`、
+`src/storage/migrations.rs`（**v9** `add_lang_column`）、`src/storage/repository.rs`、
+`src/app/state.rs`（投影带 `lang`、`code-hl` 的 fixture `bench_code_source` / `bench_code`、
+`--code` 的 10 000 行构造）、`src/app/controller.rs`（`on_code_layer`、`SetCodeLang`、两个
+scene）、`src/main.rs` / `src/bin/quire_typing.rs`（`--code` + `--dump-state` 的 `coloured=`）、
+`src/bin/quire_shot.rs`、`src/services/{import,export}_service.rs`（fence info string）、
+`src/services/{settings_store,lan_server}.rs`、`ui/{Colors,Types}.slint`、
+`ui/components/Editor.slint`（advance 探针）、`ui/components/EditorBlock.slint`（六层）、
+`benchmarks/scripts/{sweep,bench}.ps1`、`tests/integration/*`（`HandleArgs` 字面量 + 新断言）、
+docs 六份。
+
+**七条决定**：
+
+1. **一层，不是一个 run**。`highlight::layer(text, lang, frame, advance, kind)` 返回**整个
+   block**，把不属于这个颜色的字符换成 `U+00A0`（不可断空格——这是它不用普通空格的原因：空白列
+   不能成为断点），源码里的空白原样保留。六串等长、在同一批硬换行处断，所以它们是逐字叠在一起
+   的：不需要两个排版引擎互相同意，而**量行高的那一层（`Kind::Plain`）本身就是叠出来的一层**。
+2. **换行是派生的，不是存的**。列预算 `columns = floor(frame / advance)`，ASCII 记 1 列、tab
+   记 8、其余记 2（非 ASCII 的真实宽度这个模型不知道，见第 6 条）。`advance` 为 0（第一次量到
+   之前）就只上色不加换行，退化成未上色块的软换行——那是更朴素的渲染，不是坏掉的渲染。
+3. **一次全应用的字体测量**：`Editor.slint` 里一个 `visible: false`、摆在 `-1000px` 的
+   `code-probe := Text { text: "0000000000"; changed width => UIState.code-advance =
+   self.width / 10 }`。十个数字是因为小数 advance 在长串上舍得更准。没有第二个地方猜字号。
+4. **颜色复用块调色板的槽位**：`Colors.code-token(kind)` 把 keyword/comment/string/number/name
+   映到 block-text 的 7/1/5/3/6（紫/灰/绿/橙/蓝），暗色是同一组槽位的另一列。不新增颜色常量，
+   主题开关不用碰。
+5. **上色只在没在编辑时**，而且是**条件元素不是 `visible`**：`if root.is-highlighted &&
+   !editing : Rectangle { for kl in 5 : Text {…} }`。`visible: false` 不阻止 binding 运行——
+   第一版就是这么写的，结果是页面每行每次重绘跑五次 lexer。改成条件元素后，光标在块里时那五层
+   根本没被 realize；这也是「打字延迟不可测」的机制，不是运气。
+6. **画序 1,3,4,5,2，注释压最后**。非 ASCII 字符宽度未知 ⇒ 模型不敢把它 blank 掉 ⇒ 它被逐字抄
+   进每一层，于是它的颜色由最上面那层决定。散文（中文注释、字符串里的中文）最可能是非 ASCII，
+   所以让注释色赢：写在注释里的中文读起来是灰的，这是取舍不是 bug，SPEC 边界里写着。
+7. **语言是块存的唯一新东西**：`blocks.lang`（v9，本批第一次也是唯一一次迁移——math/TOC/
+   embed 四类都不存新东西）；入口是块自己的 ⋮ → Language（submenu id 14，只在 code 块出现；
+   `CODE_LANG_BASE = 600_000 + index`），撤销走 `Change::BlockLangSet`。`Lang::try_from_str`
+   折别名（`rs py python3 jsx tsx markdown jsonc sh shell zsh`），认不出的折成 `Plain`——**一
+   个这份构建认不出的语言是没有颜色，不是一个坏掉的块**。Markdown 双向带 info string（进来什
+   么别名都认，出去写规范名 `rust`，`Plain` 写空 fence），富文本粘贴带 `lang`。
+
+**两个只有截图能抓到的缺陷**（都进 ADR-0042 与 `docs/UI_ARCHITECTURE.md` 的几何陷阱表）：
+①**层与量尺的错位**——`code-hl` 第一张图上，五种颜色整块浮在字上方一行。根因是 Slint 的
+`Text` 没绑 `width` 就永不换行（它的宽度变成 `preferred-width`），所以五层只在 lexer 自己插入
+的硬换行处断，而量高那层在软换行。修法：五层各绑 `width: root.code-width`。**复证不是在
+1 280 px 而是 760 px**：fixture 里没有一行长到需要断的时候，这个缺陷在任何宽屏图上都看不见。
+②`if cond : { Rectangle {…} }` 编译不过（`expected Identifier`，EditorBlock.slint:607），条件
+元素的冒号后面必须有元素名。写文档时还出过第三次自己的错：把「彩色臂 private 更低」解释成
+「代码块文字更短」，而 fixture 是 ≈58 字节的 lorem 行换成 330 字节七行——PERFORMANCE 那节已按
+实际数据改掉，理由见下。
+
+**验证**：`cargo check --all-targets` 干净；`cargo test --all-targets -- --skip
+clipboard_write_and_read_round_trip_unicode` → **374 passed / 0 failed / 11 ignored**（上一条
+ADR-0041 是 354 / 0 / 11，这次 +20）。其中 16 条在 `highlight.rs`：五种语言各自的词法（注释里的
+`//` 不是注释、`'a` 是 lifetime 不是字符、JSON 的 key 与 value、bash 里词中的 `#`）、层与源串等
+长、所有 kind 共享同一批断点（`every_kind_shares_the_breaks_so_the_layers_stack`）、列预算
+（`a_wrapped_line_never_exceeds_what_the_row_can_show`）、宽字符只抄不 blank、`U+00A0` 不是断点
+而真空格是。别名折叠那条在 `types.rs`（`lang_strings_round_trip_and_aliases_fold`），迁移与读写
+在 storage/markdown 两处集成测试里。`cargo build --release` 零警告。跳掉的仍是本机剪贴板独占。
+
+**性能**：三臂两 exe 一个 sitting（原始行
+`benchmarks/results/2026-09-21-m11-highlight-ram.jsonl`，15 行）。control = `2b62498` 在 clean
+worktree 里编（md5 `bde7faec…` / 22 087 680 B）；candidate 是本树 release（md5 `961ff115…` /
+22 194 176 B），并跑 `--code 0` 与 `--code 2000` 两臂——**同一支 exe**，所以「树的账」与「上色
+的账」是两个读数。每臂自己的 pinned db、交替、种子那次不计、每条臂用 `coloured=` 自证 fixture
+（不带该字段的二进制印不出这行，这就是它的身份证）。稳态 private：control 97.4 / 96.9，
+candidate 无彩色 97.5 / 98.4，彩色 2 000 行 90.6 / 90.4 ⇒ **1.008×** 与 **0.924×**。第一个数
+是这批欠闸的数：0.8 MB 对 control 臂自己 0.5 MB 的散布，就是「量不出来的成本」。**第二个数不
+是成绩**，而且它的第一版解释是错的：彩色臂的行**更长**（330 B 对 58 B）、**更高**（7 行对 1
+行），文字量涨、行高涨，private 反而掉 7.5 MB。而且它连符号都不稳：200 行彩色 ⇒ +2.75 KB/行，
+2 000 ⇒ −4.4 KB/行，5 000 ⇒ −1.85 KB/行。一个在自己量程内变号的量没在被测量，所以这里发布的
+是「**彩色行多 25 倍，进程没有变大**」，不是那 7.5 MB。它是 committed-not-touched：三臂的
+working set 全在 132.2–133.4 MB，落掉的 7.5 MB 从来不在内存里，这次坐实的只是一句——不同分配
+序列留下的 arena，本闸不定价。idle CPU 稳态 0.2–0.59 %（种子那三次 2.53–5.65 %）。exe 大 106
+496 B。SPEC §三十七 真正写下来的是延迟，scene E 答这条：同一支 exe，`--code` 0 对 2000，各两
+轮（`benchmarks/results/2026-09-21-m11-highlight-typing.jsonl`）——handler 中位 **89 µs** 对
+92–112 µs，p95 154–167 对 154–207，两列都不输，而未彩色臂自己跨轮散布（92→112）比两臂之差还
+宽。「长代码块打字延迟不可测」达成。彩色臂打字时 CPU 确实高（29.7–30.8 % 对 24.3–27.1 %），那是
+软件渲染器每 tick 重画一行高亮的开销，进程有富余；若哪天把五层挪出 `!editing` 守卫，要重读的
+就是它。
+
+**像素**：`.scratch/sweep25` → `.scratch/sweep26`，52 → **54** 张：**已有 52 张动 0 张**，新增
+`code-hl` 与 `dark-code-hl`（`sweep.ps1` 的 scene 表在 `embed-empty` 与 `dark-link` 之后各加一
+行）。两张新图是这一批唯一的证据，所以不能只看「有颜色」：用 PIL 对 PNG 做了**颜色普查**，五
+种 token 色在两张图里都出现（light 5 色 / dark 5 色），而 `default` 与 `dark` 两张基线图里各只
+有 4 与 1 个杂点落在这些值上（那是 UI 别处的相近色，不是高亮）。这一步是必要的：一个「paints
+nothing」的高亮器不会让其余 52 张里任何一张变化，也不会让上面任何一个内存数字变坏。另外补的
+两张对照（`.scratch/hlfix/`，非基线）：1 280 px 的原图与 760 px 的窄图——后者才真的逼出列预算
+那条路径，错位缺陷就是在这两张之间从「看不出来」变成「看不对」的。54 张是新基线。
+
+**未验证**：①**人眼**——⋮ → Language 菜单的实际观感（一级菜单里第 14 项、8 个语言项）、编辑中
+五层消失 / 退出编辑后出现、中文注释读成灰色的取舍在真实页面上能不能接受、暗色主题下的对比度、
+以及 caret 落在高亮块里时的行高。headless 一张图都没有按下 TouchArea。②`Lang::Plain` 的块在一
+个已经上色的页面里会不会被误当彩色（守卫是 `block.lang != ""`，代码路径有单测，画面没有）。
+③非 ASCII 的列宽模型（第 6 条）只按 2 列估，一条全是中文的「代码」在窄框里会比实际宽，`clip:
+true` 兜住不溢出，但没有图证明这读起来是对的。
+
+**批次 C 还剩**：bookmark / synced block。bookmark 仍只差一个 TLS 客户端（embed 已经把卡片形状
+占了，缺的是抓标题与 favicon 那一半网络）；synced block 等 §四十。高亮这条不再需要 runs 通道，
+所以 ADR-0041 那三条残留（长标记短语、标记行需更多行、无空格文本）与它无关了。`reveal`（变高
+scroll-into-view）仍不属于批次 C，但 TOC 跳转和 `quire://block` 锚点还在等它。

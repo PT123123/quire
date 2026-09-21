@@ -9,7 +9,7 @@ use crate::app::state::{
     core_page_id, kind_from_int, palette_action, AppState, PaletteAction, PAGE_GETTING_STARTED,
     ROW_NEW_PAGE,
 };
-use crate::core::{BlockId, Change, Command};
+use crate::core::{BlockId, Change, Command, Lang};
 use crate::{AppWindow, UIState};
 use slint::{ComponentHandle, Global, Model};
 use std::rc::Rc;
@@ -780,6 +780,20 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         .on_embed_label(move |url| crate::core::embed::describe(&url).into());
     ui.global::<UIState>()
         .on_embed_url(move |url| crate::core::embed::with_scheme(&url).into());
+    // code highlight (SPEC §三十七 批次 C): the same shape as the two above —
+    // one pure function of what the row already holds, no state to consult. The
+    // row asks for each colour of its block separately; the lexing is done once
+    // per call by Slint's own cache of a pure callback.
+    ui.global::<UIState>().on_code_layer(move |text, lang, frame, advance, kind| {
+        crate::core::highlight::layer(
+            &text,
+            Lang::try_from_str(&lang).unwrap_or(Lang::Plain),
+            frame,
+            advance,
+            crate::core::highlight::Kind::from_int(kind),
+        )
+        .into()
+    });
     {
         let gw = gw.clone();
         let s = state.clone();
@@ -1481,6 +1495,10 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                 s.fill_block_menu_image_width(id);
                 return;
             }
+            if action == 14 {
+                s.fill_block_menu_code_lang(id);
+                return;
+            }
             // color picks stay open (Notion-style live preview); everything
             // else closes first
             let color_pick = (AppState::COLOR_TEXT_BASE..AppState::COLOR_BG_BASE + 100)
@@ -1488,13 +1506,22 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
             let width_pick = (AppState::IMAGE_WIDTH_BASE
                 ..AppState::IMAGE_WIDTH_BASE + 200)
                 .contains(&action);
-            if !(color_pick || width_pick) {
+            let lang_pick = (AppState::CODE_LANG_BASE
+                ..AppState::CODE_LANG_BASE + Lang::ALL.len() as i32)
+                .contains(&action);
+            if !(color_pick || width_pick || lang_pick) {
                 g.set_block_menu_open_id(-1);
             }
             if width_pick {
                 s.set_image_width(id, action - AppState::IMAGE_WIDTH_BASE);
                 // refill so the current-tier check follows the pick
                 s.fill_block_menu_image_width(id);
+                return;
+            }
+            if lang_pick {
+                let lang = Lang::ALL[(action - AppState::CODE_LANG_BASE) as usize];
+                s.set_code_lang(id, lang);
+                s.fill_block_menu_code_lang(id);
                 return;
             }
             if action == 9 {
@@ -2536,6 +2563,10 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             g.set_dark(true);
             apply_scene(ui, state, "marks");
         }
+        "dark-code-hl" => {
+            g.set_dark(true);
+            apply_scene(ui, state, "code-hl");
+        }
         "dark-link" => {
             g.set_dark(true);
             apply_scene_overlay(ui, state, "link-dlg");
@@ -2991,6 +3022,34 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
                 kind: crate::core::BlockKind::Embed,
             });
             let _ = state.exec_editor(Command::ReplaceText { id, text: "".into() });
+            state.reproject_blocks();
+        }
+        // SPEC §三十七 批次 C: the same block the memory gate scrolls, painted.
+        // The fixture carries a comment, a string, numbers, a name, CJK inside
+        // the comment, and one line long enough to need a hard break, so every
+        // rule the layer model has is on the screen at once.
+        "code-hl" => {
+            let page = core_page_id(state.open_page.get());
+            let target = {
+                let d = state.doc.borrow();
+                d.page_blocks(page)
+                    .iter()
+                    .find(|b| b.kind == crate::core::BlockKind::Paragraph && !b.text.is_empty())
+                    .map(|b| b.id)
+            };
+            let Some(id) = target else { return };
+            let _ = state.exec_on_open_page(Command::SetBlockType {
+                id,
+                kind: crate::core::BlockKind::Code,
+            });
+            let _ = state.exec_editor(Command::ReplaceText {
+                id,
+                text: crate::app::state::bench_code_source(),
+            });
+            let _ = state.exec_on_open_page(Command::SetCodeLang {
+                id,
+                lang: crate::core::Lang::Rust,
+            });
             state.reproject_blocks();
         }
         "find" => {

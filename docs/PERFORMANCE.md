@@ -1316,3 +1316,74 @@ one string, i.e. sub-pixel per gap. `sweep24` → `sweep25` (52 scenes): 0 of th
 50 existing scenes moved and 2 new ones (`table-marks`, `columns-marks`) had to
 be added, because the grid and layout fixtures hold no marks and the two
 delegate edits were otherwise unverifiable.
+
+## M11 · colouring a code block has no per-row term, and 7 MB this gate will not explain (2026-09-21, ADR-0042)
+
+Five extra `Text` elements per highlighted row, each of them the whole block run
+through the lexer. That is the shape the slice had to measure, and scene D has
+two thousand of those rows in it.
+
+**Three arms, two binaries, one sitting.** The gate has to separate *this tree*
+from the previous commit and *colouring* from *being a code block*, so the third
+arm is the candidate exe with the same knob at zero: control `2b62498` built in a
+clean worktree, candidate built from this tree, `-Code 0` and `-Code 2000` both
+run on the candidate (raw rows
+`benchmarks/results/2026-09-21-m11-highlight-ram.jsonl`). Each arm on its own
+pinned database, arms alternating, each arm's first (seeding) run excluded, and
+every candidate row printing its own fixture (`dump-state: … coloured=2000`) so
+an arm cannot pass for another:
+
+| arm | exe | steady WS MB | steady private MB |
+|-----|-----|-------------:|------------------:|
+| control `2b62498` | md5 `bde7faec…`, 22 087 680 B | 132.2 / 132.2 | 97.4 / 96.9 |
+| candidate, no colouring (`coloured=0`) | md5 `961ff115…`, 22 194 176 B | 133.0 / 133.4 | 97.5 / 98.4 |
+| candidate, 2 000 coloured rows | same exe | 132.4 / 132.2 | 90.6 / 90.4 |
+
+**1.008× for the tree, and 0.924× once its rows are coloured.** The tree-vs-tree
+number is what the slice owes: 0.8 MB against the 0.5 MB spread inside the control
+arm alone is the instrument's floor, so the schema column, the `Lang` field on
+every block model row and the conditional layer element are **not measurable on
+this scene**. The second number is the one that reads like a win, so it is
+published with the opposite reading attached rather than as a saving: the same
+binary colouring two thousand rows commits *fewer* bytes than the same binary
+colouring none.
+
+**What the drop is not, and what is left standing.** It is not the
+highlighter's — that is the point of running the third arm on the candidate exe —
+and it is not the fixture being smaller, which was this section's first draft and
+is wrong: `--code N` swaps a ≈58-byte bench line for a 330-byte, seven-line code
+sample, so the coloured arm holds *more* text in *taller* rows than the arm it
+came out under. Nothing in the slice's shape explains the sign, and the
+readings refuse a slope: +2.75 KB per coloured row at 200, −4.4 KB at 1 800,
+−1.85 KB between 2 000 and 5 000. A quantity that changes sign across its own
+range is not being measured, so what the gate publishes is the absence of a
+per-row term — **25× more coloured rows do not make the process bigger** — and
+not the 7.5 MB. That it is committed-not-touched rather than saved is the other
+counter: private bytes fall from 97.95 to 90.50 while the **working set stays at
+132.2–133.4 on all three arms**, so no page the process actually uses went
+away, and the most this sitting supports is that a different allocation sequence
+left a smaller arena committed. Idle CPU is 0.2–0.59 % on the steady runs of
+every arm; the first run of each (2.53–5.65 %) is the seed pass. The exe grew
+106 496 B.
+
+**The typing gate, which is the requirement SPEC §三十七 actually writes down.**
+Scene E, 10 000 blocks, ~30 keystrokes/s, one binary, the knob at 0 then 2000,
+two rounds each (raw rows
+`benchmarks/results/2026-09-21-m11-highlight-typing.jsonl`):
+
+| arm | handler median µs | p95 µs | max µs | n |
+|-----|------------------:|-------:|-------:|--:|
+| `-Code 0` | 92 / 112 | 160 / 207 | 294 / 559 | 459 / 464 |
+| `-Code 2000` | 89 / 89 | 167 / 154 | 421 / 304 | 461 / 464 |
+
+Median 89 µs with two thousand coloured rows against 92–112 µs without them; p95
+154–167 against 154–207. The coloured arm is not slower in any column of either
+round, and the uncoloured arm's own spread across rounds (92→112) is wider than
+the gap between the arms. "长代码块打字延迟不可测" is satisfied — and the
+mechanism is the one ADR-0042 records rather than luck: the five lexer calls live
+inside a conditional element Slint does not realize while the caret is in the
+block, so a keystroke re-renders one plain `Text` and zero lexer runs. What the
+coloured arm *does* pay is CPU while typing (29.7–30.8 % against 24.3–27.1 %),
+which is the software renderer painting a highlighted row every tick of a scene
+with headroom to spare; it is the number to re-read if a future change moves the
+layers outside the editing guard.

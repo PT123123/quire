@@ -2356,10 +2356,25 @@ embed：YouTube / Figma / Google Maps 一类链接转卡片。本阶段只做占
 * 边界（不算缺陷）：不抓标题、不抓 favicon、不预览（那是 bookmark 的活），所以卡片显示的是
   域名而不是网页标题；识别不了的域名就以域名本身为标签；未填地址时卡片说「No address yet」
 
-code 高亮：
+code 高亮：—— 2026-09-21 已交付，ADR-0042
 
 * 纯词法着色，先覆盖 rust / python / js / ts / md / json / bash
 * 不得为高亮引入 JS 运行时
+* 交付形态：块存的是「用哪门语言着色」（`blocks.lang` 一列，v9 迁移，`Change::BlockLangSet` 可撤销，
+  ⋮ 的 Language 子菜单只在 code 块上出现），字是绘制时派生的：`core::highlight::layer` 把整块文本
+  连同硬换行算成六份等长字符串，每份只留一种颜色的字符、其余换成不换行空格，Slint 侧六层 `Text`
+  逐字叠合，所以没有「两个排版器要对齐」这回事——runs 通道（ADR-0041）一个 run 是一格、不能断行，
+  当初正是这面墙把高亮挡在外面
+* 行高仍由 kind 0 那层量：量行的字符串与上色的字符串是同一份，多出来的最坏情况是一行空白，不是裁掉的页
+* 一个字符多宽只问字体一次（`Editor.slint` 里一个不可见的探针 `Text` 写 `UIState.code-advance`），
+  不在行内问：ListView 显示哪些行取决于滚动位置，而一块代码在哪断行不该取决于它
+* 着色只在块没被编辑时发生（`is-highlighted && !editing`），所以每敲一个键不做一次词法分析；
+  那五层是条件元素而不是 `visible: false`，因为后者拦不住 binding，等于每一行每次重绘都跑五遍词法
+* Markdown 是围栏上的 info string：```` ```rs ```` 读进来是 Rust，导出写 ```` ```rust ````；认不出的语言
+  折成 `Plain`，也就是不着色，而不是一个坏块
+* 边界（不算缺陷）：非 ASCII 字符宽度未知，所以六层都原样带上它、注释层最后画 —— 一行里既有注释又有
+  中文散文时，那串中文是灰色；列数按等宽字体算，`clip: true` 是这条假设的地板；没有语义分析，
+  `Vec` 与 `println!` 是名字不是类型检查
 
 math：—— 2026-09-21 已交付，ADR-0038
 
