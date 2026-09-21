@@ -1998,3 +1998,380 @@ rusqlite with the bundled SQLite (M3 — persistence has no std answer), rfd
 embed-resource as a *build* dependency only (M8 installer — it runs rc.exe and
 adds nothing to the binary). Anything else waits for a milestone that cannot be
 built without it.
+
+## ADR-0060 · A database is its own entity behind a block, and the six view layouts are one kind
+
+Decision: SPEC §三十九's `database` is a **new entity**, not a page flag and
+not a block payload: one row in `databases(id INTEGER PRIMARY KEY, name TEXT NOT
+NULL DEFAULT '')`, reached from a page through one **new block kind**,
+`BlockKind::Database` (`as_str` = `"database"`), pointing at it through a new
+nullable `blocks.db_ref INTEGER` — the shape ADR-0026 gave `blocks.page_ref`,
+and for the same reason. A "full-page database" is not a second entity: it is an
+ordinary page whose first block is a `Database` block, so there is one schema,
+one storage path and one set of lifecycle rules, and a page that holds a
+database is still a page with prose above and below it. SPEC's
+`table → board → list → calendar → gallery → timeline → form → chart` — and the
+six muted `INSERT_ITEMS` rows in `state.rs` (`Table view`, `Board`, `Gallery`,
+`List view`, `Calendar`, `Timeline`, all `id = -1`) — are **layouts of that one
+entity** (`db_views.layout`), not six or eight block kinds: choosing one creates
+a `Database` block whose first view has that layout, which is what lets the
+placeholders be lit one phase at a time (D5) without a new kind each time, and
+what makes `linked database` (D7) a pointer at an existing view rather than a
+ninth kind.
+
+Why not a page: `pages` has no schema, and a boolean "this page is a database"
+would have to be re-read by every path that lists pages (§十七's tree,
+Favorites, Recents, the search index, the sidebar's drag) while still needing
+the property and value tables anyway. It also cannot express D7's "show another
+database's view here", because a page can only ever be itself. Why not a payload
+column on the block: that is ADR-0031's rejected alternative again — a payload
+stops a row from being a page and a cell from carrying inline marks or its own
+undo granularity, and §三十九 says outright that a record may *be* a page, so the
+row has to keep the identity a page has (`pages.id` — the thing §四十's `@page
+mention` points at).
+
+Consequences:
+
+* This ADR fixes the shape; D0 ships **no** kind. Schema stays at v11 through
+  D0, so the six wiring points §三十七 lists (types, kind string, Markdown,
+  Turn into, slash/insert menu, screenshot scenes) land in one phase together
+  with the delegate that draws a view. That is also why the D0 sweep is
+  byte-identical: no menu moved because no kind exists yet.
+* The block is a **leaf**, unlike `table` and `columns`: it owns no child blocks
+  (its rows are records, its cells are values), so the projection has nothing to
+  hide and no row-index consumer has to translate. What it does own is the
+  `databases` row: deleting the block deletes the entity the way deleting a
+  `Page` block deletes its child page, and a dangling `db_ref` (the entity gone,
+  the block back through an undo) renders one muted, non-editable line —
+  "(deleted database)" — exactly as a dangling `page_ref` does.
+* The window is what makes a 10 000-row database safe inside one page, and D0
+  proved the channel exists before any of it was drawn: `core::database::window`
+  realizes **31 rows of 10 000** at the top of a 720 px viewport with 32 px rows
+  (39 mid-scroll, 31 at the bottom), and the realized rows cost **6 806 B** of
+  heap against **2 259 800 B** for the table's own row objects
+  (`benchmarks/results/2026-09-22-track3-probe.jsonl`).
+* Still unverified: nothing draws a view yet, so that number is the projection's
+  and not a frame's; `row_height` 32 px and `overscan` 8 are this slice's
+  assumptions and D3 re-measures both; and until D5 the six `INSERT_ITEMS`
+  placeholders keep promising views that do not exist, which is a visible
+  promise the menu is still not keeping.
+
+## ADR-0061 · The schema is rows (`db_properties`), and only a column's options are JSON
+
+Decision: a database's columns are rows, not a JSON column on `databases`:
+
+```sql
+CREATE TABLE db_properties (
+    id     INTEGER PRIMARY KEY,
+    db     INTEGER NOT NULL REFERENCES databases(id) ON DELETE CASCADE,
+    name   TEXT NOT NULL,
+    kind   TEXT NOT NULL,             -- the property type, a short stable string
+    config TEXT NOT NULL DEFAULT '',  -- that type's own settings, JSON
+    ord    INTEGER NOT NULL,
+    UNIQUE (db, name)
+);
+```
+
+`kind` is a string in the same spirit as `blocks.kind` and `blocks.lang`, but
+with the failure **folded rather than fatal**: an unknown kind loads as `text`
+(the rule ADR-0044 sets with `PageFont::try_from_str`), because a library
+written by a build that knows `relation` must still open in one that does not,
+and the cell draws as text. `config` is JSON *inside the row* and holds exactly
+what SQL never filters on: a select/status option list
+(`{"options":[{"id":7,"name":"Done","color":"green"}]}`), a number's format, a
+date's format, a rollup's target. Options carry their own **ids**, so renaming
+an option is one JSON edit that touches no value — the "store the id, not the
+label" rule ADR-0026 already uses for page references.
+
+Why rows for the schema and not one `databases.props_json` blob: the filter and
+sort compiler emits SQL that names a property *by number*
+(`db_values.property = 7`), so a JSON schema forces every read path through
+`json_extract` to learn an id, a kind and a name — awkward but survivable. What
+is not survivable is the invariant: `UNIQUE (db, name)` is what makes "rename a
+column" well defined, and no JSON blob can enforce it, so a rename racing
+against itself would leave two columns called `Status` that only Rust can
+detect. What rows cost is ordering (`ord` is an app invariant like
+`block_children.ord`, not a constraint) — accepted, because moving a column is
+one UPDATE.
+
+Consequences:
+
+* Every database is created with its `title` property (`kind = 'title'`,
+  `ord = 0`) and one view (`layout = 'table'`) in the same batch as the
+  `databases` row: a database with no title property or no view cannot be drawn,
+  so no path may create one.
+* A property's values are reached through the `property` FK and die with it
+  (`ON DELETE CASCADE` in ADR-0062's tables) — the one cascade this design
+  wants, because the schema is the parent of its values.
+* `person` degrades to `text` (SPEC's 降级处理: with no account model, a local
+  name list would need its own table, its own picker and its own merge rules for
+  zero extra data), and `formula` / `rollup` / `relation` are kinds whose value
+  is **not** stored (ADR-0062, ADR-0039).
+* Still unverified: deleting a property cannot clean the view documents that
+  name it (no foreign key reaches inside ADR-0064's JSON), so the compiler has to
+  ignore unknown ids and D4 pins that with a test; and "exactly one `title` per
+  database" is an app invariant of the insert path, not a constraint, so a
+  repair could break it without SQL noticing.
+
+## ADR-0062 · A value is one row per (record, property), typed by column
+
+Decision: values live in one table with the columns SQLite needs in order to
+compare them in its own type system, plus one child table for the types that
+hold a list:
+
+```sql
+CREATE TABLE db_values (
+    record   INTEGER NOT NULL REFERENCES db_records(id) ON DELETE CASCADE,
+    property INTEGER NOT NULL REFERENCES db_properties(id) ON DELETE CASCADE,
+    text     TEXT NOT NULL DEFAULT '',
+    num      REAL,
+    flag     INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (record, property)
+);
+
+CREATE TABLE db_value_items (
+    record   INTEGER NOT NULL REFERENCES db_records(id) ON DELETE CASCADE,
+    property INTEGER NOT NULL REFERENCES db_properties(id) ON DELETE CASCADE,
+    ord      INTEGER NOT NULL,
+    value    TEXT NOT NULL,
+    PRIMARY KEY (record, property, ord)
+);
+```
+
+`text` carries title / text / url / email / phone / select-option-id /
+status-option-id / date; `num` carries number; `flag` carries checkbox;
+`db_value_items` carries multi-select option ids and `files` attachment ids —
+ADR-0029/0030's store, so a column of files is the same bytes-beside-the-database
+channel and not a second one. A date is stored as its fixed-width ISO-8601 text
+(`YYYY-MM-DD` or `YYYY-MM-DDTHH:MM`, local wall time, no UTC conversion because
+this app has one clock and no accounts), which is why it needs no second column:
+the writer is the only producer of that exact form and the parser rejects
+anything else, so text order *is* time order.
+
+Why typed columns and not one TEXT column: §三十九 puts filter and sort in SQL,
+so the comparison has to happen in SQLite's own type system. One TEXT column
+makes `ORDER BY` lexicographic — `10` lands before `9` — and the fix,
+`CAST(text AS REAL)`, cannot use an index and silently sorts a malformed value
+as 0. `num REAL` is indexable, so a number property's sort is
+`ORDER BY v.num, r.ord` over the one LEFT JOIN the row query already has. Why one
+table and not one per type (`db_values_number`, `db_values_date`, …): a view
+reads every visible property of its window in one query, and per-type tables
+turn that into a join count that varies with the view's shape — string-built SQL
+with fourteen arms — while one row per (record, property) is one join per
+*sorted or filtered* property and the same row for everything else.
+
+Consequences:
+
+* `formula`, `rollup` and `relation` store **nothing**: they are computed at
+  projection time for the window only, which is where §三十九's 禁止每次输入全库
+  重算 will have to be demonstrated (D6, with the recomputed-row count as its
+  number). `created time` and `last edited time` are the two §三十九 types this
+  ADR does **not** place: `created time` needs one real column as its source
+  (nothing in `pages` or `db_records` records a creation instant today) and
+  `last edited time` needs a source only the write path can keep honest —
+  writing either into `db_values` would be the double write ADR-0039 forbids, so
+  D2 lands them with their own ADR and a measured story.
+* "Empty" and "not a number" are the same thing: the row is absent or
+  `num IS NULL`, never `0`. The sort's empty placement is emitted explicitly
+  (`ORDER BY v.num IS NULL, v.num`) because SQLite puts NULLs first and "the
+  blank rows floated to the top" is not what a user means by "sort by number";
+  D4 pins it with a test.
+* A multi-select filter is `EXISTS (SELECT 1 FROM db_value_items WHERE record =
+  r.id AND property = :p AND value = :option)` — an index probe on the PK's
+  prefix — and `files` gets the same `EXISTS` shape for "has an attachment",
+  which is why the list types are rows and not a JSON array hidden in `text`.
+* Still unverified: nothing here measures a 10 000-row × 5-property filter (D4's
+  number), and the one-row-per-(record, property) shape makes a cell write an
+  `INSERT OR REPLACE` whose row count D6 will read as its dependency edge.
+
+## ADR-0063 · A record owns its page, the title has one home, and both deletes are one undo step
+
+Decision:
+
+```sql
+CREATE TABLE db_records (
+    id   INTEGER PRIMARY KEY,
+    db   INTEGER NOT NULL REFERENCES databases(id) ON DELETE CASCADE,
+    page INTEGER REFERENCES pages(id) ON DELETE CASCADE,   -- NULL = a bare record
+    ord  INTEGER NOT NULL,
+    UNIQUE (page)
+);
+```
+
+* **Ownership, in ADR-0026's vocabulary.** A record *owns* its page the way a
+  `Page` block owns its child page; `UNIQUE (page)` makes the reverse true too —
+  a page is the face of at most one record, and two rows can never share one.
+  `linked database` (D7) is the *referencing* case, symmetrical to `Link` vs
+  `Page`.
+* **The title has exactly one home, decided by whether the record has a page.**
+  A page-backed record's title is `pages.title` and nothing else; a bare
+  record's title is the `db_values` row of its `title` property. The view's row
+  query already LEFT JOINs `pages` for the page-backed case, so the title column
+  reads `COALESCE(p.title, v.text)` and there is no second copy to go stale —
+  §三十九's record-is-a-page without ADR-0039's double write.
+* **A record is bare until something needs its page.** Creating a row creates no
+  page. The page arrives with `Open` (or "Turn into page"), as a child of the
+  page that holds the `Database` block, and that one command *moves* the title
+  from `db_values` into `pages.title` in the same batch. Its exact inverse,
+  "Turn into a plain record", moves the title back and clears the pointer, and
+  **leaves the page in the tree** — a page the user made is theirs to delete;
+  this operation is about the pointer.
+* **Delete the row** (the view's row menu): one `Command::DeleteRecord` whose
+  plan is `[DbValueDeleted…, DbRecordDeleted, PageDeleted?]` with the captured
+  rows as its inverse — the record, its values and, when it is page-backed, the
+  page it owns. **Delete the page** (the sidebar, or a parent page's recursive
+  subtree delete): `db_records.page`'s `ON DELETE CASCADE` is the SQL backstop,
+  so a row cannot outlive the page it is the face of even when the deletion
+  arrives from SQL rather than from the command layer. Both paths end in the same
+  state, and that is the property to test: *a database never holds a row whose
+  page is gone, and never loses a page while its row survives.*
+* Why "both go" rather than "the row survives as a bare record": the alternative
+  silently resurrects a row — in a view nobody is looking at, named after a page
+  the user deliberately deleted — and it has to write a title back on a delete
+  path, which is how a delete acquires a failure mode.
+
+Why the relationship is a pointer at all: §三十九's 「record 可以同时是一个 page，
+这是 Notion 的核心而不是装饰」. A row that can be a page has to keep a page's
+identity — `pages.id`, the thing §四十's mentions point at and the thing the tree
+draws — so a record can never be "the page's data"; the pointer is the only
+shape in which both exist without one being derived from the other.
+
+Consequences:
+
+* Undo is one step in both directions because a command plans `apply` and
+  `revert` together (`core::document::Entry`), so "delete the row and its page"
+  is one Ctrl+Z, and so is the convert-and-move-title pair. The one place
+  §三十九's 「删 record 与删页面的行为…都进 undo」 is **not** yet true is the
+  sidebar's own page delete: that path (`AppState::delete_page` →
+  `Change::PageDeleted`) is confirmed by a dialog and has never been on the undo
+  stack, so a row lost through it is lost. The cheapest fix is to route that
+  confirmation through a plan of the same shape; this ADR does not claim the gap
+  is closed.
+* Because a bare record's title lives in `db_values`, `title` is the one column
+  whose filter and sort compile differently per record (a `COALESCE` over a LEFT
+  JOIN). One query shape covers both, and D4 owes the test that sorting by title
+  interleaves bare and page-backed rows in a single order.
+* Lazy page creation is what keeps the tree honest: a 10 000-row database whose
+  rows nobody opened creates 0 pages, and each `Open` costs one page, one title
+  move and one undo step. It also means `db_records.page` is NULL for most rows,
+  so SQLite's tolerance of many NULLs under `UNIQUE (page)` is load-bearing
+  here, not incidental.
+* Still unverified: neither delete path has a test yet (they are D1's), and the
+  sidebar does not mark a page as a database's row, so nothing warns a user
+  before they delete a page that a database still points at it.
+
+## ADR-0064 · A view is a row with a name and a layout, and its rules are one JSON document
+
+Decision: `db_views` stores the parts SQL has to list and the rules in one
+document:
+
+```sql
+CREATE TABLE db_views (
+    id         INTEGER PRIMARY KEY,
+    db         INTEGER NOT NULL REFERENCES databases(id) ON DELETE CASCADE,
+    name       TEXT NOT NULL,
+    layout     TEXT NOT NULL DEFAULT 'table',
+    definition TEXT NOT NULL DEFAULT '',   -- filter + sorts + groups + visible columns
+    ord        INTEGER NOT NULL,
+    UNIQUE (db, name)
+);
+```
+
+`layout` is SPEC's eight-view list as a string (`table` / `board` / `list` /
+`calendar` / `gallery` / `timeline` / `form` / `chart`), with an unknown value
+folding to `table` the way `blocks.lang` folds an unknown fence to `Plain`.
+`definition` is one JSON document — `{"v":1,"filter":…,"sorts":[…],
+"groups":[…],"columns":[…],"widths":{…}}` — whose filter is a recursive node
+(`{"and":[…]}`, `{"or":[…]}`, `{"property":7,"op":"eq","value":…}`), because a
+filter is a tree and its nesting depth is not bounded by anything a user can see.
+
+Why the rules are JSON where ADR-0061's and ADR-0062's data is not — the same
+test, opposite answers: **what does SQL have to filter on?** Properties and
+values are filtered and sorted *by*, so they are rows with typed columns; a
+view's rules are only ever compiled *into* a query and never filtered on, so
+their shape should be whatever the compiler reads best. A filter tree in rows
+needs a parent-pointer table plus recursive assembly, and every query would
+reassemble the tree it had just been handed, for zero SQL benefit. The name and
+the layout stay columns because the view switcher lists them without parsing
+anything, and because a view's name has to be unique per database to be a
+switcher entry at all.
+
+Consequences:
+
+* Property references inside `definition` are ids (ADR-0061) and **the compiler
+  drops ids that no longer exist**: no foreign key reaches inside a JSON
+  document, so a view whose filter names a deleted property loses that clause
+  and shows more rows instead of failing to open. The same rule covers a sort and
+  the visible-column list, and D4 pins all three.
+* A document that does not parse — truncated, hand-edited — degrades to "no
+  rules", so the view opens showing everything: a database that cannot be opened
+  is worse than one that is not filtered. `"v":1` inside the document is what
+  lets a later build add a key without an older build reading it as corruption.
+* A compiled plan (the SQL text and its bind values, for one definition and one
+  property list) is **derived** and never stored (ADR-0039): it is rebuilt at
+  open and cached for the session. `linked database` (D7) stores `(db, view)`
+  and never a copy of the definition, so a linked view cannot drift from its
+  source.
+* Widths are a map keyed by property id rather than an array parallel to
+  `columns`, so deleting a column cannot leave a width pointing at the wrong
+  one; the cost is that an entry for a column no longer visible is dead weight
+  the panel has to clear.
+* Still unverified: nothing parses a definition yet, so forward compatibility is
+  a decision rather than a test; and where a *group* header's own row lands in
+  the window (it is not a record row) is D4's shape to fix, not this ADR's.
+
+## ADR-0065 · A database exports as the table it is showing, and imports as text
+
+Decision: the Markdown channel (§二十六) renders a `Database` block as a
+GitHub-flavoured table of the view it is **currently showing** — the title column
+first, then the visible properties in view order, one line per record in the
+order and membership the view shows, filters and sorts included, because the file
+should say what the user sees rather than what the table holds. Cells render by
+type: text / url / email / phone verbatim; number as the stored number without
+its display format; checkbox as `Yes` / `No`; select and status as the option's
+**name**; multi-select as names joined by `, `; date as its ISO text; files as
+`[name](quire://attachment/<id>)` (ADR-0030's link shape); person as the stored
+name; `relation` as the target records' titles; `formula` / `rollup` as their
+**computed** value, computed on the way out, which is legal precisely because it
+is never stored (ADR-0038/0039). A row whose record is page-backed writes its
+title as `[title](quire://page/<id>)` — ADR-0026's shape for a `Page` block — so
+the file keeps the only durable handle a reader has on that page, while a bare
+record's title stays plain text. The block writes **no marker line**, and the
+export does **not** recurse into record pages: a record's page is an ordinary
+page, exported when someone exports that page.
+
+Import is unchanged, and knowingly asymmetric: `parse_markdown` reads line at a
+time, so a pipe-separated line stays a paragraph — ADR-0031 pinned exactly that
+for the simple grid, with a test, for exactly this reason. A database therefore
+exports to a table that reads in any Markdown renderer and comes back as text:
+schema, property types, record identities and views do not survive the channel,
+and nothing pretends otherwise.
+
+Why a table and not a one-line marker like ADR-0039's `<!-- quire:toc -->`: a
+contents block has no other representation, because its body is derived from the
+page, so a marker is the only thing that could mean it. A database's rows are
+content, and the table is a real representation of them that a human and another
+tool can both use; a marker would be a second and weaker copy of the same fact,
+and one that names an id nothing can resolve on import is a dangling promise of
+the kind ADR-0026 renders as "(deleted page)" rather than as a feature.
+
+Consequences:
+
+* `export_page(blocks: &[Block]) -> String` cannot see records or values, and it
+  must not learn to (ADR-0044's boundary already recorded that the exporter never
+  receives a page object; handing it a repository would give the content channel
+  a second data path). The database's table therefore arrives as **pre-rendered
+  rows**: the caller that already reads the database passes the header and the
+  rows, and the exporter only lays them out — the same division
+  `attachment-size` and the math glyphs already use, where a renderer asks for a
+  value and never fetches it. That is a signature change to `export_page`, and
+  the callers that only have blocks (clipboard, "Copy page as Markdown") pass
+  none.
+* Property values cross the channel as display strings. That is lossy by
+  decision, and the cost is worth one line: a database is the first thing in this
+  app whose export cannot be re-imported even in principle, because its content
+  is not its blocks.
+* Still unverified: no code path renders a database to Markdown yet (D3/D8), so
+  the per-type table above is a specification and not a test; and an exported
+  `formula` column inherits D6's recompute correctness, so a wrong formula is a
+  wrong file.

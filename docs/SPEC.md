@@ -2488,11 +2488,11 @@ workspace 模板库：预置若干本地模板，导入导出走 §二十六 的
 
 这是 Quire 与 Notion 差距最大的一层。
 
-Database 不是 §九 块类型清单里的一行，它自带 model / storage / UI 三层，因此独立成阶段，阶段内再切里程碑。
+Database 不是 §九 块类型清单里的一行，它自带 model / storage / UI 三层，因此独立成阶段，阶段内再切里程碑。—— 2026-09-22 Track 3 **D0 只做决策与探针，未交付功能**：实体形状 ADR-0060、列定义 ADR-0061、值 ADR-0062、record 与 page 的关系 ADR-0063、视图定义 ADR-0064、Markdown 通道 ADR-0065。第一条性能红线已用 headless 探针证明通道存在（`core::database::window`：10 000 行 realize **31** 行，窗口 **6 806 B** 对全表 **2 259 800 B**，原始行 `benchmarks/results/2026-09-22-track3-probe.jsonl`），实现自 D1 起。
 
 ## 对象模型
 
-database：一组 record + 一份 schema（列定义、视图定义）
+database：一组 record + 一份 schema（列定义、视图定义）—— 实体形状定于 ADR-0060：自己的 `databases` 行，由一个新的 `Database` 块经 `blocks.db_ref` 指过去（同 ADR-0026 的 `page_ref`）；「整页数据库」就是首块是它的普通页，八个视图是同一个实体的八种 `layout`，不是八个块种类。列定义与视图定义分别见 ADR-0061 / ADR-0064。本轮未交付。
 
 record：一行，可以同时是一个 page（页面即行，这是 Notion 的核心而不是装饰）
 
@@ -2500,40 +2500,42 @@ view：同一份数据的一个投影（过滤 + 排序 + 分组 + 可见列 + �
 
 property：列，带类型
 
-record 与 page 的关系必须可逆：删 record 与删页面的行为都要有明确定义，且都进 undo。
+record 与 page 的关系必须可逆：删 record 与删页面的行为都要有明确定义，且都进 undo。—— 2026-09-22 契约定于 ADR-0063：record **拥有**它的 page（`db_records.page`，`UNIQUE(page)`，`ON DELETE CASCADE`）；标题只有一个家（有 page 在 `pages.title`，无 page 在 `db_values`，读的时候 `COALESCE`）；record 默认没有 page，第一次打开才建，建页与标题搬家是同一个 `Command` 的一批 change；删 record 是 `[DbValueDeleted…, DbRecordDeleted, PageDeleted?]` 一批（`Entry` 的 `apply`/`revert` 一起算，一次 Ctrl+Z）。**已知缺口**：侧边栏自己的删页从来没进过 undo，那条路上丢的 record 是丢的——ADR-0063 明写，不假装闭环。测试在 D1 落。
 
 ## 属性类型
 
-必做：title / text / number / select / multi-select / status / date / checkbox / url / email / phone / files / created time / last edited time
+必做：title / text / number / select / multi-select / status / date / checkbox / url / email / phone / files / created time / last edited time —— 2026-09-22 存储形状定于 ADR-0061（列定义是 `db_properties` 行表，只有 select 的选项列表是行内 JSON）与 ADR-0062（值是 `db_values` 一行一列，`text`/`num`/`flag` 三列 + `db_value_items` 给列表型）。本轮未交付。
 
 降级处理：person —— 没有账号体系，退化为工作区内本地成员名单，纯字符串
 
 需计算：formula / rollup / relation（含双向关系）
 
-公式引擎的限制：纯词法 + 自写解释器，不引入 JS / WASM 运行时；表达式必须有限求值；relation 环检测在保存时做，不在渲染时做。
+公式引擎的限制：纯词法 + 自写解释器，不引入 JS / WASM 运行时；表达式必须有限求值；relation 环检测在保存时做，不在渲染时做。—— 未交付（D6）。ADR-0062 记下了一条：formula / rollup / relation **不存值**，投影时现算，`created time` / `last edited time` 的来源（今天 `pages`/`db_records` 都没有时间戳列）留 D2 出 ADR，不写进 `db_values`（否则就是 ADR-0039 禁止的双写）。
 
 ## 视图
 
 table → board → list → calendar → gallery → timeline → form → chart
 
-顺序即实现顺序。chart 放最后，且不得为此引入图表库：先用现有绘制 primitive 做 bar / line / pie 三种。
+顺序即实现顺序。chart 放最后，且不得为此引入图表库：先用现有绘制 primitive 做 bar / line / pie 三种。—— 2026-09-22 形状定于 ADR-0060（八种是同一个 `Database` 块的 `db_views.layout`，不是八个块种类）与 ADR-0064（视图定义持久化）。「+」插入菜单里那六行 muted 占位（`INSERT_ITEMS` 的 `Table view` / `Board` / `Gallery` / `List view` / `Calendar` / `Timeline`，`id = -1`）就是其中六种 layout，点亮它们 = 给这些行真 id，不是加块种类。本轮未交付，六行仍不可选。
 
 ## 操作
 
-filter / sort / group by / 视图内搜索 / 行内编辑 / 列宽与隐藏列 / 视图切换器；视图与 schema 一起持久化
+filter / sort / group by / 视图内搜索 / 行内编辑 / 列宽与隐藏列 / 视图切换器；视图与 schema 一起持久化 —— 未交付。视图定义怎么存定于 ADR-0064：视图是 `db_views` 行（名字 / layout / 顺序是列），**规则**（过滤 + 排序 + 分组 + 可见列 + 列宽）是一份 JSON 文档，判据是本 ADR 与 ADR-0061/0062 共用的那一句「SQL 有东西要在它上面过滤吗」——列和值要在，视图规则不用。
 
-linked database：引用另一个库的某个视图，不复制数据
+linked database：引用另一个库的某个视图，不复制数据 —— 未交付（D7）。ADR-0060 / ADR-0064 已定：指向 `(db, view)`，不拷定义，与 ADR-0026 的 Link 块同构。
 
-数据库模板：新建 record 时的预填
+数据库模板：新建 record 时的预填 —— 未交付（D7）。
+
+**Markdown 通道（§二十六 是内容通道）定于 ADR-0065**：database 导出成它**当前显示的那个视图**的 GFM 表格（title 列在最前，一列一个可见属性，一行一条 record，按视图的顺序与成员，即过滤排序照做）；页-backed 的 record 标题写成 `[title](quire://page/<id>)`。**不写标记行**（`<!-- quire:toc -->` 那种先例不适用：目录没有别的表示，表格本身就是真表示）。导入侧不改：管道行回来是段落（ADR-0031 为简单表格定的同一条），所以一次导出/导入丢掉 schema、类型、record 身份——这是决定，不是遗漏。代价：`export_page(blocks)` 拿不到 record，导出时由调用方把渲染好的行传进来，不让导出层学会开数据库。
 
 ## 性能红线
 
 Database 是本规格里唯一会自然长出「大量行 × 大量属性」的功能，§二十二 / §二十三 的规则在这里最容易破：
 
-* 10 000 行的库不得全量 realize；视图先算可见窗口再取行
-* filter / sort 在 SQL 侧完成，不在 UI 侧过滤
-* formula / rollup 必须可增量重算，禁止每次输入全库重算
-* 数字进 docs/PERFORMANCE.md：10 000 行的 RAM、切换视图耗时、打开公式编辑器的耗时
+* 10 000 行的库不得全量 realize；视图先算可见窗口再取行 —— 2026-09-22 **通道已证明存在**（D0，ADR-0060）：`core::database::window` 先算 `[start, end)` 再取行，`RowWindow::fetch()` 就是那次查询的 `LIMIT`/`OFFSET`；10 000 行、32 px 行高、720 px 视口、8 行 overscan 时 realize **31** 行（窗口 0..31；滚到中间 39 行、底部 31 行），窗口那 31 行占 **6 806 B** 堆，全表 10 000 行占 **2 259 800 B**（332×），只要 id 的 `Vec<u64>` 是 80 000 B。可重复：`cargo test --lib database::`（断言）与 `cargo test --release --lib -- --ignored --nocapture a_window_costs`（数字），原始行 `benchmarks/results/2026-09-22-track3-probe.jsonl`。**只证明了投影，没证明帧**：没有 `.slint` 视图，没跑过 `bench.ps1`，SQL 侧的 `LIMIT` 只在计划里、还没执行过（表在 D1）。
+* filter / sort 在 SQL 侧完成，不在 UI 侧过滤 —— 未交付；形状见 ADR-0062（`num REAL` 可索引、日期是定宽 ISO 文本，所以比较发生在 SQLite 自己的类型系统里），耗时对照是 D4 的数字。
+* formula / rollup 必须可增量重算，禁止每次输入全库重算 —— 未交付（D6）。
+* 数字进 docs/PERFORMANCE.md：10 000 行的 RAM、切换视图耗时、打开公式编辑器的耗时 —— 本轮欠着。探针的窗口数字落在 `benchmarks/results/2026-09-22-track3-probe.jsonl`（进程 private 2.0 → 5.1 MB，即把 10 000 行真的拿进内存要 ≈3.1 MB，而窗口只要 6.8 KB），三个正式数字随 D3 / D8 进 PERFORMANCE.md。
 
 ## 排期前提
 

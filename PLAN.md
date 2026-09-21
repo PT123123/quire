@@ -2207,3 +2207,60 @@ emoji、图片放封面——所以「放一张图」这件事由 cover 承接�
 重开条件在 ADR-0046；四、图标不进 Markdown 通道，理由与版式同（§二十六 是内容通道）；五、封面未动，所以
 「封面之上的标题对比度」那条验收还没人替它说话——而 ADR-0046 之后，「给页放一张图」这件事全压在 cover 上，
 下一刀要按这个分量做。
+
+## Track 3 · D0 决策与探针（2026-09-22，on `track/3-database`，ADR-0060…ADR-0065）
+
+Database 这条 track 的**第一条纪律是先证明通道存在**：SPEC §三十九 性能红线的第一句是「10 000 行的库
+不得全量 realize；视图先算可见窗口再取行」。所以 D0 不写功能，先把这句话在**选定的形状**下变成数字，
+再把形状写成六个 ADR（D0 的问题 → ADR 的对应见报告 `docs/REPORT_TRACK3.md`）。
+
+**通道**：新模块 `src/core/database.rs`（外加 `src/core/mod.rs` 一行）是一个纯投影——没有 SQL、没有
+Slint、没有时钟。`window(total, ViewGeometry, scroll_y) -> RowWindow` 先算 `[start, end)`，
+`RowWindow::fetch()` 就是那次取行的 `LIMIT`/`OFFSET`，而 `RealizedRows::scroll_to` 是唯一构造器、
+只接受这个窗口，所以「先算窗口再取行」不是纪律而是类型；偏移先按内容夹紧（Slint 就是这么夹的），
+所以一张比视口还短的表不会因为一个陈旧的偏移把顶部几行丢掉。
+
+**数字**（10 000 行 / 32 px 行高 / 720 px 视口 / 8 行 overscan，release）：realize **31 行**（窗口
+0..31；滚到中间 `scroll_y = 4000` 是 39 行；滚到底 31 行），而 100 行、1 000 行、1 000 000 行在同样
+几何下算出的窗口是**同一个 0..31**——界住它的是视口不是表。内存用一个**只在测量线程计数**的全局分配器量
+（`thread_local` + `const` 初始化，分配器里不再分配；别的测试线程并行跑但没 arm，互不污染）：窗口那
+31 行的行对象 **6 806 B**，同一张表 10 000 行全 realize **2 259 800 B**（**332×**），只取 id 的
+`Vec<u64>` 是 80 000 B；构造耗时 6.317 ms / 0.061 ms / **0.0174 ms**。进程读数（测试内手写
+`K32GetProcessMemoryInfo` 声明，与 `bench.ps1` 报的两个数同源）private 2.0 → 5.1 MB、working set
+11.0 → 14.0 MB：把 10 000 行真拿进内存约 **3.1 MB 私有**，窗口是 **6.8 KB**。两次运行堆数字逐字节相同。
+原始行：`benchmarks/results/2026-09-22-track3-probe.jsonl`；断言在 `cargo test --lib database::`。
+
+**它证明/没证明什么**：证明的是**投影**（窗口由视口界定、取行计划由窗口给出、行对象只存在于窗口里），
+没证明**帧**——D0 没有任何 `.slint` 视图，所以没跑 `bench.ps1`（它要一个窗口才采得到样），SQL 侧的
+`LIMIT` 也只在计划里、一次都没执行过（表在 D1）。
+
+**六个 ADR**：1) database 是什么 → **ADR-0060**（自己的 `databases` 行 + 新的 `Database` 块经
+`blocks.db_ref` 指过去；整页数据库就是首块是它的普通页；八个视图是八种 `db_views.layout`，「+」菜单
+那六行 muted 占位由此点亮，不是八个块种类）。2) schema 存哪 → **ADR-0061**（`db_properties` 行表，
+`UNIQUE(db,name)` 是行表才有的不变量；只有 select 的选项列表是行内 JSON，选项带自己的 id）。
+3) 值怎么存 → **ADR-0062**（`db_values` 一行一 (record, property)，`text`/`num`/`flag` 三列 +
+`db_value_items` 给 multi-select / files；判据是「比较必须发生在 SQLite 自己的类型系统里」）。
+4) record 与 page → **ADR-0063**（record 拥有它的 page，`UNIQUE(page)` + `ON DELETE CASCADE`；
+标题只有一个家，有页在 `pages.title`、无页在 `db_values`、读时 `COALESCE`；record 懒建页；两个删除
+方向各一批 change、一次 Ctrl+Z）。5) 视图定义 → **ADR-0064**（`db_views` 行：名字/layout/顺序是列，
+规则是一份 JSON 文档，过滤是递归树）。6) Markdown 通道 → **ADR-0065**（导出当前视图的 GFM 表格，
+页-backed 的标题写成 `[title](quire://page/<id>)`；不写标记行；导入侧不改，管道行回来仍是段落）。
+
+**验证**：`cargo check --all-targets` 干净（0 warning，强制重编后复测）；`cargo test --all-targets`
+全绿 —— 10 个 target 合计 **394 passed / 0 failed / 13 ignored**（lib 247/10、backup 13/1、
+find 9、markdown 62、persistence 5、search 17、storage 27/2、workspace 14，main 与 quire_typing 各 0）；
+`cargo build --release` 零警告。视觉：这一刀**不碰 UI**（新模块没有被任何 UI 引用），
+`sweep.ps1 -OutDir .scratch/track3-sweep -Baseline .scratch/sweep33` 得 **changed 0 / identical 67**。
+（没有用 `-OutDir .scratch/sweep34`：开工时那个目录正被另一条 track 的 sweep 占着。）
+
+**未验证 / 已知边界**：一、没有 `.slint` 视图，所以窗口数字是投影的不是帧的，`row_height` 32 px 与
+`overscan` 8 是本刀的假设，行 payload 也是代表性的（title + 5 个文本 cell），D2 的类型化 cell 会换掉它
+（窗口算术不随之变）。二、SQL 侧一次都没跑：`fetch()` 的 `LIMIT`/`OFFSET` 只是计划，`COUNT(*)` 还没有。
+三、进程读数来自测试进程内部的 FFI，与 `bench.ps1` 的 `ram_private_mb` 同源但不同二进制，**不能**与
+既有 jsonl 行直接相除。四、ADR-0063 的两条删除路径测试未写（D1）；侧边栏删页不进 undo 是既有缺口，
+本刀只把它写在明面上，没改。五、ADR-0061/0062/0064/0065 的表一行 SQL 都还没建，`CURRENT_VERSION`
+仍是 **11**，D1 的迁移号在提交那一刻取 `CURRENT_VERSION + 1`（串行接缝）。
+
+**下一步**：D1 —— `databases` / `db_properties` / `db_views` / `db_records` / `db_values` /
+`db_value_items` 的迁移、repository 读写与 core 对象模型；record 与 page 的所有权契约（含两条删除
+路径的测试）在这里落地。
