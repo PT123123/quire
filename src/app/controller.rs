@@ -3064,6 +3064,47 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
                 g.set_find_label(state.find_label().into());
             }
         }
+        // A4 D7's other two shapes: a match with no row of its own. Each arm
+        // turns one paragraph into a container the way the menu does, so the
+        // hit has to ride on the row that paints it (ADR-0028) — and each
+        // searches a word that only exists inside that container, because a
+        // swept scene that paints nothing either way would pass.
+        "find-grid" | "find-cols" => {
+            let grid = scene == "find-grid";
+            apply_scene(ui, state, if grid { "table" } else { "columns" });
+            let term = if grid { "North" } else { "Column" };
+            g.set_find_open(true);
+            g.set_find_term(term.into());
+            state.find_start(term);
+            g.set_find_label(state.find_label().into());
+        }
+        // The fourth surface: a callout keeps its text in a tinted box of its
+        // own, offset past the emoji, so the runs path needs its frame to mark
+        // a match there. The arm turns the page's first paragraph into one and
+        // does not step — the *selected* hit belongs to the block being
+        // edited, and an editing block answers with a real text selection
+        // instead of a cell, which is the right answer and the wrong demo.
+        "find-callout" => {
+            let page = core_page_id(state.open_page.get());
+            let target = {
+                let d = state.doc.borrow();
+                d.page_blocks(page)
+                    .iter()
+                    .find(|b| {
+                        b.kind == crate::core::BlockKind::Paragraph && b.text.contains("Atlas")
+                    })
+                    .map(|b| b.id)
+            };
+            let Some(id) = target else { return };
+            let _ = state.exec_on_open_page(Command::SetBlockType {
+                id,
+                kind: crate::core::BlockKind::Callout,
+            });
+            g.set_find_open(true);
+            g.set_find_term("the".into());
+            state.find_start("the");
+            g.set_find_label(state.find_label().into());
+        }
         "marks" => {
             // seed inline marks on the first paragraph (visual test only,
             // applied directly like an editor toggle would). Offsets are

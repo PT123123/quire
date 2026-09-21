@@ -69,6 +69,9 @@ pub struct AppState {
     /// Ctrl+F in-page find session (Track B's FindSession).
     find_session: RefCell<Option<FindSession>>,
     find_label: RefCell<String>,
+    /// Rows whose runs currently carry a hit cell. The next search has to
+    /// un-paint those too, and they are not the rows the new term hits.
+    find_painted: RefCell<Vec<i32>>,
 
     search_generation: Cell<u64>,
     /// Persisted sibling order of every page (drives PageCreated/Moved).
@@ -474,6 +477,7 @@ impl AppState {
             search_generation: Cell::new(0),
             find_session: RefCell::new(None),
             find_label: RefCell::new(String::new()),
+            find_painted: RefCell::new(Vec::new()),
             page_order: RefCell::new(page_order),
             flush_hook: RefCell::new(None),
             open_page: Cell::new(0),
@@ -669,7 +673,8 @@ impl AppState {
         let page = self.open_page.get();
         let mut rows = {
             let doc = self.doc.borrow();
-            project_blocks(doc.page_blocks(core_page_id(page)))
+            let hits = self.find_hits();
+            project_blocks(doc.page_blocks(core_page_id(page)), &hits)
         };
         // a Page or Link block shows the target page's live title, not stale
         // text; a reference whose page is gone reads as deleted
@@ -681,6 +686,9 @@ impl AppState {
             row.text = ws.title_of(row.page_ref).unwrap_or("(deleted page)").into();
         }
         self.blocks.set_vec(rows);
+        // Every row was just rebuilt with the current hits in it, so the list
+        // the next search un-paints from has to say the same.
+        *self.find_painted.borrow_mut() = self.find_hit_rows();
         self.update_page_stats();
     }
 
@@ -954,6 +962,21 @@ impl AppState {
 
     // ---- in-page find (Ctrl+F; data layer = Track B's FindSession) ----
 
+    /// The session's hits grouped by the block that carries them, which is the
+    /// shape a projection reads. An empty map while the bar is closed costs a
+    /// row one failed lookup, so a search that never started stays free.
+    fn find_hits(&self) -> FindHits {
+        let mut map: FindHits = HashMap::new();
+        if let Some(session) = self.find_session.borrow().as_ref() {
+            for hit in session.hits() {
+                map.entry(hit.block.0 as i32)
+                    .or_default()
+                    .push((hit.start, hit.end));
+            }
+        }
+        map
+    }
+
     /// (Re)build the session for `term` over the open page's blocks.
     pub fn find_start(&self, term: &str) {
         let page = core_page_id(self.open_page.get());
@@ -966,6 +989,7 @@ impl AppState {
         };
         *self.find_label.borrow_mut() = label;
         *self.find_session.borrow_mut() = Some(session);
+        self.paint_find_hits();
     }
 
     /// Step to the next/previous hit. Returns (block id as i32, start, end)
@@ -988,6 +1012,71 @@ impl AppState {
     pub fn find_close(&self) {
         *self.find_session.borrow_mut() = None;
         *self.find_label.borrow_mut() = String::new();
+        self.paint_find_hits();
+    }
+
+    /// The rows a current hit sits in, sorted and deduped — a table with ten
+    /// matching cells is still one row to repaint.
+    fn find_hit_rows(&self) -> Vec<i32> {
+        let hits = self.find_hits();
+        let doc = self.doc.borrow();
+        let blocks = doc.page_blocks(core_page_id(self.open_page.get()));
+        let mut ids: Vec<i32> = hits
+            .keys()
+            .map(|id| row_id_of(blocks, BlockId(*id as u64)))
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
+    /// Push the bar's hits into the rows that carry them, and pull the last
+    /// search's out of the rows that carried those. A re-projection would
+    /// rebuild every row of a 10 000-block page to repaint a dozen of them, and
+    /// the bar does this on every keystroke.
+    fn paint_find_hits(&self) {
+        let hits = self.find_hits();
+        let rows_with_hits = self.find_hit_rows();
+        let mut ids: Vec<i32> = rows_with_hits.clone();
+        ids.extend(self.find_painted.borrow().iter().copied());
+        ids.sort_unstable();
+        ids.dedup();
+        if ids.is_empty() {
+            return;
+        }
+        let mut painted = Vec::new();
+        {
+            let doc = self.doc.borrow();
+            let blocks = doc.page_blocks(core_page_id(self.open_page.get()));
+            for i in 0..self.blocks.row_count() {
+                let Some(mut row) = self.blocks.row_data(i) else {
+                    continue;
+                };
+                if ids.binary_search(&row.id).is_err() {
+                    continue;
+                }
+                let Some(b) = blocks.iter().find(|x| x.id.0 as i32 == row.id) else {
+                    continue;
+                };
+                row.runs = runs_to_model(b, hits_of(&hits, b.id));
+                // A cell or a layout's block has no row of its own, so its hit
+                // rides on the row that draws it -- which is the row this walk
+                // just landed on, and it has to be rebuilt whole.
+                if b.kind == BlockKind::Table {
+                    let cells = table_cells(blocks, b, &hits);
+                    row.table_cells = slint::ModelRc::from(Rc::new(VecModel::from(cells)));
+                } else if b.kind == BlockKind::Columns {
+                    let (items, boxes) = column_projection(blocks, b, &hits);
+                    row.column_items = slint::ModelRc::from(Rc::new(VecModel::from(items)));
+                    row.column_boxes = slint::ModelRc::from(Rc::new(VecModel::from(boxes)));
+                }
+                if rows_with_hits.binary_search(&row.id).is_ok() {
+                    painted.push(row.id);
+                }
+                self.blocks.set_row_data(i, row);
+            }
+        }
+        *self.find_painted.borrow_mut() = painted;
     }
 
     // ---- slash menu (descriptors owned by Rust, per SPEC §十五) ----
@@ -2210,7 +2299,7 @@ impl AppState {
                 (copies, map)
             };
             let title = self.workspace.borrow().title_of(nid).unwrap().to_string();
-            let blob = block_search_blob(&title, &project_blocks(&copies));
+            let blob = block_search_blob(&title, &project_blocks(&copies, &FindHits::new()));
 
             // order: right after the original when a gap exists, else the
             // end of the sibling run. The workspace children vec must agree
@@ -3053,9 +3142,17 @@ fn block_depth(blocks: &[Block], b: &Block) -> i32 {
     depth
 }
 
-fn runs_to_model(b: &Block) -> slint::ModelRc<TextRun> {
+/// The hits of one block, as a slice. An empty map is the common case: a page
+/// with a find bar closed asks this for every row and gets `&[]` every time.
+fn hits_of<'a>(hits: &'a FindHits, id: BlockId) -> &'a [(usize, usize)] {
+    hits.get(&(id.0 as i32))
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+}
+
+fn runs_to_model(b: &Block, hits: &[(usize, usize)]) -> slint::ModelRc<TextRun> {
     slint::ModelRc::from(Rc::new(slint::VecModel::from(build_runs(
-        &b.text, &b.marks,
+        &b.text, &b.marks, hits,
     ))))
 }
 
@@ -3094,8 +3191,14 @@ fn rows_to_blocks(page: i32, rows: Vec<BlockRow>, doc: &mut Document) -> Vec<Blo
 /// unmarked stretch. The delegate lays the runs out with a wrapping flexbox
 /// and a run is one cell, so it cannot break — cutting the plain stretches
 /// to words is what gives a marked line anywhere to wrap (ADR-0041).
-fn build_runs(text: &str, marks: &[crate::core::Mark]) -> Vec<TextRun> {
-    if marks.is_empty() || text.is_empty() {
+///
+/// `hits` are the find bar's occurrences in this same byte space. Each is one
+/// more boundary, and the cell it makes carries `hit` so the delegate can tint
+/// it — which is also why a row with no marks but a hit returns runs at all:
+/// an empty vec means "render `text` as one unbroken Text", and a row with a
+/// match in it cannot say that.
+fn build_runs(text: &str, marks: &[crate::core::Mark], hits: &[(usize, usize)]) -> Vec<TextRun> {
+    if (marks.is_empty() && hits.is_empty()) || text.is_empty() {
         return Vec::new();
     }
     let len = text.len();
@@ -3107,9 +3210,24 @@ fn build_runs(text: &str, marks: &[crate::core::Mark]) -> Vec<TextRun> {
             }
         }
     }
+    for &(hs, he) in hits {
+        // A mark's span is never cut: the cell it makes is one `Text`, and a
+        // formula cell in particular renders text this byte space does not
+        // describe (`\alpha` shows as α). A hit that starts or ends inside a
+        // mark therefore tints the whole mark rather than part of it.
+        for v in [hs.min(len), he.min(len)] {
+            let inside = marks.iter().any(|m| m.start < v && v < m.end);
+            if !inside && text.is_char_boundary(v) {
+                bounds.push(v);
+            }
+        }
+    }
     bounds.sort_unstable();
     bounds.dedup();
-    let covered = |s: usize, e: usize| marks.iter().any(|m| m.start <= s && m.end >= e);
+    let covered = |s: usize, e: usize| {
+        marks.iter().any(|m| m.start <= s && m.end >= e)
+            || hits.iter().any(|(hs, he)| hs < &e && he > &s)
+    };
     let mut split: Vec<usize> = Vec::with_capacity(bounds.len() + 8);
     split.push(bounds[0]);
     for w in bounds.windows(2) {
@@ -3170,6 +3288,7 @@ fn build_runs(text: &str, marks: &[crate::core::Mark]) -> Vec<TextRun> {
                     .any(|m| m.kind == crate::core::MarkKind::Code && m.start <= s && m.end >= e),
                 link: link_mark.is_some(),
                 url: link_mark.map(|m| m.url.clone()).unwrap_or_default().into(),
+                hit: hits.iter().any(|(hs, he)| hs < &e && he > &s),
             })
         })
         .collect()
@@ -3201,6 +3320,27 @@ fn hidden_by_ancestor(blocks: &[Block], b: &Block) -> bool {
         }
     }
     false
+}
+
+/// The row that draws `id`: itself for a block with its own row, and otherwise
+/// the nearest ancestor that has one — a table cell rides on its table's row, a
+/// layout's block on the layout's. A find hit is addressed by the block it was
+/// found in, so this is how the bar's repaint finds the row to touch.
+fn row_id_of(blocks: &[Block], id: BlockId) -> i32 {
+    let mut cur = id;
+    for _ in 0..64 {
+        let Some(b) = blocks.iter().find(|x| x.id == cur) else {
+            break;
+        };
+        if !hidden_by_ancestor(blocks, b) {
+            return b.id.0 as i32;
+        }
+        let Some(p) = b.parent else {
+            break;
+        };
+        cur = p;
+    }
+    id.0 as i32
 }
 
 /// Positions (into the page's block list) of the blocks that get an editor
@@ -3316,13 +3456,13 @@ fn toc_entries(blocks: &[Block], shown: &[usize]) -> Vec<TocEntry> {
 }
 
 /// The cells of one table, as the row's data.
-fn table_cells(blocks: &[Block], table: &Block) -> Vec<TableCell> {
+fn table_cells(blocks: &[Block], table: &Block, hits: &FindHits) -> Vec<TableCell> {
     grid_blocks(blocks, table)
         .into_iter()
         .map(|c| TableCell {
             id: c.id.0 as i32,
             text: c.text.clone().into(),
-            runs: runs_to_model(c),
+            runs: runs_to_model(c, hits_of(hits, c.id)),
         })
         .collect()
 }
@@ -3403,6 +3543,7 @@ fn layout_slots(blocks: &[Block], layout: &Block) -> Vec<ColumnSlot> {
 fn column_projection(
     blocks: &[Block],
     layout: &Block,
+    hits: &FindHits,
 ) -> (Vec<ColumnItem>, Vec<ColumnBox>) {
     // the layout's own boxes, left to right — the same reading
     // `command::column_blocks` makes
@@ -3440,7 +3581,7 @@ fn column_projection(
             depth: s.depth,
             kind: kind_to_int(b.kind),
             text: b.text.clone().into(),
-            runs: runs_to_model(b),
+            runs: runs_to_model(b, hits_of(hits, b.id)),
             checked: b.checked,
             number,
             folded: b.folded,
@@ -3472,7 +3613,13 @@ fn column_projection(
 /// Project a page's blocks into editor rows: numbered items renumbered by
 /// position, the last row flagged as the tail spacer carrier. Folded
 /// subtrees are left out entirely.
-pub fn project_blocks(blocks: &[Block]) -> Vec<BlockRow> {
+/// Where the find bar's hits sit, grouped by the block that carries them.
+/// The map is empty while the bar is closed, and an empty map costs a row one
+/// failed lookup -- the projection is not asked to pay for a search nobody
+/// started.
+pub type FindHits = HashMap<i32, Vec<(usize, usize)>>;
+
+pub fn project_blocks(blocks: &[Block], hits: &FindHits) -> Vec<BlockRow> {
     let shown = visible_block_indices(blocks);
     let mut out: Vec<BlockRow> = shown
         .iter()
@@ -3480,7 +3627,7 @@ pub fn project_blocks(blocks: &[Block]) -> Vec<BlockRow> {
             let b = &blocks[i];
             // one walk per layout row, at most: the pair is built together
             let (column_items, column_boxes) = if b.kind == BlockKind::Columns {
-                let (items, boxes) = column_projection(blocks, b);
+                let (items, boxes) = column_projection(blocks, b, hits);
                 (
                     slint::ModelRc::from(Rc::new(VecModel::from(items))),
                     slint::ModelRc::from(Rc::new(VecModel::from(boxes))),
@@ -3495,7 +3642,7 @@ pub fn project_blocks(blocks: &[Block]) -> Vec<BlockRow> {
                 checked: b.checked,
                 number: 0,
                 tail: false,
-                runs: runs_to_model(b),
+                runs: runs_to_model(b, hits_of(hits, b.id)),
                 depth: block_depth(blocks, b),
                 color: b.color.slot(),
                 bg: b.background.slot(),
@@ -3517,7 +3664,7 @@ pub fn project_blocks(blocks: &[Block]) -> Vec<BlockRow> {
                 // scan the page, so calling them for every row would make the
                 // projection quadratic on a 10 000-block page
                 table_cells: if b.kind == BlockKind::Table {
-                    slint::ModelRc::from(Rc::new(VecModel::from(table_cells(blocks, b))))
+                    slint::ModelRc::from(Rc::new(VecModel::from(table_cells(blocks, b, hits))))
                 } else {
                     ModelRc::default()
                 },
@@ -4025,8 +4172,8 @@ fn fuzzy_subsequence(query: &str, target: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        mock_commands, palette_action, Lang, NavHistory, CMD_NAV_BACK, CMD_NAV_FORWARD,
-        CMD_PAGE_BASE, NAV_MAX, PaletteAction,
+        mock_commands, palette_action, FindHits, Lang, NavHistory, CMD_NAV_BACK,
+        CMD_NAV_FORWARD, CMD_PAGE_BASE, NAV_MAX, PaletteAction,
     };
     use crate::app::workspace::Workspace;
 
@@ -4089,7 +4236,7 @@ mod tests {
     #[test]
     fn a_folded_subtree_produces_no_rows_at_all() {
         let blocks = fold_scene();
-        let rows = super::project_blocks(&blocks);
+        let rows = super::project_blocks(&blocks, &FindHits::new());
         // SPEC §三十七: the collapsed section costs real rows, not hidden
         // delegates — block 2 and its own child 3 drop out with their parent.
         let ids: Vec<i32> = rows.iter().map(|r| r.id).collect();
@@ -4101,14 +4248,15 @@ mod tests {
     fn unfolding_returns_the_subtree_in_its_source_order() {
         let mut blocks = fold_scene();
         blocks[0].folded = false;
-        let ids: Vec<i32> = super::project_blocks(&blocks).iter().map(|r| r.id).collect();
+        let rows = super::project_blocks(&blocks, &FindHits::new());
+        let ids: Vec<i32> = rows.iter().map(|r| r.id).collect();
         assert_eq!(ids, vec![1, 2, 3, 4, 5, 6]);
     }
 
     #[test]
     fn the_fold_flag_reports_children_not_kind() {
         let blocks = fold_scene();
-        let rows = super::project_blocks(&blocks);
+        let rows = super::project_blocks(&blocks, &FindHits::new());
         assert!(rows.iter().find(|r| r.id == 1).unwrap().can_fold);
         assert!(rows.iter().find(|r| r.id == 4).unwrap().can_fold);
         // a section with nothing in it reports false: no chevron to click.
@@ -4119,7 +4267,7 @@ mod tests {
             b.parent = None;
             b
         }];
-        let rows = super::project_blocks(&lone);
+        let rows = super::project_blocks(&lone, &FindHits::new());
         assert!(!rows[0].can_fold, "toggle with no children");
         assert_eq!(rows[0].kind, super::BLOCK_TOGGLE);
         assert!(rows[0].folded, "the flag rides along with the block");
@@ -4133,7 +4281,7 @@ mod tests {
         blocks[1].kind = BlockKind::Numbered;
         blocks[2].kind = BlockKind::Numbered;
         blocks[5].kind = BlockKind::Numbered;
-        let rows = super::project_blocks(&blocks);
+        let rows = super::project_blocks(&blocks, &FindHits::new());
         // 2 and 3 are inside the fold: the visible list is 1 then 2, not 4
         let nums: Vec<i32> = rows.iter().filter(|r| r.kind == 5).map(|r| r.number).collect();
         assert_eq!(nums, vec![1, 2]);
@@ -4156,7 +4304,7 @@ mod tests {
             blk(6, None, 15, BlockKind::Heading3, false, ""),
             blk(7, None, 16, BlockKind::Paragraph, false, "prose"),
         ];
-        let rows = super::project_blocks(&blocks);
+        let rows = super::project_blocks(&blocks, &FindHits::new());
         let toc = rows
             .iter()
             .find(|r| r.kind == super::BLOCK_TOC)
@@ -4188,13 +4336,13 @@ mod tests {
             blk(1, None, 10, BlockKind::Toc, false, ""),
             blk(2, None, 11, BlockKind::Heading2, false, "Before"),
         ];
-        assert_eq!(toc_of(&super::project_blocks(&blocks)[0])[0].1, "Before");
+        assert_eq!(toc_of(&super::project_blocks(&blocks, &FindHits::new())[0])[0].1, "Before");
         blocks[1].text = "After".into();
-        assert_eq!(toc_of(&super::project_blocks(&blocks)[0])[0].1, "After");
+        assert_eq!(toc_of(&super::project_blocks(&blocks, &FindHits::new())[0])[0].1, "After");
         // the block's own row keeps whatever text it was made from, like a
         // divider does — painted by no one, and the list never read it
         blocks[0].text = "stale".into();
-        assert_eq!(toc_of(&super::project_blocks(&blocks)[0])[0].1, "After");
+        assert_eq!(toc_of(&super::project_blocks(&blocks, &FindHits::new())[0])[0].1, "After");
     }
 
     /// What one contents block adds to a projection, on the shape the RAM gate
@@ -4222,7 +4370,7 @@ mod tests {
         let time = |blocks: &[crate::core::Block]| {
             let t = Instant::now();
             for _ in 0..rounds {
-                std::hint::black_box(super::project_blocks(blocks).len());
+                std::hint::black_box(super::project_blocks(blocks, &FindHits::new()).len());
             }
             t.elapsed().as_secs_f64() * 1e3 / rounds as f64
         };
@@ -4274,7 +4422,7 @@ mod tests {
         let time = |blocks: &[crate::core::Block]| {
             let t = Instant::now();
             for _ in 0..rounds {
-                std::hint::black_box(super::project_blocks(blocks).len());
+                std::hint::black_box(super::project_blocks(blocks, &FindHits::new()).len());
             }
             t.elapsed().as_secs_f64() * 1e3 / rounds as f64
         };
@@ -4283,6 +4431,59 @@ mod tests {
             "projection: 10 000 unmarked rows {plain:.3} ms, 1 000 of them marked \
              {with_marks:.3} ms (+{:.3} ms)",
             with_marks - plain
+        );
+    }
+
+    /// What the find bar costs the two things it touches: a projection that
+    /// splits 1 000 of 10 000 rows into hit cells, and the walk that answers
+    /// "which row paints this block" once per hit. Printed, not asserted — the
+    /// second number is the one that decides whether the walk is allowed to be
+    /// per-hit, since the bar does it on every keystroke.
+    #[test]
+    #[ignore = "prints a timing; run with --release"]
+    fn cost_of_a_find_session_on_the_page_it_marks() {
+        use crate::core::{BlockId, BlockKind};
+        use std::time::Instant;
+        let rounds = 50u32;
+        let blocks: Vec<crate::core::Block> = (0..10_000u64)
+            .map(|i| {
+                blk(
+                    i + 2,
+                    None,
+                    i,
+                    BlockKind::Paragraph,
+                    false,
+                    "Pack my box with five dozen liquor jugs, then verify rendering.",
+                )
+            })
+            .collect();
+        let at = blocks[0].text.find("five").unwrap();
+        let mut hits = FindHits::new();
+        for b in blocks.iter().step_by(10) {
+            hits.entry(b.id.0 as i32)
+                .or_default()
+                .push((at, at + 4));
+        }
+        let total = hits.len();
+        let time = |hits: &FindHits| {
+            let t = Instant::now();
+            for _ in 0..rounds {
+                std::hint::black_box(super::project_blocks(&blocks, hits).len());
+            }
+            t.elapsed().as_secs_f64() * 1e3 / rounds as f64
+        };
+        let (clean, marked) = (time(&FindHits::new()), time(&hits));
+        let t = Instant::now();
+        for _ in 0..rounds {
+            for id in hits.keys() {
+                std::hint::black_box(super::row_id_of(&blocks, BlockId(*id as u64)));
+            }
+        }
+        let walk = t.elapsed().as_secs_f64() * 1e3 / rounds as f64;
+        println!(
+            "find: {total} hits on 10 000 rows — projection {clean:.3} ms clean, \
+             {marked:.3} ms marked (+{:.3} ms); the per-hit row walk alone {walk:.3} ms",
+            marked - clean
         );
     }
 
@@ -4302,7 +4503,7 @@ mod tests {
             kind: MarkKind::Bold,
             url: String::new(),
         }];
-        let runs = super::build_runs(text, &marks);
+        let runs = super::build_runs(text, &marks, &[]);
         let cells: Vec<&str> = runs.iter().map(|r| r.text.as_str()).collect();
         assert_eq!(
             cells,
@@ -4360,7 +4561,7 @@ mod tests {
                 }],
             ),
         ] {
-            let runs = super::build_runs(text, &marks);
+            let runs = super::build_runs(text, &marks, &[]);
             let back: String = runs.iter().map(|r| r.text.as_str()).collect();
             assert_eq!(back, text, "the runs of {text:?} do not re-join");
             assert!(
@@ -4368,6 +4569,143 @@ mod tests {
                 "an empty cell in {text:?} costs an item and paints nothing"
             );
         }
+    }
+
+    /// The find bar's cell (A4 D7): every hit is a boundary, so the cell it
+    /// makes is exactly one occurrence and the cells around it are not. A hit
+    /// that lands mid-word still splits the word, because a cell is the
+    /// smallest thing this layout can paint — a cell painting "part of a
+    /// match" would be the same defect with a tint on it.
+    #[test]
+    fn a_hit_is_its_own_cell_and_no_cell_is_part_of_a_hit() {
+        fn cells(runs: &[crate::TextRun]) -> Vec<&str> {
+            runs.iter().map(|r| r.text.as_str()).collect()
+        }
+        // a needle's byte span, counted from `from` so a repeat is addressable
+        let span = |text: &str, needle: &str, from: usize| {
+            let s = text[from..].find(needle).unwrap() + from;
+            (s, s + needle.len())
+        };
+
+        // No marks at all, yet the row has to be runs: an empty vec means
+        // "paint this as one unbroken Text", which cannot show a match.
+        let text = "alpha beta gamma beta";
+        let runs = super::build_runs(text, &[], &[span(text, "beta", 0), span(text, "beta", 11)]);
+        assert_eq!(
+            cells(&runs),
+            vec!["alpha ", "beta", " gamma ", "beta"],
+            "the two matches are two cells, the plain stretches are words"
+        );
+        let flagged: Vec<&str> = runs
+            .iter()
+            .filter(|r| r.hit)
+            .map(|r| r.text.as_str())
+            .collect();
+        assert_eq!(flagged, vec!["beta", "beta"], "a tint leaked, or a match went unpainted");
+
+        // a mid-word hit cuts the word it sits in
+        let text = "unforgettable";
+        let runs = super::build_runs(text, &[], &[span(text, "forget", 0)]);
+        assert_eq!(cells(&runs), vec!["un", "forget", "table"]);
+        assert!(runs[1].hit && !runs[0].hit && !runs[2].hit);
+        let back: String = runs.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(back, text);
+
+        // a hit inside a mark moves to the mark, which is never cut: the cell
+        // is one Text, and a formula's glyphs are not its source bytes
+        let text = "see the bold words now";
+        let bold = span(text, "bold", 0);
+        let marks = [crate::core::Mark {
+            start: bold.0,
+            end: bold.1 + " words".len(),
+            kind: crate::core::MarkKind::Bold,
+            url: String::new(),
+        }];
+        let runs = super::build_runs(text, &marks, &[span(text, "old wor", 0)]);
+        assert_eq!(
+            cells(&runs),
+            vec!["see ", "the ", "bold words", " now"],
+            "a hit cut a marked stretch in two"
+        );
+        assert!(runs[2].hit, "the mark the hit landed in is the cell");
+        assert!(runs[2].bold);
+    }
+
+    /// The hits reach all three places a line is drawn: a row, a grid cell,
+    /// and a block inside a columns box. A match in a grid has no row of its
+    /// own, so it rides on the row that paints it.
+    #[test]
+    fn the_projection_carries_hits_into_rows_cells_and_columns() {
+        use crate::core::BlockKind;
+        use slint::Model;
+        let mut blocks = grid_scene();
+        let layout = blk(20, None, 400, BlockKind::Columns, false, "");
+        let left = blk(21, Some(20), 410, BlockKind::Column, false, "");
+        let para = blk(22, Some(21), 420, BlockKind::Paragraph, false, "needle in a column");
+        for (id, text) in [(1u64, "needle before"), (4, "needle in a cell")] {
+            if let Some(b) = blocks.iter_mut().find(|b| b.id.0 == id) {
+                b.text = text.into();
+            }
+        }
+        blocks.extend([layout, left, para]);
+        let mut hits: FindHits = FindHits::new();
+        // "needle" opens all three texts, so the span is the same for each
+        for id in [1u64, 4, 22] {
+            hits.entry(id as i32).or_default().push((0, 6));
+        }
+        let rows = super::project_blocks(&blocks, &hits);
+
+        let hit_cells = |runs: &slint::ModelRc<crate::TextRun>| -> Vec<String> {
+            (0..runs.row_count())
+                .filter_map(|i| runs.row_data(i))
+                .filter(|r| r.hit)
+                .map(|r| r.text.to_string())
+                .collect()
+        };
+        assert_eq!(
+            hit_cells(&rows[0].runs),
+            vec!["needle".to_string()],
+            "a paragraph's hit is a cell of its own"
+        );
+        // the grid has no row for its cell, so the cell list carries it
+        let grid = rows.iter().find(|r| r.id == 8).unwrap();
+        let painted: Vec<String> = (0..grid.table_cells.row_count())
+            .filter_map(|i| grid.table_cells.row_data(i))
+            .flat_map(|c| hit_cells(&c.runs))
+            .collect();
+        assert_eq!(painted, vec!["needle".to_string()], "a hit in a cell never reached it");
+        // and so does a columns box, whose blocks the delegate lays out itself
+        let boxes = rows.iter().find(|r| r.id == 20).unwrap();
+        let painted: Vec<String> = (0..boxes.column_items.row_count())
+            .filter_map(|i| boxes.column_items.row_data(i))
+            .flat_map(|i| hit_cells(&i.runs))
+            .collect();
+        assert_eq!(
+            painted,
+            vec!["needle".to_string()],
+            "a hit in a column never reached it"
+        );
+        // a search that never started leaves a markless line on the
+        // single-Text path (cell A1 is the one marked block here)
+        let clean = super::project_blocks(&blocks, &FindHits::new());
+        assert_eq!(clean[0].runs.row_count(), 0, "a closed bar still splits");
+        assert_eq!(
+            clean
+                .iter()
+                .find(|r| r.id == 8)
+                .unwrap()
+                .table_cells
+                .row_count(),
+            grid.table_cells.row_count()
+        );
+        let marked = clean
+            .iter()
+            .find(|r| r.id == 8)
+            .unwrap()
+            .table_cells
+            .row_data(1)
+            .unwrap();
+        assert_eq!(hit_cells(&marked.runs), Vec::<String>::new(), "a mark is not a hit");
     }
 
     /// SPEC §十六 names these two as palette commands, and the id a row
@@ -4712,7 +5050,7 @@ mod tests {
     fn a_grid_costs_one_row_and_carries_its_cells() {
         use slint::Model;
         let blocks = grid_scene();
-        let rows = super::project_blocks(&blocks);
+        let rows = super::project_blocks(&blocks, &FindHits::new());
         // ADR-0028: the cells paint inside the grid delegate, so they must not
         // also cost a row each — SPEC §三十七 counts hidden as really hidden.
         let ids: Vec<i32> = rows.iter().map(|r| r.id).collect();
@@ -4741,7 +5079,7 @@ mod tests {
         // stray cells (a v8 database touched by hand) must not become a
         // half-row: the delegate chunks by `columns` and indexes into the list
         blocks.retain(|b| b.id != crate::core::BlockId(6) && b.id != crate::core::BlockId(7));
-        let rows = super::project_blocks(&blocks);
+        let rows = super::project_blocks(&blocks, &FindHits::new());
         assert_eq!(rows[1].table_cells.row_count(), 3, "four cells is one row of three");
         assert_eq!(cell_texts(&rows[1]), ["A0", "A1", "A2"]);
     }
@@ -4751,7 +5089,7 @@ mod tests {
         let blocks = grid_scene();
         // a cell has no row, so no row can carry kind 17 and no row index can
         // land inside a grid — drop_index_for_row reads the same list
-        let rows = super::project_blocks(&blocks);
+        let rows = super::project_blocks(&blocks, &FindHits::new());
         assert!(rows.iter().all(|r| r.kind != super::BLOCK_TABLE_CELL));
         assert_eq!(super::visible_block_indices(&blocks), vec![0, 1, 8]);
     }

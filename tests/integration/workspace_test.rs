@@ -148,7 +148,7 @@ fn duplicated_nested_list_keeps_parents_in_the_copy() {
     assert_ne!(copied_child.parent, Some(root), "stale parent pointer");
     assert_eq!(copied_child.parent, Some(copied_root.id));
     // depth projection agrees (both render, child indented)
-    let rows = quire::app::state::project_blocks(&blocks);
+    let rows = quire::app::state::project_blocks(&blocks, &Default::default());
     assert_eq!(rows[0].depth, 0);
     assert_eq!(rows[1].depth, 1);
 }
@@ -416,7 +416,7 @@ fn a_folded_section_shifts_drag_landings_but_not_row_numbers() {
         ],
     );
 
-    let rows = project_blocks(state.doc.borrow().page_blocks(pid));
+    let rows = project_blocks(state.doc.borrow().page_blocks(pid), &Default::default());
     assert_eq!(
         rows.iter().map(|r| r.id).collect::<Vec<i32>>(),
         vec![1, 3, 4],

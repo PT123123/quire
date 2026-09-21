@@ -20,6 +20,11 @@ export struct TextRun {
     code: bool,
     link: bool,
     url: string,
+    // A find hit (SPEC §二十, A4 D7): the cell is one occurrence the bar
+    // matched, so the delegate tints its background. A hit that starts or ends
+    // inside a word tints the whole cell, because a cell is the smallest thing
+    // this layout can paint.
+    hit: bool,
 }
 
 /// One cell of a table (SPEC §三十七 批次 B). The grid rides on its table's

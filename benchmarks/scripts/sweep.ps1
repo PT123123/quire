@@ -29,7 +29,7 @@ if (-not (Test-Path $shot)) {
 # light as declared, plus every dark-* the controller knows
 $all = @(
     "default", "edit", "empty", "nest", "toggle", "toggle-fold", "rename", "title-edit", "recovered",
-    "find", "marks", "marks-wrap", "block-colors", "page-block", "link-block", "image", "image-half", "file",
+    "find", "find-grid", "find-cols", "find-callout", "marks", "marks-wrap", "block-colors", "page-block", "link-block", "image", "image-half", "file",
     "table", "table-edit", "table-marks",
     "math", "math-inline",
     "toc",

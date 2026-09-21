@@ -93,18 +93,30 @@ renderer (`quire-shot`, ADR-0011) into `.scratch/shots/latest.png`. Scenes
 live in `controller::apply_scene` + `apply_scene_overlay` — popups open in
 the overlay half so headless two-pass renders see their transitions.
 Current set: default, dark, palette, search-notes, menu, rename, settings,
-dialog, empty, edit, slash, block-menu, marks, marks-wrap, link, find, nest, toggle,
+dialog, empty, edit, slash, block-menu, marks, marks-wrap, link, find, find-grid,
+find-cols, find-callout, nest, toggle,
 toggle-fold, image, image-half, file, recovered, title-edit, table, table-edit,
 table-marks, columns, columns-3, columns-marks, math, math-inline, toc, embed,
 embed-empty, code-hl
 plus dark combos (dark-slash, dark-find, dark-marks, dark-link, dark-code-hl,
 dark-block-menu, dark-block-colors, dark-title-edit).
-`benchmarks/scripts/sweep.ps1` holds the authoritative list — 54 scenes as of
-ADR-0042 — and this prose is the summary, so when the two disagree trust the
+`benchmarks/scripts/sweep.ps1` holds the authoritative list — 57 scenes as of
+ADR-0043 — and this prose is the summary, so when the two disagree trust the
 script. Every visual change ships with re-shot
 scenes; the judge-reviewed set is the regression baseline. `toggle` and
 `toggle-fold` are a pair on purpose: the same section open and closed, so a
 fold that hides the wrong rows shows up as a diff between the two PNGs.
+`find` and its three siblings are the find bar's set (ADR-0043). `find` searches
+a term the page says sixteen times, so its evidence is a box on every one of them
+that is not under the caret — 9 inside the 800px frame, 14 in a 3 000px one, and
+the two that never appear are the ones in the block the bar stepped into, which
+answers with the editor's own text selection instead of a cell. `find-grid`,
+`find-cols` and `find-callout` each search a word that lives **inside a table
+cell**, inside a box of a columns layout, and inside a callout: the first two have
+no row of their own and have to ride on the row that paints them (ADR-0028), and
+the third is a frame the runs flexbox did not draw at all until this slice. One
+box, two boxes, two boxes, on purpose — each scene's only claim is that a box
+appears where the delegate had never been asked to paint one.
 `image` and `image-half` are the same pair for the width tier — one picture
 block at 100 % and at 50 %, so a width setting that only moves the label and
 not the raster is caught by the row geometry. `file` is the picture scene's
@@ -179,7 +191,19 @@ narrowest box it can reach with a sentence too long for it and one bold phrase
 inside: the cell at a third of the grid, the line at half the page. They joined
 the set because the delegate edits they cover moved **0 of the 50** scenes that
 already existed — a correct reading of that zero requires a shot that would have
-failed, and there was none.
+failed, and there was none. The find bar's marker (ADR-0043) is the same three
+delegates a second time, and it learned the same lesson twice. The hit cell's
+`Rectangle` had to be added to all three files, and the layout's arm was the one
+that nearly stayed unproven: an earlier read of the `columns` fixture had its
+boxes rendering empty, so a swept `find-cols` was said to be a scene that would
+paint nothing either way. That read was wrong — the boxes do hold "Column 1 /
+Column 2", visible in a crop of a scene that had been in the set for two
+milestones — and the scene that was written against the wrong read would have
+been the hole. The second lesson is the callout's: its tinted box is declared
+*after* the runs in the delegate, Slint paints later siblings on top, and so the
+first `find-callout` passed every gate while painting an empty callout. The
+census caught it (2 hit cells where 4 were due), the crop said why, and the box
+moved above the runs.
 `sweep25` → `sweep26` (code highlight) moved **0 of the 52** and added 2:
 `code-hl` and `dark-code-hl` — one fixture (the same seven lines the memory bench
 feeds itself) as a Rust block, and the same block in the dark theme. That zero is
@@ -237,7 +261,18 @@ because the two slots this slice darkened had never been painted as anything but
 their own menu dot — 120 px of chip, no glyph to read. The census now finds 289 px
 of `#bd6408` and 164 px of `#a87718` where the sweep before had 0 of either, with
 the dark arm's `#e28d50`/`#dcae3f` at the same rows confirming dark moved nothing.
-The baseline is `.scratch/sweep29` (54 scenes). The set before it, `.scratch/sweep10`
+`sweep29` → `sweep31` (the find bar's own marker, ADR-0043) moved **2 of 54** and
+added `find-grid`, `find-cols` and `find-callout`: `find.png` and `dark-find.png`
+each gained exactly 4 428 px of their fill (`#ffe9a8` / `#3d3413`) and exactly
+756 px of their border (`#bd6408` / `#a87718`). The two themes agreeing to the
+pixel is the point — 9 boxes at identical coordinates in both, and only the four
+literals differ — and the three new scenes are the shapes a box has where the
+text it marks is not a block's own line: one 39×30 box in a grid cell, two 52×30
+in the boxes of a columns layout, two 21×30 inside a callout's tinted frame. The
+other 52 scenes are byte-identical, which is what "only the rows the bar touched
+get rebuilt" has to look like from outside — and which is also, on its own,
+worthless as evidence for the three new scenes, since none of them existed to move.
+The baseline is `.scratch/sweep31` (57 scenes). The set before it, `.scratch/sweep10`
 (42 scenes), re-baselined 37 of them for a
 reason unrelated to tables: `DocumentRow.head` bound `height` without `y` and so
 was centred in its delegate, which had been sitting the page title ~34 px below

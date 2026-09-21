@@ -2,6 +2,100 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0043 · A find hit is a cell, and its border is the marker
+
+Decision: the in-page find bar (SPEC §二十) paints every occurrence as **one
+word-run cell** (ADR-0041). `TextRun` gains `hit: bool`; `build_runs` takes that
+block's hit ranges as two more byte boundaries each; the projection carries them
+as `FindHits = HashMap<i32, Vec<(usize, usize)>>`; and the delegate draws a
+`Rectangle` under the glyphs of any cell whose `hit` is set. A hit that starts or
+ends mid-word **splits the word**, because a cell is the smallest thing this
+layout can paint and a cell painting half a match would be the same defect with a
+tint on it.
+
+Why not ADR-0042's colour layers: that trick works because a code block is
+monospace, so six copies of one string stack glyph for glyph. The editor body is
+proportional — there is no byte offset that predicts a pixel — so a per-character
+colour is not available here. A background is: the runs flexbox already cuts a
+line into cells at word boundaries, so adding the hit's two offsets as boundaries
+makes a cell that is exactly the occurrence, and a `Rectangle` behind it is the
+same decoration the inline-code box already uses.
+
+Two rules fall out of the cell model. A hit **never cuts a mark**: a marked
+stretch is one `Text`, and a formula's cell shows glyphs that its own byte space
+does not describe (`\alpha` reads α), so a hit that lands inside a mark tints the
+whole mark instead of part of it. And a row with neither marks nor hits keeps
+`runs: []`, which is what tells the delegate to draw one wrapping `Text` — so a
+search that never started costs nothing, and one that is closed costs a re-paint
+of the rows it had touched.
+
+The repaint is targeted rather than a re-projection. `paint_find_hits` walks the
+row model once and rebuilds the rows that carry a hit **now or carried one on the
+previous search** (`AppState::find_painted`), because the bar does this on every
+keystroke and a 10 000-block page must not re-project to repaint a dozen cells. A
+hit in a grid cell or a layout box has no row of its own (ADR-0028), so
+`row_id_of` walks it up to the row that paints it and rebuilds that row's flat
+`table_cells` / `column_items` lists whole — the hit rides on a row that is not
+the one the block owns.
+
+The palette pair is `Colors.find-hit` (fill) and `Colors.find-hit-border`, and the
+split is measured, not styled: a fill bright enough to be a 3:1 marker on its own
+would take every coloured-text pair below the floor ADR-0023 accepted (an amber
+that reaches 1.39:1 on white drags the palette's own yellow text to 2.85). So the
+fill stays pale and says only "this cell" — light #ffe9a8 keeps body text at
+13.14:1 (from 15.80) and its worst pair at 3.29 (from 3.95); dark #3d3413 keeps
+10.02 (from 14.06) and 3.83 (from 5.37) — and the **border** carries the marker:
+#bd6408 and #a87718 read 4.21 and 4.39 on their page and 3.50 and 3.13 on the
+fill they sit in, so the marker clears 3:1 against both things it touches.
+
+Consequences:
+
+* One hit is always exactly one cell — a hit's own range is `covered`, so the
+  word-cut never runs inside it, and two adjacent boxes mid-match cannot happen.
+* The hit box and the inline-code box are the same geometry, and the hit is
+  declared second. A search that lands on a code span shows the match and loses
+  the span's gray background: the bar's job is to say where the text is.
+* `project_blocks`, `table_cells` and `column_projection` each take a `&FindHits`,
+  which is `&FindHits::new()` at every call site that is not the find path. An
+  empty map costs a row one failed hash lookup, so the closed bar is not free but
+  is one lookup per row wide.
+* The active hit is **not** distinguished from the other hits by this slice. It
+  already is by the editor's own selection (the bar steps the caret there), and
+  the two overlays read differently in both themes — so a "current match" colour
+  is a separate decision with a separate measurement, not a missing flag.
+* `find`, `find-grid`, `find-cols` and `find-callout` are the pixel evidence, one
+  per surface a match can land on: a block's own line, a grid cell, a box inside
+  a columns layout, and a callout's tinted frame. Each of the last three was a
+  scene before it was a passing scene — `find-grid` needed the search term
+  changed to a word that only exists inside the grid, because with the bar's own
+  "the" it painted seven boxes on the page and none in the cell it was meant to
+  prove.
+
+* The runs flexbox is now the text renderer for a **quote and a callout** as
+  well, not just for the plain kinds. They hold one line of body text each, and
+  each draws it through its own single `Text`, so a match inside one had nowhere
+  to sit while the counter still counted it: on the swept page that was 2 of 16
+  hits, found by measuring the shot rather than by reading the code. They share
+  the flexbox and bring only their own frame — `runs-x` / `runs-y` /
+  `runs-width` / `runs-height` answer per kind, and the plain case reads exactly
+  the expressions it used to.
+
+* Paint order is part of that frame. The callout's tinted box was declared
+  *after* the runs, and Slint paints later siblings on top, so the first version
+  of this ADR's callout arm passed every gate and painted nothing: the box
+  covered its own cells. The box and its emoji moved above the runs; the emoji
+  and the text still sit on top of the box, which is the only ordering the block
+  actually needs. The symptom was an empty callout — the single `Text` had
+  stepped aside for runs, and the runs were there but hidden — which is the
+  shape this trap always takes.
+
+* A hit whose block is **being edited** is not a cell, and that is not a gap.
+  Stepping the bar moves the caret onto the match, so that one block answers
+  with the editor's own text selection; its other occurrences lose their cells
+  for as long as it holds the caret. On the swept page 16 hits are 14 cells plus
+  the 2 in the block under the caret, counted at a 3 000px-tall window so that
+  nothing was simply scrolled off.
+
 ## ADR-0042 · One colour is one layer, not one run
 
 Decision: a highlighted code block paints as **six copies of the same string**.

@@ -124,7 +124,7 @@ after `wire()`, and the app binary is untouched, because the app really does run
 the backend its features select. The re-baseline is the proof of scope: 53 scenes
 moved 118–125 px in the footer's single caption line, `settings` 244 px across that
 line plus the dialog's Renderer row — the two places that read the property, and
-nothing else. `.scratch/sweep29` (54 scenes) is the baseline.
+nothing else.
 
 The A4 open list this snapshot used to carry (1 HIGH + 2 MEDIUM + 3 LOW + 1 known
 limitation) is now: **closed** — D1 (marked lines did not wrap, ADR-0041), D9 (the
@@ -133,12 +133,27 @@ anymore), the modal scrim, the `Ctrl+B` palette chord (sidebar is `Ctrl+\`), the
 renderer label above, and both contrast LOWs. The label one is what taught the
 last: the two contrast findings went from eyeballed to measured, one half of the
 second was false, and the pair that really was weakest had never been painted.
-**Still open** — D7 · MEDIUM: per-page find reports
-"2 / 16" and paints no individual match. The code is now the evidence for what
-that costs: `ui/components/EditorBlock.slint` has no reference to the find term at
-all, so a hit in a block the caret is not in cannot be drawn — it is a missing
-feature (row-level hit ranges, which is the same one-`Text`-one-colour wall ADR-0042
-went around for code), not a broken one.
+**The A4 list is now empty.** D7 · MEDIUM — "per-page find reports 2 / 16 and
+paints no individual match" — closed by ADR-0043: a hit is one word-run cell with
+a measured fill and a border that does the marking, the bar repaints only the
+rows that carry one, and the cell is drawn wherever body text is drawn — a
+block's own line, a grid cell, a box in a columns layout, a quote, a callout.
+The finding's own diagnosis was right that this is the one-`Text`-one-colour wall
+ADR-0042 went around for code, and the way around it here is different: the layer
+trick needs a monospace font, a background does not. What closed it was the
+count, not the code: 16 hits on the swept page are 14 cells plus the 2 in the
+block currently under the caret, which answers with a real text selection.
+
+`.scratch/sweep31` (57 scenes) is the baseline. Two scenes moved and three are
+new: `find` and `dark-find` gained 4428 px of `#ffe9a8` / `#3d3413` and 756 px of
+`#bd6408` / `#a87718` each — 9 boxes apiece, at identical coordinates in both
+themes, which is the evidence that the geometry is the marker's and not the
+palette's — and `find-grid` / `find-cols` / `find-callout` search a word that
+lives in a table cell, in a columns box and in a callout, painting 1, 2 and 2
+boxes there. `find-grid`'s term had to be changed to one that exists only inside
+the grid: with the bar's own "the" it painted seven boxes on the page and none in
+the cell it was meant to prove, which is a scene that passes either way. The
+other 52 scenes are byte-identical.
 
 The contrast pair, measured rather than judged (WCAG relative luminance over the
 four light surfaces, `.scratch/contrast.py` for the before table and

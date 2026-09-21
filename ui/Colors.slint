@@ -39,6 +39,22 @@ export global Colors {
     out property <color> success: Theme.dark ? #4cc38a : #1d9e6f;
     out property <color> selection: Theme.dark ? #3d4a86 : #b5d3f7;
 
+    // ---- in-page find (SPEC §二十, A4 D7) ----
+    // A match is painted as a cell around the matched text, so the token has
+    // two jobs: read against the page, and leave the block's own text colour
+    // alive. Only the border does the first. A fill bright enough to reach 3:1
+    // on its own (an amber at #ffd75e, 1.39 here — it takes 3.0+ to reach it,
+    // which is a solid yellow) drags yellow text to 2.85 and orange to 3.03,
+    // so the fill stays pale and says only "this cell": #ffe9a8 keeps primary
+    // text at 13.14 (from 15.80) and its worst coloured pair, yellow, at 3.29
+    // (from 3.95 — the floor ADR-0023 already accepted). Dark mirrors it: fill
+    // #3d3413 keeps primary at 10.02 (from 14.06) and worst pair purple at
+    // 3.83 (from 5.37). The borders are #bd6408 and #a87718 — 4.21 and 4.39 on
+    // their page, 3.50 and 3.13 on the fill they sit in — so the marker itself
+    // clears 3:1 both ways.
+    out property <color> find-hit: Theme.dark ? #3d3413 : #ffe9a8;
+    out property <color> find-hit-border: Theme.dark ? #a87718 : #bd6408;
+
     // ---- interactive states ----
     out property <color> hover-fill: Theme.dark ? #ffffff14 : #0000000a;
     out property <color> pressed-fill: Theme.dark ? #ffffff20 : #00000014;

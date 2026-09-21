@@ -189,7 +189,16 @@ First functional release: a local, single-file-database notes workspace.
   (ADR-0042). A Markdown fence's info string carries it both ways (`rs` in,
   `rust` out), a rich paste keeps it, and a language this build cannot lex is no
   colour rather than a broken block
-- Per-page find bar (Ctrl+F) with hit counter and selection navigation
+- Per-page find bar (Ctrl+F) with hit counter and selection navigation. Every
+  match is now painted, not just counted: a hit is one word-run cell with a pale
+  fill and an amber border, so the box says where the text is without taking the
+  block's own colour below what the palette already allows. A hit that lands in
+  the middle of a word splits the word, one that lands inside bold or a formula
+  tints the whole mark, and one inside a table cell or a column box rides on the
+  row that draws it. Quote and callout hold their text in a `Text` of their own
+  and now share that flexbox, so the counter and the page reconcile: on the swept
+  page 16 hits are 14 boxes plus the 2 in the block the bar stepped into, which
+  shows the editor's selection instead (ADR-0043)
 
 - Undo/redo (Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z) — per page, command-based
 

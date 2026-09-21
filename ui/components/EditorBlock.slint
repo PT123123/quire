@@ -212,16 +212,57 @@ export component EditorBlock inherits Rectangle {
         }
     }
 
+    // callout (kind 10): a tinted box with an emoji beside the text; the
+    // background colour picker overrides the default tint. The box and the
+    // emoji are declared here, above the runs, because Slint paints later
+    // siblings on top -- a box declared after them would cover every find
+    // cell the callout holds (ADR-0043).
+    Rectangle {
+        x: content-x;
+        y: top-margin;
+        width: content-width;
+        height: root.body-height;
+        visible: block.kind == 10;
+        border-radius: Theme.radius-md;
+        background: block.bg > 0 ? block-bg-color : Colors.callout-background;
+    }
+    Text {
+        x: content-x + Theme.spacing-sm;
+        y: top-margin + Theme.spacing-sm + 2px;
+        width: 26px;
+        visible: block.kind == 10;
+        text: "💡";
+        font-size: Typography.size-body;
+        vertical-alignment: center;
+    }
+
+    // A quote and a callout hold one line of body text like a paragraph does,
+    // and their delegate is a single Text — so a find hit inside one has
+    // nowhere to sit until the runs path covers them too (ADR-0043). They
+    // share the flexbox and bring only their own frame.
+    property <bool> is-quote: block.kind == 7;
+    property <bool> is-callout: block.kind == 10;
+    property <bool> runs-line: is-plain || root.is-quote || root.is-callout;
+    property <length> runs-x: root.is-quote ? content-x + Theme.spacing-md
+        : root.is-callout ? content-x + 40px
+        : content-x + list-indent + (is-list ? 26px : 0px) + root.fold-gutter;
+    property <length> runs-y: root.is-callout ? top-margin + Theme.spacing-sm : top-margin;
+    property <length> runs-width: root.is-quote ? content-width - Theme.spacing-md
+        : root.is-callout ? content-width - 40px - Theme.spacing-sm
+        : content-width - list-indent - (is-list ? 26px : 0px) - root.fold-gutter;
+    property <length> runs-height: root.is-quote ? quote-text.height
+        : root.is-callout ? callout-text.height : plain-text.height;
+
     // inline-mark runs (M6). Slint Text has no inline formatting, so a
     // marked block renders as runs laid side by side by a wrapping flexbox:
     // each run is one cell and a line breaks between cells. Rust cuts the
     // unmarked stretches to a word per run, which is where the breaks come
     // from (ADR-0041). Unmarked blocks keep the wrapping Text.
-    if is-plain && !editing && block.runs.length > 0 : Rectangle {
-        x: content-x + list-indent + (is-list ? 26px : 0px) + root.fold-gutter;
-        width: content-width - list-indent - (is-list ? 26px : 0px) - root.fold-gutter;
-        y: top-margin;
-        height: plain-text.height;
+    if runs-line && !editing && block.runs.length > 0 : Rectangle {
+        x: runs-x;
+        width: runs-width;
+        y: runs-y;
+        height: runs-height;
         clip: true;
         FlexboxLayout {
             flex-wrap: wrap;
@@ -255,6 +296,20 @@ export component EditorBlock inherits Rectangle {
                     border-width: 1px;
                     border-color: Colors.border;
                 }
+                // A find hit is a cell of its own (ADR-0041 cuts the line at
+                // the hit's byte bounds and never word-splits inside one), so
+                // this box is one occurrence. Its fill only says "this cell" --
+                // the border is what the eye reads, because a fill that is a
+                // 3:1 marker by itself takes every coloured text pair below it
+                // (Colors.find-hit). It comes after the code box on purpose:
+                // the two are the same geometry, and a search that lands on an
+                // inline code span has to show the match, not the span.
+                if run.hit : Rectangle {
+                    border-radius: Theme.radius-xs;
+                    background: Colors.find-hit;
+                    border-width: 1px;
+                    border-color: Colors.find-hit-border;
+                }
                 run-text := Text {
                     x: 0; y: 0;
                     wrap: no-wrap;
@@ -284,8 +339,8 @@ export component EditorBlock inherits Rectangle {
     }
 
     plain-text := Text {
-        x: content-x + list-indent + (is-list ? 26px : 0px) + root.fold-gutter;
-        width: content-width - list-indent - (is-list ? 26px : 0px) - root.fold-gutter;
+        x: runs-x;
+        width: runs-width;
         y: top-margin;
         visible: is-plain && !editing && block.runs.length == 0;
         text: block.text;
@@ -539,10 +594,10 @@ export component EditorBlock inherits Rectangle {
         background: block-text-color;
     }
     quote-text := Text {
-        x: content-x + Theme.spacing-md;
+        x: runs-x;
         y: top-margin;
-        width: content-width - Theme.spacing-md;
-        visible: block.kind == 7 && !editing;
+        width: runs-width;
+        visible: block.kind == 7 && !editing && block.runs.length == 0;
         text: block.text;
         font-family: Typography.ui-font;
         font-size: Typography.size-body;
@@ -836,31 +891,13 @@ export component EditorBlock inherits Rectangle {
         visible: block.kind == 9;
         background: Colors.divider;
     }
-    // callout (kind 10): tinted box, an emoji, and the text. The background
-    // color picker overrides the default tint.
-    Rectangle {
-        x: content-x;
-        y: top-margin;
-        width: content-width;
-        height: root.body-height;
-        visible: block.kind == 10;
-        border-radius: Theme.radius-md;
-        background: block.bg > 0 ? block-bg-color : Colors.callout-background;
-    }
-    Text {
-        x: content-x + Theme.spacing-sm;
-        y: top-margin + Theme.spacing-sm + 2px;
-        width: 26px;
-        visible: block.kind == 10;
-        text: "💡";
-        font-size: Typography.size-body;
-        vertical-alignment: center;
-    }
+    // callout (kind 10), the text. Its tinted box and emoji are above the
+    // runs, and for a reason worth reading before moving them (ADR-0043).
     callout-text := Text {
-        x: content-x + 40px;
-        y: top-margin + Theme.spacing-sm;
-        width: content-width - 40px - Theme.spacing-sm;
-        visible: block.kind == 10 && !editing;
+        x: runs-x;
+        y: runs-y;
+        width: runs-width;
+        visible: block.kind == 10 && !editing && block.runs.length == 0;
         text: block.text;
         font-family: Typography.ui-font;
         font-size: Typography.size-body;

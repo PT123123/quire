@@ -134,6 +134,13 @@ export component TableBlock inherits Rectangle {
                                 border-width: 1px;
                                 border-color: Colors.border;
                             }
+                            // a find hit, as in EditorBlock: one cell per match
+                            if run.hit : Rectangle {
+                                border-radius: Theme.radius-xs;
+                                background: Colors.find-hit;
+                                border-width: 1px;
+                                border-color: Colors.find-hit-border;
+                            }
                             run-text := Text {
                                 x: 0; y: 0;
                                 wrap: no-wrap;
