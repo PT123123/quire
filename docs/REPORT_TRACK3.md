@@ -2121,3 +2121,62 @@ v17 的落地是实证）；合并后 12…20 连续。linked database **零迁�
    括号平衡器（处理 `//`、`/* */`、`r"…"`、`r#"…"#`、普通串的转义、字符字面量与 `'a`
    lifetime 的区分），它对**每个文件的 HEAD 版本与工作树版本**各算一次差值，delta 相等就说明
    本刀的编辑没有改变平衡——比只查工作树更能发现「别人的 WIP 本来就是坏的」。
+
+---
+
+# D8 · 性能收口（2026-09-22）
+
+做到这里，`docs/PLAN.md` 的 `## Track 3 · D8` 小节是这一刀的 PLAN 草稿；三个数字的全文与
+「没测什么」在 `docs/PERFORMANCE.md` 的 `## M14`；SPEC §三十九 性能红线那条 bullet 已就地标注收口。
+
+## 1 · 本刀改了哪些文件
+
+| 文件 | 为什么 |
+|------|--------|
+| `src/app/controller.rs` | 清 D6/D7 遗留的 6 条 unused binding warning（`gw`/`g`/`s`/`block` 只 clone/upgrade 从不用；Slint UIState 镜像才是这些状态的家） |
+| `src/app/state.rs` | 删 3 个从不读的 `db_formula_*` Cell + 2 个从不调的私有方法 + `db_refresh` 里 `body/total/wanted` 的死初值（改定值赋值，`mut` 随之可去）；修两处引用已删字段的注释 |
+| `src/core/database_formula.rs` | 删坏且无用的 `Parser::end_at`；**新增** `#[cfg(test)] mod perf` 的 `#[ignore]` 打印探针（解析 + 求值的 ns 数） |
+| `src/storage/database_store.rs` | **新增** `#[ignore]` 打印探针 `a_view_switch_...`（复用 D1 建库夹具量切换：解码 + 计数 + 窗口读 + 分组 tally + 全表对照） |
+| `src/core/command.rs` | 删一处未用 import（`PageFont`，Track 1 合并遗留，非本 track 功能面，仅为过零 warning 门槛） |
+| `docs/PERFORMANCE.md` / `docs/SPEC.md` / `PLAN.md` / 本文件 | 收口落档 |
+| `benchmarks/results/2026-09-22-track3-d8.jsonl`（新） | 五个探针的原始 JSON 行，多轮 warm 样本 |
+
+没碰：`CHANGELOG.md` / `docs/ROADMAP.md`（整合者）、任何 `.slint`（本刀不改渲染）、Track 1/2/4 的
+功能代码、既有 `#[test]`（只加 `#[ignore]` 打印探针，与 D0/D1/D4 同约定，不动测试语义）。
+
+## 2 · 门槛结果（在 `fa467a0` 的干净 worktree 里，非主工作树——主树挂着 Track 4 未提交的 PDF 依赖）
+
+```
+cargo check --all-targets --features software  → Finished，0 warning（13 → 0）
+cargo test --all-targets  --features software  → 476 passed / 0 failed / 15 ignored（删死码后与合并时同数）
+cargo test --release --lib -- --ignored        → 三个 §三十九 数字（见 PERFORMANCE ## M14）
+```
+release 全量 build + 像素 sweep 本 session **未跑**（探针只 `--lib` 的 release 就够出数；像素需要人手
+开一次 GUI，见 §4）。
+
+## 3 · 三个数字（一句话版，全文带区间在 PERFORMANCE）
+
+- **RAM**：10 000 行开在窗口 = **31 行 / 几 KB**，与 100 行库同价；全量 realize = 1.16–2.26 MB（≈330×），永不发生。
+- **切换视图**：切到顶部 **0.35–1.0 ms**；`OFFSET` 到表尾 **16–25 ms**（cursor 取窗 212–356 µs 可退役它）；分组 `GROUP BY` +5–18 ms。
+- **打开公式编辑器**：解析 **1.6–3.4 µs**、单格求值 68–129 ns；全表重算 = 窗口的 **108×**，投影无此路径（ADR-0083 兑现成一个数）。
+
+## 4 · 未验证（诚实清单）
+
+1. **帧 / 墙钟**：Slint 重画、日历 42 格、chart 构 path 没测——headless 探针替不了真窗口的
+   `bench.ps1` RAM/像素臂。补它要人手开一次 GUI 采一轮。
+2. **release 全量 build + sweep**：本 session 没跑（删的都是死码、加的都是 `#[ignore]`，`--all-targets`
+   check+test 已覆盖；但「release 零警告」这条门槛要一次真 release 构建才钉死）。
+3. **单格写 9–18 ms**：D4 探针打印的 `cell_write_us` 是 autocommit 落盘下界，不是查询；app 把每次
+   用户编辑并一事务（一次 Ctrl+Z），用户等的是 batched 的 17–33 µs。这条边界写进 PERFORMANCE，不粉饰。
+4. **一次越界**：`--ignored` 全量跑里 `platform::tests::a_picture_another_process_put_on_the_clipboard_decodes`
+   FAILED——它是要剪贴板上有别的过程放的图的 Track 4 环境型 ignored 探针，与 database 无关，非本刀引入，
+   报此不碰。
+
+## 5 · 给整合者的注意事项
+
+- 这一刀可独立成一个 commit：只含 warning 清理 + 两个 `#[ignore]` 探针 + 四份文档，**零新依赖、零迁移**
+  （`CURRENT_VERSION` 不动）。它与 `fa467a0` 之上任何未提交的 Track 4 PDF 改动正交。
+- CHANGELOG 若为「D8 收口」留一笔，属 `Known limitations`/performance 注，不属新功能：三个数字进了
+  PERFORMANCE 的 `## M14`，帧的墙钟与 release/sweep 仍待一次真窗口运行。
+- rollup / relation 仍欠（ADR-0084）；Track 2 引用层已落地，relation 的依赖已不阻塞，但那是一整刀新
+  语义，不属 D8。

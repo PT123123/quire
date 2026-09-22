@@ -2624,3 +2624,35 @@ attachment_ids_in 的 `_` 兜底 + repository 穷尽 match 已加臂）、`RowRe
 号段 0060…0079 早已用尽，D6 借了 0082–0084，本刀**继续借 0085 / 0086 / 0087**（linked
 database / 模板 / 视图内搜索）。工作树里 Track 4 的 0080/0081、Track 2 的 0050–0052 各归其主；
 若整合时要重编号，请以内容为准搬迁（正文交叉引用按内容书写）。
+
+## Track 3 · D8 性能收口（2026-09-22，on `track/3-database`，无新 ADR：测量刀，不新增机制）
+
+**这一刀只做两件事：把合并后的树跑到门槛上，再把 SPEC §三十九 欠的三个数字量出来。**
+
+1. **收口债务**。D6/D7 的约 2 300 行「一行 cargo 都没跑」，在 `fa467a0` 合并树上有 13 条编译
+   warning。逐个清掉，全部落在本 track 的 territory：`controller.rs` 六处只 clone/upgrade 却不用的
+   `gw`/`g`/`s`/`block`（行内回调里 Slint 镜像已接管状态，那几行是纯守卫、删之无副作用）、
+   `state.rs` 三个写了从不读的 `db_formula_block/property/record` Cell（公式弹窗的 id 实际存在
+   UIState 镜像里，这三个 AppState 字段是 D6 设计改道后的残骸，连同它的说明注释一起删）、
+   从不被调的 `db_definition`/`db_columns` 两个私有方法、`database_formula::Parser::end_at`（且实现
+   是坏的：取的是最后一个 token 的位置不是「输入末尾」）、`db_refresh` 里 `body/total/wanted` 三个
+   从不被读的初值（改成无初值的定值赋值，顺带 `mut` 也不 needed 了）、以及 `command.rs` 一处 Track 1
+   遗留的未用 `PageFont` import。清完 `cargo check --all-targets` **0 warning**、
+   `cargo test --all-targets` **476 passed / 0 failed**（与本 track 合并时同数，删的都是死码）。
+2. **三个数字**（详见 `docs/PERFORMANCE.md` 的 `## M14`）：① 10 000 行的库开在窗口上只占**几 KB**
+   行对象，全量 realize 才 1.16–2.26 MB（≈330×，counting allocator，逐次相同）；② 切到视图顶部
+   ≈ **0.35–1.0 ms**（解码 + `COUNT(*)` + 一次窗口读），但 `OFFSET` 走到表尾 16–25 ms（cursor 实测
+   212–356 µs 是退役它的现成路子），分组 `GROUP BY` 再 +5–18 ms；③ 打开公式编辑器 = 解析式子
+   **1.6–3.4 µs**、单格求值 68–129 ns，全表重算是窗口重算的 **108×** 且投影无路径去做（ADR-0083）。
+   新探针两个：`storage::database_store::probe::a_view_switch_...` 与
+   `core::database_formula::perf::a_formula_...`（都 `#[ignore]` 打印型，复用 D0 的窗口几何与 D1 的
+   建库夹具）。原始行 `benchmarks/results/2026-09-22-track3-d8.jsonl`。
+
+**明确未做（诚实）**：**帧没测**——Slint 重画 31 个 delegate / 日历 42 格 / chart 构 path 的墙钟，
+需要真窗口 + `bench.ps1` 的 RAM/像素臂，headless 探针替不了（与 D0 §2.3 同一条界限，SPEC 那句
+「没有 UI 臂就进不了 §Method」正是说它）。要在真窗口上补这三个墙钟，得人手开一次 GUI 采一轮；
+本环境不脚本点桌面 UI，故未做，写在此处不含糊过去。
+
+**rollup / relation 仍欠**（ADR-0084）：Track 2 的引用层已随合并落地，relation 的依赖不再阻塞，
+但它是一整刀新语义（存 id 不存标题、双向一批写、保存时环检测、rollup 六种聚合），形态已写死在
+ADR-0084，不属 D8 的「测量与收口」范围。

@@ -1447,7 +1447,6 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         });
     }
     {
-        let gw = gw.clone();
         let s = state.clone();
         ui.global::<UIState>()
             .on_db_column_resized(move |block, property, permille| {
@@ -1803,10 +1802,8 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         });
     }
     {
-        let gw = gw.clone();
         let s = state.clone();
         ui.global::<UIState>().on_db_gallery_shaped(move |block, per_row| {
-            let g = gw.upgrade().unwrap();
             // the grid was resized: the card slice is rows × per_row, so a new
             // shape is a re-read (and a no-op when the clamp keeps the number)
             if s.db_gallery_set_per_row(block, per_row) {
@@ -1836,10 +1833,8 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         });
     }
     {
-        let gw = gw.clone();
         let s = state.clone();
         ui.global::<UIState>().on_db_form_cleared(move |block| {
-            let g = gw.upgrade().unwrap();
             s.db_form_clear(block);
             db_refill_row(&s, block);
         });
@@ -1885,7 +1880,6 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                 let g = gw.upgrade().unwrap();
                 // the ids are read back from the mirror: the popup is the one
                 // editor open, and it opened them
-                let block = g.get_db_formula_block();
                 let property = g.get_db_formula_property();
                 let record = g.get_db_formula_record();
                 let (preview, error) = s.db_formula_preview(record as i64, property, &text);
@@ -1915,7 +1909,6 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
     }
     {
         let gw = gw.clone();
-        let s = state.clone();
         ui.global::<UIState>().on_db_formula_closed(move || {
             let g = gw.upgrade().unwrap();
             g.set_db_formula_block(-1);
@@ -2003,10 +1996,8 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         });
     }
     {
-        let gw = gw.clone();
         let s = state.clone();
         ui.global::<UIState>().on_db_chart_kind(move |block, kind| {
-            let g = gw.upgrade().unwrap();
             if s.db_chart_kind_set(block, kind) {
                 db_refill_row(&s, block);
             }

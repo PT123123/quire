@@ -175,16 +175,6 @@ pub struct AppState {
     // statement: count, window and group headers all answer the same rows.
     db_search: RefCell<HashMap<i32, String>>,
     // ─── D6: the formula editor's session state ─────────────────────────────
-    // The popup's ids (which block / column / row it edits) live here, the
-    // draft text and its preview live in `UIState` — the same split as the
-    // cell editor (`db-editing-*` here, `editing-text` there): Rust owns the
-    // facts, Slint owns the words being typed.
-    db_formula_block: Cell<i32>,
-    db_formula_property: Cell<i32>,
-    /// The **sample row** the preview evaluates on. `-1` is "no row" — the
-    /// preview then computes against an empty row, which is the honest answer
-    /// to "what would this formula show" when the table has no rows yet.
-    db_formula_record: Cell<i64>,
     /// How many formula evaluations the *projection* has performed, since
     /// startup. A counter nothing reads (no code path branches on it): it is
     /// the number ADR-0083's recompute contract is measured in — "edit one
@@ -634,9 +624,6 @@ impl AppState {
             db_gallery_per_row: RefCell::new(HashMap::new()),
             db_form: RefCell::new(HashMap::new()),
             db_search: RefCell::new(HashMap::new()),
-            db_formula_block: Cell::new(-1),
-            db_formula_property: Cell::new(-1),
-            db_formula_record: Cell::new(-1),
             db_formula_evals: Cell::new(0),
             editor_viewport_h: Cell::new(DEFAULT_EDITOR_VIEWPORT_H),
             next_db_id: Cell::new(db_ids.0),
@@ -5059,17 +5046,6 @@ impl AppState {
         self.databases.borrow().views_of(db).map(|v| v.id).next()
     }
 
-    /// A view's `definition` document, or the empty one when the view is gone.
-    fn db_definition(&self, view: ViewId) -> ViewDefinition {
-        self.databases
-            .borrow()
-            .views
-            .iter()
-            .find(|v| v.id == view)
-            .map(|v| ViewDefinition::parse(&v.definition))
-            .unwrap_or_default()
-    }
-
     /// One view's rules, parsed against the schema — the read side of D4: what
     /// the header state (`db_fill_row`) and the two panels read. The write side
     /// goes through `db_edit_definition` and, for the filter, the panel's flat
@@ -5083,17 +5059,6 @@ impl AppState {
             .find(|v| v.id == view)
             .map(|row| ViewDefinition::parse(&row.definition).rules(db, &catalog))
             .unwrap_or_default()
-    }
-
-    /// The columns the given view shows, for a database.
-    fn db_columns(&self, db: DatabaseId, view: ViewId) -> Vec<TableColumn> {
-        let catalog = self.databases.borrow();
-        let Some(row) = catalog.views.iter().find(|v| v.id == view) else {
-            return Vec::new();
-        };
-        let properties = view_columns(&catalog, db, row);
-        let definition = ViewDefinition::parse(&row.definition);
-        table_columns(&properties, &definition)
     }
 
     /// The store, or `None` in a headless session with no database. Every
@@ -5321,10 +5286,11 @@ impl AppState {
         // The per-layout outputs the shared cache stores below: `stamp` is the
         // layout's session dial (the calendar's month, the gallery's per-row),
         // `body` the surface below the header, and the two `tl_` numbers the
-        // timeline's axis. Each branch fills what it owns; the defaults cover
-        // the rest.
+        // timeline's axis. `stamp` and the `tl_` pair default and are filled by
+        // the layouts that own them; every layout that reaches the tail fills
+        // `body`, so it needs no default.
         let mut stamp: u64 = 0;
-        let mut body: f32 = 0.0;
+        let body: f32;
         let mut tl_start: i64 = 0;
         let mut tl_days: i64 = 0;
         // D7 (chart): the plot's payload — the points and, for a line, the one
@@ -5396,8 +5362,8 @@ impl AppState {
         // Every branch computes (total, wanted) from SQL counts, checks the
         // cache, and only then fetches — so a scroll that stays inside a window
         // still costs the count queries and nothing else, for every layout.
-        let mut total: usize = 0;
-        let mut wanted = RowWindow { start: 0, end: 0 };
+        let total: usize;
+        let wanted: RowWindow;
         // The two models the card-shaped layouts read (the row-shaped ones read
         // `rows`, filled below): a board's columns with their own card slices,
         // and the calendar's 42 day cells.
@@ -7628,10 +7594,11 @@ impl AppState {
     }
 
     /// The editor's live answer to the draft `text`: `(preview, error)`. The
-    /// preview is the value the formula computes on the **sample row**
-    /// (`db_formula_record` — the row the user clicked, or "an empty row" when
-    /// the table has none, which is the honest answer to "what would this
-    /// show"). A parse failure blocks nothing here — the user is still typing —
+    /// preview is the value the formula computes on the **sample row** (the
+    /// `record` the caller read back from the UIState mirror — the row the user
+    /// clicked, or "an empty row" when the table has none, which is the honest
+    /// answer to "what would this formula show"). A parse failure blocks nothing
+    /// here — the user is still typing —
     /// but its message is what the error line shows, and it is what a save
     /// refuses on.
     ///
