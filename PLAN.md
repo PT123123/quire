@@ -2505,3 +2505,43 @@ change。顺手闭合 D4 的两个提交缺口：`DatabaseView.slint`（D4 的 f
 REPORT_TRACK3 §D5）。已知边界：插入菜单四行 database 占位仍 muted（ADR-0079 写明理由）；
 gallery 封面是首字母占位（附件缩略图是 Track 4/D8 的地盘）；timeline 只有单日期列 +
 可选 end 列，没有 Notion 的双属性吸排序；迁移号不动（工作树 19，本刀提交树仍是 18）。
+
+## Track 3 · D6 计算属性 formula（2026-09-22，on track/3-database，ADR-0082…ADR-0084）
+
+SPEC §三十九「需计算」三件套（formula / rollup / relation）里的**第一件落地**：`formula`
+列有了引擎、编辑器、投影求值与导出通路。硬约束全部照 SPEC 原文：
+
+* **纯词法 + 自写解释器**（不引入 JS / WASM 运行时、不引公式解析库、零新依赖）：词法器 +
+  递归下降解析器 + 树遍历解释器都在 `src/core/database_formula.rs`，类型四类
+  （number / text / boolean / date）+ Empty（传染，`text(x)` 是唯一显式转换），函数七个
+  （`if length round abs min max text`），外加算术四则、比较、`and/or/not`、`[Column]`
+  本行引用。
+* **有限求值**：四个常量钉死（tokens 2 048 / depth 32 / steps 10 000 / result 65 536），
+  文法无循环无自定义函数，引擎无时钟无 I/O（`today()` 刻意缺席）。
+* **表达式存 `db_properties.config`（ADR-0061 的一列一文档），值不入库**——投影时现算
+  （ADR-0062/0039 的纪律）；写入经新 change `PropertyConfigSet`（整文档替换）+ 新命令
+  `SetDatabaseFormula`，一次编辑一步 undo，ADR-0074 的读改写纪律用于列。
+* **可增量重算**（ADR-0083）：求值只在投影窗口（六布局共用的 `db_table_rows` →
+  `db_paint_formulas`），**没有全表求值路径**；排序/过滤对公式列拒绝（要比较就得先算全列）；
+  依赖是本行的（引擎回调无 record 参数——跨行是 rollup/relation 的事，ADR-0084）；
+  `db_formula_evals` 计数器把契约变成可量的两个数（窗口有界、依赖精确）。
+* **环检测在保存时做**（SPEC 原文）：`would_cycle` 在 `db_formula_accept` 里跑，会自指的
+  表达式当场被拒并说明；渲染时只有深度上限兜旧文档（画 `Error` 不挂）。
+* UI：公式编辑器（多行输入 + 每键现算预览 + 错误行，单元格点击打开；Columns popup 有
+  「+ New formula column」一行创建入口）；公式列单元格只读展示（`editable=false` 不变，
+  点击开编辑器）。场景 `database-formula` / `dark-database-formula`，种子走真写路径
+  （`db_add_column` → `db_formula_accept` 含保存时检查）。
+
+**rollup / relation 本轮未做，原因是 Track 2 的引用基础设施未落地**（工作树的
+`src/core/reference.rs` / `src/storage/backlinks.rs` 是未跟踪文件，mention 的 `marks` 载荷
+与迁移 16 也都没提交）：brief 明说 relation 用 §四十 的基础设施、不另造轮子，所以这两件
+**留一刀等 Track 2**，形态（relation 存 id 不存标题、双向一批写、保存时环检测；rollup 对
+relation 目标的六个聚合、配置存 config、值投影时现算）已在 ADR-0084 写死。
+
+### 未验证（诚实清单）
+
+本刀**一行 cargo 都没跑**（铁律）：编译、测试、视觉、性能全部未验证——静态自查做了括号
+平衡（词法器处理 lifetime 后全部归零）、回调三件套 grep 核对、`Change` 全部 match 点的臂。
+已知边界（全在 REPORT_TRACK3 §D6）：公式不能引用 list/pick 列的值（id 对算术无意义，
+读作 Empty）、没有日期运算函数、没有跨刷新值缓存（理由见 ADR-0083）、导出按行现算整个
+视图（显式产物的成本，不是输入红线）。迁移号不动（工作树 19 / 提交树 18，本轮零迁移）。

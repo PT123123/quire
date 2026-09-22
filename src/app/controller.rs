@@ -1780,6 +1780,114 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         });
     }
 
+    // ─── D6 (SPEC §三十九 「需计算」): the formula editor ──────────────────────
+    // A formula cell's click lands here (DatabaseCell's `is-formula` arm): the
+    // editor opens pre-filled with the *stored* expression, and the preview
+    // evaluates the draft on the row the user clicked. One accepted save is one
+    // `SetDatabaseFormula` change and one Ctrl+Z; a refused save says why in the
+    // notice line and keeps the old expression.
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>()
+            .on_db_formula_opened(move |block, record, property| {
+                let g = gw.upgrade().unwrap();
+                // a cell editor's pending keystrokes land first: the same rule
+                // `db-cell-activated` follows, for the same reason
+                flush_pending_edit(&g, &s);
+                let text = s.db_formula_current(property);
+                let (preview, error) = s.db_formula_preview(record as i64, property, &text);
+                g.set_db_formula_block(block);
+                g.set_db_formula_property(property);
+                g.set_db_formula_record(record);
+                g.set_db_formula_name(
+                    s.db_column_toggles(block)
+                        .into_iter()
+                        .find(|t| t.property == property)
+                        .map(|t| t.name)
+                        .unwrap_or_default(),
+                );
+                g.set_db_formula_text(text.into());
+                g.set_db_formula_preview(preview.into());
+                g.set_db_formula_error(error.into());
+                g.set_db_formula_open(true);
+            });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>()
+            .on_db_formula_text_changed(move |text| {
+                let g = gw.upgrade().unwrap();
+                // the ids are read back from the mirror: the popup is the one
+                // editor open, and it opened them
+                let block = g.get_db_formula_block();
+                let property = g.get_db_formula_property();
+                let record = g.get_db_formula_record();
+                let (preview, error) = s.db_formula_preview(record as i64, property, &text);
+                g.set_db_formula_preview(preview.into());
+                g.set_db_formula_error(error.into());
+            });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_formula_accepted(move || {
+            let g = gw.upgrade().unwrap();
+            let block = g.get_db_formula_block();
+            let property = g.get_db_formula_property();
+            let text = g.get_db_formula_text().to_string();
+            // close first, then commit: the same order `db-cell-closed` uses, so
+            // a refused save's notice is on screen rather than behind a popup
+            g.set_db_formula_open(false);
+            g.set_db_formula_block(-1);
+            g.set_db_formula_property(-1);
+            g.set_db_formula_record(-1);
+            if s.db_formula_accept(block, property, &text) {
+                // the column's every cell may now paint differently
+                db_refill_row(&s, block);
+            }
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_formula_closed(move || {
+            let g = gw.upgrade().unwrap();
+            g.set_db_formula_block(-1);
+            g.set_db_formula_property(-1);
+            g.set_db_formula_record(-1);
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_formula_added(move |block| {
+            let g = gw.upgrade().unwrap();
+            flush_pending_edit(&g, &s);
+            // the Columns popup is the door this came from: close it, because a
+            // popup that opens a popup is two windows fighting over one click
+            g.set_db_columns_open(false);
+            if let Some(property) = s.db_formula_column_add(block) {
+                let (preview, error) = s.db_formula_preview(-1, property, "");
+                let name = s
+                    .db_column_toggles(block)
+                    .into_iter()
+                    .find(|t| t.property == property)
+                    .map(|t| t.name)
+                    .unwrap_or_default();
+                g.set_db_formula_block(block);
+                g.set_db_formula_property(property);
+                g.set_db_formula_record(-1);
+                g.set_db_formula_name(name.into());
+                g.set_db_formula_text("".into());
+                g.set_db_formula_preview(preview.into());
+                g.set_db_formula_error(error.into());
+                g.set_db_formula_open(true);
+            }
+        });
+    }
+
     {
         let gw = gw.clone();
         let s = state.clone();
@@ -3295,6 +3403,42 @@ fn seed_database_filter(state: &Rc<AppState>) -> Option<i32> {
     Some(id)
 }
 
+/// Seed the database-formula scene (SPEC §三十九 「需计算」, D6): the table seed
+/// plus two computed columns, created and defined **through the same write
+/// paths the UI drives** — `db_add_column` for the column and
+/// `db_formula_accept` for the expression, which is the formula editor's own
+/// door *including its save-time checks* (the parse, the column names, the
+/// dependency cycle). Nothing here hand-builds a formula the editor could not
+/// have accepted.
+///
+/// The two expressions cover the two shapes a formula column most often has,
+/// and their values are literals over the seed's literal cells (a sweep
+/// tomorrow photographs the same table):
+///
+/// * `Double` = `[Points] * 2` — arithmetic over a number column: 62, 20, 14,
+///   78, 6.
+/// * `Label` = `if([Done], "done", "open")` — a boolean column's value through
+///   `if`, a number-free shape that shows the condition arm: done, open, done,
+///   open, done.
+///
+/// `db_refill_row` follows, because a new column changes every row's cells and
+/// the block's own shape (the same call `db_add_column` makes and every
+/// structural seed ends with).
+fn seed_database_formula(state: &Rc<AppState>) -> Option<i32> {
+    use crate::core::database::PropertyKind;
+
+    let id = seed_database_table(state)?;
+    let double = state.db_add_column(id, "Double", PropertyKind::Formula)?;
+    if !state.db_formula_accept(id, double, "[Points] * 2") {
+        return None;
+    }
+    let label = state.db_add_column(id, "Label", PropertyKind::Formula)?;
+    if !state.db_formula_accept(id, label, "if([Done], \"done\", \"open\")") {
+        return None;
+    }
+    db_refill_row(state, id);
+    Some(id)
+}
 /// Seed one of D5's view-family scenes: the table seed plus a second view of
 /// the layout the scene names, added **through the same path the switcher's
 /// `+` drives** (`db_add_view`, which also switches to the new view), plus the
@@ -3552,6 +3696,10 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             g.set_dark(true);
             apply_scene(ui, state, "database-filter");
         }
+        "dark-database-formula" => {
+            g.set_dark(true);
+            apply_scene(ui, state, "database-formula");
+        }
         "dark-database-board" => {
             g.set_dark(true);
             apply_scene(ui, state, "database-board");
@@ -3656,6 +3804,19 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
         // in the statement.
         "database-filter" => {
             seed_database_filter(state);
+        }
+
+        // SPEC §三十九 「需计算」(D6): the same table with two computed columns,
+        // added and defined through the real write paths (`db_add_column` →
+        // `db_formula_accept`, the editor's own door — save-time checks
+        // included). The formulas are literals over literal cells, so a sweep
+        // tomorrow photographs the same values: `Double` is `[Points] * 2`
+        // (arithmetic), `Label` is an `if` over the checkbox with text branches
+        // (booleans, concatenation-adjacent), and both cover the two most
+        // common shapes a formula column has. The *editor* itself is not in
+        // this shot — the scene pins the table with its computed values.
+        "database-formula" => {
+            seed_database_formula(state);
         }
 
         // SPEC §三十九 「视图」(D5): the family. Each scene is the table seed

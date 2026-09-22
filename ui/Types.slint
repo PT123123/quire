@@ -690,6 +690,29 @@ export global UIState {
     callback db-form-text(int, int, string);     // block, property, draft text
     callback db-form-submitted(int);             // block
     callback db-form-cleared(int);               // block
+    // ─── D6 (SPEC §三十九 「需计算」): the formula editor ───────────────────
+    // A formula column's cell is read-only (it is computed, ADR-0062 — nothing
+    // writes a value into it); clicking one opens the column's *editor* instead,
+    // which is the only write a formula has: its expression. The draft and its
+    // live answer live here, the ids of what is being edited live in Rust —
+    // the same split as the cell editor. The preview is computed on the sample
+    // row (`db-formula-record`; -1 = an empty row) on every keystroke, the
+    // commit happens once on Enter (`db-formula-accepted`, one change and one
+    // undo step), and the error line shows a parse message or an evaluation
+    // message — never both, and never nothing when the text does not compute.
+    callback db-formula-opened(int, int, int);   // block, record (sample row), property
+    callback db-formula-text-changed(string);    // the draft: parse + evaluate per keystroke
+    callback db-formula-accepted();              // commit (one change, one undo step)
+    callback db-formula-closed();                // dismissed (outside click / Escape)
+    callback db-formula-added(int);              // block: a new empty formula column (Columns popup)
+    in-out property <bool> db-formula-open: false;
+    in-out property <int> db-formula-block: -1;
+    in-out property <int> db-formula-property: -1;
+    in-out property <int> db-formula-record: -1;  // the sample row the preview evaluates on
+    in-out property <string> db-formula-name: ""; // the column's own name (the popup's header)
+    in-out property <string> db-formula-text: "";
+    in-out property <string> db-formula-preview: "";
+    in-out property <string> db-formula-error: "";
     // rich paste (SPEC §二十七): true = the clipboard landed as blocks (the
     // key is consumed); false = fall through to the native plain paste
     callback rich-paste(int) -> bool;

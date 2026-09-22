@@ -3069,3 +3069,194 @@ Consequences:
   not disturb the first's document, opening a bare record leaves a page whose title is the
   record's title and whose parent is the database's page, and undoing that open leaves the
   record bare again.
+
+## ADR-0082 · A formula stores its expression in its own config, computes every value on the way out, and is a pure lexer plus a hand-written interpreter
+
+Decision: the `formula` kind (ADR-0062's first computed kind to get an engine)
+keeps its **expression** in the one JSON document ADR-0061 gives every column
+(`config`, key `"formula"`), written through one new change
+(`PropertyConfigSet { id, config }` — the document **replaced whole**, the
+read-edit-write discipline ADR-0074 applied to a column instead of a view; the
+command layer's `SetDatabaseFormula` carries the whole before/after documents,
+so one expression edit is one change and one Ctrl+Z, and the keys this build
+does not own pass through untouched). The **value is stored nowhere** — SPEC's
+「不存值，投影时现算」 is ADR-0062's own note and ADR-0039's discipline: a
+`db_values` row for a formula cell would be a derived copy, and the only thing
+that can go stale is everything.
+
+The engine (`core::database_formula`) is what SPEC's sentence demands: **纯词法
++ 自写解释器, no JS / WASM runtime, no formula-parsing crate** — a lexer, a
+recursive-descent parser and a tree-walking interpreter in a few hundred lines
+of Rust, with no dependency added. Its shape:
+
+* **Four types plus one absence** (`Val`): number, text, boolean, date (a
+  stored fixed-width ISO text, ADR-0062), and `Empty`, which is contagious —
+  an operand with no value makes the result empty, the same 「空」= 没有行
+  rule ADR-0062 states for storage. The two exceptions are explicit: `if`
+  short-circuits (only the taken branch evaluates), and `text(Empty)` is `""`.
+* **No implicit conversions, in these places**: `"Total: " + [Points]` is a
+  type error, not a concatenation; `length([Points])` is a type error;
+  `min("a", 1)` is a type error. The one **explicit** conversion is
+  `text(x)` (number → its `Display` form, boolean → `Yes` / `No` per
+  ADR-0065, date → its stored ISO text, `Empty` → `""`). A text may be
+  *compared* to a date — both sides are bytes, and ADR-0062's fixed width is
+  what makes bytes chronological; that is the storage shape, not a conversion.
+* **Seven functions**: `if(c,a,b)`, `length`, `round`, `abs`, `min`, `max`,
+  `text`; arithmetic `+ - * /` (where `+` on two texts concatenates), unary
+  minus, comparisons `== != < <= > >=`, `and` / `or` / `not`, literals
+  `true` / `false` / numbers / `"strings"`, and `[Column]` — a reference to a
+  column of **this row**, resolved by exact name at parse time against the
+  schema, so an unknown name is a syntax error and a refused save rather than
+  a blank cell.
+* **Finite evaluation as constants, not as a promise**
+  (SPEC: 「表达式必须有限求值」): `FORMULA_MAX_TOKENS = 2 048`,
+  `FORMULA_MAX_DEPTH = 32`, `FORMULA_MAX_STEPS = 10 000`,
+  `FORMULA_RESULT_MAX = 65 536`. The grammar has no loops and no
+  user-defined functions, and the engine has **no clock and no I/O** —
+  `today()` is deliberately absent, because a formula that read the clock
+  would paint a different value on every frame for the same document.
+* **The cycle check happens at save time** (SPEC: 「relation 环检测在保存时
+  做，不在渲染时做」, applied to the engine this build has): a formula may
+  name another *formula* column, and `would_cycle` walks the dependency graph
+  **before** the change is stored, refusing a chain that comes back to itself
+  while the text that would create it is on screen. The render path's only
+  defence is the depth cap, which paints `Error` instead of hanging — that is
+  for documents that never went through the save door, not a licence.
+* **Two folds, both honest**: a `select` / `status` cell referenced by a
+  formula reads as `Empty` (its stored value is an option *id*, and an id in
+  arithmetic is worse than a blank), and so do `multi-select` / `files`. A
+  cell whose formula cannot evaluate on its row paints `Error` — one word;
+  the *sentence* lives in the editor's preview and error line.
+
+Consequences:
+
+* `sort_column` returns `None` for the computed kinds and `FilterOp::ops_for`
+  is empty for them (D2/D4's placeholders) — now a **decision with a reason**
+  rather than a gap: "sort by a computed value" in SQL means computing it for
+  every row first, which is exactly what ADR-0083's red line forbids. A
+  formula column sorts when someone writes its value into SQL, with an ADR
+  for the materialization that takes.
+* The config key is **removed** for an empty expression (ADR-0062's one
+  representation of "nothing"), and a config that is not a document is
+  replaced by one — there is nothing to preserve and an expression has to
+  live somewhere.
+* Still unverified: no test ran. The unified test owes every function and
+  operator one evaluation test including the refusals, the empty-propagation
+  table, `[Name]` resolution (exact match, unknown = refusal), all four
+  budgets, `would_cycle`'s yes/no set, and the config round-trip
+  (REPORT_TRACK3 §D6).
+
+## ADR-0083 · The recompute unit is the window, the dependency is the row, and the counter is the contract
+
+Decision: SPEC's red line 「formula / rollup 必须可增量重算，禁止每次输入全库
+重算」 lands as three shapes, not as a discipline:
+
+1. **Formulas are evaluated at projection time only, over the realized
+   window.** `db_paint_formulas` (state) runs after `table_rows` on every
+   layout branch through one shared `db_table_rows` — table, list, board
+   cards, calendar peeks, gallery, timeline lanes — so a computed column
+   costs "realized rows × visible formula columns" and nothing else. There is
+   **no path that walks all of `db_records` to evaluate anything**, and the
+   two features that would force one (sort, filter by a formula column) are
+   refused upstream (ADR-0082). An edit of one cell re-reads the window the
+   same way every other column's repaint does; the *evaluation count* after
+   that edit grows with the window (≤ ~39 rows), never with `COUNT(*)`.
+2. **Dependencies are same-row by construction.** The engine's cell callback
+   has no record parameter and the adapter (`FormulaSource`) is built for one
+   record — a formula *cannot* address another row even in principle. Editing
+   cell `(r, q)` can therefore change a formula value only on row `r`, and
+   only in columns whose parsed dependencies, transitively through other
+   formula columns, name `q`: the set `{ (r, P) | q ∈ deps*(P) }`. Every
+   other evaluation in the window returns, byte for byte, what it returned
+   before — determinism is what makes "recompute the window" the same answer
+   as "recompute the dependents", minus the bookkeeping.
+3. **The counter is the number the test measures.** `db_formula_evals`
+   (AppState) bumps once per projected formula evaluation and is read by no
+   logic. The unified test's two numbers: **(a)** the counter's increment
+   after one cell edit — it must equal the window's formula cells (window
+   rows × visible formula columns), identical on a 10 000-row database and a
+   5-row one; **(b)** the set of (row, column) whose *painted value* changed —
+   it must be a subset of `{r} × {P | q ∈ deps*(P)}`. Both together are the
+   red line stated as arithmetic: window-bounded work, dependency-precise
+   effect, and no number in either grows with the table.
+
+Consequences:
+
+* **No cross-refresh value cache.** A cached painted value would skip the
+  redundant re-evaluations, but its invalidation must cover every write path —
+  cell edits, undo, redo, form submits, a LAN pull's bulk replace — and the
+  funnel for those is `record()`, which database changes do not all pass
+  through in every future shape. One missed path paints a *stale* value, which
+  is worse than a redundant deterministic microsecond-scale evaluation. If
+  D8's numbers say the redundancy matters, the clean place for a dirty set is
+  the `record()` funnel (every batch, both directions) — an optimization with
+  its own ADR, not a silent cache.
+* **The Markdown export computes the whole view it renders** (ADR-0065's
+  boundary made concrete): a file has no viewport, so `db_markdown_table`
+  evaluates formulas for every exported row — an explicit artifact's own
+  cost, and not the red line's subject (which is *input* latency). The
+  dependencies come from **one indexed sweep per column**
+  (`SqliteRepository::column_values`) expanded transitively, so the cost is
+  O(rows × formula columns + dep columns × table) rather than one point read
+  per row per dependency.
+* The eval-time depth cap and the save-time cycle check (ADR-0082) are two
+  halves of one sentence: the write path keeps user documents acyclic, the
+  read path keeps documents that arrived any other way finite.
+* Still unverified: no test ran, and no number was measured this knife (the
+  counter exists; the probe that prints it is the unified test's first D6
+  item).
+
+## ADR-0084 · rollup and relation wait for §四十's reference infrastructure — their shape is written down, their code is not written
+
+Decision: **D6 delivers `formula` only.** `relation` and `rollup` are
+deliberately not implemented, per the brief's own rule — 「relation 用 §四十 的
+基础设施（Track 2），不自己写一套 id 表」 — and per the check this knife ran
+first: Track 2's reference layer (`src/core/reference.rs`,
+`src/storage/backlinks.rs`, the `marks`-payload mention storage and migration
+16's two indexes) is **uncommitted work in the shared tree** — untracked files
+and uncommitted hunks, none of it in `HEAD`. Building a relation on top of
+uncommitted infrastructure would either drag their files into this knife's
+commit (forbidden) or fork a second reference mechanism (the exact thing the
+brief forbids). So: nothing here touches references, and the shape below is
+the contract the relation knife will implement against.
+
+The shape, written down so the waiting knife does not have to rediscover it:
+
+* **A relation column stores what the user picked — a *fact*, unlike
+  formula/rollup's derived values — so it needs real storage**, which ADR-0062
+  deliberately did not give it. The candidate that fits the existing shapes is
+  `db_value_items` (one target id per row, the multi-select mechanism, so
+  "is this record related to that one" is the same index probe a filter uses);
+  the decision belongs to the relation knife, with its own ADR, once Track 2's
+  ids are committable. What is fixed *here*: relations store **ids, never
+  titles** (ADR-0051's discipline — a renamed target shows its live name),
+  and a relation points at §四十's reference layer for its chips, its
+  backlinks and its open-link path rather than at any table this track owns.
+* **Two-way relations are one write, not two**: the forward change and the
+  back-pointers land in **one change batch** (one Ctrl+Z), the way
+  `DeleteDatabaseRecord` plans its values, record and page together. A
+  half-written pair is not a state any undo direction can name.
+* **Cycle detection at save time** — the same rule ADR-0082 applied to
+  formulas, and the same reason: a relation cycle has no rendering order that
+  saves it, so the write path refuses it while the user is looking, and the
+  read path's depth cap exists for documents that arrived another way.
+* **A rollup aggregates over the records a relation points at**: the six
+  starting aggregates are `sum` / `count` / `min` / `max` / `average` / `none`
+  over one target column of the related records; its configuration (the
+  relation column and the target column) lives in the rollup column's own
+  `config` document (ADR-0061's one bit of JSON per column, the same home
+  ADR-0082 gave the formula expression); its values are **computed at
+  projection time and stored nowhere** (ADR-0062), and its recompute follows
+  ADR-0083's contract — which is why the contract was written for formulas
+  first: rollup inherits it whole, with "the window" replaced by "the realized
+  rollup cells".
+
+Consequences:
+
+* SPEC §三十九's 「需计算：formula / rollup / relation」 is one third delivered
+  this knife; the report says so in its first section rather than burying it.
+* The formula editor, the `PropertyConfigSet` write path, the projection hook
+  and the counter are all relation/rollup-independent: nothing in this knife's
+  code will need to be reshaped when they land, only added to.
+* Still unverified: nothing to verify — this ADR is a decision and a
+  handover, not a feature.

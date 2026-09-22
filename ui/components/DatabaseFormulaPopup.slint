@@ -1,0 +1,216 @@
+// The formula editor (D6, SPEC §三十九 「需计算」, ADR-0082/0083): the one write
+// a computed column has — its **expression**. The value is never stored
+// (ADR-0062: 「不存值，投影时现算」), so there is no cell to type into; the
+// column's cell opens this popup instead (DatabaseCell's `is-formula` arm).
+//
+// Three things on screen, and each has a reason:
+//
+//   * **the draft** — a multi-line input, because an expression with an `if` and
+//     a concatenation is not one line. It is pre-filled with the *stored*
+//     expression (`db-formula-text`, pushed by Rust on open), never with a
+//     painted value: what a user edits is the formula, not what it computed.
+//   * **the live answer** — every keystroke asks Rust to parse and evaluate the
+//     draft against the **sample row** (`db-formula-record`: the row whose cell
+//     was clicked, or an empty row when the table has none). A preview that
+//     only appeared on Enter would make a typo a save away from being found.
+//   * **the error line** — one sentence, in the danger colour, from the parse
+//     or from the evaluation. It is *not* shown beside a preview (a formula
+//     either computes on this row or it does not) and it is not a toast: the
+//     text that does not compute is on screen right above it.
+//
+// Commit is **Enter** (`db-formula-accepted`): one expression save is one change
+// and one Ctrl+Z (ADR-0082), and committing per keystroke would make typing
+// `[Points] * 2` a dozen undo steps. Escape and a click outside dismiss; the
+// draft is dropped and the stored expression is what the next open shows.
+//
+// The syntax hint is a caption rather than a help panel: the function set is
+// seven names (FUNCTIONS in `core::database_formula`), and a hint that
+// fits in one line is a hint a user reads.
+
+import { Theme } from "../Theme.slint";
+import { Colors } from "../Colors.slint";
+import { Typography } from "../Typography.slint";
+import { UIState } from "../Types.slint";
+
+export component DatabaseFormulaPopup inherits PopupWindow {
+    width: 420px;
+    height: 232px;
+    // outside click / Escape dismiss; UIState syncs via the is-open mirror
+    close-policy: PopupClosePolicy.close-on-click-outside;
+
+    Rectangle {
+        x: 2px; y: 3px;
+        width: parent.width - 4px;
+        height: parent.height - 5px;
+        border-radius: Theme.radius-md + 2px;
+        background: Colors.shadow;
+    }
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        border-radius: Theme.radius-md;
+        background: Colors.surface-overlay;
+        border-width: 1px;
+        border-color: Colors.border;
+        clip: true;
+
+        // ── the header: which column is being defined ───────────────────────
+        Text {
+            x: 12px;
+            y: 10px;
+            width: parent.width - 24px;
+            height: 20px;
+            vertical-alignment: center;
+            overflow: elide;
+            text: UIState.db-formula-name;
+            font-family: Typography.ui-font;
+            font-size: Typography.size-ui;
+            font-weight: Typography.weight-semibold;
+            color: Colors.text-primary;
+        }
+        Text {
+            x: 12px;
+            y: 10px;
+            width: parent.width - 24px;
+            height: 20px;
+            vertical-alignment: center;
+            horizontal-alignment: right;
+            text: "Formula";
+            font-family: Typography.ui-font;
+            font-size: Typography.size-caption;
+            color: Colors.text-muted;
+        }
+
+        // ── the draft ──────────────────────────────────────────────────────
+        Rectangle {
+            x: 12px;
+            y: 36px;
+            width: parent.width - 24px;
+            height: 74px;
+            border-radius: Theme.radius-sm;
+            background: Colors.surface;
+            border-width: 1px;
+            border-color: formula-input.has-focus ? Colors.accent : Colors.border;
+
+            formula-input := TextInput {
+                x: 8px;
+                y: 6px;
+                width: parent.width - 16px;
+                height: parent.height - 12px;
+                text <=> UIState.db-formula-text;
+                // a formula is an expression, not a line: wrapping is the point
+                wrap: word-wrap;
+                font-family: Typography.mono-font;
+                font-size: Typography.size-ui;
+                color: Colors.text-primary;
+                selection-foreground-color: Colors.text-primary;
+                selection-background-color: Colors.selection;
+
+                edited => {
+                    UIState.db-formula-text-changed(self.text);
+                }
+                accepted => {
+                    UIState.db-formula-accepted();
+                }
+                key-pressed(event) => {
+                    if (event.text == Key.Escape) {
+                        UIState.db-formula-closed();
+                        accept
+                    } else {
+                        reject
+                    }
+                }
+                init => {
+                    // created with the focus, like the sidebar's rename input and
+                    // the cell editor: an always-there input would have to be
+                    // *told* to take the keyboard
+                    formula-input.focus();
+                    formula-input.select-all();
+                }
+            }
+        }
+
+        // ── the live answer: the value on the sample row ────────────────────
+        Text {
+            x: 12px;
+            y: 116px;
+            width: parent.width - 24px;
+            height: 18px;
+            vertical-alignment: center;
+            overflow: elide;
+            text: UIState.db-formula-error != ""
+                ? UIState.db-formula-error
+                : (UIState.db-formula-text == ""
+                    ? "No expression - this column's cells are empty."
+                    : "= " + (UIState.db-formula-preview == ""
+                        ? "empty"
+                        : UIState.db-formula-preview));
+            font-family: Typography.ui-font;
+            font-size: Typography.size-ui;
+            color: UIState.db-formula-error != ""
+                ? Colors.danger
+                : (UIState.db-formula-text == "" ? Colors.text-muted : Colors.accent-text);
+        }
+
+        // ── what one can write, in one line ─────────────────────────────────
+        Text {
+            x: 12px;
+            y: 140px;
+            width: parent.width - 24px;
+            height: 16px;
+            vertical-alignment: center;
+            text: "[Column] is this row - and or not - if(c, a, b) - text() length() round() abs() min() max()";
+            font-family: Typography.ui-font;
+            font-size: Typography.size-caption;
+            color: Colors.text-muted;
+        }
+
+        // ── the commit ──────────────────────────────────────────────────────
+        Rectangle {
+            x: 12px;
+            y: 168px;
+            width: parent.width - 24px;
+            height: 1px;
+            background: Colors.border;
+        }
+        Text {
+            x: 12px;
+            y: 176px;
+            width: parent.width - 24px;
+            height: 20px;
+            vertical-alignment: center;
+            text: "Enter saves - Escape closes";
+            font-family: Typography.ui-font;
+            font-size: Typography.size-caption;
+            color: Colors.text-muted;
+        }
+        Rectangle {
+            x: parent.width - 96px;
+            width: 84px;
+            y: 174px;
+            height: 26px;
+            border-radius: Theme.radius-sm;
+            background: save-ta.has-hover ? Colors.surface-hover : Colors.accent-soft;
+
+            Text {
+                width: parent.width;
+                height: parent.height;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                text: "Save";
+                font-family: Typography.ui-font;
+                font-size: Typography.size-ui;
+                font-weight: Typography.weight-semibold;
+                color: Colors.accent-text;
+            }
+            save-ta := TouchArea {
+                width: parent.width;
+                height: parent.height;
+                mouse-cursor: MouseCursor.pointer;
+                clicked => {
+                    UIState.db-formula-accepted();
+                }
+            }
+        }
+    }
+}

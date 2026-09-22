@@ -19,6 +19,9 @@ import { SettingsDialog } from "components/SettingsDialog.slint";
 // siblings are. They mount at the window root like every popup here.
 import { DatabaseFilterPopup } from "components/DatabaseFilterPopup.slint";
 import { DatabaseGroupPopup } from "components/DatabaseGroupPopup.slint";
+// D6 (SPEC §三十九 「需计算」): the formula column's editor — the one write a
+// computed column has is its expression (the value is computed, ADR-0062).
+import { DatabaseFormulaPopup } from "components/DatabaseFormulaPopup.slint";
 
 
 // Row menus (slash + block handle): one window-level popup each, positioned
@@ -193,7 +196,10 @@ component SlashMenuPopup inherits PopupWindow {
 // rather than a switch the table would refuse.
 component DatabaseColumnsPopup inherits PopupWindow {
     width: 224px;
-    height: UIState.db-columns-rows.length * 30px + 8px;
+    // the schema's rows, plus D6's one creation row: a formula column is the
+    // one kind this build can create (the kind picker is still D7's), and the
+    // Columns popup is where the schema is already listed
+    height: UIState.db-columns-rows.length * 30px + 38px;
     // outside click / Escape dismiss; UIState syncs via the is-open mirror
     close-policy: PopupClosePolicy.close-on-click-outside;
 
@@ -262,6 +268,38 @@ component DatabaseColumnsPopup inherits PopupWindow {
                 mouse-cursor: item.locked ? MouseCursor.default : MouseCursor.pointer;
                 clicked => {
                     UIState.db-column-toggled(UIState.db-columns-block, item.property);
+                }
+            }
+        }
+
+        // D6: the one column this build can create — a formula column, born
+        // empty and opened straight into its editor (an editor without a way to
+        // reach a column is a door to nowhere, and a kind picker is still D7's).
+        // The controller closes this popup and opens the formula editor.
+        Rectangle {
+            x: 4px;
+            y: 8px + UIState.db-columns-rows.length * 30px;
+            width: parent.width - 8px;
+            height: 30px;
+            border-radius: Theme.radius-sm;
+            background: formula-add.has-hover ? Colors.surface-hover : transparent;
+
+            Text {
+                x: 8px;
+                width: parent.width - 16px;
+                height: parent.height;
+                vertical-alignment: center;
+                text: "+ New formula column";
+                font-family: Typography.ui-font;
+                font-size: Typography.size-ui;
+                color: formula-add.has-hover ? Colors.text-primary : Colors.text-secondary;
+            }
+            formula-add := TouchArea {
+                width: parent.width;
+                height: parent.height;
+                mouse-cursor: MouseCursor.pointer;
+                clicked => {
+                    UIState.db-formula-added(UIState.db-columns-block);
                 }
             }
         }
@@ -499,6 +537,23 @@ export component AppWindow inherits Window {
         }
     }
 
+    // D6: the formula editor, the same three-piece pattern as the two rules
+    // popups — the open bit mirrored, the changed handler showing/closing, the
+    // is-open mirror clearing the bit when the user clicks outside.
+    changed db-formula-open => {
+        if (db-formula-open) {
+            dbFormula.show();
+        } else {
+            dbFormula.close();
+        }
+    }
+    property <bool> db-formula-shown: dbFormula.is-open;
+    changed db-formula-shown => {
+        if (!db-formula-shown && UIState.db-formula-open) {
+            UIState.db-formula-open = false;
+        }
+    }
+
     changed link-open => {
         if (link-open) {
             linkDialog.show();
@@ -723,6 +778,14 @@ export component AppWindow inherits Window {
     dbGroup := DatabaseGroupPopup {
         x: UIState.db-group-x;
         y: UIState.db-group-y;
+    }
+
+    // The formula editor is a sheet, not a menu: it is centered rather than
+    // anchored, because it edits a *column* (a fact about the schema) and the
+    // cell it was opened from may scroll away while it is open.
+    dbFormula := DatabaseFormulaPopup {
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
     }
 
     linkDialog := LinkDialog {

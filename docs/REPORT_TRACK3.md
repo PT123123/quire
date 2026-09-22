@@ -1410,3 +1410,316 @@ D4 的提交（HEAD `009a629`）漏了两处**本 track 自己**的改动，本�
    >   Gallery, Timeline (bars on an aggregate `min`/`max` axis) and Form (a new-record form that
    >   creates one record per submit, one Ctrl+Z). Chart is still refused by name (D7), and the
    >   insert menu's database placeholders beyond "Table view" are still muted.
+
+# Track 3 — Database（D6：计算属性，formula 交付 / rollup·relation 留待）
+
+D0 决策、D1 存储、D2 属性、D3 表格、D4 规则、D5 视图族之后，D6 处理 SPEC §三十九
+「需计算：formula / rollup / relation」——**这一刀只交付 formula**，另外两件按 brief
+原话留待 Track 2 的引用基础设施（§1 是核查过程与结论）。本刀遵守任务书铁律：**只写代码，
+一行 cargo 都没跑**（不 check / 不 build / 不 test / 不 run，不跑 sweep）——编译、测试、
+视觉、性能全部留给总测试。本节行号是**工作树**（四条 track 未提交改动的合集）的行号。
+
+## 1 · rollup / relation 为什么没做（先查现状的结论）
+
+任务书要求先查 Track 2 的引用基础设施落地没有，查到的是**没有**：
+
+* `git log --oneline -15` 里没有任何 T2 的引用提交（最近 6 个提交都是本 track 的 D0–D5）；
+* 工作树里 `src/core/reference.rs` 与 `src/storage/backlinks.rs` 都是 **`??` 未跟踪**（git
+  status 原文）；
+* 它们的消费者（`core/mod.rs` 的 `pub mod date;` / `pub mod reference;`、SPEC §四十 写的
+  mention `marks` 载荷、迁移 16 的两个索引）也都在**未提交的 hunk** 里，`HEAD` 上没有。
+
+brief 的原话是「relation 用 §四十 的基础设施（Track 2），不自己写一套 id 表」，SPEC 的
+排期前提也是「本阶段在 §四十 的引用基础设施之后开始，否则简单表格和 relation 会各造一遍
+轮子」。两条路都不能走：把他们的未跟踪文件拖进本刀提交（禁区），或另造一套引用机制
+（brief 明禁）。所以这两件**留一刀**（等 Track 2 落地），形态在 **ADR-0084** 里写死——
+relation 存 **id 不存标题**、双向关系是**一批 change**（一次 Ctrl+Z）、环检测在**保存时**
+做、rollup 是对 relation 目标 record 集合在目标列上的聚合（`sum / count / min / max /
+average / none` 六种起步）、配置存列自己的 `config`、值投影时现算（继承 ADR-0083 的契约）。
+
+**D6 只做 formula；报告在下面把 formula 的每一处都写清，rollup/relation 不假装。**
+
+## 2 · 本刀改了 / 新增了哪些文件
+
+| 文件 | 为什么 | 关键位置（工作树行号） |
+|------|--------|------------------------|
+| `src/core/database_formula.rs`（**新**，约 1 400 行含注释） | 本刀核心：**纯词法 + 递归下降 + 树遍历解释器**（SPEC 原文，零新依赖）+ 依赖集 + 保存时环检测 + config 存取 | 四个预算常量 L119–148、`Val` L157、`display` L177、`val_of` L197、`FUNCTIONS` L319、`Program::parse` L354、`Program::eval(eval_at)` L395/L405、`node` L426、`arith` L570、`compare` L600、`extreme` L638、词法 `lex` L776、解析器 `impl Parser` L979、`build_call` L1221、`would_cycle` L1282、`config_formula` L1316、`config_set_formula` L1335、末尾是「将来测试该验什么」的清单 |
+| `src/core/mod.rs` | 声明新模块（**只加 `pub mod database_formula;` 一行**） | L7–9 |
+| `src/core/persistence.rs` | **`Change::PropertyConfigSet { id, config }`**（追加在枚举末尾，append-only）——列 `config` 整文档替换，ADR-0074 的读改写纪律用于列 | L201–215 |
+| `src/core/command.rs` | **`Command::SetDatabaseFormula { block, property, from, to }`** + plan 臂（block 必须有 db_ref、from==to 不产生 undo 步） | 变体 L248、plan 臂 L1495–1516 |
+| `src/storage/database_store.rs` | `set_property_config`（一条 `UPDATE db_properties SET config`）+ `column_values`（导出预加载：一列一次索引扫，按 record 归并的存储值） | `column_values` L350、`set_property_config` L1207 |
+| `src/storage/repository.rs` | `apply_one` 的 `PropertyConfigSet` 臂 | L1020 |
+| `src/app/state.rs` | 本刀的投影与编辑面：求值适配器 `FormulaSource`、六布局共用的 `db_table_rows`、`db_paint_formulas`、公式方法五件、导出预加载、`db_absorb` 臂、四个会话字段 | `FormulaSource` L4685（`value` L4770 附近）、`db_absorb` 的 `PropertyConfigSet` L5134、`db_table_rows` L7254、`db_paint_formulas` L7271、`db_formula_map` L7339、`db_formula_current` L7364、`db_formula_preview` L7380、`db_formula_accept` L7442、`db_formula_column_add` L7516、计数字段 L185/629、六处 realize 调用点（5413/5551/5615/5711/5832/5862）、导出预加载与整视图现算（`db_markdown_table` 内） |
+| `src/app/controller.rs` | 5 个回调接线 + 公式场景种子 + 两个场景臂 | `on_db_formula_opened` L1850、`-text_changed` L1877、`-accepted` L1892、`-closed` L1912、`-added` L1922；`seed_database_formula` L3846；`dark-database-formula` L4151、`database-formula` L4329 |
+| `ui/Types.slint` | D6 的 5 个 callback + 8 个 UIState 属性（草稿/预览/错误/列名/三个 id） | L736–758 |
+| `ui/AppWindow.slint` | `DatabaseFormulaPopup` 的三件套（import L24 / `changed db-formula-open` L543 + is-open 镜像 L550 / 实例 L786，居中）；Columns popup 加「+ New formula column」一行（L280–305，高度公式同步 +30px） | 见左 |
+| `ui/components/DatabaseFormulaPopup.slint`（**新**） | 公式编辑器：多行输入 + 每键现算预览 + 错误行（危险色）+ 一行语法提示 + Enter 保存 / Escape 关闭 | 全文件 |
+| `ui/components/DatabaseCell.slint` | 公式格（kind 14）的点击开编辑器：`is-formula` / `clickable` 两个派生属性和 `ta` 的第四个分支 | L45–52、L153 |
+| `docs/DECISIONS.md` | **ADR-0082 / ADR-0083 / ADR-0084**（文件末尾；**借号声明见 §8**） | 末尾 |
+| `docs/SPEC.md` | §三十九「属性类型」的公式引擎句标注 D6 交付 + 「性能红线」第三条标注 formula 半边 | 两处 hunk |
+| `PLAN.md` | 末尾追加 `## Track 3 · D6 计算属性 formula` | 文件末尾 |
+| `docs/REPORT_TRACK3.md` | 本节 | — |
+
+**没碰**：`CHANGELOG.md`、`docs/ROADMAP.md`、`docs/PERFORMANCE.md`、`Cargo.toml`（**零新依赖**
+——词法/解析/求值全部手写，JSON 仍用 D2 那个唯一阅读器）、`[profile.release]`、
+`src/storage/migrations.rs`（**没有新迁移步**）、任何 Track 1/2/4 的功能文件。
+
+## 3 · 引擎：词法 / 解释器在哪、支持什么、边界在哪
+
+**文件**：`src/core/database_formula.rs`（唯一新模块，纯函数 + 一个值类型，无 SQL / 无
+Slint / 无时钟 / 无 I/O）。
+
+**支持的语法与函数（全清单，写在一处 `FUNCTIONS` L319）**：
+
+| 类别 | 清单 |
+|------|------|
+| 字面量 | 数字（`2`、`0.5`，无指数记法）、`"文本"`（仅 `\"` 与 `\\` 两个转义）、`true` / `false` |
+| 引用 | `[列名]`——**本行**的列，解析期按列名**精确匹配** schema，未知名字是**语法错误**（保存被拒，不是空格子） |
+| 算术 | `+ - * /`、一元 `-`；`+` 在两个 text 上是拼接 |
+| 比较 | `==`（`=` 同义）、`!=`、`<`、`<=`、`>`、`>=`（一篇表达式只允许一次比较，`a<b<c` 被拒并提示用 `and`） |
+| 逻辑 | `and` / `or` / `not` |
+| 函数（7 个） | `if(c,a,b)`、`length(text)`、`round(number)`（半值远离零）、`abs(number)`、`min(…)`、`max(…)`（数值族或文本/日期族，不混）、`text(x)`（**唯一显式转换**） |
+
+**类型系统（四类 + 一空缺）**：`Val`（L157）= `Num` / `Str` / `Flag` / `Date` / `Empty`。
+不支持隐式转换，具体写死在这些地方（ADR-0082 同样列了）：`"Total: " + [Points]` 是**类型
+错误**；`length([Points])` 是类型错误；`min("a", 1)` 是类型错误；`1/0` 是**错误**（不是
+`inf`/`NaN`）；`Empty` **传染**（空操作数 → 空结果），例外只有两处：`if` 短路（只算被选
+分支）与 `text(Empty)` = `""`。text 与 date 可以互相比较——两边都是字节，定宽 ISO 的字节序
+就是时间序（ADR-0062 的存储形状，不是转换）。select/status 与 multi-select/files 的值**读作
+`Empty`**（存的是选项 id / 附件 id，id 进算术比空格子更坏）——这是本刀的诚实边界。
+
+**有限求值（SPEC 原文「表达式必须有限求值」）**：四个常量（`database_formula.rs` L119–148）
+
+* `FORMULA_MAX_TOKENS = 2_048`（词法期，超了直接拒）；
+* `FORMULA_MAX_DEPTH = 32`（解析嵌套 + **运行期属性链深度**：公式引用公式列会递归求值，
+  旧文档里的环在这一层折成 `Error`，不挂）；
+* `FORMULA_MAX_STEPS = 10_000`（求值节点预算，整个表达式共享）；
+* `FORMULA_RESULT_MAX = 65_536`（结果文本上限，拼接的膨胀在这一层被拒）。
+
+文法是**无循环、无自定义函数**的（上面那张表就是全部），加上「无时钟无 I/O」（`today()`
+刻意缺席——读时钟的公式对同一份文档每帧画不同的值），所以这四个数就是全部工作量上界。
+
+**环检测在保存时做**（SPEC 原文）：`would_cycle`（L1282）在 `db_formula_accept`
+（state.rs L7442）里、**记录 change 之前**跑：公式可以引用另一个公式列（组合），自指的链
+当场被拒并在 notice 里说明；渲染期只有上面的 depth 上限兜「从别的门进来的」文档。
+
+**表达式存哪、值为什么不入库**：表达式存 `db_properties.config` 的 `"formula"` 键
+（ADR-0061 的一列一文档；`config_formula` L1316 读、`config_set_formula` L1335 读改写，
+**不拥有的键原样保留**、空表达式**删键**），写入是新 change `PropertyConfigSet`（整文档
+替换）与新命令 `SetDatabaseFormula`——一次编辑一个 change、一步 Ctrl+Z。**值不入库**：
+SPEC 的「不存值，投影时现算」（ADR-0062 记下、ADR-0039 的纪律），所以任何写路径都不写
+公式格——「存的是表达式，值是现算的」这句话在代码里是两个不同的地方。
+
+## 4 · 增量重算：机制、边界、将来的测试量哪两个数（ADR-0083）
+
+**机制（三段，都是形状不是纪律）**：
+
+1. **求值只发生在投影窗口**：六个布局分支的 realize 统一走 `db_table_rows`
+   （state.rs L7254，`table_rows` + `db_paint_formulas` L7271），所以求值集 = **被 realize
+   的行 × 可见公式列**（表格/列表是 31 行那一窗，board 是槽位切片的卡、calendar 是每天
+   ≤3 条、timeline 是泳道窗口）——**没有任何路径遍历全表求值**。
+2. **依赖是本行的，且按构造成立**：`FormulaSource`（L4685）是**为一个 record 造的**，
+   引擎的取格回调（`Program::eval` 的 `cell`）**没有 record 参数**——公式在 API 上就引用
+   不到别的行（跨行是 rollup/relation 的事，ADR-0084）。依赖集 `Program::deps()`
+   （直接引用）+ 调用方展开闭包（保存时环检测与导出预加载都走它）。于是「改格
+   (r,q)」后**值可能变化的格 ⊆ {r} × {P | q ∈ deps*(P)}**，窗口里其余格的重算结果逐位不变
+   （纯函数、输入只有本行的格）。
+3. **计数器说话**：`db_formula_evals`（state.rs L185）每次投影求值 +1，**没有任何逻辑读
+   它**——它是 ADR-0083 契约的单位。
+
+**为什么没有跨刷新的值缓存**（写进 ADR-0083 的代价）：跳过「重算结果不变」的那些格需要
+缓存 + 失效，而失效必须覆盖每条写路径（单元格、undo、redo、表单提交、LAN 批量替换）；
+漏一条就画**陈旧值**，比确定性的微秒级重复求值更糟。窗口重算与其它列的 repaint 同价，
+所以就按窗口算；将来 D8 若要省这一份，干净的位置是 `record()` 漏斗上的 dirty 集。
+
+**量法（写进下面的测试计划，第 39 条）**：两个数——
+
+* **数 A**：`db_formula_evals` 在「改一个单元格」前后的差值。预期 = 窗口行数 × 可见公式列
+  数（≤ 39 × F），**在同一棵树上的 10 000 行库与 5 行库上相同**（与 `COUNT(*)` 无关）。
+* **数 B**：该次编辑前后窗口里**绘制文本发生变化的 (row, property) 集合**。预期
+  **⊆ {被改的行} × {依赖闭包含该列的公式列}**——其余格逐字节不变。
+
+两个数一起才是红线：**窗口有界的工作 + 依赖精确的效果**，且两者都不随总行数增长。
+
+**导出边界**（同 ADR-0083）：`db_markdown_table` 渲染**整个视图**（ADR-0065 的边界），所以
+公式对整视图按行现算——这是**显式产物的固有成本**，不属「输入触发的重算」红线；它的依赖
+值经 `column_values`（database_store.rs L350）**每列一次索引扫**（按 record 归并），
+而不是每行一次点读。
+
+## 5 · UI 接线点
+
+* **单元格**：公式格（kind 14）保持只读展示（`editable=false`，`TableCellView::editable`
+  的既有规则不变），但 `ta` 的 `enabled` 与点击分支加了一种（DatabaseCell.slint L45–52、
+  L153）：点击 → `db-formula-opened(block, record, property)`，record 是**样例行**。
+* **弹窗三件套**：`Types.slint` 声明（L736–758）→ `AppWindow.slint` 的
+  `changed db-formula-open` + is-open 镜像 + 实例（L543/L550/L786，居中：它编辑的是**列**
+  这个 schema 事实，不是格子，格子会滚走）→ `controller.rs` 五个回调（L1850–1935）。
+* **实时预览**：每键 `db-formula-text-changed` → `db_formula_preview(record, property, text)`
+  （state.rs L7380）解析 + 在**样例行**上求值，返回 `(preview, error)`；错误行显示解析或
+  求值的**一句消息**，预览显示 `= 值`（空值显示 `= empty`）。样例行 `-1` = 空行
+  （表里还没有行时预览的就是「这公式在空行上是什么」）。
+* **保存**：Enter（或 Save 按钮）→ `db_formula_accept`（L7442）：校验（是公式列 / 解析与
+  列名 / 不产生环 / 空草稿 = 清空）→ `SetDatabaseFormula` 一个 change → `db_refresh`；
+  被拒时 notice 说明、旧表达式不动。一次保存一步 Ctrl+Z（undo 恢复的是**整段 config**）。
+* **新建列**：Columns popup 底部一行「+ New formula column」→ `db-formula-added` →
+  `db_formula_column_add`（L7516，名字 `Formula` / `Formula 2`… 直到唯一，因为
+  `UNIQUE (db, name)`）→ 直接打开编辑器。**这是本刀的一处范围增加**（brief 只要求编辑器）：
+  没有它，编辑器只能靠场景种出来的列到达，整条路径对用户不可达。kind picker 仍是 D7 的。
+
+## 6 · 场景
+
+`database-formula`（controller.rs L4329）+ `dark-database-formula`（L4151）。种子
+`seed_database_formula`（L3846）走**真写路径**：`seed_database_table`（D3 的 5 行 4 列，
+字面量值）→ `db_add_column` 两个公式列 → `db_formula_accept` 写表达式（**含保存时的全部
+检查**，场景不可能种出编辑器会拒绝的公式）→ `db_refill_row`。两个表达式覆盖两种最常见形状：
+
+* `Double` = `[Points] * 2` → 62 / 20 / 14 / 78 / 6（算术 + 数字列）；
+* `Label` = `if([Done], "done", "open")` → done / open / done / open / done（布尔列 + `if` +
+  字符串字面量）。
+
+`quire_shot` 的 `needs_db` 已含 `contains("database")`（D3 的），新场景自动被覆盖——**没有
+改 quire_shot.rs**。编辑器本身不在场景里（场景钉的是带计算列的表）。
+
+## 7 · 迁移号（串行接缝）
+
+**没有用新号。** 动手前读 `src/storage/migrations.rs`：工作树 `CURRENT_VERSION = 19`
+（12–15 D1、16 Track 2、17 D2、18 D3、19 Track 4 未提交）。本刀**零迁移**：表达式落进
+`db_properties.config` 这个**已经存在的列**（ADR-0061 从第一天就有它），`Change` 只加变体、
+表结构一字不动。所以 **D6 的提交 blob 不含 migrations.rs**，提交树里仍是 18（D3 的现状）。
+
+## 8 · 决策号：**号段用尽，借了 0082–0084**（请整合者确认）
+
+本 track 的号段是 **0060…0079**（ADR-0060 到 ADR-0079 已在本 track 各刀用尽）。工作树
+`docs/DECISIONS.md` 里 **ADR-0080 / ADR-0081 是 Track 4 的**（`hayro` PDF 缩略图与
+`bookmark`，未提交、插在文件中部），所以本刀**借 0082 / 0083 / 0084**：
+
+* **ADR-0082** — formula 的表达式存 config、值现算、引擎是纯词法 + 手写解释器（类型 /
+  函数 / 预算 / 无隐式转换的清单与环检测的落点）；
+* **ADR-0083** — 增量重算的契约（窗口为求值单位、本行依赖、计数器说法、导出的边界、
+  为什么没有值缓存）；
+* **ADR-0084** — rollup / relation 留待 §四十（Track 2 未落地的证据、形态写死）。
+
+**给整合者**：这是越界借号（brief 允许但要明说），若整合时要重编号（例如把 Track 4 与本
+track 的第二批放在同一段），请以**内容**为准搬迁；ADR 之间的互相引用在正文里都是按内容
+写的（「ADR-0082」「ADR-0083」这两个词不构成需要改的交叉引用之外的东西）。
+
+## 9 · 未验证（诚实清单——因为一行 cargo 都没跑）
+
+1. **编译**：本刀约 2 000 行新代码（引擎 1 400 + 接线 600）没有过 `cargo check`。静态自查
+   做了：**括号平衡**（写了一个处理 `'a` lifetime 与 `b'"'` 字面量的词法级检查器，四个
+   独立文件与八个共享文件的 delta 全部归零——第一版检查器把 `Formatter<'_>` 当未闭合字符
+   字面量，报过假阳性，已在报告里记下方法）、五个新回调的三件套 grep 核对、`Change` 的
+   全部 match 点（`document.rs` 有 `_` 兜底臂所以不用改；`repository.rs::apply_one` 是穷尽
+   match，已加臂）、`PropertyKind::ALL` 的 kind 号（公式 = 14，与 Types.slint 的 legend 一致）
+   核过。但那不是编译器。
+2. **测试**：没有跑任何已有测试；铁律禁止新增 `#[test]`，本刀没有写（未来测试清单在 §11 与
+   `database_formula.rs` 文件尾）。
+3. **视觉**：`database-formula` / `dark-database-formula` 从未渲染；公式编辑器的四个状态
+   （空草稿 / 有值预览 / 解析错误 / 求值错误）没有像素证据；`DataabaseCell` 的 `clickable`
+   改动对既有场景应当零像素差（没有公式列的旧场景照旧 inert）。
+4. **求值的每一行**：引擎的每个函数、每种类型错误、`Empty` 传染、四个预算、`would_cycle`、
+   `config_set_formula` 的键保留——**全部没有运行证据**，只有代码与注释。
+5. **增量重算的两个数**：`db_formula_evals` 计数器就位，但**没有量过**（D8 收口）。
+6. **滚动的求值成本**：每帧滚动若窗口移动会重读并重算一窗公式（31 × F 次点读依赖格）——
+   量级预期与 D1 的窗口读同阶（+依赖点读 µs 级），但没有探针证明；如果总测试看到滚动的
+   帧成本抬升，第一嫌疑是「每个公式格逐列点读」，修法是让 dep 列的读随窗口查询一起来
+   （D4 的 `hidden_join` 已经有这个机制），不是把公式挪回 Rust 预计算。
+7. **`date` 的字节比较**依赖 ADR-0062 的定宽（与 D2/D4 同一条依赖，已有既有测试钉住形状）。
+
+## 10 · 测试计划（追加到「留给最终统一测试」清单，编号接 D5 的 38）
+
+**B. 功能（headless 可证的）**
+
+39. **增量重算的两个数**（ADR-0083 的契约，本刀最核心的一条）：10 000 行的库、1 个 number
+    列 + 1 个公式列 `[Points] * 2`，并排一个 5 行的同构库作对照。改一个单元格后：
+    (a) `db_formula_evals` 的增量在两个库上**相同**（= 窗口行数 × 可见公式列数，两库都不是
+    `COUNT(*) × F`）；(b) 用两次投影的 `DbRow` 比较，绘制文本变化的格**只**出现在被改行上。
+    建议测试名 `editing_one_cell_recomputes_the_window_and_only_its_row_changes`；
+40. **公式求值的逐函数表**：`+ - * /`、一元负、每个比较符、`and/or/not`、`if` 的三臂、
+    `length/round/abs/min/max/text`——每个一条断言（含 `round(2.5) == 3`、`round(-2.5) == -3`、
+    `min` 的数值族与文本族各一）——建议测试名 `every_function_computes_the_value_it_names`；
+41. **拒绝的清单**（与 40 对照）：`"Total: " + [Points]`、`length([Points])`、`min("a",1)`、
+    `1/0`、`a < b < c`、未知函数、未知列名——各自是 `Err`（语法/求值两类分对），且**保存被
+    拒**（`db_formula_accept` 返回 false 且 config 未变）——建议测试名
+    `a_formula_that_cannot_compute_is_refused_at_save_time`；
+42. **Empty 传染**：空 number 格上 `[Points] * 2` 是空、`[Points] + 1` 是空、空串拼接
+    `"x" + [Empty]` 是空——例外两条：`if([Empty], "a", "b")` 是空（条件为空）、
+    `text([Empty])` 是 `""`——建议测试名 `an_empty_operand_makes_an_empty_value`；
+43. **环检测保存时**：`[Self]`、`A→B→A`（两个公式列）都是**保存被拒**且 notice 非空、
+    config 未变；`A→B→C`（无环链）保存成功且 C 的值经 B 的表达式算出来（公式引用公式）；
+    手写一个环进 `db_properties.config`（绕过保存门）后求值画 `Error` 且**不挂**（深度上限）
+    ——建议测试名 `a_formula_cycle_is_refused_when_it_is_saved_and_never_hangs_the_frame`；
+44. **`config` 的读改写**：带 `{"options":[…]}`（或任何外来键）的列写公式后外来键原样保留、
+    顺序不变；空表达式**删掉** `"formula"` 键；`config_formula` 与 `config_set_formula`
+    往返——建议测试名 `a_formula_edit_keeps_the_keys_this_build_does_not_own`；
+45. **四个预算**：2 049 token 的表达式被拒（语法）、33 层嵌套被拒、宽表达式撞
+    `FORMULA_MAX_STEPS`（用 `1+1+…` 造宽）、超过 `FORMULA_RESULT_MAX` 的拼接被拒为**求值**
+    错误——建议测试名 `a_formula_too_large_to_evaluate_is_an_error_not_a_hang`；
+46. **一条真实写入的往返**：`db_formula_accept` 一个表达式 → 重开库（`load`）后
+    `config_formula` 读出同一条；undo → 旧表达式回来（`PropertyConfigSet` 的 revert）；
+    redo → 新的回来——建议测试名 `a_formula_survives_a_reopen_and_an_undo`；
+47. **公式列不可排序/过滤**：`sort_column(Formula) == None` 且 `ops_for(Formula)` 为空
+    （D2/D4 已有，本刀把它变成「有理由的拒绝」——测试同时断言**没有** SQL 侧公式求值路径：
+    `RowRequest` 的列集里公式列不产生 join）——建议测试名
+    `a_formula_column_is_never_compiled_into_sql`；
+48. **导出跟随**：带一个公式列的页导出 Markdown，文件里公式列的值 = 计算值（不是空白），
+    行数 = 视图行数——建议测试名 `a_formula_exports_the_value_it_shows`；
+49. **只读展示**：公式格的 `TableCellView::editable == false`，且 `checked` 不因公式画出
+    `Yes` 而变 true（flag 只属于 checkbox 列）——建议测试名
+    `a_formula_cell_is_read_only_and_never_a_checkbox`。
+
+**C. 视觉（接着 §10 的编号）**
+
+50. sweep 对照 D5 基线：既有的 67 + D3/D4/D5 的 database 场景像素**逐字节相同**（本刀对
+    没有公式列的库零像素改动——`DatabaseCell` 的 `clickable` 只是让 kind 14 可点）；
+    `database-formula` / `dark-database-formula` 为 new，人工核对：`Double` 列显示
+    62/20/14/78/6、`Label` 列显示 done/open/done/open/done，列宽与表头正常；
+51. 公式编辑器的人工截图：点一个公式格 → 弹窗居中、输入框预填表达式、preview 显示
+    `= 62`；把 `*` 删掉一个 → 错误行出现一句话；按 Enter → 表里的值变成新表达式的值；
+    Columns popup 底部一行「+ New formula column」→ 新列出现在表尾且编辑器打开。
+
+**D. 性能（D6 欠的这一条，随 D8 收口）**
+
+52. **改一个单元格的端到端 + 增量重算行数**（SPEC §三十九 要的「打开公式编辑器的耗时」与
+    红线第三条一起）：release 探针（D1/D2 的 `#[ignore]` 打印型写法），10 000 行 ×
+    (number + 公式) 的库上量：
+    (a) 一次 `db_set_cell_text`（flush + change + 窗口重读 + 公式重算）的端到端；
+    (b) `db_formula_evals` 的增量与 `realized_rows`/`total` 并列打印（证明前者 ≈ 窗口 ×
+    公式列，后者 = 10 000）；
+    (c) 打开公式编辑器到预览出现（`db_formula_current` + 一次 `db_formula_preview`）的耗时；
+    (d) 滚动一屏的重算成本（一次 `db_refresh` 的 evals 与耗时）。
+    原始行落 `benchmarks/results/2026-09-22-track3-d6-formula.jsonl`，进
+    `docs/PERFORMANCE.md` 随 D8。
+
+## 11 · 给整合者的注意事项
+
+1. **共享文件的提交方式照 D0–D5**：`docs/DECISIONS.md`（只在末尾追加 ADR-0082…0084，排除
+   Track 4 前插的 ADR-0080/0081）、`PLAN.md`（只追加 D6 节）、`docs/SPEC.md`（公式引擎句与
+   性能红线第三条两处）、`src/core/mod.rs`（只加 `pub mod database_formula;`，排除 Track 2
+   的 `date`/`reference`）、`src/core/persistence.rs`（枚举末尾 +1 变体）、`src/core/command.rs`
+   （+1 变体 +1 plan 臂）、`src/storage/repository.rs`（+1 臂）、`src/app/state.rs` /
+   `src/app/controller.rs`（D6 段落）、`ui/Types.slint` / `ui/AppWindow.slint`（D6 段落）。
+   **整文件提交**（本 track 独占、工作树无别人的改动）：`src/core/database_formula.rs`（新）、
+   `src/storage/database_store.rs`、`ui/components/DatabaseFormulaPopup.slint`（新）、
+   `ui/components/DatabaseCell.slint`、`docs/REPORT_TRACK3.md`。脚本在
+   `.scratch/track3-d6/stage.py`。提交后共享文件在工作树里仍是 modified（那是别人的改动）。
+2. **`PropertyConfigSet` 是给后来者留的门**：D2 的欠账「选项列表没有 Change 臂」可以用它
+   （整文档替换 + 调用方读改写），option editor / number format / rollup 目标都走同一条；
+   `db_absorb` 的臂已经在了。
+3. **`RowRequest` 未变**（本刀没有加字段），但**投影的 realize 入口**从 `table_rows` 换成了
+   `state::db_table_rows`——若别的 track 也在 `db_refresh` 里加 realize 点，请用同一个入口
+   （否则那条路径的公式列会是空白）。
+4. **ADR 借号 0082–0084**（§8 明说）。
+5. **迁移号不动**；`CURRENT_VERSION` 工作树 19 / 提交树 18。
+6. **CHANGELOG**：本刀有**用户可见**的一半——公式列能算值、能打开编辑器编辑（通过 Columns
+   popup 新建）。本刀没碰 CHANGELOG（铁律），整合者若要收口，条目草稿：
+   > - A database column can be a **formula**: `[Column] * 2`, `if([Done], "done", "open")`, and
+   >   seven functions over numbers, text, booleans and dates (no scripting runtime — a small
+   >   hand-written interpreter). Its expression lives in the column, its values are computed on
+   >   the way out of SQL, and only the rows on screen are ever computed.
+   > - Rollup and relation columns are **not in this build**: they wait for the reference layer
+   >   (ADR-0084), and their cells stay blank rather than pretending.
+7. **`quire_shot` 不用改**：`needs_db` 的 `contains("database")` 已覆盖新场景。
+8. **静态自查的方法学**（可能对别的 track 有用）：括号平衡检查器必须处理 Rust 的 lifetime
+   （`Formatter<'_>`、`&'static str`）与含引号的字符字面量（`b'"'`），否则会把代码吞掉报
+   假阳性；本刀的检查器在 `.scratch/track3-d6/balance.py`。

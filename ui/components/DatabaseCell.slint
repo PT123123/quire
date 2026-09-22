@@ -50,6 +50,15 @@ export component DatabaseCell inherits Rectangle {
         && UIState.db-picking-property == cell.property;
     property <bool> is-flag: cell.kind == 7;
     property <bool> is-pick: cell.kind == 3 || cell.kind == 5;
+    // D6: a formula cell (kind 14) is read-only — its value is computed and
+    // nothing writes one (ADR-0062) — but it is *not* inert: clicking it opens
+    // the column's formula editor, which is the only write a formula has (its
+    // expression). The other two computed kinds (rollup 15 / relation 16) have
+    // no editor in this build, so their cells stay inert like they were.
+    property <bool> is-formula: cell.kind == 14;
+    // Whether a click on this cell does anything at all: the editable kinds
+    // open the one live input, a formula cell opens the formula editor.
+    property <bool> clickable: cell.editable || root.is-formula;
     property <length> pad: Theme.spacing-sm;
 
     background: transparent;
@@ -124,11 +133,12 @@ export component DatabaseCell inherits Rectangle {
         y: 0px;
         width: parent.width;
         height: parent.height;
-        // a derived or computed column has no editor to open, so its cell is
-        // inert; a cell whose editor is up keeps its area (the input is on top
-        // of it) so that clicking away and back does not re-open anything
-        enabled: cell.editable && !root.editing;
-        mouse-cursor: cell.editable ? MouseCursor.pointer : MouseCursor.default;
+        // a computed column has no *cell* editor, but a formula cell opens its
+        // column's formula editor (D6); a cell whose editor is up keeps its
+        // area (the input is on top of it) so that clicking away and back does
+        // not re-open anything
+        enabled: root.clickable && !root.editing;
+        mouse-cursor: root.clickable ? MouseCursor.pointer : MouseCursor.default;
         clicked => {
             if (root.is-flag) {
                 UIState.db-cell-toggled(root.block, root.record, root.cell.property, root.cell.checked);
@@ -137,6 +147,10 @@ export component DatabaseCell inherits Rectangle {
                 // this is the only way back out without picking anything
                 UIState.db-picking-record = root.picking ? -1 : root.record;
                 UIState.db-picking-property = root.picking ? -1 : root.cell.property;
+            } else if (root.is-formula) {
+                // the sample row travels with the call: the editor's preview
+                // evaluates the draft on the row the user clicked
+                UIState.db-formula-opened(root.block, root.record, root.cell.property);
             } else {
                 UIState.db-cell-activated(root.block, root.record, root.cell.property);
             }

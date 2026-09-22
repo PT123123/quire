@@ -11,6 +11,9 @@ use crate::core::database::{
     CellValue, DatabaseCatalog, DatabaseDraft, DatabaseId, Property, PropertyId, PropertyKind,
     RecordId, RowRequest, RowWindow, SortSpec, ViewGeometry, ViewId,
 };
+use crate::core::database_formula::{
+    self, FormulaError, Program, Val, FORMULA_ERROR_PAINT, FORMULA_MAX_DEPTH,
+};
 use crate::core::database_property::PropertyOptions;
 use crate::core::database_view::{
     all_columns, board_slots, board_window, date_key, day_number_of, day_of, days_in_month,
@@ -153,6 +156,25 @@ pub struct AppState {
     db_cal_month: RefCell<HashMap<i32, (i32, u32)>>,
     db_gallery_per_row: RefCell<HashMap<i32, usize>>,
     db_form: RefCell<HashMap<i32, Vec<(u64, String)>>>,
+    // ─── D6: the formula editor's session state ─────────────────────────────
+    // The popup's ids (which block / column / row it edits) live here, the
+    // draft text and its preview live in `UIState` — the same split as the
+    // cell editor (`db-editing-*` here, `editing-text` there): Rust owns the
+    // facts, Slint owns the words being typed.
+    db_formula_block: Cell<i32>,
+    db_formula_property: Cell<i32>,
+    /// The **sample row** the preview evaluates on. `-1` is "no row" — the
+    /// preview then computes against an empty row, which is the honest answer
+    /// to "what would this formula show" when the table has no rows yet.
+    db_formula_record: Cell<i64>,
+    /// How many formula evaluations the *projection* has performed, since
+    /// startup. A counter nothing reads (no code path branches on it): it is
+    /// the number ADR-0083's recompute contract is measured in — "edit one
+    /// cell, and the evaluation count grows by the *window's* formula cells,
+    /// never by the table's rows" is a claim about this number and about
+    /// `COUNT(*)`. Bumped in `db_paint_formulas` only: the editor's preview
+    /// evaluates on demand and is not a projection.
+    db_formula_evals: Cell<u64>,
     /// The editor list's own height, in px, reported by `Editor.slint` when it
     /// changes. The window's *viewport height* — the number `core::database::window`
     /// divides by — and a property rather than a callback argument because it is
@@ -587,6 +609,10 @@ impl AppState {
             db_cal_month: RefCell::new(HashMap::new()),
             db_gallery_per_row: RefCell::new(HashMap::new()),
             db_form: RefCell::new(HashMap::new()),
+            db_formula_block: Cell::new(-1),
+            db_formula_property: Cell::new(-1),
+            db_formula_record: Cell::new(-1),
+            db_formula_evals: Cell::new(0),
             editor_viewport_h: Cell::new(DEFAULT_EDITOR_VIEWPORT_H),
             next_db_id: Cell::new(db_ids.0),
             next_property_id: Cell::new(db_ids.1),
@@ -3955,6 +3981,152 @@ fn property_kind_int(kind: crate::core::database::PropertyKind) -> i32 {
         .unwrap_or(0)
 }
 
+// ─── D6: the projection's formula half (SPEC §三十九 「需计算」) ─────────────
+//
+// A formula column stores nothing (ADR-0062: 「不存值，投影时现算」), so its
+// cells are computed on the way to the screen — here, in the projection layer,
+// over exactly the rows a view realized. The engine is
+// `core::database_formula` (pure, no store); this is the adapter that answers
+// the engine's one question ("what is this column's value on the row being
+// evaluated").
+
+/// What one row's formula evaluation reads its cells through — the adapter
+/// between the engine and the store.
+///
+/// **There is no record parameter in the engine's cell callback, and this
+/// struct is the reason the contract holds by construction**: the source is
+/// built *for one record*, so a formula's `[Column]` reference can only ever
+/// reach that row's cells. Same-row references are the boundary (ADR-0083);
+/// cross-row values are rollup / relation's, which this build does not have
+/// (ADR-0084 — they wait for §四十's reference infrastructure, Track 2).
+struct FormulaSource<'a> {
+    repo: &'a SqliteRepository,
+    /// The one row this source knows how to read. Every path below reads
+    /// *this* record and no other.
+    record: u64,
+    db: DatabaseId,
+    catalog: &'a DatabaseCatalog,
+    /// The row's cells, read on first use and remembered for the rest of the
+    /// evaluation. Bounded by the formula's dependency count: each column is
+    /// read at most once per row however many expressions name it.
+    cells: RefCell<HashMap<u64, Val>>,
+    /// Formula columns' parsed expressions, parsed on first use out of the
+    /// catalog's `config` (ADR-0061/0082). `None` is a formula column whose
+    /// expression does not parse or is absent — a reference to it reads as
+    /// [`Val::Empty`], the same fold an unpaintable config gets everywhere else.
+    programs: RefCell<HashMap<u64, Option<std::rc::Rc<Program>>>>,
+    /// The Markdown export's preload (see `db_markdown_table`): `property →
+    /// (record → value)`, one indexed sweep per dependency column instead of
+    /// one point read per row. `None` on the window path, which reads through
+    /// `repo.cell` — 31 rows × a few dependencies is smaller than the sweep.
+    preload: Option<&'a HashMap<u64, HashMap<u64, CellValue>>>,
+}
+
+impl<'a> FormulaSource<'a> {
+    fn new(
+        repo: &'a SqliteRepository,
+        record: u64,
+        db: DatabaseId,
+        catalog: &'a DatabaseCatalog,
+        preload: Option<&'a HashMap<u64, HashMap<u64, CellValue>>>,
+    ) -> Self {
+        Self {
+            repo,
+            record,
+            db,
+            catalog,
+            cells: RefCell::new(HashMap::new()),
+            programs: RefCell::new(HashMap::new()),
+            preload,
+        }
+    }
+
+    fn kind_of(&self, id: PropertyId) -> Option<PropertyKind> {
+        self.catalog
+            .properties
+            .iter()
+            .find(|p| p.id == id)
+            .map(|p| p.kind)
+    }
+
+    /// A formula column's parsed expression, parsed once per evaluation and
+    /// remembered. `None` folds to "no value" at the reference site.
+    fn program_of(&self, id: PropertyId) -> Option<std::rc::Rc<Program>> {
+        if let Some(cached) = self.programs.borrow().get(&id.as_u64()) {
+            return cached.clone();
+        }
+        let parsed = self
+            .catalog
+            .properties
+            .iter()
+            .find(|p| p.id == id)
+            .and_then(|property| database_formula::config_formula(&property.config))
+            .and_then(|source| {
+                let resolve = |name: &str| {
+                    self.catalog
+                        .properties_of(self.db)
+                        .find(|p| p.name == name)
+                        .map(|p| p.id)
+                };
+                Program::parse(&source, resolve).ok()
+            })
+            .map(std::rc::Rc::new);
+        self.programs.borrow_mut().insert(id.as_u64(), parsed.clone());
+        parsed
+    }
+
+    /// The engine's cell callback: the value of column `id` **on this source's
+    /// row**, evaluating at `depth` — a reference to another *formula* column
+    /// recurses through that column's program at the depth it was handed, and
+    /// past [`FORMULA_MAX_DEPTH`] the answer is an error, not a hang (the
+    /// save-time cycle check keeps user-written chains acyclic, ADR-0082; this
+    /// is what keeps a document that arrived another way finite, which is the
+    /// SPEC sentence 「表达式必须有限求值」 holding at render time too).
+    fn value(&self, id: PropertyId, depth: u32) -> Result<Val, FormulaError> {
+        if depth > FORMULA_MAX_DEPTH {
+            return Err(FormulaError::Eval(format!(
+                "formulas are nested more than {FORMULA_MAX_DEPTH} deep"
+            )));
+        }
+        if let Some(cached) = self.cells.borrow().get(&id.as_u64()) {
+            return Ok(cached.clone());
+        }
+        let Some(kind) = self.kind_of(id) else {
+            // Unreachable through the UI (the parse resolves names against the
+            // same catalog), reachable if the schema moved mid-evaluation; the
+            // honest answer is an error the cell paints, not a fake empty.
+            return Err(FormulaError::Eval(
+                "the formula names a column this database does not have".into(),
+            ));
+        };
+        let value = if kind == PropertyKind::Formula {
+            match self.program_of(id) {
+                Some(program) => program.eval_at(depth, &mut |next, next_depth| {
+                    self.value(next, next_depth)
+                })?,
+                None => Val::Empty,
+            }
+        } else {
+            match self.preload {
+                Some(columns) => columns
+                    .get(&id.as_u64())
+                    .and_then(|column| column.get(&self.record))
+                    .map(|cell| database_formula::val_of(kind, cell))
+                    .unwrap_or(Val::Empty),
+                None => {
+                    let cell = self
+                        .repo
+                        .cell(RecordId(self.record), id)
+                        .unwrap_or(CellValue::Empty);
+                    database_formula::val_of(kind, &cell)
+                }
+            }
+        };
+        self.cells.borrow_mut().insert(id.as_u64(), value.clone());
+        Ok(value)
+    }
+}
+
 /// Painted rows as the delegate reads them. `header` is a group header's label
 /// (D4) — a data row carries an empty one, which is the only thing the
 /// delegate's conditional asks. One conversion, used by both realize paths
@@ -4271,6 +4443,16 @@ impl AppState {
                 Change::PropertyDeleted { id } => {
                     catalog.properties.retain(|p| p.id != *id);
                 }
+                // D6 (ADR-0082): the column's `config` document, replaced
+                // whole — the formula expression's write. Learned here, in the
+                // one funnel apply/undo/redo share, so a Ctrl+Z of a formula
+                // edit puts the previous expression back into the catalog the
+                // projection reads, exactly the way a width drag's undo does.
+                Change::PropertyConfigSet { id, config } => {
+                    if let Some(row) = catalog.properties.iter_mut().find(|p| p.id == *id) {
+                        row.config = config.clone();
+                    }
+                }
                 Change::ViewAdded(view) => {
                     if !catalog.views.iter().any(|v| v.id == view.id) {
                         catalog.views.push(view.clone());
@@ -4545,7 +4727,7 @@ impl AppState {
                                     match repo.window_rows_in_group(
                                         &request, &spec, key, *skip, *len,
                                     ) {
-                                        Ok(rows) => db_rows_of(table_rows(&rows, &columns, &pages)),
+                                        Ok(rows) => db_rows_of(self.db_table_rows(db, &rows, &columns, &pages, None)),
                                         Err(e) => {
                                             self.db_notice
                                                 .borrow_mut()
@@ -4683,7 +4865,7 @@ impl AppState {
                                 end: CALENDAR_PEEK,
                             },
                         ) {
-                            Ok(rows) => db_rows_of(table_rows(&rows, &columns, &pages)),
+                            Ok(rows) => db_rows_of(self.db_table_rows(db, &rows, &columns, &pages, None)),
                             Err(e) => {
                                 self.db_notice
                                     .borrow_mut()
@@ -4747,7 +4929,7 @@ impl AppState {
                     end: (wanted.end * per_row).min(total),
                 };
                 match repo.window_rows(&request, window) {
-                    Ok(rows) => view_rows = db_rows_of(table_rows(&rows, &columns, &pages)),
+                    Ok(rows) => view_rows = db_rows_of(self.db_table_rows(db, &rows, &columns, &pages, None)),
                     Err(e) => {
                         self.db_notice
                             .borrow_mut()
@@ -4843,7 +5025,7 @@ impl AppState {
                                 return false;
                             }
                         };
-                        view_rows = db_rows_of(table_rows(&rows, &columns, &pages));
+                        view_rows = db_rows_of(self.db_table_rows(db, &rows, &columns, &pages, None));
                         // The bar's day numbers, read out of the painted cells
                         // at the two positions the column list reserved. A
                         // painted date cell always starts with the stored day
@@ -4964,7 +5146,7 @@ impl AppState {
                                 return false;
                             }
                         };
-                        view_rows = db_rows_of(table_rows(&rows, &columns, &pages));
+                        view_rows = db_rows_of(self.db_table_rows(db, &rows, &columns, &pages, None));
                     }
                     Some(counts) => {
                         let spec = rules.group.as_ref().expect("counts imply a group");
@@ -4993,7 +5175,8 @@ impl AppState {
                                     return false;
                                 }
                             };
-                            for (at, row) in db_rows_of(table_rows(&rows, &columns, &pages))
+                            for (at, row) in
+                                db_rows_of(self.db_table_rows(db, &rows, &columns, &pages, None))
                                 .into_iter()
                                 .enumerate()
                             {
@@ -6277,14 +6460,55 @@ impl AppState {
         };
         let rows = repo.unwindowed_rows(&request).ok()?;
         let pages = repo.record_pages(db).unwrap_or_default();
+        // D6: the formula columns are computed here too — a file shows the same
+        // values the screen does. The export renders the *whole* view (ADR-0065's
+        // boundary), so a computed column is computed for the whole view: that
+        // is an artifact's own cost, and the input path's red line (「禁止每次输
+        // 入全库重算」) is about editing, not about the file the user explicitly
+        // asked to produce. The dependencies' values come from **one indexed
+        // sweep per column** (`column_values`, the same trade `unwindowed_rows`
+        // makes) rather than one point read per row, and the sweep is expanded
+        // transitively: a formula that names another formula column needs *its*
+        // dependencies' stored values too.
+        let mut preload: HashMap<u64, HashMap<u64, CellValue>> = HashMap::new();
+        if columns.iter().any(|c| c.kind == PropertyKind::Formula) {
+            let catalog = self.databases.borrow();
+            let map = self.db_formula_map(db, &catalog);
+            let mut seen: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
+            let mut stack: Vec<u64> = Vec::new();
+            for column in columns.iter().filter(|c| c.kind == PropertyKind::Formula) {
+                if let Some(Some(program)) = map.get(&column.property.as_u64()) {
+                    stack.extend(program.deps().iter().copied());
+                }
+            }
+            while let Some(id) = stack.pop() {
+                if !seen.insert(id) {
+                    continue;
+                }
+                match map.get(&id).and_then(|program| program.as_ref()) {
+                    // Another formula column: its own dependencies are wanted
+                    // too (the eval walks it through the source's programs).
+                    Some(program) => stack.extend(program.deps().iter().copied()),
+                    // A stored column: sweep it once.
+                    None => {
+                        if let Ok(values) = repo.column_values(db, PropertyId(id)) {
+                            preload.insert(id, values);
+                        }
+                    }
+                }
+            }
+        }
+        // The painted rows: `table_rows` + the formula pass, so an exported
+        // formula cell and an on-screen one cannot disagree about their value.
+        let painted = self.db_table_rows(db, &rows, &columns, &pages, Some(&preload));
         let mut header: Vec<String> = vec![properties
             .iter()
             .find(|p| p.kind.is_title())
             .map(|p| p.name.clone())
             .unwrap_or_default()];
         header.extend(columns.iter().skip(1).map(|c| c.name.clone()));
-        let mut out = Vec::with_capacity(rows.len());
-        for row in rows {
+        let mut out = Vec::with_capacity(painted.len());
+        for row in &painted {
             // ADR-0065's one link: a page-backed row writes its title as a
             // `quire://page/<id>` address (ADR-0026's shape for a Page block), so
             // the file keeps the only durable handle a reader has on that page; a
@@ -6295,14 +6519,332 @@ impl AppState {
                 None => row.title.clone(),
             });
             // The title column is the first cell of the row and the first entry
-            // of the header, written once above; the rest follow in view order.
-            line.extend(row.cells.iter().skip(1).cloned());
+            // of the header, written once above; the rest follow in view order —
+            // now as painted (and, for a formula column, computed) strings.
+            line.extend(row.cells.iter().skip(1).map(|cell| cell.painted.clone()));
             out.push(line);
         }
         Some(crate::services::export_service::DatabaseTable {
             header,
             rows: out,
         })
+    }
+
+    // ─── D6: computed properties (SPEC §三十九 「需计算」, ADR-0082/0083) ────
+    //
+    // A formula column's cell is **computed at projection time** and never
+    // stored (ADR-0062's 「不存值，投影时现算」; ADR-0039's discipline). Three
+    // contracts live in this section, and each is a shape rather than a rule:
+    //
+    // 1. **The recompute unit is the window, never the table** (SPEC's red
+    //    line 「禁止每次输入全库重算」). Formulas are evaluated in
+    //    `db_paint_formulas`, over exactly the rows a view realized — the same
+    //    31-or-so rows every other column paints for. There is no path that
+    //    walks all of `db_records` to evaluate anything, and the two knobs that
+    //    would force one — sorting and filtering by a formula column — are
+    //    refused upstream (`PropertyKind::sort_column` is `None`,
+    //    `FilterOp::ops_for` is empty for the computed kinds), because "sort by
+    //    a computed value" in SQL means "compute it for every row first".
+    // 2. **Dependencies are same-row, by construction.** `FormulaSource` is
+    //    built for one record; the engine's cell callback has no record
+    //    parameter. Editing cell (r, q) can therefore change formula values
+    //    only on row r, and only in columns whose parsed dependencies
+    //    (transitively, through other formula columns) name q — the dependency
+    //    set the save-time cycle check and the export's preload both walk.
+    //    The *evaluation count* for that edit is still "the window's formula
+    //    cells" (the model is rebuilt on refresh, like every column's paint);
+    //    what the dependency precision buys is the *guarantee about which
+    //    values can differ*, and `db_formula_evals` is the counter the unified
+    //    test measures it against — evaluations grow with the window, never
+    //    with `COUNT(*)`.
+    // 3. **Errors paint, they do not fail the frame.** A formula that cannot
+    //    evaluate on one row (a type error, a division by zero, a reference
+    //    chain gone deep) paints `Error` in that one cell; the editor's
+    //    preview carries the sentence. A blank would read as "no value", which
+    //    is a different fact.
+
+    /// `table_rows` plus the formula pass — the one realize shape every layout
+    /// branch uses (table, list, board cards, calendar peeks, gallery, timeline
+    /// lanes), so a computed column cannot be painted in one layout and blank
+    /// in another. `preload` is the export's per-column sweep; the window path
+    /// passes `None` and point-reads.
+    fn db_table_rows(
+        &self,
+        db: DatabaseId,
+        rows: &[crate::core::database::RowView],
+        columns: &[TableColumn],
+        pages: &crate::core::database_view::RecordPages,
+        preload: Option<&HashMap<u64, HashMap<u64, CellValue>>>,
+    ) -> Vec<TableRowView> {
+        let mut view = table_rows(rows, columns, pages);
+        self.db_paint_formulas(db, columns, &mut view, preload);
+        view
+    }
+
+    /// Compute and paint every **visible formula column** of `rows` — the one
+    /// place a projection evaluates formulas (contract 1 above). A database
+    /// with no visible formula column pays a config scan and nothing else; the
+    /// parse happens once per column per refresh, not once per row.
+    fn db_paint_formulas(
+        &self,
+        db: DatabaseId,
+        columns: &[TableColumn],
+        rows: &mut [TableRowView],
+        preload: Option<&HashMap<u64, HashMap<u64, CellValue>>>,
+    ) {
+        if rows.is_empty() {
+            return;
+        }
+        let catalog = self.databases.borrow();
+        let resolve = |name: &str| {
+            catalog
+                .properties_of(db)
+                .find(|p| p.name == name)
+                .map(|p| p.id)
+        };
+        // The visible formula columns that have a parseable expression. A
+        // formula column with no expression (or an unparsable one — a config
+        // this build's parse refuses) paints nothing, the same fold every
+        // unreadable setting gets: an error is for values, not for absence.
+        let mut formulas: Vec<(usize, Program)> = Vec::new();
+        for (at, column) in columns.iter().enumerate() {
+            if column.kind != PropertyKind::Formula {
+                continue;
+            }
+            let Some(source) = catalog
+                .properties
+                .iter()
+                .find(|p| p.id == column.property)
+                .and_then(|p| database_formula::config_formula(&p.config))
+            else {
+                continue;
+            };
+            if let Ok(program) = Program::parse(&source, resolve) {
+                formulas.push((at, program));
+            }
+        }
+        if formulas.is_empty() {
+            return;
+        }
+        let Some(repo) = self.db_repo() else {
+            return;
+        };
+        for row in rows.iter_mut() {
+            let source = FormulaSource::new(repo, row.record, db, &catalog, preload);
+            for (at, program) in &formulas {
+                let painted = match program.eval(&mut |id, depth| source.value(id, depth)) {
+                    Ok(value) => database_formula::display(&value),
+                    Err(_) => FORMULA_ERROR_PAINT.to_string(),
+                };
+                // The counter ADR-0083's contract is measured in: one bump per
+                // (row × visible formula column) evaluation. After editing one
+                // cell it grows by the *window's* formula cells — never by the
+                // table's rows (see the section comment, contract 1).
+                self.db_formula_evals.set(self.db_formula_evals.get() + 1);
+                if let Some(cell) = row.cells.get_mut(*at) {
+                    cell.painted = painted;
+                }
+            }
+        }
+    }
+
+    /// Every formula column of one database, parsed once: the map the save-time
+    /// cycle check walks (`would_cycle`'s `deps_of`) and the export's dependency
+    /// expansion reads. A column with no readable expression maps to `None` —
+    /// a leaf, not an error: references to it read as empty at eval time and it
+    /// cannot close a loop it does not traverse.
+    fn db_formula_map(
+        &self,
+        db: DatabaseId,
+        catalog: &DatabaseCatalog,
+    ) -> HashMap<u64, Option<Program>> {
+        let resolve = |name: &str| {
+            catalog
+                .properties_of(db)
+                .find(|p| p.name == name)
+                .map(|p| p.id)
+        };
+        catalog
+            .properties_of(db)
+            .filter(|p| p.kind == PropertyKind::Formula)
+            .map(|p| {
+                let program = database_formula::config_formula(&p.config)
+                    .and_then(|source| Program::parse(&source, resolve).ok());
+                (p.id.as_u64(), program)
+            })
+            .collect()
+    }
+
+    /// The expression a formula column holds, as the editor's starting text —
+    /// the stored shape, never a painted one (the same rule `db_cell_text`
+    /// states for cells). An absent expression is an empty draft.
+    pub fn db_formula_current(&self, property: i32) -> String {
+        let config = self.db_property_config(property);
+        database_formula::config_formula(&config).unwrap_or_default()
+    }
+
+    /// The editor's live answer to the draft `text`: `(preview, error)`. The
+    /// preview is the value the formula computes on the **sample row**
+    /// (`db_formula_record` — the row the user clicked, or "an empty row" when
+    /// the table has none, which is the honest answer to "what would this
+    /// show"). A parse failure blocks nothing here — the user is still typing —
+    /// but its message is what the error line shows, and it is what a save
+    /// refuses on.
+    ///
+    /// One evaluation per call, against one row: the preview is not a
+    /// projection and does not touch `db_formula_evals` (the section comment's
+    /// contract 1 measures projections).
+    pub fn db_formula_preview(
+        &self,
+        record: i64,
+        property: i32,
+        text: &str,
+    ) -> (String, String) {
+        if text.trim().is_empty() {
+            // An empty draft is a column with no expression: nothing computes,
+            // nothing errors, every cell goes blank on save.
+            return (String::new(), String::new());
+        }
+        let Some(property_row) = self
+            .databases
+            .borrow()
+            .properties
+            .iter()
+            .find(|p| p.id == PropertyId(property as u64))
+            .cloned()
+        else {
+            return (String::new(), String::new());
+        };
+        let (db, catalog) = (property_row.db, self.databases.borrow());
+        let resolve = |name: &str| {
+            catalog
+                .properties_of(db)
+                .find(|p| p.name == name)
+                .map(|p| p.id)
+        };
+        let program = match Program::parse(text, resolve) {
+            Ok(program) => program,
+            Err(e) => return (String::new(), e.message().to_string()),
+        };
+        // The sample row's source — a record of `-1` reads every cell as
+        // absent, which is the empty-row preview the doc comment promised.
+        let Some(repo) = self.db_repo() else {
+            return (String::new(), String::new());
+        };
+        let source = FormulaSource::new(repo, record as u64, db, &catalog, None);
+        match program.eval(&mut |id, depth| source.value(id, depth)) {
+            Ok(value) => (database_formula::display(&value), String::new()),
+            Err(e) => (String::new(), e.message().to_string()),
+        }
+    }
+
+    /// Commit the editor's draft as the column's expression: **the save-time
+    /// checks** (ADR-0082 — SPEC's 「保存时做」) run here, before any change is
+    /// recorded, and a refusal keeps the old expression and says why in the
+    /// notice line. One accepted save is one `SetDatabaseFormula` command —
+    /// one change, one Ctrl+Z — and the window is re-read because every cell
+    /// of the column may now paint differently.
+    ///
+    /// The checks, in the order a user meets them:
+    /// 1. *the column is a formula column* — nothing else has an expression;
+    /// 2. *the expression parses and every `[Column]` name exists* (a typo is
+    ///    refused here, not blanked on screen);
+    /// 3. *the dependency graph stays acyclic* — the draft may name other
+    ///    formula columns, and a chain that comes back to this column has no
+    ///    value to compute; refused now, while the text that would create it
+    ///    is on screen (`would_cycle`), with the eval-time depth cap kept only
+    ///    for documents that never went through this door;
+    /// 4. *an empty draft clears the column* — the config key is removed, not
+    ///    stored empty, which is ADR-0062's one representation of "nothing".
+    pub fn db_formula_accept(&self, block: i32, property: i32, text: &str) -> bool {
+        let Some(row) = self
+            .databases
+            .borrow()
+            .properties
+            .iter()
+            .find(|p| p.id == PropertyId(property as u64))
+            .cloned()
+        else {
+            return false;
+        };
+        if row.kind != PropertyKind::Formula {
+            return false;
+        }
+        let db = row.db;
+        let from_config = row.config.clone();
+        let to_config;
+        if text.trim().is_empty() {
+            to_config = database_formula::config_set_formula(&from_config, "");
+        } else {
+            let catalog = self.databases.borrow();
+            let resolve = |name: &str| {
+                catalog
+                    .properties_of(db)
+                    .find(|p| p.name == name)
+                    .map(|p| p.id)
+            };
+            let program = match Program::parse(text, resolve) {
+                Ok(program) => program,
+                Err(e) => {
+                    self.set_db_notice(e.message().to_string());
+                    return false;
+                }
+            };
+            // The cycle check: the draft's direct dependencies, expanded over
+            // the formula columns this database already has.
+            let map = self.db_formula_map(db, &catalog);
+            let deps_of = |id: PropertyId| -> Option<std::collections::BTreeSet<u64>> {
+                map.get(&id.as_u64())
+                    .and_then(|program| program.as_ref())
+                    .map(|program| program.deps().clone())
+            };
+            if database_formula::would_cycle(PropertyId(property as u64), program.deps(), deps_of) {
+                self.set_db_notice(
+                    "This formula would depend on itself, so it has no value to compute.".into(),
+                );
+                return false;
+            }
+            drop(catalog);
+            to_config = database_formula::config_set_formula(&from_config, text);
+        }
+        if to_config == from_config {
+            return false;
+        }
+        let cmd = Command::SetDatabaseFormula {
+            block: BlockId(block as u64),
+            property: PropertyId(property as u64),
+            from: from_config,
+            to: to_config,
+        };
+        if self.exec_editor(cmd).is_none() {
+            return false;
+        }
+        self.db_refresh(block);
+        true
+    }
+
+    /// A brand-new formula column, from the Columns popup's row — the one
+    /// creation path this build has (the kind picker is still D7's), and the
+    /// reason it exists: a formula column without an editor is a column of
+    /// blanks, and an editor without a column to edit is a door to nowhere.
+    /// The name is "Formula", then "Formula 2", … until it is unique, because
+    /// `UNIQUE (db, name)` (ADR-0061) is the schema's own rule. The caller
+    /// opens the editor for the returned id.
+    pub fn db_formula_column_add(&self, block: i32) -> Option<i32> {
+        let db = self.db_ref_of(block)?;
+        let base = "Formula";
+        let mut name = base.to_string();
+        let mut suffix = 2;
+        while self
+            .databases
+            .borrow()
+            .properties_of(db)
+            .any(|p| p.name == name)
+        {
+            name = format!("{base} {suffix}");
+            suffix += 1;
+        }
+        self.db_add_column(block, &name, PropertyKind::Formula)
     }
 
     // ─── D5: the view family (SPEC §三十九 「视图」) ─────────────────────────
