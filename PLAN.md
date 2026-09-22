@@ -3262,3 +3262,53 @@ master 本来就没在当前 head 上跑过它们（ROADMAP:108 自己记着）�
 `just check` 是否仍全绿**没跑过**（现在仍是 `path = "crates/data"`）；⑥ 新仓的
 `Cargo.toml` 里那枚空 `[workspace]` 是为「它暂时无处可去」写的，搬出本仓目录之后它变成多余的
 一行——留着无害，但要认得它为什么在那儿。
+
+## 剥离落地 · 那枚仓有了远端，本仓改成锁 rev（2026-09-23，ADR-0094，on `split/quire-data`）
+
+仓名由用户定：`github.com/PT123123/quire-core`，推走 SSH。上一节那两枚本地 commit 因此重做
+（`build(core): …`），全树 `quire-data`→`quire-core`、`quire_data`→`quire_core`，改完 tracked
+文件里旧拼写 0 处。
+
+**推送前扫了 identity，扫出泄露**：71 枚里 **46 枚** 的 author + committer 都是
+一个个人 QQ 邮箱（地址不写在这里——它已经在 137 枚 commit 的元数据里，本仓是公开的，没必要再多
+一份可搜索的副本）。`filter-repo --mailmap` 一遍洗成 GitHub noreply（名字不变、只有 SHA 动），
+本地确认 71/71 之后**再回读远端**（`gh api …/commits --paginate`）复算一遍，不信任本地日志。
+本仓 174 枚里 **137 枚** 带同一个地址，而 `PT123123/quire` 是 PUBLIC——泄露是既成事实，
+重写已公开的历史是另一个决定，本刀没做，等用户点头。
+
+**内容零漂移的证据（这条是本刀最硬的 control）**：拿本仓仍留着的 `09ef5aa:crates/data/` 那些
+blob 逐文件比，45 个源文件里 **38 个去 CRLF 后逐字节相等**，另 **7 个**（6 个 doc 注释里带
+`-p quire-data` 的 + `lib.rs`）把 `quire-core`→`quire-data` 反 sed 回去后哈希也相等。
+也就是说整个剥离 + 改名 + 历史重写，落地的唯一内容差就是那个 crate 的名字。
+
+| 门 | 命令 | 结果 |
+|---|---|---|
+| 新仓自证 | `cargo test --all-targets`（在 quire-core） | 431 passed / 0 failed / 13 ignored，0 warning |
+| check | `cargo check --workspace --all-targets` | exit 0，0 warning，47.5 s |
+| test（本仓） | `cargo test --workspace --all-targets` | **134 passed / 0 failed / 10 ignored**，0 warning |
+| release | `cargo build --workspace --release` | Finished in **6m 49s**，0 warning，`quire.exe` 27 847 168 B |
+| 像素 | `sweep.ps1 -OutDir .scratch/swap-core -Baseline .scratch/split-after` | **changed 0 / identical 131** |
+
+**本刀买到最重要的一条：`--workspace` 从「承重」降级成「装饰」，而且是结构性的。**
+上一刀的结论是「workspace root 上裸 `cargo test` 只测 root package，所以必须加 `--workspace`」；
+现在 `quire-core` 是 **dependency**，不是 member——**没有任何一个 flag 能让本仓跑到它那 431 个测试**。
+本仓的绿色从此按定义只是壳的绿色（134），`just check` 的注释已经改口这么写。谁以后引用这个数，
+必须同时说清是哪个仓。
+
+**第二学到：cargo 自带的 libgit2 拉不动一个公开仓。** 依赖一挂上，`cargo check` 就死在
+`no authentication methods succeeded`，而同一条 HTTPS URL `git ls-remote` 干净返回 ref——
+libgit2 主动递了凭证，服务器回 401，报错长得像权限问题，其实是客户端多事。
+解法是 `.cargo/config.toml` 里 `net.git-fetch-with-cli = true`（本仓第一次有这文件）。
+**读走 HTTPS、写走 SSH**：fetch 要在没有 SSH key 的机器上也能成，push 才需要身份。
+
+`Cargo.lock` 的改动只有 **3 入 2 出**：`quire-data` 那枚换名并多出 `source = "git+…#f3044e22"`
+一行，`image` / `rusqlite` 的解析版本一个没动（本仓和那仓要的版本与 feature 本来就一致）。
+
+**没动的一条**：`src/lib.rs` 那 4 行 re-export 仍然撑着 `crate::core::…` 的 959 处拼写——
+上一节列的④「物理搬仓之后要删掉 re-export 才算真强制」这条债**本刀没还**，跨仓之后它反而更明显了。
+
+**未验证（诚实）**：① `cargo check --target aarch64-linux-android` 仍**没跑过**，而且现在只能在
+`quire-core` 那棵树里跑（`-p quire-core` 在本仓已经不解析）；② `dist.ps1` / `verify-installer.ps1`
+/ `verify-portable.ps1` 依旧没在新布局上验过；③ 新仓没有 tag、没有 release 节奏，rev 是一枚裸
+SHA，升级它是一次手改 + 一次全部门槛；④ 换 rev 之后 `Cargo.lock` 里会不会同时留两条
+`quire-core` 记录（旧 rev 那条在被裁掉之前）没验过——本仓这次是第一次有 git 依赖，只有一条。

@@ -3891,7 +3891,7 @@ version = "0.1.0"
 dependencies = [
  "embed-resource",
  "image",
- "quire-data",
+ "quire-core",
  "rfd",
  "rusqlite",
  "slint",
@@ -3899,8 +3899,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "quire-data"
+name = "quire-core"
 version = "0.1.0"
+source = "git+https://github.com/PT123123/quire-core.git?rev=f3044e22ee597307fe6bb031662b65ac1856a030#f3044e22ee597307fe6bb031662b65ac1856a030"
 dependencies = [
  "image",
  "rusqlite",

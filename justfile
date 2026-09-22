@@ -15,9 +15,12 @@ run *args:
 
 # local CI replacement (the GitHub workflow was removed on purpose):
 # everything a push would run, before you commit.
-# --workspace is not decoration: since the data layer moved into crates/data,
-# a bare `cargo test` at this root silently tests only the shell (134 of 565)
-# and exits 0.
+# `--workspace` survived the two-crate week and is now decoration: this workspace
+# has one member again, and `quire-core` is a *dependency*, which no cargo flag
+# run from here will test. Its 431 tests belong to that repository
+# (`cargo test --all-targets` there). So a green `just check` here means the shell
+# compiles against the pinned rev and its own suite passes — never quote it as
+# "the whole app is green".
 check:
     cargo check --workspace --all-targets
     cargo test --workspace

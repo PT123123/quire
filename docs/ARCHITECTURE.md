@@ -42,19 +42,24 @@ See `docs/DECISIONS.md` for the rationale of every non-obvious pick
 ## Directory map
 
 ```
-Cargo.toml           workspace root + the shell package; [workspace.dependencies]
-                     pins rusqlite/image once so the two crates cannot diverge
-crates/data/         quire-data — everything that stores, with no window in sight
+Cargo.toml           one package, plus a pinned git dependency; [workspace.dependencies]
+                     keeps rusqlite/image on the same version this side does
+                     ── the dependency ──
+quire-core           github.com/PT123123/quire-core, rev-pinned — everything that
+                     stores, with no window in sight (its own repository; the tree
+                     below is what lives there, not a directory in this checkout)
   src/lib.rs         module root; the rule: no Slint, no dialog, no clipboard,
-                     no platform API anywhere under here (ADR-0093)
+                     no platform API anywhere under here (ADR-0093, shipped ADR-0094)
   src/core/          document model, commands, history, database model
   src/storage/       SQLite, migrations, repository, search index, backups
   src/services/      persistence, import/export, search, attachments, settings,
                      the LAN framing a sync module will grow out of
   src/testing.rs     scratch-directory guard for tests
   tests/             the five integration suites that name only the data layer
+                     ── this repository ──
+.cargo/config.toml   git-fetch-with-cli: cargo's libgit2 cannot fetch a public repo
 src/                 the shell
-  lib.rs             app + platform, and `pub use quire_data::{core, services,
+  lib.rs             app + platform, and `pub use quire_core::{core, services,
                      storage, testing}` so the split is invisible from in here;
                      slint include_modules (one compiled unit)
   main.rs            args parse, 8 MB-stack UI thread (ADR-0009), bench timers
@@ -76,7 +81,8 @@ ui/
                      Button, IconButton
 tests/
   integration/       workspace + persistence: the two that name app::state
-                     (the other five moved to crates/data/tests with the code)
+                     (the other five left with the code, and are flat
+                     `tests/` in quire-core now)
   fixtures/          editor/storage fixtures land here in M3+
 benchmarks/
   scripts/           bench.ps1 (scenes A–G), shot2png.ps1, sweep.ps1

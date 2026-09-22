@@ -1,0 +1,11 @@
+# Fetch git dependencies through the `git` CLI instead of cargo's built-in libgit2.
+#
+# Needed since `quire-core` became a git dependency (ADR-0094). That repository is
+# public and `git ls-remote https://github.com/PT123123/quire-core.git` returns the
+# ref on this machine, but the same fetch through libgit2 dies with
+# `no authentication methods succeeded` — it offers credentials the anonymous URL
+# never asked for, and GitHub answers the challenge with 401. Without this table a
+# fresh clone of the shell cannot build, and the failure reads as a permissions
+# problem rather than a client one.
+[net]
+git-fetch-with-cli = true

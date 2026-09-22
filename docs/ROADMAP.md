@@ -23,26 +23,28 @@ low RAM > low CPU > GPU rendering > maintainability > feature count.
 | M13 References | @page mention, @date, backlinks panel, synced block | ✅ delivered 2026-09-22 · SPEC §四十 is done: a mention span stores the **page id** and nothing else, so the chip / panel / export read the live title (ADR-0050); @date stores its own ISO text with the format defined once (`core/date.rs`), so it never drifts; backlinks add **no table and no column** — migration 16 is two indexes and the panel is a derived projection (ADR-0051: 78 µs folded against 6 068 µs with the index dropped, i.e. "no full-library scan" is a number and not an intention); a synced block owns no text at all, `blocks.sync_ref` names the source and the row draws that (ADR-0052, and a cycle is refused at the write, not at the draw). |
 | M14 Database | record+schema+view model; table → board → list → calendar → gallery → timeline → form → chart; properties, filter/sort/group, relation/rollup/formula, linked database, database templates | ✅ delivered 2026-09-23 · SPEC §三十九 is done in **ten slices D0–D10** (ADR-0060…ADR-0092, schema steps in the v12–v20 range — see `CURRENT_VERSION`'s note for why Track 1's steps moved instead): one `Database` block with **eight layouts** as views of it, 17 property kinds, filter/sort/group/search compiled into SQL so 10 000 rows never get realized (a window costs kilobytes; scrolling an unchanged window recomputes in 29 µs), formula as a self-written lexer + walker with four budgets and cycle detection at save, rollup as a three-name fold over a relation, relation as a **pair written in one batch** (which is what makes a cycle unrepresentable rather than detected), plus linked views and a record template that prefills a new row in one Ctrl+Z. D10 landed the last three user-facing doors (the column type menu, the relation picker, the rollup configurator) and drew the marks instead of typing them (ADR-0092). Timings in `docs/PERFORMANCE.md` `## M14`; per-slice reporting in `docs/REPORT_TRACK3.md`. **Open, on purpose**: the three popups still want a hand in a real window (Escape / click-outside / focus-on-open — the headless sweep cannot reach a callback), and a relation's **fan-out has no cap** (10 000 targets = 28.5 ms vs a 9.1 ms control, 3.12×), which is a product decision rather than a bug. |
 
-## Repository shape (since ADR-0093, 2026-09-23)
+## Repository shape (since ADR-0093 + ADR-0094, 2026-09-23)
 
-Two crates in one workspace. `crates/data` (`quire-data`) is the document and
-database model, SQLite behind it, and the services that need no window — import,
-export, search, attachments, settings, and the LAN framing a sync module will
-grow out of; it compiles against `std`, `rusqlite` and `image` and against
-nothing graphical. The root package (`quire`) is the Slint shell: `app/`,
-`platform/`, `ui/`, `build.rs`, the three binaries.
+Two repositories, one edge between them. `quire-core`
+(`github.com/PT123123/quire-core`) is the document and database model, SQLite
+behind it, and the services that need no window — import, export, search,
+attachments, settings, and the LAN framing a sync module will grow out of; it
+compiles against `std`, `rusqlite` and `image` and against nothing graphical.
+This repository is the Slint shell: `app/`, `platform/`, `ui/`, `build.rs`, the
+three binaries, and one dependency on that crate **at a pinned rev**.
 
-This is the prerequisite for M9 and for sync, and it is a *prerequisite*, not
-either of them: `cargo check -p quire-data --target aarch64-linux-android` has
-not been run. The history has since been cut out with `git filter-repo` into a
-standalone crate that builds and tests on its own (431 passed, 69 of the 172
-parent commits carried, at `.scratch/wt/quire-data-extract/repo`) — it has no
-remote yet, so the shell still consumes `crates/data` by path rather than by
-pinned rev.
-One gate consequence to know before trusting a green run: **`cargo test` at a
-workspace root tests the root package only** — the bare form reports 134 passed
-and exit 0 while the data crate's 431 tests never run. `just check` carries
-`--workspace` on all three lines for that reason.
+That is the prerequisite for M9 and for sync, and it is a *prerequisite*, not
+either of them: `cargo check --target aarch64-linux-android` has not been run in
+`quire-core` either. Two gate consequences to know before trusting a green run:
+
+- **`cargo test` at a workspace root tests the members only**, and a git
+  dependency is not a member. The whole suite is no longer reachable from this
+  checkout: what runs here is 134 passed / 10 ignored, and the crate's 431 tests
+  run in that repository. Never report a green `just check` as "the app is green".
+- Cargo's built-in libgit2 cannot fetch a *public* repository here — it offers
+  credentials nobody asked for and takes a 401. `.cargo/config.toml` sets
+  `net.git-fetch-with-cli = true`, so `git` does the fetch. `--workspace` is still
+  on `just check`'s three lines but is now decoration, not load-bearing.
 
 ## Explicitly out of scope for v1
 

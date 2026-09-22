@@ -2,6 +2,64 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0094 · The extracted crate leaves this repository and comes back as a pinned git dependency
+
+Decision: `crates/data/` is deleted here. Its content is now the repository
+`github.com/PT123123/quire-core`, branch `main`, and the shell consumes it as
+`quire-core = { git = "…", rev = "f3044e22…" }`. Four choices were made before
+touching anything, in this order: split the workspace first and only then move the
+directory (ADR-0093 was that rehearsal), carry `core/` + `storage/` + `services/`
+and nothing else, take the git history out with `git filter-repo` rather than
+starting flat, and have the shell depend on a **pinned rev** rather than a path or
+a branch. `src/lib.rs` still re-exports the four modules, so the 959 references
+survived the second move too — only the spelling of the crate changed.
+
+Why a repository and not just a crate: the Android port is the second consumer, and
+a second consumer that lives in a different checkout cannot import a relative path.
+The sync module is the second *reason*: it belongs next to the storage it fronts,
+not next to a renderer.
+
+Consequences:
+
+- **The name is `quire-core`, and ADR-0093 still says `quire-data`.** Both are
+  correct on their own date. The extracted repository's first commit is what pays
+  for the rename — a name on a remote is harder to change than a name in a manifest.
+- **The gate in this checkout got smaller, and no cargo flag makes it bigger.**
+  `quire-core` is a dependency, and `--workspace` means "the members", so
+  `cargo test --workspace --all-targets` here runs the shell and *builds* the store
+  without running one of its 431 tests. The number is no longer 565. `just check`
+  says this in its comment; a reported green has to name which repository it ran in.
+- **Cargo's own git cannot fetch a public repository.** With the dependency in
+  place, `cargo check` died on `no authentication methods succeeded` while
+  `git ls-remote` on the same HTTPS URL returned the ref. libgit2 offers credentials
+  an anonymous URL never asked for and GitHub answers the challenge with 401.
+  `.cargo/config.toml` now sets `net.git-fetch-with-cli = true`, which is also the
+  setting a machine with no SSH key needs. The remote is consumed over **HTTPS** and
+  pushed over **SSH**: fetch has to work for a stranger, push has to work for the
+  owner.
+- **The history was scrubbed before it was published.** 46 of the 71 carried commits
+  still carried a personal QQ address as both author and committer; a
+  `filter-repo --mailmap` pass rewrote them to the GitHub noreply identity, and the
+  remote was re-read after the push to confirm 71/71 on both fields rather than
+  trusting the local log. The rewrite moved every SHA in the range. It did not touch
+  a file: measured against the blobs this repository still holds at
+  `09ef5aa:crates/data/`, **38 of 45** source files hash byte-identical (after
+  normalising the checkout's CRLF) and the remaining **7** hash identical once the
+  `quire-core` → `quire-data` rename is reversed — so the only content delta across
+  the whole extraction is the crate's own name. What the scrub does **not** fix is
+  this repository's already-public history, where 137 of 174 commits carry the same
+  address; rewriting published history is a separate decision and has not been made.
+- `Cargo.lock` is committed **in the extracted repository** as well, which a library
+  normally would not: the Android shell will consume it as a git dependency with no
+  workspace root above it to inherit a lock from, and `rusqlite` is `bundled` there,
+  so that file is what pins SQLite.
+- What this does **not** do: no tag and no release cadence, so the rev is a raw SHA
+  and updating it is a hand edit. `docs/SPEC.md` §三十九/四十, `docs/DECISIONS.md`
+  and `docs/PERFORMANCE.md` stay here — they describe the product, not one crate —
+  so `quire-core`'s README points at this repository instead of copying them.
+  `cargo check -p quire-core --target aarch64-linux-android` has still not been run;
+  the `-p` no longer resolves here, and the check now belongs in that checkout.
+
 ## ADR-0093 · The model and the store become their own crate, so a second shell can compile them without a window
 
 Decision: the repository is now a cargo workspace of two packages. `quire-data`
@@ -66,6 +124,9 @@ Consequences:
   nothing in the blame chain breaks) and the extracted tree builds and tests standalone at
   431 passed / 0 failed — but it has **no remote**, so the shell still consumes the crate
   by path. Pushing it, and switching to a pinned `git = ` dependency, are one decision away.
+  **(They were taken the same day; see ADR-0094. Everything above this line is the state at
+  the moment of writing, including the crate's first name — it is `quire-core` now, and
+  `crates/data/` no longer exists in either tree.)**
 - One seam left visible rather than papered over: `storage::data_location::roaming_root()`
   is the only function in the data crate that reads an environment variable
   (`%APPDATA%`), and its neighbour `app_data(&Path)` already takes the value as a

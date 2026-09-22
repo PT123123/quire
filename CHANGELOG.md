@@ -529,6 +529,19 @@ First functional release: a local, single-file-database notes workspace.
   check` says `--workspace` on all three lines now. Nothing else moved: 565 passed / 23
   ignored with the 589 test names proved identical to the run before, and 131 of 131
   sweep PNGs byte-identical between two shot binaries that differ by md5
+- The same day that crate left this repository (ADR-0094): `crates/data/` is deleted,
+  and `github.com/PT123123/quire-core` at a pinned rev is where the model and the store
+  live now — 71 commits carried out with `git filter-repo`, of which 46 had a personal
+  QQ address as author and committer and were rewritten to the GitHub noreply identity
+  before the first push. The rename is the only content change: 38 of 45 source files
+  still hash byte-identical to the blobs this repository holds at `09ef5aa:crates/data/`,
+  and the other 7 hash identical once the name is reversed. Two things follow that are
+  worth knowing before quoting a green run. **The suite is no longer reachable from
+  here** — a git dependency is not a workspace member, so `cargo test --workspace` runs
+  the shell's 134 / 10 ignored and only *builds* the crate whose 431 tests gate it. And
+  **cargo's own git cannot fetch a public repository**: it offers credentials the
+  anonymous URL never asked for and takes a 401, so `.cargo/config.toml` now sets
+  `net.git-fetch-with-cli = true` and a fresh clone builds without an SSH key
 
 ### Known limitations
 - Switching directly from one open menu to another (e.g. ⋮⋮ on a different

@@ -1,17 +1,17 @@
 [workspace]
-# Two crates, one boundary: `crates/data` is the model and the store and knows
-# nothing about windows, the root package is the Slint shell that draws them.
-# The Android port is meant to be a second consumer of the first one.
-members = [".", "crates/data"]
+# One member again: the model and the store left for their own repository
+# (ADR-0094) and come back as the pinned git dependency below, so the only crate
+# built from this directory is the Slint shell.
+members = ["."]
 
 [workspace.dependencies]
 # gif is listed because `attachment_store` names a GIF row `gif` / `image/gif`.
-# It is pinned here rather than in one crate so the store never relies on a
-# dependency's choice for its own row format, and so both crates resolve the
-# same feature set.
+# It is pinned here rather than spelled out at each use site so the shell and the
+# store agree: the same version and feature set is what stops cargo from building
+# two copies of one library into one binary.
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "bmp", "gif"] }
 # `bundled` in one place for the same reason: two different feature sets for
-# rusqlite across the workspace would compile SQLite twice.
+# rusqlite across the two repositories would compile SQLite twice.
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 
 [package]
@@ -23,7 +23,12 @@ description = "A local, GPU-accelerated, Notion-like document app built with Rus
 default-run = "quire"
 
 [dependencies]
-quire-data = { path = "crates/data" }
+# The model, the store and the windowless services, at a commit that is known
+# green here. A `rev` rather than a tag because the extracted repository has one
+# branch and no releases yet; the SHA is what makes a build reproducible.
+# Over HTTPS on purpose: the repository is public, and this is the URL that works
+# on a machine that has no SSH key registered — pushing uses SSH.
+quire-core = { git = "https://github.com/PT123123/quire-core.git", rev = "f3044e22ee597307fe6bb031662b65ac1856a030" }
 image = { workspace = true }
 rfd = "0.17.2"
 rusqlite = { workspace = true }
