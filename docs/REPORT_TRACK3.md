@@ -1176,3 +1176,237 @@ definition 文本让下一次投影重读窗口。**没有新表、没有新列�
 7. **提交**：`c0734d2`（feat(m14): a filter compiles into the statement, and a group header is
    never a row）——共享文件照旧「只暂存自己那段」（脚本 `.scratch/track3-d4/stage.py`），提交后
    这些文件在工作树里仍是 modified（那是别人的改动），不是脏数据。
+
+# Track 3 — Database（D5：视图族，代码刀）
+
+D0 决策、D1 存储、D2 属性、D3 table、D4 规则之后，D5 把 SPEC §三十九「视图」剩下的六种
+**一次做齐**：**board / list / calendar / gallery / timeline / form 六种全部交付**（chart 按
+SPEC 的顺序留 D7），每一种都有虚拟化、规则持久化、切换器入口、`apply_scene` 臂与 `dark-` 臂。
+本刀遵守任务书铁律：**只写代码，一行 cargo 都没跑**（不 check / 不 build / 不 test / 不 run，
+不跑 sweep）——编译、测试、视觉、性能全部留给总测试。本节行号是**工作树**（四条 track 未提交
+改动的合集）的行号。
+
+## 1 · 六个视图各做到什么（第一段先回答「做了哪几个、没做哪几个」）
+
+| 视图 | 状态 | 文件与关键位置 | 虚拟化契约（窗口开在什么单位上） |
+|------|------|----------------|-----------------------------------|
+| **board** | **做了** | `core/database_view.rs` 的 `board_window`/`board_slots`（L~640/L~672）；state 的 Board 分支 L5180–5263；`DatabaseView.slint` 的 board 臂（`is-board`） | 窗口开在**卡片槽位**上：一个槽位是一道横贯所有列的带，板面高 = 各列计数的 max。列=**组列表**（一次 `GROUP BY`，≤ 选项数，全部 realize 成小矩形），每列只取它落到槽位窗口里的那一段（`window_rows_in_group` + 组内 `LIMIT/OFFSET`）。10 000 张卡片的一组 realize 的还是那一窗。**拖拽换组不做**（边界，见 §6） |
+| **list** | **做了** | `DatabaseView.slint` 的 list 行臂（`is-list`，行高 44 px = `TableView::LIST_ROW_HEIGHT`）；state 的默认分支（与 table 同路） | 与 table 同一套行窗口（`db-row-start`/`db-row-height`），只是行高 44、一行画「标题 + 首两列预览」，行点击 = 打开 record |
+| **calendar** | **做了** | state 的 Calendar 分支 L5266–5395；`core/database_view.rs` 的日历算术（`days_in_month`/`first_weekday_monday0`/`month_cells`/`CALENDAR_PEEK`）；`DatabaseView.slint` 的 calendar 臂 | 格子固定 6×7（表面高是**常数**），窗口开在**天**里：整月一次 `GROUP BY` 取每日计数（≤ 31 键，月界由 `>= 1 号` / `< 下月 1 号` 两个子句编译进语句），每天至多 realize `CALENDAR_PEEK = 3` 条 + 折叠计数（"and N more" 的 N 来自 `GROUP BY`，那 N 条从不变成对象）。**无日期的 record 不显示**（月范围子句 + 三值逻辑天然排除） |
+| **gallery** | **做了** | state 的 Gallery 分支 L5398–5441；`DatabaseView.slint` 的 gallery 臂（`is-gallery`，含 delegate 报告的 `per-row`） | 窗口开在**卡片行**上：一次取 `per_row × 行窗` 的切片，delegate 按它报告的 `per_row` 切块摆放。`per_row` 由 delegate 量出（它知道网格宽）后回调给 Rust，**进了缓存键**（`DbWindow::stamp`），所以形状变了就重读。卡片 = 首字母占位（首图见 §6 边界） |
+| **timeline** | **做了** | state 的 Timeline 分支 L5444–5570；`core/database_view.rs` 的 `day_number`/`day_number_of`；`database_query.rs` 的 `range_query` + `database_store.rs` 的 `column_bounds`；`DatabaseView.slint` 的 timeline 臂 | 窗口开在**泳道**上（一行一条有日期的 record，行高 36）；轴是**一次 `min`/`max`**（同一 `WHERE`，不取行），「无日期不显示」是 AND 进请求的 `is_not_empty` 子句——不取回来再 `retain`。天的数字在 Rust 从**已绘制的日期格**读出（画出来的日期永远以存储的那天开头），所以一条泳道不花第二次查询。起=止=同一天画点（宽 6 px 起） |
+| **form** | **做了** | state 的 Form 分支 L5573–5593 + `db_form_*` 三方法 + `db_form_submit`；`DatabaseView.slint` 的 form 臂 | **不读行**：表面 = 字段表（schema 的可见列 × 40 px）+ 动作行，窗口只用来算计数文案。草稿在会话里（`db_form`），**提交才建行**：每个填了的字段过 `parse_one`，一个 record + N 个 cell 在**一批**里（一次 Ctrl+Z）。**分享链接不做**（brief 明确） |
+
+七个布局里 `chart` 仍 `LayoutSupport::Missing`（D7）：它以名字拒绝，切换器「+」菜单里那行
+可见但 inert（"Chart - not in this build yet"）。
+
+## 2 · 本刀改了 / 新增了哪些文件
+
+| 文件 | 为什么 | 关键位置（工作树行号） |
+|------|--------|------------------------|
+| `src/core/database_view.rs` | D5 的**纯**一半：`LayoutSupport` 七种已交付；`LayoutMetrics`/`layout_metrics`；每布局的表面高公式（`rows_surface_height`/`gallery_surface_height`/`calendar_surface_height`/`form_surface_height`）与常量（LIST 44 / BOARD 76 / GALLERY 132 / TIMELINE 36 / 周 96 / 字段 40）；`board_window`/`board_slots`；日历算术（`days_in_month`/`day_number`/`day_number_of`/`first_weekday_monday0`/`date_key`/`month_key`/`month_of`/`day_of`/`shift_month`/`month_label`/`month_cells`/`CALENDAR_PEEK`）；文档新键 `date`/`end` 的读写 | D5 段 L1560 起（文件末尾）；`layout_metrics` L1590、`board_window` L1720、日历算术 L1740–1900、`date_column`/`set_date`/`end_column` L1905 起 |
+| `src/storage/database_query.rs` | `range_query`：`min(expr), max(expr)` over 同一 `FROM`/`WHERE`（timeline 的轴） | L374 起 |
+| `src/storage/database_store.rs` | `column_bounds`（执行 range_query，返回存储文本两端）与 `local_month`（日历默认月，用与 record 时间戳**同一个时钟**：`strftime('now','localtime')`） | `column_bounds` L513、`local_month` L540 起 |
+| `src/core/command.rs` | `Command::AddDatabaseView { block, view }`（+1 变体、+1 plan 臂；apply `[ViewAdded]` / revert `[ViewDeleted]`），`View` 进 import | 变体 L218、plan 臂 L1455 起 |
+| `src/app/state.rs` | 会话态三张表（`db_cal_month`/`db_gallery_per_row`/`db_form`）；`DbWindow` +7 字段（layout/stamp/body/board/cal/tl_start/tl_days）与缓存键扩两维；`db_refresh` 六分支（Layout 决定窗口单位）；`db_fill_row` 填布局载荷（含每布局 geometry）；`db_time_axis`/`db_calendar_month(_set)`/`db_cal_shift`/`db_gallery_set_per_row`/`db_form_*`/`db_add_view`/`db_open_record`；`db_rows_of` 补 `tl_from/tl_to/letter`；`DbRow::header()/header_with()` 两个构造器；`layout_total`/`date_bound`/`month_clauses`/`group_day`/`push_column` 五个自由函数 | `DbWindow` L4513+、`db_refresh` L5025、`db_fill_row` L5845、D5 方法段 L6600 起、辅助函数 L4660 起 |
+| `src/app/controller.rs` | 7 个新回调接线（`db-view-added`/`db-open-record`/`db-cal-month`/`db-gallery-shaped`/`db-form-text`/`db-form-submitted`/`db-form-cleared`）；`seed_database_view`（六场景共用，走 `db_add_view` 同一写路径）；6 个场景臂 + 6 个 `dark-` 臂 | dispatch L1752 起、`seed_database_view` L3640、dark 臂 L3985 起、场景臂 L4130 起 |
+| `ui/Types.slint` | `DbBoardColumn`/`DbCalendarDay`/`DbFormField` 三个新 struct；`DbRow` +`tl-from`/`tl-to`/`letter`；`BlockRow` +8 字段（`db-body-height`/`db-board-columns`/`db-cal-days`/`db-cal-label`/`db-gallery-per-row`/`db-tl-start`/`db-tl-days`/`db-form`）；7 个新 callback | struct L131/L161 起、BlockRow L204 起、callback L716 起 |
+| `ui/components/DatabaseView.slint` | 六个布局臂（行矩形里的 table/list/timeline 分支；board/calendar/gallery/form 四个新臂）；高度改为 Rust 的 `db-body-height`（布局自己的表面）；空态只对行/卡类布局显示 | `is-*` 判定 L47 起、`height` L76、board L780、calendar L880、gallery L1030、form L1130 |
+| `ui/components/DatabaseSwitcher.slint` | 「+」点亮：布局菜单（8 行，chart 那行 inert），行点击 → `db-view-added(block, index)` | 全文件（菜单在 `if root.menu-open`） |
+| `ui/components/EditorBlock.slint` | `db-height` 改用 `db-header-height + max(db-body-height, 34px)`（布局自己的形状） | L41–53 |
+| `docs/DECISIONS.md` | ADR-0078（每布局的窗口单位与日历折叠）/ ADR-0079（视图创建、懒建页触发、chart 拒绝） | 文件末尾 |
+| `docs/SPEC.md` | §三十九「视图」段标注 D5 交付 + ADR 号 | 一处（视图段末尾） |
+| `PLAN.md` | 末尾追加 `## Track 3 · D5 视图族` | 文件末尾 |
+| `docs/REPORT_TRACK3.md` | 本节 | — |
+
+**没碰**：`CHANGELOG.md`、`docs/ROADMAP.md`、`docs/PERFORMANCE.md`、`Cargo.toml`（**零新依赖**
+——日历/时间轴的日子算术是 Hinnant 的 civil-date 两段手写，没有日期库；SQL 仍手拼；JSON 仍
+用 D2 那个唯一阅读器）、`[profile.release]`、`src/storage/migrations.rs`（**没有新迁移步**）、
+Track 1/2/4 的功能文件。
+
+## 3 · 迁移号（串行接缝）
+
+**没有用新号。** 动手前读 `src/storage/migrations.rs`：工作树 `CURRENT_VERSION = 19`
+（12–15 D1、16 Track 2、17 D2、18 D3、19 Track 4 未提交）。本刀的视图族**零迁移**：
+board 的列 = D4 的 `groups` 键，时间轴 = 视图文档的新键 `date`/`end`（ADR-0064 的同一份
+`db_views.definition` JSON），layout = `db_views.layout` 的**已有行**（`AddDatabaseView` 只是
+插一行）。所以 **D5 的提交 blob 不含 migrations.rs**，提交树里仍是 18（D3 的现状）。
+
+## 4 · 顺手闭合的 D4 提交缺口（两条，都是「工作树有、提交树缺」）
+
+D4 的提交（HEAD `009a629`）漏了两处**本 track 自己**的改动，本刀的 blob 把它们带上：
+
+1. **`ui/components/DatabaseView.slint` 整个没进 D4 的提交**（HEAD 的该文件是 D3 版 446 行，
+   没有 filter/group 按钮、没有组头行臂）。工作树里那 177 行正是 D4 的 UI 半刀。本刀按
+   「工作树版 + D5 段」提交，缺口闭合。
+2. **`src/app/state.rs` 的 `record()` 少了 `self.db_absorb(&changes);`**（ADR-0075 的漏斗）。
+   HEAD 的 `record()` 只把它交给 persistence，内存 catalog 因此不会学到新建的 library——一个
+   刚建的数据库在自己的块上会画成 "(deleted database)" 直到重启。工作树里有这一行，本刀带上。
+
+另外两处工作树里的 D4/合并痕迹（`next_view_id: Cell<u64>,}` 的换行、`column_items, column_boxes,`
+的重复）**不**归本刀，是别的 track 的清理，不带上。
+
+## 5 · 各视图特有规则存哪（JSON 键名）
+
+全部落在 **`db_views.definition`**（ADR-0064 的文档，ADR-0074 的文本读改写）：
+
+| 视图 | 键 | 形状 | 写入方 |
+|------|----|------|--------|
+| board | `groups`（**复用 D4**） | `[7]`（选项有界的那一列） | 同一个 Group picker（`db_group_pick` → `SetDatabaseViewDefinition`） |
+| calendar / timeline | `date`（新） | `7` 或 `null` | `ViewDefinition::set_date`；本轮**没有**UI 编辑器（边界见 §6）——默认按 schema 序解析，且**不回写** |
+| calendar / timeline | `end`（新，可选） | `7` 或 `null` | `ViewDefinition::set_end`（同边界：本轮无编辑器） |
+| list / gallery / form | — | 无自有键（列与顺序用 D3 的 `columns`/`widths`） | — |
+
+时间轴列的解析（`AppState::db_time_axis`）：文档的 `date` 键（合法日期类列）→ schema 第一个
+`date` 列 → 第一个派生时间列（created/last edited）→ 无（calendar 画空白月 + nav，timeline
+画空态）。**gallery 的 per-row 不进文档**：它是会话态（窗口宽度的事实），delegate 报告、
+`DbWindow::stamp` 进缓存键。
+
+## 6 · 已接 / 未接（D5 的诚实边界）
+
+| 项 | 状态 | 说明 |
+|----|------|------|
+| board 拖拽换组 | **不做** | brief 明说「拖拽换组不做」。换组今天只能改分组列的值（表格视图里改），board 只是它的横向读法 |
+| board 卡片的「列内新建」 | 未接 | 卡片列表下方没有 per-column "+ new" 行（表头有全局 New row）。Notion 的 per-column new 是 D7 的模板/预填一起 |
+| 新建 select 选项 | 仍未接（D2 的欠账） | `PropertyOptions::to_config()` 没有 `Change` 臂，所以 select/status 列**没有选项编辑器**：board 的分组只能用已有选项的列（场景因此用 checkbox 的 Done 列） |
+| `date`/`end` 的 UI 编辑器 | 未接 | 解析按 schema 序默认；「选哪一列做时间轴」的下拉是 D5 之后的东西（文档键已就位、值可手写） |
+| gallery 封面图 | 首字母占位 | brief 允许的降级：`files` 属性首图需要逐卡缩略图解码（Track 4 的 `pdf_thumb` / D8 的解码预算），本轮画字母头像 + 标题 + 首列预览 |
+| calendar 日格里点一条 record 打开 | 未接 | 日格画标题（elided），点击不开页；打开走 board 卡 / list 行 / gallery 卡三处 + 表格行菜单（D5 新加的 `db-open-record`） |
+| timeline 双日期「吸」排序 | 未接 | 只有「一个日期列 + 可选 end 列」。没有 Notion 的 start/end 双属性选择器 |
+| 时间轴/日历的空状态 | 已接 | timeline 无任何有日期的行 → 空态文案；calendar 无日期列 → 空白月 + nav（「这个 schema 没有时间轴」是事实，不是错误） |
+| 插入菜单四行 database 占位 | **仍 muted** | `Board`/`Gallery`/`List view`/`Calendar`/`Timeline` 五行 id 仍 -1。点亮它们要教插入路径「首视图是 X 的数据库」，而本轮唯一的诚实路径是切换器「+」（ADR-0079）。**没做，明说** |
+| 视图内搜索 | 未做（D7） | SPEC 把它排在 D7 |
+| 导出 | 未改 | ADR-0065 的「导出当前视图的 GFM 表」在 D4 已跟随 filter/sort；本轮六个布局的导出**仍是那条底层行表**（calendar 的月份/board 的列不改变导出的行集，只改变看法）。边界写在这里 |
+
+## 7 · UI 接线点
+
+* **组件**：`DatabaseSwitcher`（`+` → 布局菜单 → `db-view-added`）、`DatabaseView` 的六个布局
+  臂。新增/点亮回调 7 个，全部三件套齐（`Types.slint` 声明 / `.slint` 使用 / `controller.rs`
+  绑定，逐个 grep 核对过）。
+* **场景**（每个视图一对，共 12 个臂）：`database-board` / `database-list` / `database-calendar`
+  / `database-gallery` / `database-timeline` / `database-form` + 各自 `dark-`。种子走**真写
+  路径**：`seed_database_table`（D3 的 5 行 4 列）→ `db_add_view`（切换器同一条路）→
+  board 用 `db_group_pick(Done)`、calendar 用 `db_calendar_month_set(2026, 9)`（**钉死月份**，
+  明天的 sweep 拍同一张月历）。`quire_shot` 的 `needs_db` 已含 `contains("database")`（D3 的），
+  新场景自动被覆盖。
+* **打开 record**：board 卡（标题区 TouchArea）、list 行（整行）、gallery 卡（整张）三处 →
+  `db-open-record` → 有页去页；无页**现在建页**（父 = 数据库所在页、标题 = record 的标题、
+  `[PageCreated, RecordPageSet]` 一批 = 一次 Ctrl+Z）→ 导航（controller 的 `open`）。
+* **表单**：`db-form-text`（草稿，不写库不重填——正在输入的输入框不能被重建）、
+  `db-form-submitted`（一批建行）、`db-form-cleared`（丢草稿）。
+* **日历**：`db-cal-month(±1)` → `db_cal_shift`。**画廊**：`db-gallery-shaped(per_row)` →
+  `db_gallery_set_per_row`（clamp 1..=8，变了才重读）。
+
+## 8 · 未验证（诚实清单——因为一行 cargo 都没跑）
+
+1. **编译**：本刀约 2 300 行新代码 + 多处重接没有过 `cargo check`。静态自查做了：九个文件的
+   括号平衡（剥注释/字符串的检查器；`.slint` 四个文件全平衡，Rust 文件的差值与本刀前一致——
+   噪声来自剥串粗粒度与别人未提交的 hunk）；我手写的 Rust 段逐段数过 `{}`（`AddDatabaseView`
+   的变体与 plan 臂）；7 个新回调的三件套逐个 grep；`DbRow`/`BlockRow` 的全部字面量构造点
+   （`db_rows_of` + `DbRow::header()` + `project_blocks` 大写字面量 + 测试工厂 `block()`）补齐
+   新字段；`RowRequest`/`RowWindow`/`Change::RecordPageSet` 的形状对着源码核过。但那不是编译器。
+2. **测试**：没跑任何已有测试；铁律禁止新增 `#[test]`，本刀没有写。
+3. **视觉**：12 个新场景从未渲染。**已知风险点**（统一测试先看这里）：
+   * `for cell[ci] in card.cells : if cell.kind == 7 : Rectangle`（board 卡的 checkbox）——
+     「`for` 里套 `if`」在 Slint 1.18 的接受度是解析里最含糊的一处，若不接受，改成
+     `for … : Rectangle { if … }` 加宽度 0 的壳；
+   * `db-cal-days[week * 7 + day]` 与 gallery 的 `index % per-row`：模型/数学表达式下标；
+   * `Math.floor` 返回 int 并赋给 `int` 属性（画廊 `per-row`）；
+   * `changed per-row =>` 在首帧布局时触发一次 `db-gallery-shaped`（预期：初始计算值与
+     默认 4 不同就触发，触发即重读——没有循环的风险，重读不改宽度）；
+   * `drop-shadow-*` 在测试环境（无合成器）的表现。
+4. **分组与排序在 board/timeline 上的交互**：board 的组内行按视图 sorts 排、组间按 config 序
+   （照 D4）；timeline 的泳道按视图 sorts 排——组合行为只在代码与注释里。
+5. **性能**：本刀**没有量任何数字**（D5 欠「切换视图耗时」，见测试计划）。已知的形状：board
+   一次刷新 = 1 次 `GROUP BY` + 每个触及窗口的列 1 次切片查询；calendar = 1 次月 `GROUP BY`
+   + 每天 1 次 `LIMIT 3`（最多 31 次小查询，**这是本轮最可疑的性能点**，若总测试量出 hitch，
+   第一嫌疑是它——修法是把 31 次合成一次「整天范围 + 窗口函数」或一次取回一个月的前 3 行/天，
+   不是把过滤挪回 Rust）；gallery = 1 次计数 + 1 次切片；timeline = 1 次计数 + 1 次 min/max +
+   1 次窗口读。
+6. **`date`/`end` 键与 `columns` 的透传**：ADR-0074 的读改写只在代码里（没有往返测试钉住）。
+7. **`db_open_record` 的父页与侧边栏**：建出的页会出现在侧边栏当前页之下（走 workspace 的
+   `create`），本刀没有跑过侧边栏的投影；页的 search text 没有写（`create_page` 也不写，只有
+   `rename_page` 会写——所以新建的 record 页在搜索索引里只有标题的既有路径，未验证）。
+8. **`CURRENT_VERSION`**：工作树 19 / HEAD 18，本刀**没有**动迁移，所以提交树里 18 仍是 D3 的
+   现状，合并后 12…19 连续。
+
+## 9 · 测试计划（追加到「留给最终统一测试」清单，编号接 D4 的 25）
+
+**B. 功能（headless 可证的）**
+
+26. board 只 realize 一窗卡片：10 000 行、3 列的分组库，`db_table` 的 board 模型里每列
+    `cards.len()` 之和 ≤ `列数 × (可见槽位 + overscan)`，且组的 `count` 之和 = 真实行数——
+    建议测试名 `a_board_realizes_one_slot_window_per_column`；
+27. calendar 折叠：某天 500 条、`CALENDAR_PEEK = 3`，该日格 `records.len() == 3`、
+    `count == 500`；整月计数之和 = 月范围过滤后的 `COUNT(*)`；同一天两种存储形状
+    （`2026-09-22` 与 `2026-09-22T10:00`）折到同一格——建议测试名
+    `a_calendar_day_folds_five_hundred_records_into_three_and_a_count`；
+28. timeline 的「无日期不显示」在 SQL 里：引擎捕到的语句含 `IS NOT NULL AND <> ''`（或
+    kind 对应形态），且无日期的行不在结果里；轴 = `min`/`max`；`end < start` 折成点——
+    建议测试名 `an_undated_row_never_enters_the_timeline_statement`；
+29. gallery 的窗口与报告：`per_row = 4`、viewport 两行，取回的卡片 = `4 × (2 + overscan×2)`；
+    `db_gallery_set_per_row(0)` clamp 成 1 且 `per_row = 4` 不变时返回 false（不重读）——建议
+    测试名 `a_gallery_window_is_card_rows_times_per_row`；
+30. form 提交一批：填两列 + 空一列，一次 `db_form_submit` → 1 个 record + 2 个 cell，**一次
+    Ctrl+Z 全没**；一列填了非法值（number 里写 `abc`）→ 提交被拒、`db_notice` 提到列名、**没有
+    建任何行**——建议测试名 `a_form_submit_is_one_record_and_one_undo`；
+31. `AddDatabaseView` 的往返：新增视图后 `db_views` 多一行、id/ord 正确、**第一个视图的文档
+    一字未动**；undo 删掉它、redo 放回来（同 id）——建议测试名
+    `a_second_view_does_not_disturb_the_first`；
+32. 懒建页：`db_open_record` 一个裸 record → 页存在、标题 = record 标题、父 = 数据库所在页、
+    `RecordPageSet` 已写；undo → record 回到裸（无页）；对已有页的 record 再调 → 返回同一页
+    （不建第二个）——建议测试名 `opening_a_record_mints_its_page_once`；
+33. 文档键透传（ADR-0074/0078）：手写 `{"date":7,"end":8,"columns":[…]}` 后隐藏一列，
+    `date`/`end` 原样保留；`date` 指向非日期列 → 解析回退到 schema 第一个日期列且**不写回**
+    ——建议测试名 `a_time_axis_naming_a_text_column_falls_back_without_writing`；
+34. 布局几何一致：每个布局 `layout_metrics(layout).row_height` == `db_fill_row` 写进
+    `db-row-height` 的值，且 `db-body-height` == 该布局表面高公式——建议测试名
+    `every_layout_lays_itself_out_at_its_own_unit`（钉住 D3 那个 row-height=0 的 bug 类）。
+
+**C. 视觉（接着 §10 编号）**
+
+35. sweep 对照 D4 基线：既有的 67 个场景 + D3/D4 两个 database 场景的像素**逐字节相同**
+    （本刀没动 table 的像素？**会动**：`db-height` 的公式换了实现但等值——table 的 body 仍是
+    `total × 32`，所以 `database-table` 与 `database-filter` 应当逐字节相同，**这是要看的信号**：
+    若它们动了，第一嫌疑是 body 高度公式不等值）；`database-*` 六个新场景为 new（人工核对
+    每张：board 两列 `Done · 3` / `Done · 2` 与卡片、list 两行预览、calendar 2026-09 的格子与
+    "and N more"、gallery 4 列卡片与字母、timeline 五天轴上的条与点、form 四字段 + Submit）。
+36. 切换器「+」菜单的人工截图：点开 → 8 行、chart 行灰、点 Board → tab 多一个 "Board" 且内容
+    换成看板（**这也是「切换视图耗时」要量的那一刻**）。
+
+**D. 性能（D5 欠 SPEC 的第二个数字）**
+
+37. **切换视图耗时**：release 探针（`#[ignore]` 打印型，D1/D2 的写法），10 000 行的库上量
+    `db_add_view` + `db_pick_view`（含一次窗口重读）的端到端；再分三种布局各一次（board 的
+    `GROUP BY` 成本、calendar 的月 `GROUP BY`、timeline 的 min/max）。原始行落
+    `benchmarks/results/2026-09-22-track3-d5-views.jsonl`，进 `docs/PERFORMANCE.md` 随 D8 收口。
+38. **calendar 的 31 次日查询**（§8.5 的最可疑点）：量整月刷新（1 次 `GROUP BY` + N 次
+    `LIMIT 3`）对一个 10 000 行库的耗时，与「取回整月再在 Rust 里截前 3」的对照臂比；若日
+    查询占大头，修法是合查询而不是挪过滤。
+
+## 10 · 给整合者的注意事项
+
+1. **共享文件的提交方式照 D0–D4**：`docs/DECISIONS.md`（只在末尾追加 ADR-0078/0079，排除
+   Track 4 前插的 ADR-0080）、`PLAN.md`（只追加 D5 节）、`docs/SPEC.md`（视图段一处的追加）、
+   `src/core/command.rs`（+1 变体 +1 plan 臂 + `View` 进 import）、`src/app/state.rs`
+   （D5 段 + 两个 D4 缺口）、`src/app/controller.rs`（7 回调 + 12 场景臂 + seed）、
+   `ui/Types.slint`（D5 的 struct/字段/callback）、`ui/components/EditorBlock.slint`
+   （一行 binding + 其注释）。脚本在 `.scratch/track3-d5/stage.py`。提交后这些共享文件在工作
+   树里仍是 modified——那是别人的改动（Track 2 的 mention/backlinks/synced），不是脏数据。
+2. **本刀顺带闭合 D4 的两个提交缺口**（§4）：`ui/components/DatabaseView.slint`（D4 整刀没提
+   交它）与 `src/app/state.rs` 的 `db_absorb` 漏斗行。所以 D5 的提交树里这两个文件带着 D4 的
+   内容——**D4 的提交树（009a629）单独编译/运行是缺这两处的**，统一测试若要对照「D4 树 vs D5
+   树」，请以合并后的树为准。
+3. **`db_open_record` 会建页**：它是第一个从 UI 触发懒建页的路径（ADR-0063 的 UI 半边）。若
+   Track 1 正在改页面生命周期/侧边栏，合并时注意这条路径建出的页是一个普通子页（父 = 打开
+   页），没有新的页属性。
+4. **迁移号不动**（§3）；**ADR 号** 0078/0079 接在 0077 后，与 Track 4 的 0080+ 不冲突。
+5. **`RowRequest` 未变**（本刀没加字段），但 `DbWindow` 的字段和缓存键加了 layout/stamp——
+   只影响本 track 的 state.rs。
+6. **`CHANGELOG.md` 不要为 D5 写功能行吗？** 六个视图首次可画是**用户可见**的（切换器「+」
+   与六个布局）。本刀没碰 CHANGELOG（铁律：不改它）；整合者若要收口，条目草稿：
+   > - The view switcher's `+` now adds a view, and six of §三十九's layouts are drawn: Board
+   >   (grouped columns of cards), List, Calendar (a month grid with per-day fold counts),
+   >   Gallery, Timeline (bars on an aggregate `min`/`max` axis) and Form (a new-record form that
+   >   creates one record per submit, one Ctrl+Z). Chart is still refused by name (D7), and the
+   >   insert menu's database placeholders beyond "Table view" are still muted.

@@ -96,6 +96,17 @@ export struct DbRow {
     // surface and carries no cells, so a 10 000-row database grouped into
     // three groups realizes three of these, never one per group.
     header: string,
+    // D5 (timeline): the bar's two ends as day numbers (days since
+    // 1970-01-01, computed in Rust from the row's date cells — a delegate
+    // never parses a date). -1 = no date, which the timeline's own filter
+    // never hands over anyway (「无日期不显示」 is SQL, not a delegate check);
+    // from == to is a point, the brief's 「起=止=同一天时画点」.
+    tl-from: int,
+    tl-to: int,
+    // D5 (gallery): the avatar's one character — the title's first, cut in
+    // Rust because a delegate never touches string surgery. "" = nothing to
+    // cut (the avatar draws blank, which a record with no title is).
+    letter: string,
     cells: [DbCell],
 }
 
@@ -177,6 +188,26 @@ export struct BlockRow {
     db-sort-property: int,
     db-sort-desc: bool,
     db-group-property: int,
+    // ─── D5: the view family (SPEC §三十九 「视图」) ─────────────────────────
+    // The block's height is the layout's own shape now: `db-body-height` is the
+    // surface below the header, computed in Rust from the layout's counts (a
+    // table's rows, a board's tallest column, a gallery's card rows, the
+    // calendar's fixed grid, the form's fields) — the delegate adds the header
+    // and stops doing arithmetic of its own.
+    db-body-height: length,
+    // board: the group columns with their realized card slices
+    db-board-columns: [DbBoardColumn],
+    // calendar: the fixed 6×7 grid (0 = blank) and the month's name
+    db-cal-days: [DbCalendarDay],
+    db-cal-label: string,
+    // gallery: the delegate's reported cards-per-row (it knows the width)
+    db-gallery-per-row: int,
+    // timeline: the axis the bars are drawn against — first day (a day number)
+    // and its length in days, one aggregate query per refresh
+    db-tl-start: int,
+    db-tl-days: int,
+    // form: the field list, fed from the draft until Submit creates the record
+    db-form: [DbFormField],
 
 
 }
@@ -211,6 +242,41 @@ export struct DbFilterRow {
 export struct DbFilterOp {
     op: int,
     name: string,
+}
+
+// ─── D5: the view family's own shapes (SPEC §三十九 「视图」) ────────────────
+// Everything here is already decided in Rust — labels, counts, windows — and
+// the delegate only places what it is handed, the same contract the table's
+// rows have kept since D3.
+
+// One board column: the group's label and count (from one `GROUP BY` over an
+// option-bounded column — the list of *headers*, never one per card) and the
+// cards the slot window realizes inside it. A card is a `DbRow`: its `title`
+// is the card's words and its cells carry the checkbox the card draws.
+export struct DbBoardColumn {
+    label: string,
+    count: int,
+    cards: [DbRow],
+}
+
+// One calendar day cell: the day of the month (0 = a leading/trailing blank),
+// how many records the day holds (the fold's number, from one `GROUP BY`), and
+// up to three realized records — the rest say "and N more" without ever
+// becoming objects.
+export struct DbCalendarDay {
+    day: int,
+    count: int,
+    records: [DbRow],
+}
+
+// One form field: the column the field edits, and the draft text as typed.
+// A draft and not a record — nothing reaches SQL until Submit, and one submit
+// is one undo step.
+export struct DbFormField {
+    property: int,
+    name: string,
+    kind: int,
+    text: string,
 }
 
 export struct CommandRow {
@@ -609,6 +675,21 @@ export global UIState {
     // layout. Fired when that number moves, which is a scroll or a reflow.
     callback db-viewport(int, length);           // block, top-in-viewport
     callback db-open-record(int, int);           // block, record: open the row's page (D5)
+    // ─── D5: the view family ────────────────────────────────────────────────
+    // The switcher's `+` picked a layout (`ViewLayout::ALL`'s order — the index
+    // IS the layout; Chart is refused in Rust with its own word). Creates the
+    // view and switches to it.
+    callback db-view-added(int, int);            // block, layout index
+    // calendar: ‹ › step one month
+    callback db-cal-month(int, int);             // block, delta (+1 / -1)
+    // gallery: the delegate's reported cards-per-row (it knows the grid's
+    // width; Rust re-reads the card slice when the number changes)
+    callback db-gallery-shaped(int, int);        // block, cards per row
+    // form: the draft's keystrokes (stored, never written), Submit (creates
+    // one record from the parsed draft — one undo step) and Clear
+    callback db-form-text(int, int, string);     // block, property, draft text
+    callback db-form-submitted(int);             // block
+    callback db-form-cleared(int);               // block
     // rich paste (SPEC §二十七): true = the clipboard landed as blocks (the
     // key is consumed); false = fall through to the native plain paste
     callback rich-paste(int) -> bool;

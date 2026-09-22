@@ -1688,6 +1688,98 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         });
     }
 
+    // ---- database view family (SPEC §三十九 「视图」, D5) ----
+    //
+    // The switcher's `+` (one callback per picked layout, `ViewLayout::ALL`'s
+    // order), the card click (open the record's page, minting it when the
+    // record is bare — ADR-0063's lazy page finally getting its trigger), the
+    // calendar's ‹ ›, the gallery's reported shape, and the form's three
+    // callbacks. The same two rules the D4 bindings carry: every accepted edit
+    // re-fills the one block row (the layout's own payload rides on it), and a
+    // write Rust refused changed nothing on screen.
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_view_added(move |block, layout| {
+            let g = gw.upgrade().unwrap();
+            flush_pending_edit(&g, &s);
+            // `db_add_view` also switches to the new view — creating and not
+            // looking would be half a gesture — so one refill carries the
+            // switch's own re-read
+            if s.db_add_view(block, layout) {
+                db_refill_row(&s, block);
+            }
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_open_record(move |block, record| {
+            let g = gw.upgrade().unwrap();
+            flush_pending_edit(&g, &s);
+            if let Some(page) = s.db_open_record(block, record as i64) {
+                // the record may have just gained its page: the block row's
+                // own shape (board cards' Open targets) follows on the refill,
+                // and the navigation below is the sidebar's usual dance
+                db_refill_row(&s, block);
+                open(&g, &s, page);
+            }
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_cal_month(move |block, delta| {
+            let g = gw.upgrade().unwrap();
+            flush_pending_edit(&g, &s);
+            if s.db_cal_shift(block, delta) {
+                db_refill_row(&s, block);
+            }
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_gallery_shaped(move |block, per_row| {
+            let g = gw.upgrade().unwrap();
+            // the grid was resized: the card slice is rows × per_row, so a new
+            // shape is a re-read (and a no-op when the clamp keeps the number)
+            if s.db_gallery_set_per_row(block, per_row) {
+                db_refill_row(&s, block);
+            }
+        });
+    }
+    {
+        let s = state.clone();
+        ui.global::<UIState>().on_db_form_text(move |block, property, text| {
+            // the draft only: no refill (the live input must not be rebuilt
+            // under the keystroke), no SQL (nothing exists until Submit)
+            s.db_form_set_text(block, property, &text);
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_form_submitted(move |block| {
+            let g = gw.upgrade().unwrap();
+            flush_pending_edit(&g, &s);
+            // a refused submit said its own word (`db-notice`); a successful
+            // one cleared the draft, and the refill is what blanks the fields
+            if s.db_form_submit(block) {
+                db_refill_row(&s, block);
+            }
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_form_cleared(move |block| {
+            let g = gw.upgrade().unwrap();
+            s.db_form_clear(block);
+            db_refill_row(&s, block);
+        });
+    }
+
     {
         let gw = gw.clone();
         let s = state.clone();
@@ -3203,6 +3295,51 @@ fn seed_database_filter(state: &Rc<AppState>) -> Option<i32> {
     Some(id)
 }
 
+/// Seed one of D5's view-family scenes: the table seed plus a second view of
+/// the layout the scene names, added **through the same path the switcher's
+/// `+` drives** (`db_add_view`, which also switches to the new view), plus the
+/// layout's own rule through the same helpers the UI drives:
+///
+/// * board — groups by the seed's `Done` checkbox (D4's `db_group_pick`, the
+///   same key the Group picker writes). A checkbox rather than a select: an
+///   option editor is still D5's undone half, so a seeded select column would
+///   have an empty option list and the shot would be about that.
+/// * calendar — the month is **pinned** (`db_calendar_month_set`, 2026-09), not
+///   defaulted to now: a sweep that runs tomorrow must photograph the same
+///   grid. The records carry literal dates (`2026-09-22` …), so the month's
+///   counts and the day peeks answer to the same query the view runs.
+/// * timeline / gallery / list / form — the layout itself, no extra rule: the
+///   date column resolves by the schema's own order (`Due` is the seed's only
+///   date), the gallery reports its own shape on first layout, and the form is
+///   its field list.
+///
+/// The values are literals throughout: a sweep that runs tomorrow must
+/// photograph the same view.
+fn seed_database_view(state: &Rc<AppState>, layout: crate::core::database::ViewLayout) -> Option<i32> {
+    let id = seed_database_table(state)?;
+    let index = crate::core::database::ViewLayout::ALL
+        .iter()
+        .position(|l| *l == layout)? as i32;
+    if !state.db_add_view(id, index) {
+        return None;
+    }
+    if layout == crate::core::database::ViewLayout::Board {
+        let done = state
+            .db_column_toggles(id)
+            .into_iter()
+            .find(|t| t.name == "Done")
+            .map(|t| t.property)?;
+        if !state.db_group_pick(id, done) {
+            return None;
+        }
+    }
+    if layout == crate::core::database::ViewLayout::Calendar {
+        state.db_calendar_month_set(id, 2026, 9);
+    }
+    db_refill_row(state, id);
+    Some(id)
+}
+
 /// The first cell a grid-building command created — the cell a table's caret
 /// starts in. `apply` inserts cells in row-major order, so this is the
 /// top-left one, which is where the converted line's words went.
@@ -3415,6 +3552,30 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             g.set_dark(true);
             apply_scene(ui, state, "database-filter");
         }
+        "dark-database-board" => {
+            g.set_dark(true);
+            apply_scene(ui, state, "database-board");
+        }
+        "dark-database-list" => {
+            g.set_dark(true);
+            apply_scene(ui, state, "database-list");
+        }
+        "dark-database-calendar" => {
+            g.set_dark(true);
+            apply_scene(ui, state, "database-calendar");
+        }
+        "dark-database-gallery" => {
+            g.set_dark(true);
+            apply_scene(ui, state, "database-gallery");
+        }
+        "dark-database-timeline" => {
+            g.set_dark(true);
+            apply_scene(ui, state, "database-timeline");
+        }
+        "dark-database-form" => {
+            g.set_dark(true);
+            apply_scene(ui, state, "database-form");
+        }
         "title-edit" => {
             g.set_page_title("Renaming in place…".into());
             g.set_title_editing(true);
@@ -3497,6 +3658,29 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             seed_database_filter(state);
         }
 
+        // SPEC §三十九 「视图」(D5): the family. Each scene is the table seed
+        // plus a second view of the named layout, added and switched to through
+        // the switcher's own write path — so every shot is the real read
+        // pipeline's answer (group counts, month counts, per-day peeks, card
+        // slices), never a hand-built fixture.
+        "database-board" => {
+            seed_database_view(state, crate::core::database::ViewLayout::Board);
+        }
+        "database-list" => {
+            seed_database_view(state, crate::core::database::ViewLayout::List);
+        }
+        "database-calendar" => {
+            seed_database_view(state, crate::core::database::ViewLayout::Calendar);
+        }
+        "database-gallery" => {
+            seed_database_view(state, crate::core::database::ViewLayout::Gallery);
+        }
+        "database-timeline" => {
+            seed_database_view(state, crate::core::database::ViewLayout::Timeline);
+        }
+        "database-form" => {
+            seed_database_view(state, crate::core::database::ViewLayout::Form);
+        }
         "empty" => open(&g, state, 113),
         "nest" => {
             // indent the second bullet under the first (visual test)

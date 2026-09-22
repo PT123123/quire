@@ -30,16 +30,21 @@
 //    to sum the fixed widths inside a binding. Header and rows use the same
 //    expression, which is what keeps the columns aligned.
 //
-// What is deliberately *not* here: adding or reordering a property, a filter, a
-// sort, a row menu beyond delete, and the other seven layouts. The first four
-// are D4/D5, and the last is why `db-layout-ok` exists: a view whose layout this
-// build cannot draw says so instead of pretending to be a table.
+// What is deliberately *not* here: adding or reordering a property, and the
+// other seven layouts. D4 added the rules' UI — the filter button and its
+// panel, the header-click sort with its arrow, the group-by picker, the group
+// header entries between the rows — and every one of those controls only
+// *sends* a decision: the rules are written back into the view's document and
+// compiled into SQL, so what a row shows is the query's answer, never a
+// Rust- or Slint-side filter. A row menu beyond delete, and the layouts, are
+// D5. `db-layout-ok` is why a view this build cannot draw says so instead of
+// pretending to be a table.
 
 import { Theme } from "../Theme.slint";
 import { Colors } from "../Colors.slint";
 import { Typography } from "../Typography.slint";
 import { Icon } from "../Icons.slint";
-import { UIState, BlockRow } from "../Types.slint";
+import { UIState, BlockRow, DbBoardColumn, DbCalendarDay, DbFormField } from "../Types.slint";
 import { DatabaseCell } from "./DatabaseCell.slint";
 import { DatabaseSwitcher } from "./DatabaseSwitcher.slint";
 
@@ -48,9 +53,34 @@ export component DatabaseView inherits Rectangle {
     in property <length> content-width;
     in property <length> row-y; // the block body's top, in list-content coords
 
+    // ── D5: which layout is drawn, and the shape it is drawn at ──────────
+    // The active view's `db_views.layout` decides which body arm below draws,
+    // and — with it — what a "unit" of the scroll surface is: a table row, a
+    // list row, a timeline lane, a board slot, a gallery card row. The heights
+    // are not restated here: `db-row-height` is the layout's own unit (Rust's
+    // `layout_metrics`), and `db-body-height` is the whole surface below the
+    // header, computed in Rust from the layout's counts. The block's height is
+    // the header plus that surface (floored at the empty-state's one line),
+    // which is what keeps the page's scroll the view's scroll for every
+    // layout — the red line is about rows, and each layout's window is its own
+    // answer to it.
+    property <bool> is-table: root.block.db-layout == "table";
+    property <bool> is-board: root.block.db-layout == "board";
+    property <bool> is-list: root.block.db-layout == "list";
+    property <bool> is-calendar: root.block.db-layout == "calendar";
+    property <bool> is-gallery: root.block.db-layout == "gallery";
+    property <bool> is-timeline: root.block.db-layout == "timeline";
+    property <bool> is-form: root.block.db-layout == "form";
+    // The three layouts that place one row per unit and share the row
+    // rectangle below; the others draw their own body arms.
+    property <bool> row-based: root.is-table || root.is-list || root.is-timeline;
+    // The layouts whose empty state is the delegate's own body (a calendar
+    // with no records is a month of blanks; a form is always its fields).
+    property <bool> shows-empty-state: !root.is-calendar && !root.is-form;
+
     // The page scroll, and this block's place in it: where the viewport's top
     // edge falls inside this block, in px. Negative when the block's top is
-    // above the viewport, positive when the block starts below it. Reported to
+    // above the viewport, positive when it starts below it. Reported to
     // Rust whenever it moves — a scroll, a reflow, a page switch — and it is the
     // *only* piece of layout this slice lets Rust depend on.
     property <length> top-in-view: root.row-y - UIState.editor-scroll-y;
@@ -58,14 +88,18 @@ export component DatabaseView inherits Rectangle {
         UIState.db-viewport(root.block.id, root.top-in-view);
     }
 
-    // The scroll surface: the header plus every row of the *database*, not of
-    // the window. An empty database reserves one line for its "no rows" text, so
-    // the block is never zero-height and always clickable.
+    // The scroll surface: the header plus the layout's surface below it. An
+    // empty database (except the calendar and the form, which draw their own
+    // bodies) reserves one line for its "no rows" text, so the block is never
+    // zero-height and always clickable.
     property <length> body-top: root.block.db-header-height;
-    property <length> body-h: root.block.db-row-count * root.block.db-row-height;
+    property <length> body-h: Math.max(root.block.db-body-height, 0px);
     property <length> empty-h: 34px;
     property <bool> has-rows: root.block.db-row-count > 0;
-    height: root.body-top + (root.has-rows ? root.body-h : root.empty-h);
+    height: root.body-top
+        + (root.has-rows || !root.shows-empty-state
+            ? Math.max(root.body-h, 0px)
+            : root.empty-h);
 
     // The columns' grid: the row-action slot is reserved on both the header and
     // the rows, which is what keeps their columns aligned.
@@ -126,9 +160,25 @@ export component DatabaseView inherits Rectangle {
 
         // How many rows there are, in words: a 10 000-row table's scroll bar
         // cannot say it, and the switcher line has the room. Right-aligned
-        // against the two buttons, which are fixed-width.
-        Text {
-            x: parent.width - 96px - 92px - 96px;
+        // against the buttons, which are fixed-width. D4: when the view has a
+        // visible degradation (`db-filter-note` — a filter the document held
+        // that this build could not apply), the note takes the count's place,
+        // in the color that says "read this": a count of rows the user is not
+        // seeing is exactly the wrong thing to display there.
+        if root.block.db-filter-note != "" : Text {
+            x: parent.width - 552px;
+            y: 4px;
+            width: 228px;
+            height: 22px;
+            vertical-alignment: center;
+            overflow: elide;
+            text: root.block.db-filter-note;
+            font-family: Typography.ui-font;
+            font-size: Typography.size-caption;
+            color: Colors.danger;
+        }
+        if root.block.db-filter-note == "" : Text {
+            x: parent.width - 316px - 92px;
             y: 4px;
             width: 88px;
             height: 22px;
@@ -145,7 +195,7 @@ export component DatabaseView inherits Rectangle {
         // header rather than under the last row, because a 10 000-row database
         // has no reachable last row.
         new-row := Rectangle {
-            x: parent.width - 96px - 92px;
+            x: parent.width - 224px - 92px;
             y: 4px;
             width: 92px;
             height: 22px;
@@ -185,7 +235,7 @@ export component DatabaseView inherits Rectangle {
         // popup and not an inline menu, because a menu drawn inside a row would
         // be clipped by the list view it sits in.
         columns-btn := Rectangle {
-            x: parent.width - 96px;
+            x: parent.width - 224px;
             y: 4px;
             width: 96px;
             height: 22px;
@@ -231,6 +281,83 @@ export component DatabaseView inherits Rectangle {
             }
         }
 
+        // "Filter": the view's rules (D4). The count chip is how many clauses
+        // the filter holds, and the accent color is the "this view is
+        // filtered" state — the same signal the note line borrows when the
+        // rules could not be applied.
+        filter-btn := Rectangle {
+            x: parent.width - 128px;
+            y: 4px;
+            width: 64px;
+            height: 22px;
+            border-radius: Theme.radius-sm;
+            background: root.block.db-filter-count > 0 ? Colors.accent-soft
+                : filter-ta.has-hover ? Colors.surface-hover : transparent;
+
+            Text {
+                x: 6px;
+                width: parent.width - 12px;
+                height: parent.height;
+                vertical-alignment: center;
+                horizontal-alignment: center;
+                text: root.block.db-filter-count > 0
+                    ? "Filter " + root.block.db-filter-count
+                    : "Filter";
+                font-family: Typography.ui-font;
+                font-size: Typography.size-caption;
+                color: root.block.db-filter-count > 0 ? Colors.accent-text : Colors.text-secondary;
+            }
+            filter-ta := TouchArea {
+                width: parent.width;
+                height: parent.height;
+                mouse-cursor: MouseCursor.pointer;
+                clicked => {
+                    UIState.db-filter-opened(
+                        root.block.id,
+                        self.absolute-position.x,
+                        self.absolute-position.y + self.height);
+                }
+            }
+        }
+
+        // "Group": the group-by picker (D4). Accent when a column is grouped;
+        // the picker itself offers only the option-bounded kinds, because the
+        // list of group headers has to stay small enough to compute in full
+        // (ADR-0076) — grouping by a text column would put a header on every
+        // distinct value, which is the one thing group-by must not become.
+        group-btn := Rectangle {
+            x: parent.width - 64px;
+            y: 4px;
+            width: 64px;
+            height: 22px;
+            border-radius: Theme.radius-sm;
+            background: root.block.db-group-property >= 0 ? Colors.accent-soft
+                : group-ta.has-hover ? Colors.surface-hover : transparent;
+
+            Text {
+                x: 6px;
+                width: parent.width - 12px;
+                height: parent.height;
+                vertical-alignment: center;
+                horizontal-alignment: center;
+                text: "Group";
+                font-family: Typography.ui-font;
+                font-size: Typography.size-caption;
+                color: root.block.db-group-property >= 0 ? Colors.accent-text : Colors.text-secondary;
+            }
+            group-ta := TouchArea {
+                width: parent.width;
+                height: parent.height;
+                mouse-cursor: MouseCursor.pointer;
+                clicked => {
+                    UIState.db-group-opened(
+                        root.block.id,
+                        self.absolute-position.x,
+                        self.absolute-position.y + self.height);
+                }
+            }
+        }
+
         // the column names, one per visible column, in view order
         HorizontalLayout {
             x: 0px;
@@ -246,10 +373,17 @@ export component DatabaseView inherits Rectangle {
                 border-width: 1px;
                 border-color: Colors.border;
 
+                // The sort indicator's state (D4): the first term of the view's
+                // sort list, which is the one the header edits. A document may
+                // name more terms and still sorts by all of them — this arrow
+                // is the head of that order, and cycling it is the one sort
+                // edit a header can honestly offer.
+                property <bool> is-sorted: root.block.db-sort-property == column.property;
+
                 Text {
                     x: Theme.spacing-sm;
                     y: 0px;
-                    width: parent.width - 2 * Theme.spacing-sm;
+                    width: parent.width - 2 * Theme.spacing-sm - (parent.is-sorted ? 14px : 0px);
                     height: parent.height;
                     vertical-alignment: center;
                     overflow: elide;
@@ -260,9 +394,26 @@ export component DatabaseView inherits Rectangle {
                     color: Colors.text-secondary;
                 }
 
+                if parent.is-sorted : Icon {
+                    x: parent.width - 18px;
+                    y: (parent.height - 12px) / 2;
+                    width: 12px;
+                    height: 12px;
+                    size: 12px;
+                    name: root.block.db-sort-desc ? "chevron-down" : "chevron-up";
+                    color: Colors.accent-text;
+                }
+
                 head-ta := TouchArea {
                     width: parent.width - 6px;
                     height: parent.height;
+                    mouse-cursor: MouseCursor.pointer;
+                    // cycle none → ascending → descending → none; a kind with
+                    // no order (a multi-select, a formula) refuses in Rust and
+                    // the header stays as it was
+                    clicked => {
+                        UIState.db-sort-cycled(root.block.id, column.property);
+                    }
                 }
 
                 // The resize handle: a 6 px strip on the column's trailing edge.
@@ -315,14 +466,14 @@ export component DatabaseView inherits Rectangle {
         }
     }
 
-    // ── the rows ────────────────────────────────────────────────────────
+    // ── the rows (table / list / timeline: one row per window unit) ───────
     // One element per realized row, placed at its own offset in the scroll
     // surface: `db-row-start` is what makes `index` a *model* index and the
     // position a *row* index (§三十七's two extra rules for a block whose rows
     // are dynamic). Deliberately not clipped — a select cell's option list is
     // taller than the row it belongs to, and the list view clips to the viewport
     // anyway.
-    if root.live : Rectangle {
+    if root.live && root.row-based : Rectangle {
         x: 0px;
         y: root.body-top;
         width: root.content-width;
@@ -336,7 +487,36 @@ export component DatabaseView inherits Rectangle {
             height: root.block.db-row-height;
             background: transparent;
 
-            HorizontalLayout {
+            // ── a group header (D4): one muted line, an *entry* and not a
+            // record. It occupies one slot of the scroll surface the window
+            // arithmetic already accounted for (`group_window` placed it
+            // here), carries no cells and no row actions, and its label came
+            // from Rust with the count already in it — the delegate draws
+            // words, it does not count rows.
+            if row.header != "" : Rectangle {
+                x: 0px;
+                y: 0px;
+                width: parent.width;
+                height: parent.height;
+                background: Colors.surface-hover;
+
+                Text {
+                    x: Theme.spacing-sm;
+                    y: 0px;
+                    width: parent.width - 2 * Theme.spacing-sm;
+                    height: parent.height;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    text: row.header;
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-caption;
+                    font-weight: Typography.weight-semibold;
+                    color: Colors.text-secondary;
+                }
+            }
+
+            // ── a table row: the cell grid (D3) ────────────────────────────
+            if row.header == "" && root.is-table : HorizontalLayout {
                 x: 0px;
                 y: 0px;
                 width: root.grid-w;
@@ -354,11 +534,110 @@ export component DatabaseView inherits Rectangle {
                 }
             }
 
+            // ── a list row (D5): the title on its own line, the first two
+            // visible columns as a muted preview underneath. Opening is the
+            // row's whole click: a page-backed record navigates, a bare one
+            // mints its page first (ADR-0063's lazy page, `db-open-record`) —
+            // which is why the click is on the row, not in a cell.
+            if row.header == "" && root.is-list : Rectangle {
+                x: 0px;
+                y: 0px;
+                width: root.grid-w;
+                height: parent.height;
+                background: list-ta.has-hover ? Colors.surface-hover : transparent;
+
+                Text {
+                    x: Theme.spacing-sm;
+                    y: 4px;
+                    width: parent.width - 2 * Theme.spacing-sm;
+                    height: 18px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    text: row.title;
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-ui;
+                    color: Colors.text-primary;
+                }
+                Text {
+                    x: Theme.spacing-sm;
+                    y: 22px;
+                    width: parent.width - 2 * Theme.spacing-sm;
+                    height: 16px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    // the painted cells, joined: two columns of preview, and
+                    // "" when the view shows nothing but the title
+                    text: row.cells.length > 0
+                        ? (row.cells[0].text + (row.cells.length > 1 ? " · " + row.cells[1].text : ""))
+                        : "";
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-caption;
+                    color: Colors.text-muted;
+                }
+                list-ta := TouchArea {
+                    width: parent.width;
+                    height: parent.height;
+                    mouse-cursor: MouseCursor.pointer;
+                    clicked => {
+                        UIState.db-open-record(root.block.id, row.record);
+                    }
+                }
+            }
+
+            // ── a timeline lane (D5): the bar at its days' place on the axis.
+            // The axis is Rust's (`db-tl-start` / `db-tl-days`, one aggregate
+            // query), the bar's days are the row's (`tl-from` / `tl-to`) — the
+            // delegate does the one mapping and nothing else. A same-day bar
+            // is a point (a 6 px pill), the brief's 「起=止=同一天时画点」.
+            if row.header == "" && root.is-timeline : Rectangle {
+                x: 0px;
+                y: 0px;
+                width: root.grid-w;
+                height: parent.height;
+                background: transparent;
+
+                property <length> day-w: root.grid-w / Math.max(root.block.db-tl-days, 1);
+                property <length> bar-x: (row.tl-from - root.block.db-tl-start) * self.day-w;
+                property <length> bar-w: Math.max(
+                    (row.tl-to - row.tl-from + 1) * self.day-w, 6px);
+
+                // the lane's own line, so a bar's height reads against something
+                Rectangle {
+                    x: 0px;
+                    y: (parent.height - 1px) / 2;
+                    width: parent.width;
+                    height: 1px;
+                    background: Colors.border;
+                }
+                if row.tl-from >= 0 : Rectangle {
+                    x: parent.bar-x;
+                    y: (parent.height - 12px) / 2;
+                    width: parent.bar-w;
+                    height: 12px;
+                    border-radius: 6px;
+                    background: Colors.accent;
+                }
+                Text {
+                    x: parent.bar-x + parent.bar-w + 8px;
+                    y: 0px;
+                    width: Math.max(parent.width - parent.bar-x - parent.bar-w - 16px, 40px);
+                    height: parent.height;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    text: row.title;
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-caption;
+                    color: Colors.text-secondary;
+                }
+            }
+
             // The row's own action, in the slot both the header and the rows
             // reserve. Delete is ADR-0063's plan (`[values, record, page?]`, one
             // Ctrl+Z) and the only row menu D3 ships: renaming a row is editing
-            // its title cell, and opening one as a page is D5's.
-            row-actions := Rectangle {
+            // its title cell, and opening one as a page is the row's click in a
+            // list (above). A group header has nothing to delete — its slot
+            // stays empty.
+            if row.header == "" : Rectangle {
                 x: root.grid-w;
                 width: root.slot-w;
                 height: parent.height;
@@ -391,8 +670,9 @@ export component DatabaseView inherits Rectangle {
         }
 
         // an empty database says so and offers its first row, in the place the
-        // rows would start
-        if !root.has-rows : Rectangle {
+        // rows would start (the calendar and the form draw their own bodies,
+        // so this arm is theirs to skip)
+        if !root.has-rows && root.shows-empty-state : Rectangle {
             x: 0px;
             y: 0px;
             width: parent.width;
@@ -420,7 +700,561 @@ export component DatabaseView inherits Rectangle {
         }
     }
 
-    // ── a layout this build cannot draw yet (D5) ─────────────────────────
+    // ── a board (D5): columns are groups, cards are records ──────────────
+    // The columns are the group list (a handful of headers from one `GROUP
+    // BY`); each holds its own slice of the slot window the Rust side
+    // computed (`board_window`), and a card is placed at
+    // `(db-row-start + index) * db-row-height` inside its column — the same
+    // row→slot conversion the table's rows use, one unit down. A column
+    // holding 10 000 cards realizes the same handful the ungrouped table
+    // would; a card is a title and the first checkbox cell it was handed.
+    if root.live && root.is-board : Rectangle {
+        x: 0px;
+        y: root.body-top;
+        width: root.content-width;
+        height: root.body-h;
+        background: transparent;
+
+        HorizontalLayout {
+            x: 0px;
+            y: 0px;
+            width: root.grid-w;
+            height: parent.height;
+            spacing: Theme.spacing-sm;
+
+            for column[ci] in root.block.db-board-columns : Rectangle {
+                horizontal-stretch: 1;
+                height: parent.height;
+                background: transparent;
+
+                Text {
+                    x: Theme.spacing-sm;
+                    y: 0px;
+                    width: parent.width - 2 * Theme.spacing-sm;
+                    height: 24px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    // the label came with the count in it from Rust ("Done · 3",
+                    // the group header's own wording) — the delegate draws words
+                    text: column.label;
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-caption;
+                    font-weight: Typography.weight-semibold;
+                    color: Colors.text-secondary;
+                }
+
+                // the card area: the whole surface's height, so every column's
+                // slot grid is the same height and a card's y is its true slot
+                Rectangle {
+                    x: 0px;
+                    y: 24px;
+                    width: parent.width;
+                    height: Math.max(parent.height - 24px, 0px);
+                    background: transparent;
+
+                    for card[index] in column.cards : Rectangle {
+                        x: Theme.spacing-sm;
+                        y: (root.block.db-row-start + index) * root.block.db-row-height;
+                        width: parent.width - 2 * Theme.spacing-sm;
+                        height: root.block.db-row-height - 8px;
+                        border-radius: Theme.radius-sm;
+                        background: Colors.surface;
+                        border-width: 1px;
+                        border-color: Colors.border;
+
+                        // the card's words, clickable: a page-backed card
+                        // navigates, a bare one mints its page first
+                        // (ADR-0063's lazy page) — the same Open a list row's
+                        // click is
+                        card-ta := TouchArea {
+                            width: parent.width;
+                            height: parent.height;
+                            mouse-cursor: MouseCursor.pointer;
+                            clicked => {
+                                UIState.db-open-record(root.block.id, card.record);
+                            }
+                        }
+
+                        Text {
+                            x: Theme.spacing-sm;
+                            y: 8px;
+                            width: parent.width - 2 * Theme.spacing-sm;
+                            height: 20px;
+                            vertical-alignment: center;
+                            overflow: elide;
+                            text: card.title;
+                            font-family: Typography.ui-font;
+                            font-size: Typography.size-caption;
+                            color: Colors.text-primary;
+                        }
+
+                        // the card's checkboxes: the checkbox cells the row was
+                        // handed, drawn as the box the cell draws and toggled
+                        // through the **same write path** (`db-cell-toggled`,
+                        // `Flag(!shown)`) — a board card is a record, and its
+                        // box must not invent a second one
+                        HorizontalLayout {
+                            x: Theme.spacing-sm;
+                            y: 34px;
+                            width: parent.width - 2 * Theme.spacing-sm;
+                            height: 20px;
+                            spacing: Theme.spacing-xs;
+
+                            for cell[ci] in card.cells : if cell.kind == 7 : Rectangle {
+                                width: 16px;
+                                height: 16px;
+                                border-radius: Theme.radius-xs;
+                                border-width: 1.5px;
+                                border-color: cell.checked ? Colors.accent : Colors.border-strong;
+                                background: cell.checked ? Colors.accent : transparent;
+
+                                if cell.checked : Text {
+                                    x: 0px;
+                                    y: -1px;
+                                    width: parent.width;
+                                    height: parent.height;
+                                    text: "v";
+                                    font-size: 11px;
+                                    font-weight: Typography.weight-bold;
+                                    color: Colors.text-on-accent;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                                box-ta := TouchArea {
+                                    width: parent.width;
+                                    height: parent.height;
+                                    mouse-cursor: MouseCursor.pointer;
+                                    clicked => {
+                                        UIState.db-cell-toggled(root.block.id, card.record, cell.property, cell.checked);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── a calendar (D5): the month grid, records folded inside each day ──
+    // The grid is **fixed** (six weeks of seven days) so its height does not
+    // depend on the data — which is the whole reason this layout's red line is
+    // about the *day cells* rather than a scroll window: a day draws at most
+    // three records and says "and N more", and both numbers came from one
+    // `GROUP BY` over the month (≤ 31 keys). The month's own records never all
+    // become objects.
+    if root.live && root.is-calendar : Rectangle {
+        x: 0px;
+        y: root.body-top;
+        width: root.content-width;
+        height: root.body-h;
+        background: transparent;
+
+        // the month strip: ‹ September 2026 › — one refresh per press
+        Rectangle {
+            x: 0px;
+            y: 0px;
+            width: root.grid-w;
+            height: 28px;
+            background: transparent;
+
+            prev-btn := Rectangle {
+                x: 0px;
+                y: 2px;
+                width: 24px;
+                height: 24px;
+                border-radius: Theme.radius-sm;
+                background: prev-ta.has-hover ? Colors.surface-hover : transparent;
+
+                Text {
+                    x: 0px;
+                    y: 0px;
+                    width: parent.width;
+                    height: parent.height;
+                    text: "<";
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    font-size: Typography.size-caption;
+                    color: Colors.text-secondary;
+                }
+                prev-ta := TouchArea {
+                    width: parent.width;
+                    height: parent.height;
+                    mouse-cursor: MouseCursor.pointer;
+                    clicked => {
+                        UIState.db-cal-month(root.block.id, -1);
+                    }
+                }
+            }
+            Text {
+                x: 32px;
+                y: 0px;
+                height: parent.height;
+                vertical-alignment: center;
+                text: root.block.db-cal-label;
+                font-family: Typography.ui-font;
+                font-size: Typography.size-ui;
+                font-weight: Typography.weight-semibold;
+                color: Colors.text-primary;
+            }
+            next-btn := Rectangle {
+                x: parent.width - 24px;
+                y: 2px;
+                width: 24px;
+                height: 24px;
+                border-radius: Theme.radius-sm;
+                background: next-ta.has-hover ? Colors.surface-hover : transparent;
+
+                Text {
+                    x: 0px;
+                    y: 0px;
+                    width: parent.width;
+                    height: parent.height;
+                    text: ">";
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    font-size: Typography.size-caption;
+                    color: Colors.text-secondary;
+                }
+                next-ta := TouchArea {
+                    width: parent.width;
+                    height: parent.height;
+                    mouse-cursor: MouseCursor.pointer;
+                    clicked => {
+                        UIState.db-cal-month(root.block.id, 1);
+                    }
+                }
+            }
+        }
+
+        // the weekday initials, Monday first — the order `first_weekday_monday0`
+        // numbers the grid's columns by
+        HorizontalLayout {
+            x: 0px;
+            y: 28px;
+            width: root.grid-w;
+            height: 20px;
+            spacing: 0px;
+
+            for day in 7 : Rectangle {
+                horizontal-stretch: 1;
+                height: parent.height;
+                background: transparent;
+
+                Text {
+                    x: Theme.spacing-xs;
+                    y: 0px;
+                    height: parent.height;
+                    vertical-alignment: center;
+                    text: ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"][day];
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-caption;
+                    color: Colors.text-muted;
+                }
+            }
+        }
+
+        // the grid itself: six weeks of seven cells, indexed into the model
+        // Rust built (`month_cells` → the `GROUP BY`'s counts and the peeks)
+        for week in 6 : HorizontalLayout {
+            x: 0px;
+            y: 48px + week * 96px;
+            width: root.grid-w;
+            height: 96px;
+            spacing: 0px;
+
+            for day in 7 : Rectangle {
+                horizontal-stretch: 1;
+                height: parent.height;
+                background: root.block.db-cal-days[week * 7 + day].day > 0
+                    ? (cell-ta.has-hover ? Colors.surface-hover : transparent)
+                    : transparent;
+                border-width: 1px;
+                border-color: Colors.border;
+
+                if root.block.db-cal-days[week * 7 + day].day > 0 : Text {
+                    x: Theme.spacing-xs;
+                    y: 2px;
+                    height: 16px;
+                    vertical-alignment: center;
+                    text: "" + root.block.db-cal-days[week * 7 + day].day;
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-caption;
+                    color: Colors.text-secondary;
+                }
+                // up to three realized records — a title each, elided
+                for at in 3 : Rectangle {
+                    x: 0px;
+                    y: 20px + at * 16px;
+                    width: parent.width;
+                    height: 16px;
+                    background: transparent;
+
+                    if root.block.db-cal-days[week * 7 + day].records.length > at : Text {
+                        x: Theme.spacing-xs;
+                        y: 0px;
+                        width: parent.width - 2 * Theme.spacing-xs;
+                        height: parent.height;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        text: root.block.db-cal-days[week * 7 + day].records[at].title;
+                        font-family: Typography.ui-font;
+                        font-size: Typography.size-caption;
+                        color: Colors.text-primary;
+                    }
+                }
+                // the fold: what the day holds minus what it drew. The number
+                // is the `GROUP BY`'s count, so the rows it names never became
+                // objects.
+                if root.block.db-cal-days[week * 7 + day].count > 3 : Text {
+                    x: Theme.spacing-xs;
+                    y: 68px;
+                    width: parent.width - 2 * Theme.spacing-xs;
+                    height: 16px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    text: "and "
+                        + (root.block.db-cal-days[week * 7 + day].count - 3)
+                        + " more";
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-caption;
+                    color: Colors.accent-text;
+                }
+                cell-ta := TouchArea {
+                    width: parent.width;
+                    height: parent.height;
+                    mouse-cursor: MouseCursor.default;
+                }
+            }
+        }
+    }
+
+    // ── a gallery (D5): a grid of cards, windowed by card rows ───────────
+    // The grid's width decides how many cards a row holds, and the shape is
+    // what the *window* was computed with — so the delegate **reports** it
+    // when it changes (`db-gallery-shaped`), exactly the split the scroll's
+    // top-in-view follows. Each realized card is placed at its own row and
+    // column from `db-row-start`; the cards' objects are the window's slice
+    // (`per_row × rows`), never the grid's total.
+    if root.live && root.is-gallery : Rectangle {
+        x: 0px;
+        y: root.body-top;
+        width: root.content-width;
+        height: root.body-h;
+        background: transparent;
+
+        // the shape formula: the same minimum card width Rust's
+        // `gallery_per_row` uses, so the reported number and the drawn columns
+        // cannot disagree
+        property <int> per-row: Math.max(
+            Math.floor(root.grid-w / 168px), 1);
+        changed per-row => {
+            UIState.db-gallery-shaped(root.block.id, root.per-row);
+        }
+        property <length> card-w: root.grid-w / Math.max(root.block.db-gallery-per-row, 1);
+
+        for card[index] in root.block.db-rows : Rectangle {
+            x: (index % Math.max(root.block.db-gallery-per-row, 1)) * root.card-w;
+            y: (root.block.db-row-start
+                + Math.floor(index / Math.max(root.block.db-gallery-per-row, 1)))
+                * root.block.db-row-height;
+            width: root.card-w - Theme.spacing-sm;
+            height: root.block.db-row-height - Theme.spacing-sm;
+            border-radius: Theme.radius-sm;
+            background: Colors.surface;
+            border-width: 1px;
+            border-color: Colors.border;
+
+            card-ta := TouchArea {
+                width: parent.width;
+                height: parent.height;
+                mouse-cursor: MouseCursor.pointer;
+                clicked => {
+                    UIState.db-open-record(root.block.id, card.record);
+                }
+            }
+
+            // the letter avatar: the title's first character, cut in Rust.
+            // The *cover image* (a files column's first attachment) is D8's —
+            // a thumbnail per realized card is the decode budget's business,
+            // and the brief allows the letter as the stand-in.
+            Rectangle {
+                x: Theme.spacing-sm;
+                y: 8px;
+                width: 28px;
+                height: 28px;
+                border-radius: 14px;
+                background: Colors.surface-hover;
+
+                Text {
+                    x: 0px;
+                    y: 0px;
+                    width: parent.width;
+                    height: parent.height;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    text: card.letter;
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-ui;
+                    font-weight: Typography.weight-semibold;
+                    color: Colors.text-secondary;
+                }
+            }
+            Text {
+                x: Theme.spacing-sm;
+                y: 42px;
+                width: parent.width - 2 * Theme.spacing-sm;
+                height: 20px;
+                vertical-alignment: center;
+                overflow: elide;
+                text: card.title;
+                font-family: Typography.ui-font;
+                font-size: Typography.size-caption;
+                font-weight: Typography.weight-medium;
+                color: Colors.text-primary;
+            }
+            Text {
+                x: Theme.spacing-sm;
+                y: 64px;
+                width: parent.width - 2 * Theme.spacing-sm;
+                height: 16px;
+                vertical-alignment: center;
+                overflow: elide;
+                text: card.cells.length > 0 ? card.cells[0].text : "";
+                font-family: Typography.ui-font;
+                font-size: Typography.size-caption;
+                color: Colors.text-muted;
+            }
+        }
+    }
+
+    // ── a form (D5): the schema's fields, and one gesture that creates ────
+    // The one layout that *reads no records to draw itself*: the fields are the
+    // visible columns, the text is a draft held in the session, and nothing
+    // reaches SQL until Submit — which parses every filled field through its
+    // column's own rules and creates **one** record in **one** batch (one
+    // Ctrl+Z). A form that half-created a record would be two facts about one
+    // gesture, so a refused field refuses the whole submit and says which
+    // column refused (the notice line).
+    if root.live && root.is-form : Rectangle {
+        x: 0px;
+        y: root.body-top;
+        width: root.content-width;
+        height: root.body-h;
+        background: transparent;
+
+        for field[index] in root.block.db-form : Rectangle {
+            x: 0px;
+            y: index * 40px;
+            width: root.grid-w;
+            height: 40px;
+            background: transparent;
+
+            Text {
+                x: 0px;
+                y: 0px;
+                width: root.grid-w / 4;
+                height: parent.height;
+                vertical-alignment: center;
+                overflow: elide;
+                text: field.name;
+                font-family: Typography.ui-font;
+                font-size: Typography.size-caption;
+                color: Colors.text-secondary;
+            }
+            field-input := TextInput {
+                x: root.grid-w / 4;
+                y: 8px;
+                width: root.grid-w * 3 / 4 - 8px;
+                height: parent.height - 16px;
+                vertical-alignment: center;
+                // the draft's text; keystrokes go back into the session draft
+                // and never into SQL, and Enter submits the whole form
+                text: field.text;
+                font-family: Typography.ui-font;
+                font-size: Typography.size-caption;
+                color: Colors.text-primary;
+                edited(text) => {
+                    UIState.db-form-text(root.block.id, field.property, text);
+                }
+                accepted(text) => {
+                    UIState.db-form-text(root.block.id, field.property, text);
+                    UIState.db-form-submitted(root.block.id);
+                }
+            }
+        }
+
+        // the action row: Submit (one record) and Clear (the draft)
+        Rectangle {
+            x: 0px;
+            y: root.block.db-form.length * 40px;
+            width: root.grid-w;
+            height: 40px;
+            background: transparent;
+
+            submit-btn := Rectangle {
+                x: root.grid-w / 4;
+                y: 6px;
+                width: 84px;
+                height: 28px;
+                border-radius: Theme.radius-sm;
+                background: Colors.accent;
+
+                Text {
+                    x: 0px;
+                    y: 0px;
+                    width: parent.width;
+                    height: parent.height;
+                    text: "Submit";
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-caption;
+                    font-weight: Typography.weight-medium;
+                    color: Colors.text-on-accent;
+                }
+                submit-ta := TouchArea {
+                    width: parent.width;
+                    height: parent.height;
+                    mouse-cursor: MouseCursor.pointer;
+                    clicked => {
+                        UIState.db-form-submitted(root.block.id);
+                    }
+                }
+            }
+            clear-btn := Rectangle {
+                x: root.grid-w / 4 + 92px;
+                y: 6px;
+                width: 64px;
+                height: 28px;
+                border-radius: Theme.radius-sm;
+                background: clear-ta.has-hover ? Colors.surface-hover : transparent;
+
+                Text {
+                    x: 0px;
+                    y: 0px;
+                    width: parent.width;
+                    height: parent.height;
+                    text: "Clear";
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-caption;
+                    color: Colors.text-secondary;
+                }
+                clear-ta := TouchArea {
+                    width: parent.width;
+                    height: parent.height;
+                    mouse-cursor: MouseCursor.pointer;
+                    clicked => {
+                        UIState.db-form-cleared(root.block.id);
+                    }
+                }
+            }
+        }
+    }
+
+    // ── a layout this build cannot draw yet (D7) ─────────────────────────
     // SPEC §三十九's order is the implementation order, so a database written by
     // a later build can name a view this one has no drawing for. It says which
     // view it is, instead of showing a table that is not what was asked for.

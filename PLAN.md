@@ -2482,3 +2482,26 @@ SPEC §三十九 的红线第二条（「filter / sort 在 SQL 侧完成，不�
 本刀一行 cargo 都没跑，所以编译、测试、视觉、性能全部未验证，静态自查的清单在报告里。
 已知约束：共享文件只加自己的部分（controller / state / Types / AppWindow）；ADR 号 0076/0077 接在
 0075 后；迁移号不动（工作树仍是 19，本刀提交树仍是 18）。
+
+## Track 3 · D5 视图族（2026-09-22，on track/3-database，ADR-0078/ADR-0079）
+
+SPEC §三十九「视图」的最后六种布局（chart 留 D7）一次落齐：**board / list / calendar /
+gallery / timeline / form 全部交付**，每个都有虚拟化、规则持久化、切换器入口与场景臂
+（`database-board` … `database-form` 及其 `dark-` 对）。核心是把 D0/D4 的「计数先算、窗口后
+开」按布局各自的意思落了一遍：board 的窗口开在**卡片槽位**上（列=组列表，每列取自己的切
+片）、gallery 开在**卡片行**上（一次取 `per_row × 行` 的切片）、calendar 的窗口开在**天**
+里（整月一次 `GROUP BY` ≤ 31 键 + 每天至多 3 条、其余折叠计数）、timeline 的窗口开在**泳
+道**上（「无日期不显示」编译成 is-not-empty 子句进语句，轴是一次 min/max）、form **不读
+行**（字段表 = schema 的大小，提交才建行）。持久化零新表零新列：board 复用 `groups`，
+calendar/timeline 用文档新键 `date`/`end`，gallery 的每行卡数是会话态（delegate 报告）。
+切换器「+」点亮（`AddDatabaseView` 一个 change，创建即切换，chart 以名字拒绝）；board 卡片
+/list 行/gallery 卡片的点击接 `db-open-record`——懒建页（ADR-0063）的 UI 触发，一批两个
+change。顺手闭合 D4 的两个提交缺口：`DatabaseView.slint`（D4 的 filter/group 按钮当时未入
+提交）与 `state.rs` 的 `record()` 漏斗 `db_absorb` 接线。
+
+### 未验证（诚实清单）
+
+本刀一行 cargo 都没跑：编译、测试、视觉、性能全部未验证（静态自查清单在
+REPORT_TRACK3 §D5）。已知边界：插入菜单四行 database 占位仍 muted（ADR-0079 写明理由）；
+gallery 封面是首字母占位（附件缩略图是 Track 4/D8 的地盘）；timeline 只有单日期列 +
+可选 end 列，没有 Notion 的双属性吸排序；迁移号不动（工作树 19，本刀提交树仍是 18）。

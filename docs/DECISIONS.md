@@ -2965,3 +2965,107 @@ Consequences:
   the group list), scrolling across a group boundary fetches only the groups the window
   touches, a value whose option was deleted groups under its own id, and the "No value" group
   contains exactly the rows the `IS NULL OR ''` predicate admits.
+
+## ADR-0078 · Each view layout windows its own unit, and the calendar's fold is the same red line in a grid
+
+Decision: SPEC §三十九's six layouts after the table are **one entity's layouts**, and what a
+layout changes is what the window is computed *on* — one answer per shape, all of them ending
+in "a count from SQL, then exactly the window's objects":
+
+| layout | the window's unit | the count it comes from | what is realized |
+|--------|-------------------|-------------------------|------------------|
+| table | a row (or, grouped, an entry — ADR-0077) | `COUNT(*)` / the group counts | the viewport's rows, 31 of 10 000 |
+| list | a row (44 px: title + two preview cells) | the same | the same |
+| board | a **card slot** — one horizontal band across every column | `max(group counts)` over one `GROUP BY` | per column, its own slice of the band (`board_window`) |
+| gallery | a **card row** (`per_row` cards) | `COUNT(*)` | one slice of `per_row × rows` cards |
+| calendar | a **day cell** (the grid is fixed 6×7) | one `GROUP BY` over the date column for the month (≤ 31 keys) | ≤ `CALENDAR_PEEK` records per day, the rest folded into the cell's count |
+| timeline | a **lane** (one dated record) | `COUNT(*)` with an `is not empty` clause on the date column | the viewport's lanes; one `min`/`max` query for the axis |
+| form | — (the field list is the schema's size) | `COUNT(*)` for the count text | no records at all: it creates one |
+
+Three consequences that are decisions and not implementation details:
+
+1. **Board columns are the group list, not a second read.** A board *is* a grouping seen
+   horizontally, so it reuses D4's `groups` key, its `GROUP BY`, and its header labels; the
+   columns are realized in full (a handful of small rectangles from an option-bounded column)
+   while each column's *cards* are fetched through a slice of the slot window. A column
+   holding 10 000 cards realizes the same handful the ungrouped table would. Board's fallback
+   grouping (the first option-bounded column, when the view has no `groups` key) is **not
+   written back** — a default the user never chose must not become a rule they have to undo.
+2. **The calendar folds by day, and the fold is the virtualization.** A day with 500 records
+   realizes three and says "and 497 more"; both numbers come from one `GROUP BY` over the
+   month, whose key count is bounded by the calendar itself (≤ 31 days, plus each stored shape
+   of a day — a `2026-09-22` and a `2026-09-22T10:00` are two keys and one day, so the counts
+   are folded by *day*, not by key). This is why a **date column may group here** even though
+   D4's picker refuses it: a header per day is 31 objects; a header per text value would be
+   the table. The month's records are read through day-range clauses (`>= the day`, `< the
+   next`) compiled by the same clause compiler the panel drives — bytes-are-time (ADR-0062)
+   doing the date arithmetic in SQL, in one place.
+3. **The timeline's axis is one aggregate, and undated rows never enter the statement.** The
+   lanes are windowed like rows; the axis under them is `min`/`max` over the *same* predicate
+   (one scan, no rows); and 「无日期不显示」 is an `is not empty` clause ANDed with the view's
+   own filter — SQL's row set, not a Rust `retain`. A row with no date is not fetched and then
+   dropped; it is never fetched. The bar's two ends are day numbers computed in Rust from the
+   painted date cells (a painted date always starts with the stored day), so a bar costs no
+   second query per row; a missing or earlier end makes a point («起=止=同一天时画点»).
+
+Where the views' own settings live: **one new document key pair** —
+`date` (which column is the time axis) and `end` (the optional partner) — in the same
+`db_views.definition` JSON ADR-0064 defined. One key serves both the calendar and the
+timeline because they ask the same question ("which column is this view's time axis"), and
+the schema's own first date column is the fallback when the key is absent (never written
+back). No new table, no new column, no new migration step; the gallery's cards-per-row is
+**session state**, because it is a fact about the window's width — the delegate reports it
+(`db-gallery-shaped`) the way it reports the scroll anchor.
+
+Consequences:
+
+* `LayoutSupport` now draws seven of the eight layouts; `chart` stays refused by name until
+  D7, and the switcher's `+` menu lists it as its own muted row rather than hiding it.
+* Every layout's geometry lives in `core::database_view::layout_metrics` (row height + header
+  height) and its surface height is computed once, in Rust (`DbWindow::body`), so the block's
+  height, the delegate's placement and the window arithmetic cannot disagree — the D3
+  row-height-zero bug class is closed by construction for all seven.
+* The window cache key grows two fields (`layout`, `stamp`): the calendar's month and the
+  gallery's per-row change which model the same view, document and total would produce.
+* Still unverified: no test ran. The unified test owes: a board of 10 000 cards realizes
+  `columns × viewport` cards (not cards), a 500-record day realizes three and reports 500, a
+  filtered month's `GROUP BY` counts sum to the count line, a timeline excludes undated rows
+  in SQL (the statement text shows the clause), and the `date`/`end` keys survive an unrelated
+  rule edit (ADR-0074's read-edit-write).
+
+## ADR-0079 · A view is created by one change, a record's page is minted by opening it, and chart is refused by name
+
+Decision: the switcher's `+` adds a row to `db_views` through **one new command**
+(`Command::AddDatabaseView { block, view }` → `[Change::ViewAdded]`, revert `[ViewDeleted]`),
+carrying the whole row because the plan layer can allocate no ids (`MakeDatabase`'s rule
+applied to the one table the app keeps out of memory). The name defaults to the layout's own
+label and the `ord` is past the last view, so a new view lands at the switcher's end; the app
+then **switches to it**, because a view created and not looked at is half a gesture. `chart`
+is **refused with a notice** rather than created: a menu row that made a view this build
+cannot draw would be a promise the switcher has to un-draw on the next frame, and D7 owns that
+layout.
+
+Opening a record — the board card click, the list row click, the gallery card click — is one
+gesture with two halves, and both are ADR-0063's lazy page finally getting its UI trigger:
+a page-backed record navigates; a **bare record mints its page now**, named after the
+record's title, as a child of the page the database sits on, in **one batch**
+(`[PageCreated, RecordPageSet{page}]`) — one Ctrl+Z, and the 「打开」 half of ADR-0063 that D1
+tested at the storage level is now reachable from the UI. The parent is the open page rather
+than the sidebar root because that is where a Notion database's rows live, and the record's
+title is read from the row's own value (a bare record's title has its second home in
+`db_values`, ADR-0063), falling back to "Untitled".
+
+Consequences:
+
+* The insert menu's four remaining database placeholders (`Board` / `Gallery` / `List view` /
+  `Calendar` / `Timeline`) are **still muted**: lighting them means teaching the insert path
+  "a database whose first view is X", and this build's one honest path for that is the
+  switcher's `+`. The placeholders stay a promise the roadmap is readable off, and the report
+  says so rather than pretending otherwise.
+* Chart's row in the `+` menu is visible and inert (its own wording), so the menu never opens
+  a view the delegate would have to draw as "not in this build yet".
+* Still unverified: no test ran. The unified test owes: `AddDatabaseView`'s undo removes the
+  row (and a redo puts it back with the same id and `ord`), a second view of a database does
+  not disturb the first's document, opening a bare record leaves a page whose title is the
+  record's title and whose parent is the database's page, and undoing that open leaves the
+  record bare again.

@@ -24,6 +24,10 @@ export component DatabaseSwitcher inherits Rectangle {
     in property <[DbViewTab]> tabs;
     in property <int> block;
 
+    // the `+`'s layout menu, open or not. Local to the switcher on purpose: it
+    // is one block's gesture, and no other component reads it.
+    property <bool> menu-open: false;
+
     height: 26px;
     background: transparent;
 
@@ -60,13 +64,16 @@ export component DatabaseSwitcher inherits Rectangle {
             }
         }
 
-        // "+": the second view. Muted and inert, with the sentence that makes
-        // the muteness honest.
+        // "+": a new view. D5 lights it: the menu lists every layout (SPEC's
+        // order is `ViewLayout::ALL`'s — the index IS the layout), the seven
+        // this build draws create a view and switch to it, and the one it does
+        // not (chart) keeps its row visible and says so, the way the insert
+        // menu's muted rows always have.
         add := Rectangle {
             width: 22px;
             height: 24px;
             border-radius: Theme.radius-sm;
-            background: add-ta.has-hover ? Colors.surface-hover : transparent;
+            background: add-ta.has-hover || root.menu-open ? Colors.surface-hover : transparent;
 
             Text {
                 x: 0px;
@@ -77,18 +84,21 @@ export component DatabaseSwitcher inherits Rectangle {
                 horizontal-alignment: center;
                 vertical-alignment: center;
                 font-size: Typography.size-ui;
-                color: Colors.text-muted;
+                color: root.menu-open ? Colors.text-primary : Colors.text-muted;
             }
 
             add-ta := TouchArea {
                 width: parent.width;
                 height: parent.height;
-                mouse-cursor: MouseCursor.default;
+                mouse-cursor: MouseCursor.pointer;
+                clicked => {
+                    root.menu-open = !root.menu-open;
+                }
             }
         }
 
         // what a database has that this build cannot draw yet: a view whose
-        // layout is D5's opens as its own name rather than as a wrong table
+        // layout is D7's opens as its own name rather than as a wrong table
         // (ADR-0060's fold, said out loud on screen)
         if root.tabs.length == 0 : Text {
             height: parent.height;
@@ -97,6 +107,65 @@ export component DatabaseSwitcher inherits Rectangle {
             font-family: Typography.ui-font;
             font-size: Typography.size-caption;
             color: Colors.text-muted;
+        }
+    }
+
+    // the layout menu: one row per layout, in SPEC's order (the index is the
+    // layout). Anchored under the tab strip's left edge and drawn *over* what
+    // is below it — a menu that is a list, not a popup per row, the same
+    // reasoning the cell option lists follow.
+    if root.menu-open : Rectangle {
+        x: 0px;
+        y: 26px;
+        width: 168px;
+        height: 8 * 26px + 8px;
+        background: Colors.surface;
+        border-radius: Theme.radius-sm;
+        border-width: 1px;
+        border-color: Colors.border-strong;
+        // the menu must draw over the rows below the header: the delegate is
+        // deliberately unclipped (D3's decision), and a menu is the shape that
+        // relies on it
+        drop-shadow-blur: 8px;
+        drop-shadow-color: Colors.border;
+
+        VerticalLayout {
+            padding: 4px;
+            spacing: 0px;
+
+            // the layouts, in SPEC's order — the row's index IS the
+            // `ViewLayout::ALL` index Rust's `db_add_view` reads, and the
+            // eighth (chart) is D7's: visible, named, inert.
+            for layout[index] in ["Table", "Board", "List", "Calendar", "Gallery", "Timeline", "Form", "Chart"] : Rectangle {
+                property <bool> drawn: index < 7;
+                height: 26px;
+                border-radius: Theme.radius-xs;
+                background: layout-ta.has-hover && layout.drawn ? Colors.surface-hover : transparent;
+
+                Text {
+                    x: Theme.spacing-sm;
+                    y: 0px;
+                    width: parent.width - 2 * Theme.spacing-sm;
+                    height: parent.height;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    text: layout.drawn ? layout : layout + " - not in this build yet";
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-caption;
+                    color: layout.drawn ? Colors.text-primary : Colors.text-muted;
+                }
+                layout-ta := TouchArea {
+                    width: parent.width;
+                    height: parent.height;
+                    mouse-cursor: layout.drawn ? MouseCursor.pointer : MouseCursor.default;
+                    clicked => {
+                        // a drawn layout creates the view (Rust refuses chart
+                        // with its own word; the menu just closes either way)
+                        root.menu-open = false;
+                        UIState.db-view-added(root.block, index);
+                    }
+                }
+            }
         }
     }
 }

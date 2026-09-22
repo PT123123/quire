@@ -13,9 +13,11 @@ use crate::core::database::{
 };
 use crate::core::database_property::PropertyOptions;
 use crate::core::database_view::{
-    all_columns, group_window, is_stored_date, table_columns, table_rows, view_columns,
-    FilterClause, FilterOp, FilterValue, FlatClause, FlatFilter, GroupKey, GroupSpec, LayoutSupport,
-    TableColumn, TableView, ViewDefinition, ViewRules, ViewTab, WIDTH_AUTO,
+    all_columns, board_slots, board_window, date_key, day_number_of, day_of, days_in_month,
+    group_window, is_stored_date, layout_metrics, month_cells, month_key, month_label, shift_month,
+    table_columns, table_rows, view_columns, CALENDAR_PEEK, FilterClause, FilterNode, FilterOp,
+    FilterValue, FlatClause, FlatFilter, GroupKey, GroupSpec, LayoutSupport, TableColumn, TableView,
+    ViewDefinition, ViewRules, ViewTab, WIDTH_AUTO,
 };
 
 use crate::core::persistence::{Change, Repository};
@@ -133,6 +135,24 @@ pub struct AppState {
     /// the block itself reported it (Rust cannot see Slint's layout). What the
     /// window is computed from, together with the page's scroll offset.
     db_anchor: RefCell<HashMap<i32, f32>>,
+    // ─── D5: the view family's session state ─────────────────────────────────
+    // Three maps, all keyed by block id, all session-only (ADR-0073's rule:
+    // "which / how the user is looking" is a fact about a window, not about a
+    // document — a restart opens the defaults).
+    //
+    // * `db_cal_month` — which month a calendar view shows. Defaults to the
+    //   month that contains today, but the scene seeds pin it so a sweep
+    //   photographs the same grid tomorrow.
+    // * `db_gallery_per_row` — how many cards a gallery row has. **Reported by
+    //   the delegate** (it is the layer that knows the grid's width, the same
+    //   split as `db_anchor`'s top-in-view), and part of the window's cache key
+    //   through `DbWindow::stamp` because the card slice is rows × per_row.
+    // * `db_form` — a form view's draft, one `(property, text)` per filled
+    //   field. A draft and not a record on purpose: nothing reaches SQL until
+    //   Submit, and one submit is one undo step.
+    db_cal_month: RefCell<HashMap<i32, (i32, u32)>>,
+    db_gallery_per_row: RefCell<HashMap<i32, usize>>,
+    db_form: RefCell<HashMap<i32, Vec<(u64, String)>>>,
     /// The editor list's own height, in px, reported by `Editor.slint` when it
     /// changes. The window's *viewport height* — the number `core::database::window`
     /// divides by — and a property rather than a callback argument because it is
@@ -564,6 +584,9 @@ impl AppState {
             db_windows: RefCell::new(HashMap::new()),
             db_active_view: RefCell::new(HashMap::new()),
             db_anchor: RefCell::new(HashMap::new()),
+            db_cal_month: RefCell::new(HashMap::new()),
+            db_gallery_per_row: RefCell::new(HashMap::new()),
+            db_form: RefCell::new(HashMap::new()),
             editor_viewport_h: Cell::new(DEFAULT_EDITOR_VIEWPORT_H),
             next_db_id: Cell::new(db_ids.0),
             next_property_id: Cell::new(db_ids.1),
@@ -940,6 +963,14 @@ impl AppState {
         if changes.is_empty() {
             return;
         }
+        // SPEC §三十九: the database layer's *schema* has a second reader — the
+        // in-memory catalog — and this is the one funnel every change list
+        // passes through, in both directions (`exec` and `undo`/`redo` hand back
+        // the list as it was applied). Learning it here rather than at each call
+        // site is what keeps the catalog from drifting: a `MakeDatabase` arrives
+        // as `DatabaseCreated` + `PropertyAdded` + `ViewAdded`, its undo as the
+        // three deletions, and no call site has to remember to say so.
+        self.db_absorb(&changes);
         if let Some(p) = &self.persistence {
             p.record(changes);
         }
@@ -1375,6 +1406,10 @@ impl AppState {
                     BlockKind::Image => "image",
                     BlockKind::File => "page",
                     BlockKind::Table => "minimize",
+                    // SPEC §三十九: a database view — the same glyph as the simple
+                    // grid, because both are "a table of rows" to a reader who is
+                    // picking a block from a list.
+                    BlockKind::Database => "table",
                     _ => "minimize",
                 };
                 rows.push(row(
@@ -3827,6 +3862,17 @@ struct DbWindow {
     /// than re-parsed: the document is the only copy of the rules, and two
     /// documents that differ as text can differ as rules.
     definition: String,
+    /// The layout this window was read for. Part of the key for the same reason
+    /// the view is: a layout set (D5's shapes) changes what the surface *is* —
+    /// a board's slots are not a table's rows — while the definition text may
+    /// not change at all.
+    layout: crate::core::database::ViewLayout,
+    /// A per-layout session nonce, part of the cache key: the calendar's month
+    /// (year × 12 + month) and the gallery's cards-per-row both change what the
+    /// realized model holds without touching the view, the document or the
+    /// total — exactly the inputs the three fields above cover. Zero for the
+    /// layouts that have no such dial.
+    stamp: u64,
     /// The columns the read was made with, in view order.
     columns: Vec<TableColumn>,
     /// The count the window was computed from — the rows the view's rules
@@ -3838,6 +3884,26 @@ struct DbWindow {
     /// The realized rows, as the delegate reads them. Cloned into the block's
     /// row, so a re-read updates the UI without touching the page's row list.
     rows: Rc<VecModel<DbRow>>,
+    /// D5: the board's columns, each holding its own window of cards — the
+    /// model the board delegate reads instead of `rows` (which stays the
+    /// row-shaped layouts'). Empty for every other layout.
+    board: Rc<VecModel<crate::DbBoardColumn>>,
+    /// D5: the calendar's fixed grid — 42 day cells, the month's records
+    /// already windowed inside each (`CALENDAR_PEEK` per day, the rest folded
+    /// into the cell's count). Empty for every other layout.
+    cal: Rc<VecModel<crate::DbCalendarDay>>,
+    /// D5: the surface height **below the header**, in px, per layout — the
+    /// number the block's own height is made of. Computed here rather than in
+    /// the delegate because it is a *projection* fact (counts, per-row, the
+    /// month shape), and a delegate that recomputed it would need every input
+    /// the projection already had.
+    body: f32,
+    /// D5 (timeline): the axis the realized bars are drawn against — the first
+    /// day (as a day number) and its length in days. One aggregate query per
+    /// refresh (`column_bounds`); the delegate maps a bar's day numbers onto
+    /// pixels with these two numbers and nothing else.
+    tl_start: i64,
+    tl_days: i64,
 }
 
 /// How a database block's columns popup is built: every property of the
@@ -3899,8 +3965,18 @@ fn db_rows_of(rows: Vec<crate::core::database_view::TableRowView>) -> Vec<DbRow>
         .map(|row| DbRow {
             record: row.record as i32,
             page: row.page.map(|p| p.as_u64() as i32).unwrap_or(-1),
-            title: row.title.into(),
+            title: row.title.clone().into(),
             header: "".into(),
+            // D5 (timeline): no bar until the timeline branch stamps the row's
+            // day numbers in — `-1` is "no date", which every other layout's
+            // delegate never reads.
+            tl_from: -1,
+            tl_to: -1,
+            // D5 (gallery): the avatar's first character, cut here because a
+            // delegate never does string surgery. A char boundary at index 1
+            // is only valid when the first byte is ASCII, so the cut is by
+            // chars — a non-ASCII first character still gives one character.
+            letter: row.title.chars().next().map(String::from).unwrap_or_default().into(),
             cells: ModelRc::from(Rc::new(VecModel::from(row
                 .cells
                 .into_iter()
@@ -3914,6 +3990,133 @@ fn db_rows_of(rows: Vec<crate::core::database_view::TableRowView>) -> Vec<DbRow>
                 .collect::<Vec<_>>()))),
         })
         .collect()
+}
+
+impl DbRow {
+    /// A placeholder entry — the slot a grouped view reserves in its entry
+    /// list for a row that the per-group slices fill in. One constructor, so
+    /// "an entry that is not yet a row" has one shape (and D5's fields have
+    /// one place to be defaulted in).
+    fn header() -> Self {
+        DbRow {
+            record: -1,
+            page: -1,
+            title: "".into(),
+            header: "".into(),
+            tl_from: -1,
+            tl_to: -1,
+            letter: "".into(),
+            cells: ModelRc::default(),
+        }
+    }
+
+    /// A group header entry (D4): its label came from Rust with the count in
+    /// it, it carries no cells, and it is one slot of the scroll surface the
+    /// window arithmetic already accounted for.
+    fn header_with(label: &str) -> Self {
+        DbRow {
+            header: label.into(),
+            ..DbRow::header()
+        }
+    }
+}
+
+// ─── D5: the view family's helpers ───────────────────────────────────────────
+//
+// Small free functions the layout branches above share. None of them holds a
+// row: the first three turn SQL counts into the per-layout facts the window
+// and the body are made of, and the last three build the date-range clauses a
+// calendar and a timeline speak to SQL in — fixed-width ISO bounds compiled by
+// the same clause compiler the filter panel writes (there is no separate "date
+// query" in this codebase, on purpose).
+
+/// The gallery's default cards-per-row, in px of editor width, for the first
+/// refresh before the delegate has reported the grid's real width. The number
+/// is the default editor content width, run through the same
+/// [`TableView::gallery_per_row`] formula the delegate uses.
+const GALLERY_DEFAULT_WIDTH: f32 = 760.0;
+
+/// The ungrouped count a view's window is computed from: `COUNT(*)` over the
+/// filter's predicate when the view has one, over the database alone when it
+/// does not. The table branch inlined this before D5; the gallery and the form
+/// need the same question, so the question got a name.
+fn layout_total(
+    repo: &SqliteRepository,
+    request: &RowRequest<'_>,
+    db: DatabaseId,
+    filtered: bool,
+) -> Result<usize, crate::core::persistence::StorageError> {
+    if filtered {
+        repo.filtered_count(request)
+    } else {
+        repo.record_count(db)
+    }
+}
+
+/// One date-range bound as a filter clause — the only way a calendar or a
+/// timeline speaks to SQL. The bound is a **stored-shape ISO text**, so the
+/// comparison is byte order, which is time order (ADR-0062's rule doing the
+/// date arithmetic); the clause goes through the same compiler the panel's
+/// rules use, so there is exactly one place that turns "after" into SQL.
+fn date_bound(property: PropertyId, kind: PropertyKind, op: FilterOp, bound: &str) -> FilterNode {
+    FilterNode::Clause(FilterClause {
+        property,
+        kind,
+        op,
+        value: FilterValue::Text(bound.to_string()),
+    })
+}
+
+/// A month's bounds ANDed with whatever the view already filters by: `>= the
+/// 1st` and `< the 1st of the next`. The view's tree is *inside* the `All`, so
+/// a filter the user wrote keeps meaning what it meant — the month only narrows
+/// it further.
+fn month_clauses(
+    base: &Option<FilterNode>,
+    property: PropertyId,
+    kind: PropertyKind,
+    low: &str,
+    high: &str,
+) -> FilterNode {
+    let mut children: Vec<FilterNode> = Vec::new();
+    if let Some(tree) = base {
+        children.push(tree.clone());
+    }
+    children.push(date_bound(property, kind, FilterOp::Gte, low));
+    children.push(date_bound(property, kind, FilterOp::Lt, high));
+    FilterNode::All(children)
+}
+
+/// The day of the month a group key names, when the key *is* a date text — the
+/// fold that turns a `GROUP BY` over a date column into per-day counts. Keys
+/// that are not dates (the empty group) have no day and no cell.
+fn group_day(key: &GroupKey) -> Option<u32> {
+    match key {
+        GroupKey::Option(text) => day_of(text),
+        _ => None,
+    }
+}
+
+/// Append a property to a request's column list if it is not already there,
+/// returning the position its painted cell will occupy. The timeline uses this
+/// to carry its date (and optional end) columns even when the view hides them —
+/// a bar cannot be drawn from a value the row was not handed. When the catalog
+/// has no such row (a document naming a deleted column), the list is left
+/// alone and the position is `usize::MAX` — an index `Vec::get` answers with
+/// `None`, which the caller reads as "no such value" rather than guessing.
+fn push_column(
+    columns: &mut Vec<Property>,
+    catalog: &DatabaseCatalog,
+    property: PropertyId,
+) -> usize {
+    if let Some(at) = columns.iter().position(|p| p.id == property) {
+        return at;
+    }
+    if let Some(row) = catalog.properties.iter().find(|p| p.id == property) {
+        columns.push(row.clone());
+        return columns.len() - 1;
+    }
+    usize::MAX
 }
 
 impl AppState {
@@ -4150,23 +4353,25 @@ impl AppState {
             let _ = persistence.force_flush();
         }
         // One catalog read for everything the refresh needs: the columns the
-        // view shows, its definition **text** (the cache key's rules half), and
-        // the rules parsed against the schema — filter, sorts, group, and the
+        // view shows, its definition **text** (the cache key's rules half), the
+        // rules parsed against the schema — filter, sorts, group, and the
         // visible note if any of it could not be applied (D4's degradation,
-        // `ViewRules::note`).
-        let (definition_text, properties, columns, rules) = {
+        // `ViewRules::note`) — and, since D5, the layout, which decides what
+        // the window below even opens on.
+        let (definition_text, properties, columns, rules, layout) = {
             let catalog = self.databases.borrow();
             let Some(db_row) = catalog.views.iter().find(|v| v.id == view) else {
                 return false;
             };
             let definition_text = db_row.definition.clone();
             let properties = view_columns(&catalog, db, db_row);
+            let layout = db_row.layout;
             // One parse for both readers: the rules (filter/sorts/group/note)
             // and the widths the columns lay out at are the same document.
             let definition = ViewDefinition::parse(&definition_text);
             let rules = definition.rules(db, &catalog);
             let columns = table_columns(&properties, &definition);
-            (definition_text, properties, columns, rules)
+            (definition_text, properties, columns, rules, layout)
         };
 
         // `top` is the anchor the delegate reports (`db-viewport`): the block
@@ -4183,7 +4388,22 @@ impl AppState {
         let top = *self.db_anchor.borrow().get(&block).unwrap_or(&0.0);
         let viewport = self.editor_viewport_h.get();
         let offset = (-top).max(0.0);
-        let geometry = ViewGeometry::new(TableView::ROW_HEIGHT, viewport);
+        // D5: the window's unit is the layout's own — a table row, a list row,
+        // a timeline lane, a board slot, a gallery card row. `layout_metrics`
+        // is the one source the delegate's placement reads too, so the two
+        // halves cannot disagree about how tall a unit is (D3's row-height = 0
+        // bug was exactly this disagreement, in another form).
+        let metrics = layout_metrics(layout);
+        let geometry = ViewGeometry::new(metrics.row_height, viewport);
+        // The per-layout outputs the shared cache stores below: `stamp` is the
+        // layout's session dial (the calendar's month, the gallery's per-row),
+        // `body` the surface below the header, and the two `tl_` numbers the
+        // timeline's axis. Each branch fills what it owns; the defaults cover
+        // the rest.
+        let mut stamp: u64 = 0;
+        let mut body: f32 = 0.0;
+        let mut tl_start: i64 = 0;
+        let mut tl_days: i64 = 0;
 
         let title = properties.iter().find(|p| p.kind.is_title()).map(|p| p.id);
         let Some(title) = title else {
@@ -4206,79 +4426,306 @@ impl AppState {
             filter: rules.filter.as_ref(),
         };
 
-        // ── the count, SQL's, before the window ────────────────────────────
-        // A grouped view counts by its group query (one `GROUP BY` over an
-        // option-bounded column — the list of *headers*, a handful of rows);
-        // its entries are then Σ(count + 1). An ungrouped view counts with one
-        // `COUNT(*)` — over the filter's predicate when it has one, over the
-        // database alone when it does not. Either way the window arithmetic is
-        // computed FROM that number: filter a 10 000-row database down to 3
-        // rows and the window realizes 3 rows, and a grouped one realizes 3
-        // rows plus its headers — never the table, never one row per group.
-        let counts = match &rules.group {
-            Some(spec) => match repo.group_counts(&request, spec) {
-                Ok(counts) => Some(self.db_order_groups(spec, counts)),
-                Err(e) => {
-                    self.db_notice.borrow_mut().push(format!("database read failed: {e}"));
-                    return false;
-                }
-            },
-            None => None,
-        };
-        let total: usize = match &counts {
-            Some(counts) => counts.iter().map(|(_, n)| n + 1).sum(),
-            None => {
-                if rules.filter.is_some() {
-                    match repo.filtered_count(&request) {
-                        Ok(total) => total,
-                        Err(e) => {
-                            self.db_notice
-                                .borrow_mut()
-                                .push(format!("database read failed: {e}"));
-                            return false;
-                        }
-                    }
-                } else {
-                    match repo.record_count(db) {
-                        Ok(total) => total,
-                        Err(e) => {
-                            self.db_notice
-                                .borrow_mut()
-                                .push(format!("database read failed: {e}"));
-                            return false;
-                        }
-                    }
-                }
-            }
-        };
-        let wanted = crate::core::database::window(total, geometry, offset);
-
-        {
-            let windows = self.db_windows.borrow();
-            if let Some(existing) = windows.get(&block) {
-                // The whole point of overscan: a scroll that stays inside the
-                // window costs the arithmetic above and nothing else. The
-                // definition text is part of the key because the rules — and
-                // with them the count and the row set — live in it: a filter or
-                // sort edit invalidates exactly the way a view switch does.
-                if existing.view == view
-                    && existing.definition == definition_text
-                    && existing.window == wanted
-                    && existing.total == total
-                {
-                    return false;
-                }
-            }
-        }
+        // ── the layout's own read (D5) ──────────────────────────────────────
+        // The red line is per layout, and so is the *unit* the window opens on:
+        //
+        // * **table / list** — rows, and entries when the view is grouped
+        //   (D4's `group_window`): `COUNT(*)` / the group counts first, then
+        //   exactly the window's rows.
+        // * **board** — card *slots*: slot `s` is one horizontal band across
+        //   every column, so the board is `max(column counts)` slots tall and
+        //   each group fetches its own slice of that band (`board_window`).
+        //   The columns themselves are the group list — one `GROUP BY` over an
+        //   option-bounded column, a handful of rows, never one per card.
+        // * **gallery** — card *rows*: one slice of `per_row × rows` cards.
+        // * **calendar** — the month grid is fixed (6×7), so the window is
+        //   *inside a day*: one `GROUP BY` over the date column for the month's
+        //   counts (≤ 31 rows) and at most [`CALENDAR_PEEK`] records per day,
+        //   the rest folded into the cell's count. A month filter — `>= the
+        //   1st`, `< the 1st of the next` — is compiled by the same clause
+        //   compiler the panel's rules use, so bytes-are-time (ADR-0062) is
+        //   doing the date arithmetic in SQL.
+        // * **timeline** — lanes like rows, plus one aggregate query for the
+        //   axis (`column_bounds`: `min`/`max` over the same `WHERE`); a lane
+        //   with no date never enters the statement, because the request is
+        //   ANDed with an `is not empty` clause on the date column — the
+        //   brief's 「无日期不显示」 as SQL, not as a Rust `retain`.
+        // * **form** — nothing: the field list is the schema's size and it
+        //   *creates* rows rather than reading them.
+        //
+        // Every branch computes (total, wanted) from SQL counts, checks the
+        // cache, and only then fetches — so a scroll that stays inside a window
+        // still costs the count queries and nothing else, for every layout.
+        let mut total: usize = 0;
+        let mut wanted = RowWindow { start: 0, end: 0 };
+        // The two models the card-shaped layouts read (the row-shaped ones read
+        // `rows`, filled below): a board's columns with their own card slices,
+        // and the calendar's 42 day cells.
+        let mut view_rows: Vec<DbRow> = Vec::new();
+        let mut board_model: Rc<VecModel<crate::DbBoardColumn>> = Rc::new(VecModel::new());
+        let mut cal_model: Rc<VecModel<crate::DbCalendarDay>> = Rc::new(VecModel::new());
 
         // Which rows are pages (ADR-0063), for the row's own Open/name column.
         // One query for the database, not one per row: lazy pages mean this is a
         // handful of rows however large the database is.
         let pages = repo.record_pages(db).unwrap_or_default();
-        let mut view_rows: Vec<DbRow> = match &counts {
-            None => {
-                let rows = match repo.window_rows(&request, wanted) {
-                    Ok(rows) => rows,
+
+        // Is the window already the answer? The whole point of overscan: a
+        // scroll that stays inside the window costs the count queries above and
+        // nothing else. The definition text is part of the key because the
+        // rules — and with them the count and the row set — live in it (D4);
+        // the layout and the session stamp are D5's additions, because the
+        // calendar's month and the gallery's per-row change which model the
+        // same view, document and total would produce.
+        let unchanged = |wanted: RowWindow, total: usize, stamp: u64| -> bool {
+            let windows = self.db_windows.borrow();
+            match windows.get(&block) {
+                Some(existing) => {
+                    existing.view == view
+                        && existing.definition == definition_text
+                        && existing.layout == layout
+                        && existing.stamp == stamp
+                        && existing.window == wanted
+                        && existing.total == total
+                }
+                None => false,
+            }
+        };
+
+        match layout {
+            // ── board: columns are groups, cards are records ────────────────
+            crate::core::database::ViewLayout::Board => {
+                // The board's grouping column: the view's own `groups` rule
+                // (the same key D4's picker writes — a board *is* a grouping,
+                // seen horizontally), else the first option-bounded column.
+                // The fallback is not written back: a default the user never
+                // chose must not become a rule they have to undo.
+                let spec = match rules.group {
+                    Some(spec) => Some(spec),
+                    None => self
+                        .databases
+                        .borrow()
+                        .properties_of(db)
+                        .find(|p| GroupSpec::admits(p.kind))
+                        .map(|p| GroupSpec {
+                            property: p.id,
+                            kind: p.kind,
+                        }),
+                };
+                match spec {
+                    Some(spec) => {
+                        let counts = match repo.group_counts(&request, &spec) {
+                            Ok(counts) => self.db_order_groups(&spec, counts),
+                            Err(e) => {
+                                self.db_notice
+                                    .borrow_mut()
+                                    .push(format!("database read failed: {e}"));
+                                return false;
+                            }
+                        };
+                        let slot_counts: Vec<usize> =
+                            counts.iter().map(|(_, n)| *n).collect();
+                        let slots = board_slots(&slot_counts);
+                        total = slot_counts.iter().sum();
+                        body = TableView::rows_surface_height(metrics.row_height, slots);
+                        wanted = crate::core::database::window(slots, geometry, offset);
+                        if unchanged(wanted, total, stamp) {
+                            return false;
+                        }
+                        let slices = board_window(&slot_counts, wanted);
+                        let mut columns_model: Vec<crate::DbBoardColumn> =
+                            Vec::with_capacity(counts.len());
+                        for (group, (key, count)) in counts.iter().enumerate() {
+                            // Every column is realized (its header is one small
+                            // rectangle and its count came from the `GROUP BY`);
+                            // its *cards* are fetched only for the slice of the
+                            // slot window it reaches into.
+                            let cards = match slices.iter().find(|(g, _, _)| *g == group) {
+                                Some((_, skip, len)) => {
+                                    match repo.window_rows_in_group(
+                                        &request, &spec, key, *skip, *len,
+                                    ) {
+                                        Ok(rows) => db_rows_of(table_rows(&rows, &columns, &pages)),
+                                        Err(e) => {
+                                            self.db_notice
+                                                .borrow_mut()
+                                                .push(format!("database read failed: {e}"));
+                                            return false;
+                                        }
+                                    }
+                                }
+                                None => Vec::new(),
+                            };
+                            columns_model.push(crate::DbBoardColumn {
+                                label: self.db_group_label(&spec, key).into(),
+                                count: *count as i32,
+                                cards: ModelRc::from(Rc::new(VecModel::from(cards))),
+                            });
+                        }
+                        board_model = Rc::new(VecModel::from(columns_model));
+                    }
+                    None => {
+                        // No column to group by: a board with nothing to divide
+                        // records into draws the empty state (the delegate's
+                        // `db-row-count == 0` arm) rather than inventing one
+                        // group called "All".
+                        total = 0;
+                        body = 0.0;
+                        wanted = crate::core::database::window(0, geometry, offset);
+                        if unchanged(wanted, total, stamp) {
+                            return false;
+                        }
+                    }
+                }
+            }
+
+            // ── calendar: a fixed month grid, records folded per day ────────
+            crate::core::database::ViewLayout::Calendar => {
+                let definition = ViewDefinition::parse(&definition_text);
+                let axis = self.db_time_axis(db, &definition);
+                let (year, month) = self.db_calendar_month(block);
+                stamp = year as u64 * 12 + month as u64 - 1;
+                body = TableView::calendar_surface_height();
+                let mut cells_model: Vec<crate::DbCalendarDay> = month_cells(year, month)
+                    .iter()
+                    .map(|&day| crate::DbCalendarDay {
+                        day,
+                        count: 0,
+                        records: ModelRc::default(),
+                    })
+                    .collect();
+                if let Some((date_prop, date_kind)) = axis {
+                    let lo = month_key(year, month);
+                    let (next_year, next_month) = shift_month(year, month, 1);
+                    let hi = month_key(next_year, next_month);
+                    // The month's per-day counts: one `GROUP BY` over the date
+                    // column (≤ 31 keys), *bounded the way a group list is
+                    // bounded* — which is why a date column may group here even
+                    // though D4's picker does not offer it: a header per day is
+                    // 31 objects, a header per text value would be the table.
+                    let month_filter = month_clauses(&rules.filter, date_prop, date_kind, &lo, &hi);
+                    let req_month = RowRequest {
+                        db,
+                        title,
+                        columns: &properties,
+                        sorts: &rules.sorts,
+                        filter: Some(&month_filter),
+                    };
+                    let date_spec = GroupSpec {
+                        property: date_prop,
+                        kind: date_kind,
+                    };
+                    let groups = match repo.group_counts(&req_month, &date_spec) {
+                        Ok(groups) => groups,
+                        Err(e) => {
+                            self.db_notice
+                                .borrow_mut()
+                                .push(format!("database read failed: {e}"));
+                            return false;
+                        }
+                    };
+                    // Merge to days: `2026-09-22` and `2026-09-22T10:00` are
+                    // two stored shapes and one day, so the counts are folded
+                    // by *day* rather than by key.
+                    let mut per_day: Vec<(u32, usize)> = Vec::new();
+                    for (key, count) in groups {
+                        let Some(day) = group_day(&key) else { continue };
+                        match per_day.iter_mut().find(|(d, _)| *d == day) {
+                            Some((_, at)) => *at += count,
+                            None => per_day.push((day, count)),
+                        }
+                    }
+                    per_day.sort_by_key(|(day, _)| *day);
+                    total = per_day.iter().map(|(_, count)| *count).sum();
+                    wanted = RowWindow { start: 0, end: 0 };
+                    if unchanged(wanted, total, stamp) {
+                        return false;
+                    }
+                    let days = days_in_month(year, month);
+                    for (day, count) in per_day {
+                        let Some(at) = cells_model
+                            .iter()
+                            .position(|cell| cell.day == day as i32)
+                        else {
+                            continue;
+                        };
+                        // One day's peek: the same two bounds one day apart,
+                        // `LIMIT CALENDAR_PEEK`. The fold's number is the
+                        // `GROUP BY`'s count — the cell says "and N more"
+                        // without those N ever becoming objects.
+                        let day_lo = date_key(year, month, day);
+                        let day_hi = if day < days {
+                            date_key(year, month, day + 1)
+                        } else {
+                            month_key(next_year, next_month)
+                        };
+                        let day_filter =
+                            month_clauses(&rules.filter, date_prop, date_kind, &lo, &hi);
+                        let day_filter = match day_filter {
+                            FilterNode::All(mut children) => {
+                                children.push(date_bound(date_prop, date_kind, FilterOp::Gte, &day_lo));
+                                children.push(date_bound(date_prop, date_kind, FilterOp::Lt, &day_hi));
+                                FilterNode::All(children)
+                            }
+                            other => other,
+                        };
+                        let req_day = RowRequest {
+                            db,
+                            title,
+                            columns: &properties,
+                            sorts: &rules.sorts,
+                            filter: Some(&day_filter),
+                        };
+                        let records = match repo.window_rows(
+                            &req_day,
+                            RowWindow {
+                                start: 0,
+                                end: CALENDAR_PEEK,
+                            },
+                        ) {
+                            Ok(rows) => db_rows_of(table_rows(&rows, &columns, &pages)),
+                            Err(e) => {
+                                self.db_notice
+                                    .borrow_mut()
+                                    .push(format!("database read failed: {e}"));
+                                return false;
+                            }
+                        };
+                        cells_model[at] = crate::DbCalendarDay {
+                            day: day as i32,
+                            count: count as i32,
+                            records: ModelRc::from(Rc::new(VecModel::from(records))),
+                        };
+                    }
+                } else {
+                    // No date column at all: the grid still draws (a month of
+                    // blanks and the nav strip) — a calendar with no axis is a
+                    // fact about the schema, not an error, and the empty state
+                    // says "New row" rather than pretending to have days.
+                    wanted = RowWindow { start: 0, end: 0 };
+                    total = 0;
+                    if unchanged(wanted, total, stamp) {
+                        return false;
+                    }
+                }
+                cal_model = Rc::new(VecModel::from(cells_model));
+            }
+
+            // ── gallery: a grid of cards, windowed by card rows ─────────────
+            crate::core::database::ViewLayout::Gallery => {
+                // How many cards fit in a row is the *delegate's* answer (it is
+                // the layer that knows the grid's width) and it reports it back;
+                // until the first report, the default is what the formula gives
+                // for the default editor width.
+                let per_row = self
+                    .db_gallery_per_row
+                    .borrow()
+                    .get(&block)
+                    .copied()
+                    .unwrap_or_else(|| TableView::gallery_per_row(GALLERY_DEFAULT_WIDTH));
+                stamp = per_row as u64;
+                total = match layout_total(&repo, &request, db, rules.filter.is_some()) {
+                    Ok(total) => total,
                     Err(e) => {
                         self.db_notice
                             .borrow_mut()
@@ -4286,59 +4733,284 @@ impl AppState {
                         return false;
                     }
                 };
-                db_rows_of(table_rows(&rows, &columns, &pages))
+                let rows_total = TableView::gallery_rows(total, per_row);
+                body = TableView::gallery_surface_height(total, per_row);
+                wanted = crate::core::database::window(rows_total, geometry, offset);
+                if unchanged(wanted, total, stamp) {
+                    return false;
+                }
+                // One slice for the whole window: `per_row × rows` cards, which
+                // the delegate chunks by `per_row` (the same number it
+                // reported) into the rows it draws.
+                let window = RowWindow {
+                    start: wanted.start * per_row,
+                    end: (wanted.end * per_row).min(total),
+                };
+                match repo.window_rows(&request, window) {
+                    Ok(rows) => view_rows = db_rows_of(table_rows(&rows, &columns, &pages)),
+                    Err(e) => {
+                        self.db_notice
+                            .borrow_mut()
+                            .push(format!("database read failed: {e}"));
+                        return false;
+                    }
+                }
             }
-            Some(counts) => {
-                let spec = rules.group.as_ref().expect("counts imply a group");
-                // A group header is one entry and its rows follow it:
-                // `group_window` maps the entry window onto per-group slices,
-                // so the rows realized are the viewport's wherever they sit
-                // relative to their header — a group holding all 10 000 rows
-                // realizes the same 31 rows it would ungrouped, and each group
-                // costs one header entry, never one row per group.
-                let surface = group_window(&counts.iter().map(|(_, n)| *n).collect::<Vec<_>>(), wanted);
-                let mut entries: Vec<DbRow> = (0..wanted.len())
-                    .map(|_| DbRow {
-                        record: -1,
-                        page: -1,
-                        title: "".into(),
-                        header: "".into(),
-                        cells: ModelRc::default(),
-                    })
-                    .collect();
-                for slice in &surface.rows {
-                    let (key, _) = &counts[slice.group];
-                    let rows = match repo.window_rows_in_group(&request, spec, key, slice.skip, slice.len)
-                    {
-                        Ok(rows) => rows,
+
+            // ── timeline: one lane per dated record, bars on a shared axis ──
+            crate::core::database::ViewLayout::Timeline => {
+                let definition = ViewDefinition::parse(&definition_text);
+                match self.db_time_axis(db, &definition) {
+                    Some((date_prop, date_kind)) => {
+                        // The date (and the optional end) must be *painted*
+                        // even when the view hides them, because the lane's bar
+                        // is read out of the row: the request's column list is
+                        // the view's plus whichever of the two is missing.
+                        let mut tl_columns = properties.clone();
+                        let date_at =
+                            push_column(&mut tl_columns, &self.databases.borrow(), date_prop);
+                        let end_at: Option<usize> = definition
+                            .end_column()
+                            .filter(|id| *id != date_prop)
+                            .and_then(|id| {
+                                let catalog = self.databases.borrow();
+                                let row = catalog.properties.iter().find(|p| p.id == id)?;
+                                if matches!(
+                                    row.kind,
+                                    PropertyKind::Date
+                                        | PropertyKind::CreatedTime
+                                        | PropertyKind::LastEditedTime
+                                ) {
+                                    Some(push_column(&mut tl_columns, &catalog, id))
+                                } else {
+                                    None
+                                }
+                            });
+                        // 「无日期不显示」: an `is not empty` clause on the date
+                        // column, compiled by the clause compiler and ANDed with
+                        // the view's own rules — the row set is SQL's, not a
+                        // Rust `retain` on a fetched table.
+                        let dated = FilterNode::Clause(FilterClause {
+                            property: date_prop,
+                            kind: date_kind,
+                            op: FilterOp::IsNotEmpty,
+                            value: FilterValue::Missing,
+                        });
+                        let filter = match &rules.filter {
+                            Some(tree) => FilterNode::All(vec![tree.clone(), dated]),
+                            None => dated,
+                        };
+                        let req_tl = RowRequest {
+                            db,
+                            title,
+                            columns: &tl_columns,
+                            sorts: &rules.sorts,
+                            filter: Some(&filter),
+                        };
+                        total = match repo.filtered_count(&req_tl) {
+                            Ok(total) => total,
+                            Err(e) => {
+                                self.db_notice
+                                    .borrow_mut()
+                                    .push(format!("database read failed: {e}"));
+                                return false;
+                            }
+                        };
+                        // The axis: one `min`/`max` over the same predicate. A
+                        // `None` (no admitted row holds a value) leaves a
+                        // one-day axis, which draws nothing off the edge.
+                        let bounds = repo.column_bounds(&req_tl, date_prop, date_kind);
+                        let (first, last) = match bounds {
+                            Ok(Some((low, high))) => (
+                                day_number_of(&low).unwrap_or(0),
+                                day_number_of(&high).unwrap_or(0),
+                            ),
+                            _ => (0, 0),
+                        };
+                        tl_start = first;
+                        tl_days = (last - first + 1).max(1);
+                        body = TableView::rows_surface_height(metrics.row_height, total);
+                        wanted = crate::core::database::window(total, geometry, offset);
+                        if unchanged(wanted, total, stamp) {
+                            return false;
+                        }
+                        let rows = match repo.window_rows(&req_tl, wanted) {
+                            Ok(rows) => rows,
+                            Err(e) => {
+                                self.db_notice
+                                    .borrow_mut()
+                                    .push(format!("database read failed: {e}"));
+                                return false;
+                            }
+                        };
+                        view_rows = db_rows_of(table_rows(&rows, &columns, &pages));
+                        // The bar's day numbers, read out of the painted cells
+                        // at the two positions the column list reserved. A
+                        // painted date cell always starts with the stored day
+                        // (`DateFormat` truncates a stamp to its date), which is
+                        // what makes this one read per row instead of a second
+                        // query per row.
+                        for (at, row) in rows.iter().enumerate() {
+                            let from = row
+                                .cells
+                                .get(date_at)
+                                .and_then(|text| day_number_of(text));
+                            let to = end_at
+                                .and_then(|end| {
+                                    row.cells.get(end).and_then(|text| day_number_of(text))
+                                });
+                            view_rows[at].tl_from = from.map(|day| day as i32).unwrap_or(-1);
+                            // `起=止=同一天时画点`: no end column, or an end
+                            // before the start, is a point at the start.
+                            view_rows[at].tl_to = match (from, to) {
+                                (Some(from), Some(to)) => to.max(from) as i32,
+                                (Some(from), None) => from as i32,
+                                _ => -1,
+                            };
+                        }
+                    }
+                    None => {
+                        // No time axis: no lane can be placed, so the timeline
+                        // treats the database as empty and the delegate says so
+                        // — the honest answer, and the same one the calendar
+                        // gives with no axis.
+                        total = 0;
+                        body = 0.0;
+                        tl_start = 0;
+                        tl_days = 1;
+                        wanted = crate::core::database::window(0, geometry, offset);
+                        if unchanged(wanted, total, stamp) {
+                            return false;
+                        }
+                    }
+                }
+            }
+
+            // ── form: the field list, not a read ────────────────────────────
+            crate::core::database::ViewLayout::Form => {
+                total = match layout_total(&repo, &request, db, rules.filter.is_some()) {
+                    Ok(total) => total,
+                    Err(e) => {
+                        self.db_notice
+                            .borrow_mut()
+                            .push(format!("database read failed: {e}"));
+                        return false;
+                    }
+                };
+                // One field per visible column plus the action row: the form's
+                // height is the schema's, and no record is read to draw it. The
+                // count text still answers "N rows" from a count query, because
+                // the form is a view *of* the table even when it draws none of
+                // it.
+                body = TableView::form_surface_height(columns.len());
+                wanted = crate::core::database::window(total, geometry, offset);
+                if unchanged(wanted, total, stamp) {
+                    return false;
+                }
+            }
+
+            // ── table / list (and chart, which draws its own refusal) ───────
+            _ => {
+                // A grouped view counts by its group query (one `GROUP BY` over
+                // an option-bounded column — the list of *headers*, a handful of
+                // rows); its entries are then Σ(count + 1). An ungrouped view
+                // counts with one `COUNT(*)` — over the filter's predicate when
+                // it has one, over the database alone when it does not. Either
+                // way the window arithmetic is computed FROM that number: filter
+                // a 10 000-row database down to 3 rows and the window realizes 3
+                // rows, and a grouped one realizes 3 rows plus its headers —
+                // never the table, never one row per group.
+                let counts = match &rules.group {
+                    Some(spec) => match repo.group_counts(&request, spec) {
+                        Ok(counts) => Some(self.db_order_groups(spec, counts)),
                         Err(e) => {
                             self.db_notice
                                 .borrow_mut()
                                 .push(format!("database read failed: {e}"));
                             return false;
                         }
-                    };
-                    for (at, row) in db_rows_of(table_rows(&rows, &columns, &pages))
-                        .into_iter()
-                        .enumerate()
-                    {
-                        entries[slice.at - wanted.start + at] = row;
+                    },
+                    None => None,
+                };
+                total = match &counts {
+                    Some(counts) => counts.iter().map(|(_, n)| n + 1).sum(),
+                    None => match layout_total(&repo, &request, db, rules.filter.is_some()) {
+                        Ok(total) => total,
+                        Err(e) => {
+                            self.db_notice
+                                .borrow_mut()
+                                .push(format!("database read failed: {e}"));
+                            return false;
+                        }
+                    },
+                };
+                // The list's own row height comes from `layout_metrics`, so the
+                // block's height and the window's division agree by
+                // construction (a 44 px list row realizes 44 px of surface).
+                body = TableView::rows_surface_height(metrics.row_height, total);
+                wanted = crate::core::database::window(total, geometry, offset);
+                if unchanged(wanted, total, stamp) {
+                    return false;
+                }
+
+                match &counts {
+                    None => {
+                        let rows = match repo.window_rows(&request, wanted) {
+                            Ok(rows) => rows,
+                            Err(e) => {
+                                self.db_notice
+                                    .borrow_mut()
+                                    .push(format!("database read failed: {e}"));
+                                return false;
+                            }
+                        };
+                        view_rows = db_rows_of(table_rows(&rows, &columns, &pages));
+                    }
+                    Some(counts) => {
+                        let spec = rules.group.as_ref().expect("counts imply a group");
+                        // A group header is one entry and its rows follow it:
+                        // `group_window` maps the entry window onto per-group
+                        // slices, so the rows realized are the viewport's
+                        // wherever they sit relative to their header — a group
+                        // holding all 10 000 rows realizes the same 31 rows it
+                        // would ungrouped, and each group costs one header
+                        // entry, never one row per group.
+                        let surface =
+                            group_window(&counts.iter().map(|(_, n)| *n).collect::<Vec<_>>(), wanted);
+                        let mut entries: Vec<DbRow> = (0..wanted.len())
+                            .map(|_| DbRow::header())
+                            .collect();
+                        for slice in &surface.rows {
+                            let (key, _) = &counts[slice.group];
+                            let rows = match repo.window_rows_in_group(
+                                &request, spec, key, slice.skip, slice.len,
+                            ) {
+                                Ok(rows) => rows,
+                                Err(e) => {
+                                    self.db_notice
+                                        .borrow_mut()
+                                        .push(format!("database read failed: {e}"));
+                                    return false;
+                                }
+                            };
+                            for (at, row) in db_rows_of(table_rows(&rows, &columns, &pages))
+                                .into_iter()
+                                .enumerate()
+                            {
+                                entries[slice.at - wanted.start + at] = row;
+                            }
+                        }
+                        for (group, header_at) in &surface.headers {
+                            let (key, count) = &counts[*group];
+                            let label = self.db_group_label(spec, key);
+                            entries[header_at - wanted.start] =
+                                DbRow::header_with(&format!("{label} · {count}"));
+                        }
+                        view_rows = entries;
                     }
                 }
-                for (group, header_at) in &surface.headers {
-                    let (key, count) = &counts[*group];
-                    let label = self.db_group_label(spec, key);
-                    entries[header_at - wanted.start] = DbRow {
-                        record: -1,
-                        page: -1,
-                        title: "".into(),
-                        header: format!("{label} · {count}").into(),
-                        cells: ModelRc::default(),
-                    };
-                }
-                entries
             }
-        };
+        }
         // (`ViewRules::note` — the visible degradation — is not toasted here:
         // it rides the block row, and `db_fill_row` draws it where the row
         // count would be, because a filter that is not being applied is a fact
@@ -4349,17 +5021,31 @@ impl AppState {
         let entry = windows.entry(block).or_insert_with(|| DbWindow {
             view,
             definition: String::new(),
+            layout,
+            stamp: 0,
             columns: Vec::new(),
             total,
             window: wanted,
             rows: Rc::new(VecModel::from(Vec::new())),
+            board: Rc::new(VecModel::new()),
+            cal: Rc::new(VecModel::new()),
+            body: 0.0,
+            tl_start: 0,
+            tl_days: 1,
         });
         entry.view = view;
         entry.definition = definition_text;
+        entry.layout = layout;
+        entry.stamp = stamp;
         entry.columns = columns;
         entry.total = total;
         entry.window = wanted;
+        entry.body = body;
+        entry.tl_start = tl_start;
+        entry.tl_days = tl_days;
         entry.rows.set_vec(view_rows);
+        entry.board = board_model;
+        entry.cal = cal_model;
         true
     }
 
@@ -4501,13 +5187,25 @@ impl AppState {
         row.db_sort_property = -1;
         row.db_sort_desc = false;
         row.db_group_property = -1;
+        // D5: the view family's own fields, refilled below from the window
+        // cache and the session state — the surface height, the board's
+        // columns, the calendar's grid, the gallery's shape, the timeline's
+        // axis, the form's draft.
+        row.db_body_height = 0.0;
+        row.db_board_columns = ModelRc::default();
+        row.db_cal_days = ModelRc::default();
+        row.db_cal_label = "".into();
+        row.db_gallery_per_row = 1;
+        row.db_tl_start = 0;
+        row.db_tl_days = 0;
+        row.db_form = ModelRc::default();
         // The two constants the window arithmetic is laid out at, handed to the
         // delegate rather than restated in .slint: `core::database::window`
-        // divides the scroll offset by ROW_HEIGHT, and the block is as tall as
-        // HEADER_HEIGHT + total * ROW_HEIGHT — one source, or the view would
-        // fetch a window that does not cover its own viewport. Set before the
-        // early return: even a dangling entity's one muted line is laid out at
-        // the same geometry.
+        // divides the scroll offset by the *layout's* row height, and the block
+        // is as tall as HEADER_HEIGHT + its layout's surface — one source, or
+        // the view would fetch a window that does not cover its own viewport.
+        // Set before the early return: even a dangling entity's one muted line
+        // is laid out at the same geometry.
         row.db_row_height = TableView::ROW_HEIGHT;
         row.db_header_height = TableView::HEADER_HEIGHT;
         // `db_ref` is not reset: it is the block's own pointer, projected from
@@ -4518,6 +5216,14 @@ impl AppState {
             return;
         };
         row.db_ok = true;
+        // D5: the layout's own geometry. The row height is the placement unit
+        // the window was computed with (a table row, a list row, a timeline
+        // lane, a board slot, a gallery card row), and the surface height is
+        // the window cache's `body` — the block's height is now the layout's
+        // own shape, not one formula in the delegate.
+        let metrics = layout_metrics(view.layout);
+        row.db_row_height = metrics.row_height;
+        row.db_header_height = metrics.header_height;
         // The rules' header state, from the same document the window was read
         // with: how many clauses the filter holds (the button's chip and its
         // active tint), the first sort term (the header's arrow — the panel
@@ -4580,6 +5286,51 @@ impl AppState {
                     view: tab.view.as_u64() as i32,
                     name: tab.name.clone().into(),
                     active: tab.active,
+                })
+                .collect::<Vec<_>>(),
+        )));
+        // ── D5: the layout's own payload, from the window cache ─────────────
+        // The surface height, the timeline's axis, and the per-layout model the
+        // delegate reads (a board's columns, the calendar's grid) — one read of
+        // the cache the refresh just settled, so the block row carries the
+        // layout's whole shape and the delegate does no arithmetic but the
+        // placement the window already decided.
+        let windows = self.db_windows.borrow();
+        let Some(window) = windows.get(&block) else {
+            return;
+        };
+        row.db_body_height = window.body;
+        row.db_tl_start = window.tl_start as i32;
+        row.db_tl_days = window.tl_days as i32;
+        row.db_board_columns = ModelRc::from(window.board.clone());
+        row.db_cal_days = ModelRc::from(window.cal.clone());
+        let (cal_year, cal_month) = self.db_calendar_month(block);
+        row.db_cal_label = month_label(cal_year, cal_month).into();
+        row.db_gallery_per_row = self
+            .db_gallery_per_row
+            .borrow()
+            .get(&block)
+            .copied()
+            .unwrap_or_else(|| TableView::gallery_per_row(GALLERY_DEFAULT_WIDTH)) as i32;
+        // The form's draft: one field per visible column, the draft text (a
+        // field left empty is `""` — an empty draft *is* the cleared state), in
+        // the order the view shows the columns.
+        let draft = self.db_form.borrow().get(&block).cloned().unwrap_or_default();
+        row.db_form = ModelRc::from(Rc::new(VecModel::from(
+            view.columns
+                .iter()
+                .map(|column| {
+                    let text = draft
+                        .iter()
+                        .find(|(property, _)| *property == column.property.as_u64())
+                        .map(|(_, text)| text.clone())
+                        .unwrap_or_default();
+                    crate::DbFormField {
+                        property: column.property.as_u64() as i32,
+                        name: column.name.clone().into(),
+                        kind: property_kind_int(column.kind),
+                        text: text.into(),
+                    }
                 })
                 .collect::<Vec<_>>(),
         )));
@@ -5553,6 +6304,356 @@ impl AppState {
             rows: out,
         })
     }
+
+    // ─── D5: the view family (SPEC §三十九 「视图」) ─────────────────────────
+    //
+    // One new command (`AddDatabaseView`), one lazy-page path (`db_open_record`,
+    // ADR-0063's 「打开 record 时建页」 finally getting its UI trigger), and the
+    // three session dials the layouts read. Every view's *rules* still go
+    // through `db_edit_definition` — a board's grouping **is** D4's `groups`
+    // key, a calendar's and a timeline's time axis is the one new document key
+    // (`date`/`end`, ADR-0064's one JSON document, no new table, no new
+    // column), and the gallery's per-row is session state because it is a fact
+    // about the window's width.
+
+    /// The time axis a calendar places records by and a timeline draws bars
+    /// from: the document's `date` key when it names an existing date-ish
+    /// column, else the schema's own first date column, else the first derived
+    /// stamp. The fallbacks are the schema's order — the column the user would
+    /// have picked — and are *not* written back: a default must not become a
+    /// rule.
+    fn db_time_axis(
+        &self,
+        db: DatabaseId,
+        definition: &ViewDefinition,
+    ) -> Option<(PropertyId, PropertyKind)> {
+        let date_ish = |kind: PropertyKind| {
+            matches!(
+                kind,
+                PropertyKind::Date
+                    | PropertyKind::CreatedTime
+                    | PropertyKind::LastEditedTime
+            )
+        };
+        let catalog = self.databases.borrow();
+        if let Some(id) = definition.date_column() {
+            if let Some(row) = catalog.properties_of(db).find(|p| p.id == id) {
+                if date_ish(row.kind) {
+                    return Some((id, row.kind));
+                }
+            }
+        }
+        let stored = catalog
+            .properties_of(db)
+            .find(|p| p.kind == PropertyKind::Date)
+            .map(|p| (p.id, p.kind));
+        stored.or_else(|| {
+            catalog
+                .properties_of(db)
+                .find(|p| date_ish(p.kind))
+                .map(|p| (p.id, p.kind))
+        })
+    }
+
+    /// Which month the block's calendar shows. Session state (ADR-0073's rule
+    /// applied to a dial): the default is the month that contains now, read
+    /// from the same local clock the record stamps use (`local_month`, the
+    /// store's one clock), so "this month" means what the timestamps mean.
+    pub fn db_calendar_month(&self, block: i32) -> (i32, u32) {
+        if let Some(month) = self.db_cal_month.borrow().get(&block) {
+            return *month;
+        }
+        let now = match self.db_repo() {
+            Some(repo) => repo.local_month().ok().flatten(),
+            None => None,
+        };
+        now.unwrap_or((2026, 9))
+    }
+
+    /// Set the calendar's month outright — the seed's door, and `db_cal_shift`'s
+    /// innards. A month outside `1..=12` is refused rather than folded: a
+    /// caller that sends `13` is confused, not approximate.
+    pub fn db_calendar_month_set(&self, block: i32, year: i32, month: u32) -> bool {
+        if !(1..=12).contains(&month) {
+            return false;
+        }
+        self.db_cal_month.borrow_mut().insert(block, (year, month));
+        // The cached window holds the old month's day cells: dropping it is
+        // what makes the next projection read the new month's counts.
+        self.db_windows.borrow_mut().remove(&block);
+        self.db_refresh(block);
+        true
+    }
+
+    /// ‹ › : step the calendar one month. One refresh per press — the month's
+    /// counts and day peeks are a handful of small queries over a range the
+    /// month's own bounds set, and the grid itself is fixed.
+    pub fn db_cal_shift(&self, block: i32, delta: i32) -> bool {
+        let (year, month) = self.db_calendar_month(block);
+        let (year, month) = shift_month(year, month, delta);
+        self.db_calendar_month_set(block, year, month)
+    }
+
+    /// The delegate's reported cards-per-row (it is the layer that knows the
+    /// grid's width — the same split as `db_anchor`'s top-in-view). Clamped,
+    /// because a report of `0` would divide the card slice by zero in
+    /// `gallery_rows`'s caller and a report of `100` would make one card row
+    /// per card: a grid of one column is the honest floor.
+    pub fn db_gallery_set_per_row(&self, block: i32, per_row: i32) -> bool {
+        let per_row = per_row.clamp(1, 8) as usize;
+        let changed = self
+            .db_gallery_per_row
+            .borrow_mut()
+            .insert(block, per_row)
+            != Some(per_row);
+        if changed {
+            // The card slice is rows × per_row: a new shape re-reads.
+            self.db_windows.borrow_mut().remove(&block);
+            self.db_refresh(block);
+        }
+        changed
+    }
+
+    /// One keystroke into a form field: the draft learns the text, and nothing
+    /// else happens. Deliberately **not** a write and **not** a refresh — the
+    /// field is a live input, and re-filling the block row per keystroke would
+    /// rebuild the very input the user is typing into. Nothing reaches SQL
+    /// until Submit.
+    pub fn db_form_set_text(&self, block: i32, property: i32, text: &str) {
+        let mut form = self.db_form.borrow_mut();
+        let draft = form.entry(block).or_default();
+        let property = property as u64;
+        match draft.iter_mut().find(|(p, _)| *p == property) {
+            Some((_, slot)) => *slot = text.to_string(),
+            None => draft.push((property, text.to_string())),
+        }
+    }
+
+    /// Throw the draft away. The fields go blank on the next projection; the
+    /// caller refreshes the block row.
+    pub fn db_form_clear(&self, block: i32) {
+        self.db_form.borrow_mut().remove(&block);
+    }
+
+    /// Submit: parse every filled field through its column's own rules (the
+    /// same `parse_one` a cell edit runs, ADR-0069), create **one** record, and
+    /// write the values into it — one batch, so one Ctrl+Z takes the whole
+    /// submission back. A field that does not parse refuses the whole submit
+    /// and says which column refused: a form that half-created a record would
+    /// be two facts about one gesture.
+    ///
+    /// Empty fields write nothing (ADR-0062's absence-is-empty), and a draft
+    /// with no values at all creates a bare record — the same thing the table's
+    /// "New row" makes.
+    pub fn db_form_submit(&self, block: i32) -> bool {
+        let Some(db) = self.db_ref_of(block) else {
+            return false;
+        };
+        let Some(repo) = self.db_repo().cloned() else {
+            return false;
+        };
+        let catalog = self.databases.borrow();
+        let draft = self.db_form.borrow().get(&block).cloned().unwrap_or_default();
+        let mut values: Vec<(PropertyId, CellValue)> = Vec::new();
+        for (property, text) in &draft {
+            if text.is_empty() {
+                continue;
+            }
+            let Some(row) = catalog.properties.iter().find(|p| p.id == PropertyId(*property))
+            else {
+                continue;
+            };
+            let value =
+                match crate::core::database_property::parse_one(row.kind, &row.config, text) {
+                    Ok(value) => value,
+                    Err(e) => {
+                        self.db_notice.borrow_mut().push(format!(
+                            "{}: {e}",
+                            if row.name.is_empty() {
+                                "a column".to_string()
+                            } else {
+                                row.name.clone()
+                            }
+                        ));
+                        return false;
+                    }
+                };
+            values.push((PropertyId(*property), value));
+        }
+        drop(catalog);
+        // One batch: the record and every parsed value, planned together and
+        // reverted together. The `from` half of each cell write is `Empty`
+        // because the record does not exist yet — the plan reads the document,
+        // and the store applies the writes in order.
+        let record = RecordId(self.next_record_id.get());
+        let ord = self.db_next_row_ord(block);
+        let mut cmds = vec![Command::AddDatabaseRecord {
+            block: BlockId(block as u64),
+            record,
+            ord,
+        }];
+        cmds.extend(values.into_iter().map(|(property, to)| Command::SetDatabaseCell {
+            block: BlockId(block as u64),
+            record,
+            property,
+            from: CellValue::Empty,
+            to,
+        }));
+        if self.exec_all_on_open_page(cmds).is_none() {
+            return false;
+        }
+        self.next_record_id.set(self.next_record_id.get() + 1);
+        self.db_form_clear(block);
+        self.db_refresh(block);
+        true
+    }
+
+    /// One new view of this database, in `ViewLayout::ALL`'s order — the
+    /// switcher `+`'s menu row picked. The view is born named after its layout
+    /// (renameable later, `ViewRenamed`), at the switcher's end, with an empty
+    /// rules document; the app then *switches to it*, because a view created
+    /// and not looked at is a gesture that did half of what it said.
+    ///
+    /// `Chart` is refused by name: D7's layout, and a menu row that creates a
+    /// view this build cannot draw would be a promise the switcher has to
+    /// un-draw on the next frame.
+    pub fn db_add_view(&self, block: i32, layout_index: i32) -> bool {
+        let Some(db) = self.db_ref_of(block) else {
+            return false;
+        };
+        let Some(layout) = crate::core::database::ViewLayout::ALL.get(layout_index as usize)
+            .copied()
+        else {
+            return false;
+        };
+        if matches!(layout, crate::core::database::ViewLayout::Chart) {
+            self.db_notice
+                .borrow_mut()
+                .push("Chart view is not in this build yet.".to_string());
+            return false;
+        }
+        // The end of the switcher's order, from the catalog (a schema is a
+        // handful of rows; no `MAX(ord)` query — the same fold the columns'
+        // ord uses).
+        let ord = {
+            let catalog = self.databases.borrow();
+            catalog
+                .views_of(db)
+                .map(|v| v.ord)
+                .max()
+                .map(|last| {
+                    OrderKey::between(Some(last), None)
+                        .unwrap_or(OrderKey(last.0 + OrderKey::STRIDE))
+                })
+                .unwrap_or(OrderKey::FIRST)
+        };
+        let id = self.next_view_id.get();
+        let view = crate::core::database::View {
+            id: ViewId(id),
+            db,
+            name: layout.label().to_string(),
+            layout,
+            definition: String::new(),
+            ord,
+        };
+        if self
+            .exec_editor(Command::AddDatabaseView {
+                block: BlockId(block as u64),
+                view,
+            })
+            .is_none()
+        {
+            return false;
+        }
+        self.next_view_id.set(id + 1);
+        // Switch to it: the same two lines `db_pick_view` runs, inline, because
+        // the new view is the answer to the click that made it.
+        self.db_active_view.borrow_mut().insert(block, ViewId(id));
+        self.db_windows.borrow_mut().remove(&block);
+        self.db_refresh(block);
+        true
+    }
+
+    /// Open a record: to its page when it has one; otherwise the page is
+    /// **minted now** — ADR-0063's lazy page, whose other half (the pointer)
+    /// lands in the same batch, so the first Open is one undo step and a
+    /// deleted page's record can be opened again into a fresh page.
+    ///
+    /// The page is created as a child of the page the database sits on, named
+    /// after the record's title (a bare record's title lives in `db_values`,
+    /// ADR-0063's second home). Returns the page's id; the caller navigates.
+    /// `None` for a session without a store, or a record that is not there —
+    /// both are facts about the session, not errors.
+    pub fn db_open_record(&self, block: i32, record: i64) -> Option<i32> {
+        let db = self.db_ref_of(block)?;
+        let repo = self.db_repo().cloned()?;
+        let record_id = RecordId(record as u64);
+        let row = repo.record(record_id).ok().flatten()?;
+        if let Some(page) = row.page {
+            return Some(page.as_u64() as i32);
+        }
+        // The title, from the record's own title value (an empty title names
+        // the page "Untitled", which is what a row nobody named is).
+        let title = {
+            let catalog = self.databases.borrow();
+            catalog
+                .properties_of(db)
+                .find(|p| p.kind.is_title())
+                .and_then(|p| repo.cell(record_id, p.id).ok())
+                .map(|value| value.display())
+                .filter(|title| !title.trim().is_empty())
+                .unwrap_or_else(|| "Untitled".to_string())
+        };
+        // The page's own facts, the way `create_page` writes them: a child of
+        // the page this database sits on, last among its siblings. Duplicated
+        // rather than called because `create_page` *navigates* — and the caller
+        // of an Open already owns the navigation.
+        let parent = self.open_page.get();
+        let id = self
+            .workspace
+            .borrow_mut()
+            .create(if parent > 0 { Some(parent) } else { None }, &title);
+        let order = {
+            let kids = self.workspace.borrow().children_of(if parent > 0 {
+                Some(parent)
+            } else {
+                None
+            });
+            let map = self.page_order.borrow();
+            let prev = kids
+                .len()
+                .checked_sub(2)
+                .and_then(|i| kids.get(i))
+                .and_then(|pid| map.get(pid).copied());
+            OrderKey::between(prev, None).expect("append order exhausted")
+        };
+        let page = crate::core::Page {
+            id: PageId(id as u32 as u64),
+            title,
+            parent: if parent > 0 {
+                Some(PageId(parent as u32 as u64))
+            } else {
+                None
+            },
+            order,
+            favorite: false,
+            expanded: false,
+            font: crate::core::PageFont::default(),
+            full_width: false,
+            small_text: false,
+            icon: String::new(),
+        };
+        // One batch: the page exists and the record points at it, or neither
+        // happened. This is ADR-0063's 「打开」 in one Ctrl+Z.
+        self.record(vec![
+            Change::PageCreated(page),
+            Change::RecordPageSet {
+                id: record_id,
+                page: Some(PageId(id as u32 as u64)),
+            },
+        ]);
+        Some(id)
+    }
 }
 
 /// The cells of one table, as the row's data.
@@ -5799,6 +6900,16 @@ pub fn project_blocks(blocks: &[Block], hits: &FindHits) -> Vec<BlockRow> {
                 db_sort_property: -1,
                 db_sort_desc: false,
                 db_group_property: -1,
+                // D5: the view family's fields, all neutral until `db_fill_row`
+                // fills them for a live block
+                db_body_height: 0.0,
+                db_board_columns: ModelRc::default(),
+                db_cal_days: ModelRc::default(),
+                db_cal_label: "".into(),
+                db_gallery_per_row: 1,
+                db_tl_start: 0,
+                db_tl_days: 0,
+                db_form: ModelRc::default(),
             }
         })
         .collect();
@@ -5896,6 +7007,17 @@ fn block(kind: i32, text: &str) -> BlockRow {
         db_sort_property: -1,
         db_sort_desc: false,
         db_group_property: -1,
+        // D5: the view family's fields, neutral in the test factory like the
+        // rest — a projection without a database has no board, grid, axis or
+        // draft to fill them from
+        db_body_height: 0.0,
+        db_board_columns: ModelRc::default(),
+        db_cal_days: ModelRc::default(),
+        db_cal_label: "".into(),
+        db_gallery_per_row: 1,
+        db_tl_start: 0,
+        db_tl_days: 0,
+        db_form: ModelRc::default(),
     }
 }
 

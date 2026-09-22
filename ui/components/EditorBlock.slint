@@ -39,19 +39,16 @@ export component EditorBlock inherits Rectangle {
     // no child blocks (its rows are records, its cells are values)
     property <bool> is-database: block.kind == 23;
     // The row's height is the view's own (SPEC §三十九 红线第一条): the header
-    // plus every row of the *database*, not of the realized window, which is
-    // what makes the page's scroll the view's scroll — a 10 000-row database
-    // is a tall block, and the rows that exist as objects are only the ones
-    // the viewport can see. The two lengths come from Rust
-    // (`TableView::HEADER_HEIGHT` / `ROW_HEIGHT`), so the delegate and the
-    // window arithmetic cannot disagree about a row's height. An empty
-    // database reserves one clickable line; a dangling entity is its one
-    // muted line (ADR-0060).
+    // plus the layout's surface, both computed in Rust (`db-header-height`,
+    // `db-body-height` — the layout's own shape since D5: a table's rows, a
+    // board's tallest column, a gallery's card rows, the calendar's fixed grid,
+    // the form's fields). One source, so the delegate and the window arithmetic
+    // cannot disagree about a row's height. An empty database reserves one
+    // clickable line (the calendar and the form always draw their own bodies);
+    // a dangling entity is its one muted line (ADR-0060).
     property <length> db-height: !block.db-ok ? 34px
-        : block.db-row-count > 0
-            ? block.db-header-height + block.db-row-count * block.db-row-height
-            : block.db-header-height + 34px;
-
+        : block.db-header-height
+            + Math.max(block.db-body-height, 34px);
     // picture (kind 14): the row's height comes from the raster's ratio, which
     // Rust knows from the attachments row. 0 means there is no picture to
     // show — a missing file or an attachment from another library — and the
