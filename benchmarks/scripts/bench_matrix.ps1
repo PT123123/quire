@@ -10,6 +10,7 @@ param(
     [string[]]$Only = @()
 )
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "redact.ps1")
 
 if ($TypingExe -eq "") {
     $TypingExe = Join-Path (Split-Path $Exe -Parent) "quire-typing.exe"
@@ -106,7 +107,7 @@ foreach ($scene in $scenes) {
     foreach ($params in $rows) {
         $line = & "$PSScriptRoot\bench.ps1" @params | ConvertFrom-Json
         $line | Add-Member -NotePropertyName command -NotePropertyValue $scene.command
-        $text = $line | ConvertTo-Json -Depth 6 -Compress
+        $text = Open-JsonPlaceholders ($line | ConvertTo-Json -Depth 6 -Compress)
         Write-Output $text
         if ($Out -ne "") { Add-Content -Path $Out -Value $text }
     }

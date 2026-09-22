@@ -3339,3 +3339,23 @@ libgit2 主动递了凭证，服务器回 401，报错长得像权限问题，�
 / `verify-portable.ps1` 依旧没在新布局上验过；③ 新仓没有 tag、没有 release 节奏，rev 是一枚裸
 SHA，升级它是一次手改 + 一次全部门槛；④ 换 rev 之后 `Cargo.lock` 里会不会同时留两条
 `quire-core` 记录（旧 rev 那条在被裁掉之前）没验过——本仓这次是第一次有 git 依赖，只有一条。
+
+**补刀 · 写入侧（同日，紧跟着上面那把重写）**：历史洗干净了，可四枚行生成器照旧把 `$Exe` 和
+pinned db 记成绝对路径——下一趟 `bench_matrix.ps1` 就会把同一份泄露再写进一次提交。现在它们都先过
+`benchmarks/scripts/redact.ps1`：checkout 根 / `%TEMP%` / `%LOCALAPPDATA%` / `%USERPROFILE%` 分别
+换成 `<repo>` `<temp>` `<localappdata>` `<user>`（跟历史那一趟用的是同一套写法，免得新旧行读起来是
+两样）。两个坑记下来：① **必须在把反斜杠翻倍成 JSON 之前洗**——规则是从真实路径拼的，只有一个分隔
+符，永远match不上 `C:\\Users\\…`；② PS 5.1 的 `ConvertTo-Json` 会把 `<` `>` 转义成 `\u003c`
+`\u003e`，而 bench_matrix / profile_bench 是把 bench.ps1 那一行反序列化后再序列化写盘的，所以
+`Open-JsonPlaceholders` 把它们开回来（值里**真的**含 `\u003c` 的情况不受影响，那份是 `\\u003c`）。
+兜底是一句 `Write-Warning` 而不是一条更宽的规则：账号名仍以完整路径段出现，说明有一个前缀是这文件
+不认识的，那就嚷出来，别安静地写下去。
+
+**这刀的自证**（四枚写盘脚本各跑一遍，产物只落 `.scratch/`）：10 行输出里 **0 行**还带
+`[A-Za-z]:[\\/]` 形状的绝对路径（这条不依赖知道本机账号名），**0 行**提到 `Users\`，10/10 带
+`<repo>`、6/10 带 `<temp>`，`\u003` 剩 0，10 行全部 `ConvertFrom-Json` 通过。control 三枚：一条不
+在任何已知前缀下的 `D:\other\thing.exe` **原样返回**（证明它不是「把一切都换成 `<repo>`」）；换到
+E 盘的另一个 home 被兜底规则洗成 `Users\<user>`；`profile_bench.ps1` 那枚 meta 行是从脚本里**读出
+那一行源码再 Invoke-Expression** 求值的（不是抄一份），它带着 `<repo>` 且 `exe_bytes` 仍是真实的
+27 847 168。有一处误报要说清：按「账号名作为子串」判会命中 1 行，那是英文单词里偶然含到的三个
+字母，不是路径；所以真正的判据是上面那两条不依赖账号名的（drive 前缀 + `Users\`）。

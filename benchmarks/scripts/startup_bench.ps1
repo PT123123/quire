@@ -7,6 +7,7 @@ param(
     [string]$ResultsDir = ""
 )
 $ErrorActionPreference = "SilentlyContinue"
+. (Join-Path $PSScriptRoot "redact.ps1")
 
 # A2 · first-paint latency, measured against the harness's old window-up
 # number inside the same run.
@@ -29,7 +30,7 @@ if ($ResultsDir -eq "") {
 $outFile = Join-Path $ResultsDir "$(Get-Date -Format 'yyyy-MM-dd')-first-paint-$Label.jsonl"
 if (Test-Path $outFile) { Remove-Item $outFile }
 
-$jsonExe = ($Exe -replace '\\', '\\') -replace '"', '\"'
+$jsonExe = ((Redact-MachinePath $Exe) -replace '\\', '\\') -replace '"', '\"'
 $rows = @()
 $phaseRuns = @()
 $renderer = ""

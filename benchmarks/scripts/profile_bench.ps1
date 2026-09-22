@@ -6,6 +6,7 @@ param(
     [string]$Out = ""
 )
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "redact.ps1")
 
 # One [profile.release] audit pass: the runtime-shaped scenes only —
 #   A  empty shell      · D10000  10 000 blocks idle
@@ -26,7 +27,7 @@ $bench = Join-Path $PSScriptRoot "bench.ps1"
 $typingExe = Join-Path (Split-Path $Exe -Parent) "quire-typing.exe"
 
 $exeItem = Get-Item $Exe
-"{`"kind`":`"meta`",`"profile`":`"$Profile`",`"exe`":`"$($Exe -replace '\\','\\')`",`"exe_bytes`":$($exeItem.Length),`"exe_mtime`":`"$($exeItem.LastWriteTime.ToString('s'))`"}"
+"{`"kind`":`"meta`",`"profile`":`"$Profile`",`"exe`":`"$((Redact-MachinePath $Exe) -replace '\\','\\')`",`"exe_bytes`":$($exeItem.Length),`"exe_mtime`":`"$($exeItem.LastWriteTime.ToString('s'))`"}"
 
 foreach ($scene in $runPlan) {
     if ($scene.args.ContainsKey("Typing")) {
@@ -52,7 +53,7 @@ foreach ($scene in $runPlan) {
         $line | Add-Member -NotePropertyName command -NotePropertyValue $scene.command
         $line | Add-Member -NotePropertyName profile -NotePropertyValue $Profile
         $line | Add-Member -NotePropertyName exe_bytes -NotePropertyValue $exeItem.Length
-        $text = $line | ConvertTo-Json -Depth 6 -Compress
+        $text = Open-JsonPlaceholders ($line | ConvertTo-Json -Depth 6 -Compress)
         Write-Output $text
         if ($Out -ne "") { Add-Content -Path $Out -Value $text }
     }

@@ -85,7 +85,8 @@ tests/
                      `tests/` in quire-core now)
   fixtures/          editor/storage fixtures land here in M3+
 benchmarks/
-  scripts/           bench.ps1 (scenes A–G), shot2png.ps1, sweep.ps1
+  scripts/           bench.ps1 (scenes A–G), redact.ps1 (a committed row never
+                     carries a machine path), shot2png.ps1, sweep.ps1
 docs/                ARCHITECTURE, UI_ARCHITECTURE, EDITOR_ARCHITECTURE,
                      PERFORMANCE, DECISIONS, ROADMAP
 ```

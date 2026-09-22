@@ -30,8 +30,12 @@ Task Manager's "GPU Memory" column / pdh counters and say so.
 `<localappdata>` wherever it had been committed — 22 of the 147 tracked files, and
 nothing else inside them (replaying the substitution over the originals reproduces
 every rewritten hash). A row whose `db` reads `<temp>\…` is not missing data. The
-generator still records absolute paths, so **new runs reintroduce them**; scrubbing
-at write time is the follow-up this note exists to make visible.
+generator side is closed too: every writer now runs its `exe` and `db` fields
+through `benchmarks/scripts/redact.ps1`, which substitutes the same placeholders
+before the backslashes are doubled for JSON. `%TEMP%` is matched before
+`%LOCALAPPDATA%`, which is matched before `%USERPROFILE%`, because each one nests
+inside the next and the outermost match would win otherwise. A row that reads
+`<temp>\…` is a row written on a machine, not a row with missing data.
 Startup latency has two measurements, not one: `bench.ps1`'s `startup_ms` is
 window-handle-up, and `startup_bench.ps1`'s `first_paint_ms` is the first
 painted frame (see the A2 section at the end — they differ by ~4×).

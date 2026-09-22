@@ -440,6 +440,13 @@ First functional release: a local, single-file-database notes workspace.
 - `just check`: `cargo check --all-targets`, the whole test suite, a release
   build. Visual regression and the RAM/CPU scenes run from
   `benchmarks/scripts/` (`sweep.ps1` compares against a manifest of hashes)
+- The benchmark row writers no longer commit a machine path. ADR-0094 rewrote
+  the 22 `benchmarks/results/*.jsonl` files that had one, and the next run would
+  have written it straight back: `exe` and `db` are absolute paths at run time.
+  `benchmarks/scripts/redact.ps1` now substitutes `<repo>`, `<temp>`,
+  `<localappdata>` and `<user>` before those fields are JSON-escaped, in all four
+  writers, and warns instead of staying quiet when an account name still reads as
+  a whole path segment (ADR-0094)
 - A test that needs a folder — a database, a log family, an attachments
   directory — gets one from `quire::testing::ScratchDir`, which deletes it when
   the test ends. Each helper used to create a uniquely named `%TEMP%` directory

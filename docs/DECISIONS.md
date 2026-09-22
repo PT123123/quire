@@ -76,6 +76,22 @@ Consequences:
   Not taken, on purpose — the leak being closed is the public one, and a machine that
   already names that user in twenty file paths gains nothing from local amnesia. The run
   left `commit-map` behind, so every old SHA still resolves to its replacement on paper.
+- **A scrub of published history is worth nothing if the next run writes the same
+  paths back, and the next run did.** All four row generators recorded `$Exe` and the
+  pinned database as absolute paths, so `benchmarks/scripts/redact.ps1` now turns the
+  checkout root, `%TEMP%`, `%LOCALAPPDATA%` and `%USERPROFILE%` into `<repo>`, `<temp>`,
+  `<localappdata>` and `<user>` — the same four spellings the history pass used, longest
+  prefix first, since each of those nests inside the next. Two traps in it are worth
+  keeping: redaction has to happen **before** the backslashes are doubled for JSON,
+  because a rule built from a real path carries one separator and would never match
+  `C:\\Users\\…`; and PowerShell 5.1's `ConvertTo-Json` re-escapes the placeholders'
+  angle brackets, which three of the writers route bench.ps1's line through, so
+  `Open-JsonPlaceholders` opens them back up — a `\u003c` that is really in a value
+  survives that, because it arrives as `\\u003c`. The last line of defence is a warning
+  rather than a wider filter: an account name still standing as a whole path segment
+  means a prefix this file does not know, and it says so instead of writing quietly.
+  Measured on ten rows from all four writers: 0 carry a drive-absolute path, 10 carry
+  `<repo>`, 6 carry `<temp>`, 0 still read `\u003c`, and all 10 parse.
 - `Cargo.lock` is committed **in the extracted repository** as well, which a library
   normally would not: the Android shell will consume it as a git dependency with no
   workspace root above it to inherit a lock from, and `rusqlite` is `bundled` there,

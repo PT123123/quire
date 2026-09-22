@@ -19,6 +19,7 @@ param(
     [string]$PinnedDb = ""
 )
 $ErrorActionPreference = "SilentlyContinue"
+. (Join-Path $PSScriptRoot "redact.ps1")
 
 # Scene E types into the real window; the binary prints one JSON report line,
 # which we capture to a file and inline below. The typing window is padded so
@@ -125,10 +126,12 @@ if ($cacheFile -ne "") {
 if ($dbFile -ne "") { Get-ChildItem -Path "$dbFile*" | Remove-Item -Force }
 if ($reportFile -ne "") { Remove-Item -Path $reportFile -Force }
 # a Windows path is not a legal JSON string until its backslashes are doubled,
-# and `$json` has to survive ConvertFrom-Json for bench_matrix.ps1
-$jsonExe = $Exe -replace '\\', '\\'
+# and `$json` has to survive ConvertFrom-Json for bench_matrix.ps1. The machine
+# prefix comes off first: these two fields are the ones that used to publish
+# where the checkout and the scratch database live.
+$jsonExe = (Redact-MachinePath $Exe) -replace '\\', '\\'
 $jsonLabel = $Label -replace '\\', '\\'
 $jsonDb = $PinnedDb
 if ($dbFile -ne "") { $jsonDb = $dbFile }
-$jsonDb = $jsonDb -replace '\\', '\\'
+$jsonDb = (Redact-MachinePath $jsonDb) -replace '\\', '\\'
 "{`"label`":`"$jsonLabel`",`"exe`":`"$jsonExe`",`"db`":`"$jsonDb`",`"blocks`":$Blocks,`"startup_ms`":$startupMs,`"idle_cpu_pct`":$cpuPct,`"ram_workingset_mb`":$ramMB,`"ram_private_mb`":$privMB,`"exit_code`":$ec,`"typing`":$typingReport,`"attachment_cache`":$cacheReport,`"dump_state`":$dumpState}"
