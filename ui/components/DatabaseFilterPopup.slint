@@ -27,6 +27,7 @@
 import { Theme } from "../Theme.slint";
 import { Colors } from "../Colors.slint";
 import { Typography } from "../Typography.slint";
+import { Icon } from "../Icons.slint";
 import { UIState } from "../Types.slint";
 
 export component DatabaseFilterPopup inherits PopupWindow {
@@ -214,13 +215,20 @@ export component DatabaseFilterPopup inherits PopupWindow {
                         border-radius: Theme.radius-sm;
                         background: del-ta.has-hover ? Colors.danger : Colors.background;
                         opacity: del-ta.has-hover ? 1.0 : 0.6;
-                        Text {
-                            text: "✕";
-                            font-family: Typography.ui-font;
-                            font-size: Typography.size-ui;
+                        // The cross is drawn, not set in a font: `✕` (U+2715) is
+                        // a Dingbats code point, and Segoe UI — this app's UI
+                        // face — has no glyph for it, so the Text was a blank
+                        // box whose TouchArea still deleted the rule. Same class
+                        // as the picker's tick, which is the one that got
+                        // photographed.
+                        Icon {
+                            x: (parent.width - 12px) / 2;
+                            y: (parent.height - 12px) / 2;
+                            width: 12px;
+                            height: 12px;
+                            size: 12px;
+                            name: "x";
                             color: del-ta.has-hover ? Colors.background : Colors.text-muted;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
                         }
                         del-ta := TouchArea {
                             width: parent.width;

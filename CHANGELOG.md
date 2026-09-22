@@ -30,13 +30,15 @@ First functional release: a local, single-file-database notes workspace.
   quire://page link jumps inside the app. The slash menu and Turn-into
   list only carry kinds without a symbol shortcut (ADR-0022)
 - "+" handle opens Notion's insert menu: it creates the empty line below
-  and shows the full block list (Text, Page, To-do, Headings, Bulleted /
-  Numbered, Quote, Divider, Callout, Code, Toggle list, Image, File, Table,
-  Columns, Math, Table of contents, Embed) — picking a
+  and shows the full block list (Text, Page, Link to page, To-do, Headings,
+  Bulleted / Numbered, Quote, Divider, Callout, Code, Toggle list, Image, File,
+  Table, Columns, Math, Table of contents, Embed, Table view, Synced block,
+  Linked view) — picking a
   row converts the new line, clicking away or Escape keeps the empty line,
-  typing filters the menu. The database views (Table view, Board, Gallery,
-  List, Calendar, Timeline) appear as muted "later" placeholders and
-  cannot be picked yet
+  typing filters the menu. The five remaining database rows (Board, Gallery,
+  List, Calendar, Timeline) are still muted "later" placeholders: they name
+  layouts, and a layout is a view of a database you already have — see
+  Databases below
 - Toggle list: a collapsible section. The chevron folds its whole subtree
   out of existence — the hidden blocks get no rows at all, so they cannot
   be tabbed into, dragged or renumbered — and the fold is a view setting,
@@ -201,6 +203,83 @@ First functional release: a local, single-file-database notes workspace.
   shows the editor's selection instead (ADR-0043)
 
 - Undo/redo (Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z) — per page, command-based
+
+### References
+- Typing `@` in text opens the picker the slash menu already uses: its first row
+  is a date, the rest are the workspace's pages. Applying one replaces the `@`
+  and the filter words typed after it with a chip in a single undo step
+- A mention stores the page's id and never its title, so renaming a page stays
+  one write and no reference has to be re-printed: the chip, the backlink
+  panel's group headers and Markdown export all read whatever that page is
+  called right now. A page that is gone reads `(deleted page)` and greys out;
+  clicking a live chip jumps to the page
+- `@date` is a chip of its own, with a clock instead of a page mark: it stores
+  the ISO day it was set to rather than "today's number", so it does not drift
+  and only one spelling is ever written
+- Backlinks: the bottom of every page lists the blocks that point at it, grouped
+  by source page — five rows collapsed, fifty expanded, and one line that states
+  the total so a page cited 200 times never pushes the text off screen. It is
+  derived, not stored (no table, no column), and two indexes keep one page open
+  at 78 µs instead of a full-library scan. Clicking a row jumps to the source
+  block, opening its page first when it lives elsewhere
+- Synced block: a second view of another block, from the insert menu or the
+  slash menu. The copy holds no text of its own — it draws its source's line, and
+  typing into either one writes that single content, undone by one Ctrl+Z.
+  Deleting a mirror takes only its row; deleting the source leaves the mirrors
+  visible, read-only and saying `(deleted source)`. A pair that would point at
+  each other is refused at the moment you write it, not discovered while
+  drawing. Markdown writes a mirror as its source's line, and import
+  deliberately does not learn the syntax — a block id from another file would be
+  a reference born broken
+
+### Databases
+- A database is one block with a tab strip: eight layouts over the same records
+  — table, board, list, calendar, gallery, timeline, form, chart — where "+"
+  adds a second view and each view keeps its own filters, sorts, grouping and
+  layout. The insert menu's other five layout names stay muted on purpose,
+  because a layout is a property of a view rather than a second kind of block:
+  the way to a board is a tab, not a new block
+- Seventeen property kinds: title, text, number, select, multi-select, status,
+  date, checkbox, url, email, phone, files, created time, last edited time,
+  formula, rollup, relation. The Columns popup shows and hides columns and, on
+  its second panel, changes what a column is; created and last-edited stamps
+  come from the record itself and are never typed. A cell with no value stores
+  nothing at all, so "empty" means one thing in every screen
+- Filter, sort and group are questions asked of the database, not a pass over
+  rows already in memory: the operators offered depend on the column's type, a
+  rule whose value you have not filled in constrains nothing, and a date sorts
+  as text because its format is fixed width
+- The search box is one needle over a record's title and text, and the header's
+  "N rows" answers to it — the count comes from SQL before the window opens
+- Formula: an expression sheet with a real lexer and interpreter (no script
+  engine, no new dependency). `if / length / round / abs / min / max / text`,
+  four budgets that cap tokens, depth, steps and result size so nothing can run
+  away, and a cycle is refused when you save rather than hanging the draw. A
+  formula's value is computed as the window is projected and never stored —
+  which is also why sorting or filtering a formula column says no: that would
+  mean evaluating the whole column first
+- Rollup: three questions in order — through which relation, which column, what
+  fold (count / sum / min / max / average, or none). Its chooser lists only what
+  the save path would accept, so a column that cannot be folded reads greyed
+  there rather than refusing afterwards
+- Relation: a column points at another database, optionally declaring the
+  back-pointer on the far side, and its cell is picked from a list with its own
+  search box and a tick on what the cell already holds. One pick writes the cell
+  and every mirror it implies as a single undo step, and the pairing rule is what
+  makes a relation cycle unrepresentable instead of detected
+- Linked view: a second block that draws a database which already exists, so one
+  table can sit on two pages without the records being copied
+- Each row's hover slot carries two actions: delete (record, its values and its
+  page go together in one Ctrl+Z) and "T", which makes that row the database's
+  template — every later "New row" arrives prefilled from it in one undo step,
+  and a column the schema has since lost simply does not prefill
+- Chart is the eighth layout and it plots aggregates rather than rows: one
+  grouping query feeds bar / line / pie drawn with the primitives already in the
+  app (no chart library), realizing zero rows however large the database is
+- Ten thousand rows are never all present: the count is computed first, then a
+  window, so only the rows on screen exist as objects (kilobytes rather than
+  megabytes) and scrolling inside a window that has not changed recomputes
+  nothing
 
 ### Workspace
 - Page tree: create / rename in place / duplicate (nested lists survive) /
@@ -529,3 +608,18 @@ First functional release: a local, single-file-database notes workspace.
   same name rather than updating the first, so pruning is a Delete you do by hand
 - Chinese IME: the manual acceptance pass (docs/IME_CHECKLIST.md) is
   signed off — 2026-09-20
+- Databases say what they will not do rather than guessing: a formula or rollup
+  column cannot be sorted or filtered (that would mean evaluating every row of a
+  10 000-row column, which is the red line the windowed read exists to keep), and
+  a rollup cannot fold through another computed column, so its nesting depth is
+  zero by construction
+- A relation's picker lists a bounded number of the target's rows and its search
+  box is the way past that bound — but nothing caps how many records one cell may
+  *point at*. It is measured, not assumed: folding a window whose relation fans
+  out to 10 000 rows costs 28.5 ms against 9.1 ms for reading those 10 000 values
+  out and folding them in the app, so the upper bound is the fan-out rather than
+  the table size. Whether to cap it is an open product decision
+- Deleting a page from the sidebar is still not an undoable action (it predates
+  the command registry), and a record owns its page in storage — so a record
+  reached only through that page goes with it. Deleting the *record* is undoable
+  and takes its page in the same step; that is the path this feature controls

@@ -3143,3 +3143,55 @@ D8 收尾时留着「rollup / relation 仍欠（ADR-0084）」。这一刀把它
 **顺带修掉一处 ADR 的不实**：ADR-0089 写着读路径有 `ROLLUP_MAX_DEPTH` 上限，实际代码的深度上限
 是 **0**（`values_of` 对计算列回空 map，空 map 折叠成 `Empty`），常量从未存在。改成如实描述，
 而不是为了对齐 ADR 去加一个常量。
+
+## Track 3 · D10 那三个入口落地，而像素在四处说了「不」（2026-09-23，on `m14-database`，ADR-0092）
+
+D9 的诚实清单第一条是「UI 一个字都没写」：状态层齐了、测试绿了，用户够不着。这一刀把 D5 留下
+的那笔欠账清掉，并且**第一次用像素而不是断言来验收这一 track**——`cargo build --features software
+--bin quire-shot` + `benchmarks/scripts/sweep.ps1`，16 亮 + 16 暗 database 场景进基线。
+
+**接的三个入口**：① 列类型菜单是 Columns 弹层的第二个面板（`db-columns-panel == 1`），行由 Rust
+推成 `DbPickRow`——把「不能这么改」的拒绝写在**灰掉的行**上，而不是弹一条事后的 notice；② relation
+编辑器 `DatabaseRelationPopup`，一窗三态（target 库 / back-pointer / 带 needle 的 record picker），
+未配置的列从 1 开、已配置的从 0 开；③ rollup 配置器 `DatabaseRollupPopup`，一句三段话，每段开自己
+的 `DatabasePickList`，chooser 逐行走 `check_config` ⇒ 不接受的列在选择器里就是灰的。三者共用新组件
+`ui/components/DatabasePickList.slint`（一套列表形状回答三个问题）。
+
+**为此补的状态层**（不是 UI 的附属，是 UI 一接上就暴露的洞）：
+`Command::SetDatabasePropertyKind`（ADR-0062 的 `PropertyKindSet`，值不转换；改到计算列给「得先定
+义」的提示；点同一个 kind 零 change，于是一个会重画的菜单不烧 undo 步）；`FilterOp::ops_for(kind)`
+把算子按类型收敛；`build_clause` 认 `FilterValue::Missing`（ ⇄ `Json::Null`）为「规则在、值没填」
+⇒ 不加约束——这一条在 D4 起就是错的，只是没人能在没有算子选择器的时候把它点出来；`layout_total`
+认 `request.search`，`DbWindow` 把 needle 算进缓存键（换搜索词不重画，是 D7 搜索自带的洞）。
+这条修复有价：10 000 行的库上 header 的计数从 `record_count` 的 **~0.18 ms** 换成带 needle 的
+`filtered_count` **3.4–3.7 ms**（每次刷新一条语句，`LIKE '%…%'` 用不上索引），而且**needle 越窄窗口
+读得越贵**（1 命中 8.3 ms vs 1 111 命中 3.6 ms——读按 `ord` 走到窗满为止，夹具里那一命中恰好是最后
+一行；D8 的「OFFSET 走完它跳过的行」从 filter 这一侧再现）。数字与新探针见 `docs/PERFORMANCE.md`
+的 D10 一节。
+
+**四个测出来的缺陷**（详见 `docs/REPORT_TRACK3.md` §D10 与 ADR-0092）：`✓` `✕` `⋯` 三个码位不在
+Segoe UI 的字体脸里（fontTools 数 cmap：3 996 个码位，三个全无；`segoeui` 有 `‹ … ≤ √ ≠`），
+所以「勾选」在两个弹层里画的是**零像素**——改成 `Icon` 的 path 后，A/B 渲染只有 kinds+relation 的
+哈希移动、relation 图 90 px 变化。另两处是上面的 filter/search 洞，第四处是**我自己的两个 seed
+bug**（把 block id 当 `DatabaseId` 传；rollup 折叠了近侧列），都是读图读出来的，不是读代码。
+
+**门槛**（收尾那两处改动之后全部重跑）：`cargo check --all-targets` **0 warning**；
+`cargo test --all-targets --no-fail-fast` **565 passed / 0 failed / 23 ignored**（+18 新测试，
++1 新 `#[ignore]` 探针；中途曾记 564/1，唯一失败是读真实剪贴板的
+`platform::tests::clipboard_..._unicode`，本机剪贴板被占，重跑即绿——数字以重跑为准）；
+`cargo build --release` **0 warning**（收尾重跑 9 m 34 s，与同批 test 抢 CPU，故不比首轮 4 m 42 s 的长短；
+比的是两轮都零警告）。
+sweep：d11→d12 99 同 / 32 新（新场景），d12→d13 4 变（预期：三处字形 + lock 文案）/ 127 同，
+d13→d14 **0 变 / 131 同**（复位只动回调，而场景驱动器不经过回调 —— 逐字节不变是这一处可证的预言）。
+
+**未验证（诚实）**：① **真窗口手测仍欠**——本环境禁止脚本点桌面 UI，所以 Escape、点击外部、
+开屏焦点、tick 的重画只有 headless 场景的证据，没有真窗口鼠标键盘的证据；② 分组弹层（
+`DatabaseGroupPopup`）没有自己的场景，它的两处字形是按规则改的、不是按像素改的；
+③ 收尾时又发现一处同类洞：从类型面板里关闭 Columns 弹层会把 `db-columns-panel` 留在 1，下次打开
+直接落在过期的类型菜单上——已修（`on_db_columns_closed` 里复位 panel/property/title），但**它没有
+测试**，因为四个 `*_closed` 回调（columns / formula / relation / rollup）都要真 UI 句柄，而 headless
+场景驱动器摆状态、不经过它们；④ relation 的**双向扇出无上限**
+（D9 的 28.5 ms / 3.12× 数字仍然成立），是产品决策不是 bug，等用户定；⑤ `core/math.rs` 的符号表
+里还有约 70 个码位不在 Segoe UI 脸上（ADR-0092 明写它**不在**本刀这条规则内，因为那是另一条
+territory 与另一刀的事）——现有的 `math` / `math-inline` 两张场景恰好只用查过的 `≤ √ ≠ ∫`
+与上标数字，所以没看见洞，那是**未答的问题**不是已验的事实。

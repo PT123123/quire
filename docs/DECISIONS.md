@@ -2,6 +2,64 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0092 · A mark the user has to see is drawn from the icon set, because the UI face has no tick
+
+Decision: a mark that carries meaning — which row of a chooser is the answer, which button
+clears a rule — is a `Path` from `ui/Icons.slint` (`Icon { name: "todo-check" }`,
+`Icon { name: "x" }`), never a `Text` holding a code point. Prose that *names* a drawn button
+keeps to a code point the UI face actually carries: `…` (U+2026), not `⋯` (U+22EF).
+
+Why this is a rule and not a bug report: `Typography.ui-font` is `"Segoe UI"`, and the
+character map read out of `C:\Windows\Fonts\segoeui.ttf` (3996 code points) does **not**
+contain U+2713 ✓, U+2715 ✕ or U+22EF ⋯. It does contain U+2039 ‹, U+2191 ↑, U+2193 ↓,
+U+2026 … and U+00B7 ·, which is why the picker's back-header, the palette's navigation hint
+and this app's every other typographic mark have always looked fine. The three that are
+missing are exactly the three this project used as *meaning*.
+
+The evidence is pixels, not reasoning. In the `database-kinds` scene the tick's `Text` painted
+**nothing**: the row's right gutter (x 695..742 of the 224 px popup, all 17 rows) is white
+except the card's own border, while the same delegate's name and refusal caption painted
+normally — so the row arrived with its fields intact and only the glyph was absent. Swapping
+it for the drawn check put a 8 × 7 px mark at x 721..728, the row's own gutter, and the sweep
+manifest moved by exactly that. `page-lock` said the same thing in prose: the bar read
+`Page locked ·  to unlock`, with the hole where the button's name belongs.
+
+Both were found by **measuring a scene that had just been added to the default sweep**. The
+group popup's two ticks (D4, shipped for six slices) had no scene at all, so they were never
+photographed and are still unphotographed; they are fixed here by the same rule, not by the
+same evidence.
+
+What this ADR deliberately does **not** claim: that the shipped window cannot draw a ✓.
+`seguisym.ttf` (Segoe UI Symbol, 7536 code points) carries all three, and a DirectWrite
+fallback chain could reach it — the headless software renderer demonstrably does not. That
+question is the reason for the rule: a meaning carried by a glyph is rendered by whatever
+fallback the platform happens to own, in a colour that is not the theme's, and no one has to
+look at it again. A `Path` takes `color:` from `Colors.accent-text`, so it is the *same mark*
+in the light and dark shot, which is now measured (`dark-database-kinds`,
+`dark-database-relation`, `dark-database-rollup`).
+
+Consequences:
+
+* Four call sites became paths: `DatabasePickList`'s chosen-row tick (the type menu, the
+  relation picker, the rollup's three choosers — one component, five questions), the group
+  popup's two ticks, and the filter panel's clear cross. The cross is the one whose refusal
+  was *silent in a different way*: its `TouchArea` worked, so the button deleted the rule
+  while looking like an empty box.
+* Two strings Rust writes into the notice bar changed (`AppState::note_locked`, the
+  save-as-template notice). An audit therefore has to read `.slint` **and** `.rs`: every
+  string literal under `ui/**/*.slint` and `src/**/*.rs`, filtered against the face's cmap,
+  ignoring CJK (which the app demonstrably renders — the sidebar's 写作与中文测试 proves it).
+  What is left uncovered after this ADR is emoji (deliberate: `Typography` asks for the emoji
+  face by name) and test fixtures.
+* `core/math.rs`'s symbol table is **out** of this rule and unmeasured: ~70 of its code points
+  are outside Segoe UI. The `math` and `math-inline` scenes happen to use only covered ones
+  (`≤ √ ≠ ∫` and the superscript digits all read `True` against the cmap), so no hole has been
+  seen there. A formula asking for `\aleph` or `\therefore` is an open question, named rather
+  than answered.
+* The sweep's default scene list gains the database scenes (`sweep.ps1`'s `$all`), which is
+  how this class became visible at all: two of the §三十九 scenes had spent six slices
+  photographing the *same* table because nothing in the harness was comparing them.
+
 ## ADR-0091 · A version is a database file with one page left in it, and the cap is twenty
 
 Decision: SPEC §三十八's version history stores a named version as **a whole

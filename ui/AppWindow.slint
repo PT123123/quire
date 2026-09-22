@@ -23,6 +23,12 @@ import { DatabaseGroupPopup } from "components/DatabaseGroupPopup.slint";
 // D6 (SPEC §三十九 「需计算」): the formula column's editor — the one write a
 // computed column has is its expression (the value is computed, ADR-0062).
 import { DatabaseFormulaPopup } from "components/DatabaseFormulaPopup.slint";
+// D10 (SPEC §三十九 「属性」): the two editors a cell of a configured kind opens
+// — a relation's picker and a rollup's configurator. Both share the one list
+// shape the Columns popup's type menu uses too (`DatabasePickList`).
+import { DatabaseRelationPopup } from "components/DatabaseRelationPopup.slint";
+import { DatabaseRollupPopup } from "components/DatabaseRollupPopup.slint";
+import { DatabasePickList } from "components/DatabasePickList.slint";
 
 // Row menus (slash + block handle): one window-level popup each, positioned
 // by the controller from the delegate's reported geometry. Declared before
@@ -187,19 +193,26 @@ component SlashMenuPopup inherits PopupWindow {
     }
 }
 
-// The database columns popup (SPEC §三十九 「操作」): hide/show a column of
-// the active view. A window-level popup like the block menu — one popup for
+// The database columns popup (SPEC §三十九 「操作」 + 「属性」): which columns
+// the active view shows, and — D10's second panel — what type a column is or a
+// new one starts as. A window-level popup like the block menu — one popup for
 // the whole app, not one per realized row — and its rows are pushed by Rust
-// (`db_column_toggles`), because "what the view shows" is the view
-// document's answer, not the delegate's. The title column is listed and
-// locked: it is what a row is named by (ADR-0063), so it has no switch
-// rather than a switch the table would refuse.
+// (`db_column_toggles`, `db_column_kinds`), because "what the view shows" and
+// "what may this become" are the document's answers, not the delegate's. The
+// title column is listed and locked: it is what a row is named by (ADR-0063),
+// so it has no switch rather than a switch the table would refuse.
+//
+// The type menu is this popup's second state rather than a popup of its own for
+// the reason the filter panel gives for its four lists: one popup that changes
+// its list is a state machine, and two popups are two windows fighting over
+// one click. It opens from the row's own **type word**, which is the only
+// place a column's type is both shown and reachable.
 component DatabaseColumnsPopup inherits PopupWindow {
     width: 224px;
-    // the schema's rows, plus D6's one creation row: a formula column is the
-    // one kind this build can create (the kind picker is still D7's), and the
-    // Columns popup is where the schema is already listed
-    height: UIState.db-columns-rows.length * 30px + 38px;
+    // the schema's rows, plus the one creation row
+    height: UIState.db-columns-panel == 1
+        ? 34px + UIState.db-kind-rows.length * 32px + 6px
+        : UIState.db-columns-rows.length * 30px + 42px;
     // outside click / Escape dismiss; UIState syncs via the is-open mirror
     close-policy: PopupClosePolicy.close-on-click-outside;
 
@@ -217,89 +230,170 @@ component DatabaseColumnsPopup inherits PopupWindow {
         background: Colors.surface-overlay;
         border-width: 1px;
         border-color: Colors.border;
+        clip: true;
 
-        for item[index] in UIState.db-columns-rows : Rectangle {
-            x: 4px;
-            y: 4px + (index * 30px);
-            width: parent.width - 8px;
-            height: 30px;
-            border-radius: Theme.radius-sm;
-            background: !item.locked && dc-ta.has-hover ? Colors.surface-hover : transparent;
-            animate background { duration: Theme.duration-instant; }
+        // ── panel 0: hide / show, and the door to each column's type ───────
+        if UIState.db-columns-panel == 0 : Rectangle {
+            width: parent.width;
+            height: parent.height;
+            background: transparent;
 
-            HorizontalLayout {
-                x: 8px;
-                width: parent.width - 16px;
-                spacing: Theme.spacing-sm;
-                Text {
-                    text: item.name;
-                    font-family: Typography.ui-font;
-                    font-size: Typography.size-ui;
-                    color: item.locked ? Colors.text-muted
-                        : (dc-ta.has-hover ? Colors.text-primary : Colors.text-secondary);
-                    vertical-alignment: center;
-                    horizontal-stretch: 1;
-                    overflow: elide;
+            for item[index] in UIState.db-columns-rows : Rectangle {
+                x: 4px;
+                y: 4px + (index * 30px);
+                width: parent.width - 8px;
+                height: 30px;
+                border-radius: Theme.radius-sm;
+                background: !item.locked && dc-ta.has-hover ? Colors.surface-hover : transparent;
+                animate background { duration: Theme.duration-instant; }
+
+                HorizontalLayout {
+                    x: 8px;
+                    width: parent.width - 16px;
+                    spacing: Theme.spacing-sm;
+                    Text {
+                        text: item.name;
+                        font-family: Typography.ui-font;
+                        font-size: Typography.size-ui;
+                        color: item.locked ? Colors.text-muted
+                            : (dc-ta.has-hover ? Colors.text-primary : Colors.text-secondary);
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                        overflow: elide;
+                    }
+                    // The column's type, as the kind's own word — and the door
+                    // to the type menu. A caption you can click is one fewer
+                    // control on every row than a second button beside it, and
+                    // the word is already here because a popup about the schema
+                    // that did not say what each column *is* would be half a
+                    // description.
+                    type-cell := Rectangle {
+                        vertical-stretch: 0;
+                        cross-axis-self-alignment: center;
+                        width: type-word.preferred-width + 8px;
+                        height: 22px;
+                        border-radius: Theme.radius-xs;
+                        background: dk-ta.has-hover ? Colors.surface-hover : transparent;
+
+                        type-word := Text {
+                            x: 4px;
+                            height: parent.height;
+                            vertical-alignment: center;
+                            text: item.kind;
+                            font-family: Typography.ui-font;
+                            font-size: Typography.size-caption;
+                            color: Colors.text-muted;
+                        }
+                        dk-ta := TouchArea {
+                            width: parent.width;
+                            height: parent.height;
+                            mouse-cursor: MouseCursor.pointer;
+                            clicked => {
+                                UIState.db-kind-opened(UIState.db-columns-block, item.property);
+                            }
+                        }
+                    }
+                    if item.visible : Icon {
+                        vertical-stretch: 0;
+                        cross-axis-self-alignment: center;
+                        width: 13px;
+                        height: 13px;
+                        size: 13px;
+                        name: "todo-check";
+                        stroke-width: 2.6px;
+                        color: item.locked ? Colors.text-muted : Colors.accent;
+                    }
                 }
-                // the column's type, as the kind's own word — a caption, not a
-                // second name; the popup is about visibility
-                Text {
-                    text: item.kind;
-                    font-family: Typography.ui-font;
-                    font-size: Typography.size-caption;
-                    color: Colors.text-muted;
-                    vertical-alignment: center;
-                }
-                if item.visible : Icon {
-                    vertical-stretch: 0;
-                    cross-axis-self-alignment: center;
-                    width: 13px;
-                    height: 13px;
-                    size: 13px;
-                    name: "todo-check";
-                    stroke-width: 2.6px;
-                    color: item.locked ? Colors.text-muted : Colors.accent;
+                dc-ta := TouchArea {
+                    // the title column is listed so the popup is the one place the
+                    // whole schema is visible; it does not pretend to be toggleable
+                    enabled: !item.locked;
+                    mouse-cursor: item.locked ? MouseCursor.default : MouseCursor.pointer;
+                    clicked => {
+                        UIState.db-column-toggled(UIState.db-columns-block, item.property);
+                    }
                 }
             }
-            dc-ta := TouchArea {
-                // the title column is listed so the popup is the one place the
-                // whole schema is visible; it does not pretend to be toggleable
-                enabled: !item.locked;
-                mouse-cursor: item.locked ? MouseCursor.default : MouseCursor.pointer;
-                clicked => {
-                    UIState.db-column-toggled(UIState.db-columns-block, item.property);
+
+            // The one creation row: the type menu, with nothing chosen, listing
+            // what a new column can start as. D6 had a shortcut straight to a
+            // formula column here, and the menu subsumes it — a new formula
+            // column arrives in the editor exactly the way the shortcut left
+            // it (the controller opens it for kind 14).
+            Rectangle {
+                x: 4px;
+                y: 8px + UIState.db-columns-rows.length * 30px;
+                width: parent.width - 8px;
+                height: 30px;
+                border-radius: Theme.radius-sm;
+                background: column-add.has-hover ? Colors.surface-hover : transparent;
+
+                Text {
+                    x: 8px;
+                    width: parent.width - 16px;
+                    height: parent.height;
+                    vertical-alignment: center;
+                    text: "+ New column";
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-ui;
+                    color: column-add.has-hover ? Colors.text-primary : Colors.text-secondary;
+                }
+                column-add := TouchArea {
+                    width: parent.width;
+                    height: parent.height;
+                    mouse-cursor: MouseCursor.pointer;
+                    clicked => {
+                        UIState.db-kind-opened(UIState.db-columns-block, -1);
+                    }
                 }
             }
         }
 
-        // D6: the one column this build can create — a formula column, born
-        // empty and opened straight into its editor (an editor without a way to
-        // reach a column is a door to nowhere, and a kind picker is still D7's).
-        // The controller closes this popup and opens the formula editor.
-        Rectangle {
-            x: 4px;
-            y: 8px + UIState.db-columns-rows.length * 30px;
-            width: parent.width - 8px;
-            height: 30px;
-            border-radius: Theme.radius-sm;
-            background: formula-add.has-hover ? Colors.surface-hover : transparent;
+        // ── panel 1: the column type menu (D10, SPEC §三十九 「属性」) ──────
+        if UIState.db-columns-panel == 1 : Rectangle {
+            width: parent.width;
+            height: parent.height;
+            background: transparent;
 
+            // The question, and the way home in the same line ("‹", the filter
+            // panel's affordance). A column that *is* something reads truer
+            // than a generic "Property type", so the name comes from Rust.
             Text {
                 x: 8px;
+                y: 6px;
                 width: parent.width - 16px;
-                height: parent.height;
+                height: 22px;
                 vertical-alignment: center;
-                text: "+ New formula column";
+                overflow: elide;
+                text: UIState.db-columns-property < 0
+                    ? "New column"
+                    : "‹ " + UIState.db-columns-title;
                 font-family: Typography.ui-font;
-                font-size: Typography.size-ui;
-                color: formula-add.has-hover ? Colors.text-primary : Colors.text-secondary;
+                font-size: Typography.size-caption;
+                color: UIState.db-columns-property < 0
+                    ? Colors.text-muted
+                    : (kind-back.has-hover ? Colors.text-primary : Colors.text-muted);
             }
-            formula-add := TouchArea {
-                width: parent.width;
-                height: parent.height;
+            kind-back := TouchArea {
+                x: 4px;
+                y: 4px;
+                width: parent.width - 8px;
+                height: 26px;
+                enabled: UIState.db-columns-property >= 0;
                 mouse-cursor: MouseCursor.pointer;
                 clicked => {
-                    UIState.db-formula-added(UIState.db-columns-block);
+                    UIState.db-kind-back();
+                }
+            }
+
+            DatabasePickList {
+                x: 4px;
+                y: 34px;
+                width: parent.width - 8px;
+                row-height: 32px;
+                rows: UIState.db-kind-rows;
+                picked(id) => {
+                    UIState.db-kind-picked(UIState.db-columns-block, id);
                 }
             }
         }
@@ -431,6 +525,9 @@ export component AppWindow inherits Window {
     in-out property <bool> db-filter-open <=> UIState.db-filter-open;
     in-out property <bool> db-group-open <=> UIState.db-group-open;
     in-out property <bool> db-formula-open <=> UIState.db-formula-open;
+    // D10 (SPEC §三十九 「属性」): the relation picker and the rollup editor.
+    in-out property <bool> db-relation-open <=> UIState.db-relation-open;
+    in-out property <bool> db-rollup-open <=> UIState.db-rollup-open;
     in-out property <bool> link-open <=> UIState.link-open;
     in-out property <bool> dialog-open <=> UIState.dialog-open;
     in-out property <bool> settings-open <=> UIState.settings-open;
@@ -555,6 +652,38 @@ export component AppWindow inherits Window {
     changed db-formula-shown => {
         if (!db-formula-shown && UIState.db-formula-open) {
             UIState.db-formula-open = false;
+        }
+    }
+
+    // D10: the relation picker and the rollup editor, same three-piece pattern
+    // as the formula editor above. They are centered like it, not anchored:
+    // each one edits a fact about a *column*, and the cell it opened from may
+    // scroll away while the popup is up.
+    changed db-relation-open => {
+        if (db-relation-open) {
+            dbRelation.show();
+        } else {
+            dbRelation.close();
+        }
+    }
+    property <bool> db-relation-shown: dbRelation.is-open;
+    changed db-relation-shown => {
+        if (!db-relation-shown && UIState.db-relation-open) {
+            UIState.db-relation-open = false;
+        }
+    }
+
+    changed db-rollup-open => {
+        if (db-rollup-open) {
+            dbRollup.show();
+        } else {
+            dbRollup.close();
+        }
+    }
+    property <bool> db-rollup-shown: dbRollup.is-open;
+    changed db-rollup-shown => {
+        if (!db-rollup-shown && UIState.db-rollup-open) {
+            UIState.db-rollup-open = false;
         }
     }
 
@@ -800,6 +929,20 @@ export component AppWindow inherits Window {
     // anchored, because it edits a *column* (a fact about the schema) and the
     // cell it was opened from may scroll away while it is open.
     dbFormula := DatabaseFormulaPopup {
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+    }
+
+    // D10 (SPEC §三十九 「属性」): a relation cell's picker and a rollup cell's
+    // configurator, both centered like the formula editor — they edit a fact
+    // about a *column*, and the row a cell sits in may scroll away underneath
+    // them while the user is still choosing.
+    dbRelation := DatabaseRelationPopup {
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+    }
+
+    dbRollup := DatabaseRollupPopup {
         x: (root.width - self.width) / 2;
         y: (root.height - self.height) / 2;
     }

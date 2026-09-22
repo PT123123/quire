@@ -52,7 +52,22 @@ $all = @(
     "dark-page-icon", "dark-page-cover", "dark-page-cover-white", "dark-page-lock",
     "dark-page-templates", "dark-page-versions", "dark-mention", "dark-date",
     "dark-backlinks", "dark-dangling", "dark-synced", "dark-synced-source-gone",
-    "dark-move-to-tall"
+    "dark-move-to-tall",
+    # SPEC §三十九 (M14): the database's own scenes. They were run out of a
+    # separate list for six slices, which is how two of them spent those slices
+    # photographing the *same* table — a scene nobody sweeps is a scene nobody
+    # measures. In the default list they now stay.
+    "database-table", "database-filter", "database-formula", "database-search",
+    "database-linked", "database-template",
+    "database-board", "database-list", "database-calendar", "database-gallery",
+    "database-timeline", "database-form", "database-chart",
+    "database-kinds", "database-relation", "database-rollup",
+    "dark-database-table", "dark-database-filter", "dark-database-formula",
+    "dark-database-search", "dark-database-linked", "dark-database-template",
+    "dark-database-board", "dark-database-list", "dark-database-calendar",
+    "dark-database-gallery", "dark-database-timeline", "dark-database-form",
+    "dark-database-chart", "dark-database-kinds", "dark-database-relation",
+    "dark-database-rollup"
 )
 $targets = if ($Scenes -eq "") { $all } else { $Scenes -split ',' }
 

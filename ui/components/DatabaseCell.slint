@@ -53,12 +53,21 @@ export component DatabaseCell inherits Rectangle {
     // D6: a formula cell (kind 14) is read-only — its value is computed and
     // nothing writes one (ADR-0062) — but it is *not* inert: clicking it opens
     // the column's formula editor, which is the only write a formula has (its
-    // expression). The other two computed kinds (rollup 15 / relation 16) have
-    // no editor in this build, so their cells stay inert like they were.
+    // expression).
     property <bool> is-formula: cell.kind == 14;
+    // D10: the other two kinds a cell cannot simply be typed into got their
+    // editors in the same shape — a click opens the *column's* editor rather
+    // than a text input. A relation cell (kind 16) opens its picker, which is
+    // the one write a relation has (its list of targets, ADR-0088); a rollup
+    // cell (kind 15) opens its configurator, which is the one write a rollup
+    // has (its three names, ADR-0089). Neither value is stored anywhere, so
+    // neither has a caret.
+    property <bool> is-relation: cell.kind == 16;
+    property <bool> is-rollup: cell.kind == 15;
     // Whether a click on this cell does anything at all: the editable kinds
-    // open the one live input, a formula cell opens the formula editor.
-    property <bool> clickable: cell.editable || root.is-formula;
+    // open the one live input, and the three configured ones open theirs.
+    property <bool> clickable: cell.editable || root.is-formula || root.is-relation
+        || root.is-rollup;
     property <length> pad: Theme.spacing-sm;
 
     background: transparent;
@@ -151,6 +160,17 @@ export component DatabaseCell inherits Rectangle {
                 // the sample row travels with the call: the editor's preview
                 // evaluates the draft on the row the user clicked
                 UIState.db-formula-opened(root.block, root.record, root.cell.property);
+            } else if (root.is-relation) {
+                // D10: the row the cell belongs to is the picker's subject, and
+                // when the column points at nothing yet the same popup becomes
+                // its configurator — which row is being linked is a question the
+                // picker asks only once there is a database to pick from.
+                UIState.db-relation-opened(root.block, root.record, root.cell.property);
+            } else if (root.is-rollup) {
+                // no row travels with the call: a fold is a fact about the
+                // column, and which record's cell was clicked changes nothing
+                // about what it aggregates
+                UIState.db-rollup-opened(root.block, root.cell.property);
             } else {
                 UIState.db-cell-activated(root.block, root.record, root.cell.property);
             }

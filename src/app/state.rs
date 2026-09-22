@@ -23,7 +23,7 @@ use crate::core::database_view::{
     month_cells, month_key, month_label, shift_month, table_columns, table_rows, view_columns,
     CALENDAR_PEEK, ChartKind, FilterClause, FilterNode, FilterOp, FilterValue, FlatClause,
     FlatFilter, GroupKey, GroupSpec, LayoutSupport, TableColumn, TableRowView, TableView,
-    ViewDefinition, ViewRules, ViewTab, WIDTH_AUTO,
+    ViewDefinition, ViewRules, ViewTab, WIDTH_AUTO, WIDTH_MIN, WIDTH_UNIT,
 };
 use crate::core::database_template;
 use crate::core::persistence::{Change, Repository};
@@ -1349,6 +1349,23 @@ impl AppState {
         Some(line)
     }
 
+    /// Say one thing in the notice line, **now**: [`AppState::note_locked`]'s
+    /// split for the same reason — a window is what the user is looking at, so
+    /// the bar is written directly; with none attached the queue is both the
+    /// memory and the proof (a headless session can only assert what it can
+    /// read back).
+    ///
+    /// The queue alone is not enough for a write that *succeeded*: unlike a
+    /// formula draft, whose error line the editor is already showing, a column
+    /// type that moved has nothing on screen but the notice to say what
+    /// happened to the values under it.
+    fn db_say(&self, line: String) {
+        match self.ui.borrow().clone().and_then(|u| u.upgrade()) {
+            Some(g) => g.set_db_notice(line.into()),
+            None => self.db_notice.borrow_mut().push(line),
+        }
+    }
+
     pub fn page_order_of(&self, id: i32) -> OrderKey {
         *self
             .page_order
@@ -1416,7 +1433,9 @@ impl AppState {
     /// the queue plays both roles: it remembers the refusal, and in a headless
     /// session it is the only way one can be proved at all.
     pub fn note_locked(&self) {
-        const LINE: &str = "This page is locked — ⋯ → Unlock page to edit.";
+        // `…` and not `⋯`: U+22EF is outside Segoe UI's face, so the midline
+        // dots painted as a hole where the button's name should be.
+        const LINE: &str = "This page is locked — … → Unlock page to edit.";
         match self.ui.borrow().clone().and_then(|ui| ui.upgrade()) {
             Some(g) => {
                 if g.get_db_notice().as_str() != LINE {
@@ -5857,6 +5876,13 @@ struct DbWindow {
     /// total — exactly the inputs the three fields above cover. Zero for the
     /// layouts that have no such dial.
     stamp: u64,
+    /// The view's search needle (ADR-0087), part of the key for the same reason
+    /// the stamp is: it is session state that changes the statement without
+    /// changing the view, the document or the layout. Without it, typing a
+    /// needle that happens to match every row would be reported to the caller
+    /// as "nothing changed" — and the box would open over rows the last needle
+    /// narrowed.
+    search: Option<String>,
     /// The columns the read was made with, in view order.
     columns: Vec<TableColumn>,
     /// The count the window was computed from — the rows the view's rules
@@ -5918,6 +5944,27 @@ pub struct DbColumnToggle {
     pub kind: String,
     pub visible: bool,
     pub locked: bool,
+}
+
+/// One row of any of D10's chooser lists: the column type menu, a relation's
+/// target database, a relation's back-pointer, a rollup's three parts, and the
+/// records a relation cell holds. `id` is whatever that list's callback names —
+/// a `PropertyKind::ALL` index, a property id, a database id, a record id, an
+/// `Aggregate::ALL` index — which is why one struct serves all of them: every
+/// list asks the same question ("which of these?"), and the three things a
+/// delegate may draw are a word, a tick and a reason.
+///
+/// A `disabled` row is never blank: `note` carries the sentence that says why,
+/// because a menu that greys something out with no reason is a guess the user
+/// has to make. On a live row `note` is the row's own caption (what kind a
+/// column is) or empty.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DbPickRow {
+    pub id: i32,
+    pub name: String,
+    pub chosen: bool,
+    pub disabled: bool,
+    pub note: String,
 }
 
 /// One filter-panel row (D4), as the panel draws it: the clause's ids plus the
@@ -6198,16 +6245,21 @@ impl DbRow {
 const GALLERY_DEFAULT_WIDTH: f32 = 760.0;
 
 /// The ungrouped count a view's window is computed from: `COUNT(*)` over the
-/// filter's predicate when the view has one, over the database alone when it
-/// does not. The table branch inlined this before D5; the gallery and the form
-/// need the same question, so the question got a name.
+/// request's predicate when it has one, over the database alone when it has
+/// none. The table branch inlined this before D5; the gallery and the form need
+/// the same question, so the question got a name.
+///
+/// **Both** predicates count, not just the filter's: the view's search needle
+/// (ADR-0087) narrows the same rows, and a header that answered `COUNT(*)` over
+/// the whole database under a needle would print "5 rows" above a window of 3 —
+/// and then `unchanged` would call that the same window as the unsearched one,
+/// so the search would not happen at all.
 fn layout_total(
     repo: &SqliteRepository,
     request: &RowRequest<'_>,
     db: DatabaseId,
-    filtered: bool,
 ) -> Result<usize, crate::core::persistence::StorageError> {
-    if filtered {
+    if request.filter.is_some() || request.search.is_some() {
         repo.filtered_count(request)
     } else {
         repo.record_count(db)
@@ -6655,7 +6707,9 @@ impl AppState {
         // rules — and with them the count and the row set — live in it (D4);
         // the layout and the session stamp are D5's additions, because the
         // calendar's month and the gallery's per-row change which model the
-        // same view, document and total would produce.
+        // same view, document and total would produce; the needle is D7's
+        // (ADR-0087), for the same reason — it is in the statement and in
+        // nothing the other five fields see.
         let unchanged = |wanted: RowWindow, total: usize, stamp: u64| -> bool {
             let windows = self.db_windows.borrow();
             match windows.get(&block) {
@@ -6664,6 +6718,7 @@ impl AppState {
                         && existing.definition == definition_text
                         && existing.layout == layout
                         && existing.stamp == stamp
+                        && existing.search.as_deref() == search.as_deref()
                         && existing.window == wanted
                         && existing.total == total
                         // …and nothing has been recorded since this window was
@@ -6909,7 +6964,7 @@ impl AppState {
                     .copied()
                     .unwrap_or_else(|| TableView::gallery_per_row(GALLERY_DEFAULT_WIDTH));
                 stamp = per_row as u64;
-                total = match layout_total(&repo, &request, db, rules.filter.is_some()) {
+                total = match layout_total(&repo, &request, db) {
                     Ok(total) => total,
                     Err(e) => {
                         self.db_notice
@@ -7074,7 +7129,7 @@ impl AppState {
 
             // ── form: the field list, not a read ────────────────────────────
             crate::core::database::ViewLayout::Form => {
-                total = match layout_total(&repo, &request, db, rules.filter.is_some()) {
+                total = match layout_total(&repo, &request, db) {
                     Ok(total) => total,
                     Err(e) => {
                         self.db_notice
@@ -7205,7 +7260,7 @@ impl AppState {
                         // chart is a view *of* the table even before it
                         // aggregates it. (Empty db → 0, and the empty state
                         // is the ordinary "No rows yet".)
-                        total = match layout_total(&repo, &request, db, rules.filter.is_some()) {
+                        total = match layout_total(&repo, &request, db) {
                             Ok(total) => total,
                             Err(e) => {
                                 self.db_notice
@@ -7255,7 +7310,7 @@ impl AppState {
                 };
                 total = match &counts {
                     Some(counts) => counts.iter().map(|(_, n)| n + 1).sum(),
-                    None => match layout_total(&repo, &request, db, rules.filter.is_some()) {
+                    None => match layout_total(&repo, &request, db) {
                         Ok(total) => total,
                         Err(e) => {
                             self.db_notice
@@ -7346,6 +7401,7 @@ impl AppState {
             layout,
             content,
             stamp: 0,
+            search: None,
             columns: Vec::new(),
             total,
             window: wanted,
@@ -7364,6 +7420,7 @@ impl AppState {
         entry.layout = layout;
         entry.content = content;
         entry.stamp = stamp;
+        entry.search = search.clone();
         entry.columns = columns;
         entry.total = total;
         entry.window = wanted;
@@ -7547,6 +7604,7 @@ impl AppState {
         row.db_row_start = 0;
         row.db_row_count = 0;
         row.db_layout = "".into();
+        row.db_layout_index = 0;
         row.db_layout_ok = true;
         // The rules' header state (D4): no filter, no sort, no group, no note —
         // refilled below from the active view's document.
@@ -7630,7 +7688,30 @@ impl AppState {
         row.db_row_start = self.db_row_start(block);
         row.db_row_count = self.db_row_count(block);
         row.db_layout = view.layout.label().into();
+        row.db_layout_index = view.layout.index();
         row.db_layout_ok = view.support.is_drawn();
+        // An "auto" width is a *share*, and the share is Rust's to work out: a
+        // delegate cannot fold a list, and Slint's layout gives an explicit
+        // `width` binding the last word over `horizontal-stretch` — so the 0
+        // this projection used to hand over was a column of no width at all,
+        // which is how every table body stayed blank until D10 measured it.
+        // What the dragged columns take is subtracted from the grid and divided
+        // equally among the rest, never below the floor the document enforces.
+        let dragged: i32 = view
+            .columns
+            .iter()
+            .map(|c| if c.width == WIDTH_AUTO { 0 } else { c.width as i32 })
+            .sum();
+        let autos = view
+            .columns
+            .iter()
+            .filter(|c| c.width == WIDTH_AUTO)
+            .count() as i32;
+        let share = if autos == 0 {
+            0
+        } else {
+            ((WIDTH_UNIT as i32 - dragged).max(0) / autos).max(WIDTH_MIN as i32)
+        };
         row.db_columns = ModelRc::from(Rc::new(VecModel::from(
             view.columns
                 .iter()
@@ -7638,7 +7719,11 @@ impl AppState {
                     property: column.property.as_u64() as i32,
                     name: column.name.clone().into(),
                     kind: property_kind_int(column.kind),
-                    permille: column.width as i32,
+                    permille: if column.width == WIDTH_AUTO {
+                        share
+                    } else {
+                        column.width as i32
+                    },
                     title: column.title,
                     options: ModelRc::from(Rc::new(VecModel::from(column
                         .options
@@ -7939,6 +8024,205 @@ impl AppState {
         // a sorting bug.
         self.db_refresh(block);
         Some(id as i32)
+    }
+
+    // ─── D10 (SPEC §三十九 「属性」): the column type menu ────────────────────
+    //
+    // D5 left this half of the schema unreachable: every kind after `text` could
+    // be *stored* (`AddDatabaseProperty` takes a kind, `PropertyKindSet` writes
+    // one, `parse_one` reads one) and none of them could be *chosen*. The menu is
+    // therefore two questions in one list — what does this column become, and
+    // what does a new column start as — and one refusal that is not about the
+    // kind at all: a column another column depends on cannot move without
+    // stranding that dependency, and ADR-0088's involution and ADR-0089's
+    // acyclic fold are both properties of the *schema*, not of one column.
+
+    /// Why this column's type cannot change, if it cannot. `None` = the menu is
+    /// live for it.
+    ///
+    /// Four shapes refuse, and each is one of the schema's own invariants rather
+    /// than a general "is anything referring to this?" scan:
+    ///
+    /// * the **title** column — a row's name is its title (ADR-0063), so a
+    ///   database without one has headers with nothing under them;
+    /// * a relation that **is paired** — its partner's config names this column,
+    ///   and a relation that stops being one leaves that pointer pointing at a
+    ///   text column, which is ADR-0088's involution broken by a side door;
+    /// * a column that **is somebody's mirror** — the same pair seen from the
+    ///   other end;
+    /// * a column a **rollup** folds through, as its relation or as its values —
+    ///   ADR-0089's acyclicity is a statement about two configs agreeing, and
+    ///   moving one of them under the other is how the cycle it refuses at
+    ///   config time arrives by *edit* instead.
+    fn kind_move_refusal(&self, property: PropertyId) -> Option<&'static str> {
+        let catalog = self.databases.borrow();
+        let Some(row) = catalog.properties.iter().find(|p| p.id == property) else {
+            return Some("That column no longer exists.");
+        };
+        if row.kind.is_title() {
+            return Some("A database's title column is what its rows are named by.");
+        }
+        if row.kind == PropertyKind::Relation {
+            if database_relation::config_relation(&row.config).mirror.is_some() {
+                return Some(
+                    "This relation is two-way — clear its back-pointer before changing its type.",
+                );
+            }
+            if catalog.properties.iter().any(|p| {
+                p.kind == PropertyKind::Relation
+                    && database_relation::config_relation(&p.config).mirror == Some(property)
+            }) {
+                return Some("Another relation points back through this column.");
+            }
+        }
+        if catalog.properties.iter().any(|p| {
+            if p.kind != PropertyKind::Rollup {
+                return false;
+            }
+            let fold = database_rollup::config_rollup(&p.config);
+            fold.relation == Some(property) || fold.column == Some(property)
+        }) {
+            return Some("A rollup folds through this column.");
+        }
+        None
+    }
+
+    /// The kind menu's rows: `PropertyKind::ALL`'s order — the same order the
+    /// `kind` ints in every database callback mean — with the current kind
+    /// marked and a row that cannot be chosen saying why in its own words.
+    ///
+    /// `property < 0` is the **creation** list: nothing is chosen, `Title` is the
+    /// only refusal (a database is born with its title column, and a second one
+    /// is not a thing the schema has a meaning for), and the caller creates the
+    /// column rather than moving one.
+    pub fn db_column_kinds(&self, property: i32) -> Vec<DbPickRow> {
+        let current = (property >= 0)
+            .then(|| self.db_property_kind(property))
+            .flatten();
+        // The refusal of the *column*, computed once: it is the same sentence on
+        // every row, because it is about what hangs off this column and not about
+        // what the user is about to pick.
+        let moved = if property >= 0 {
+            self.kind_move_refusal(PropertyId(property as u64))
+        } else {
+            None
+        };
+        PropertyKind::ALL
+            .iter()
+            .enumerate()
+            .map(|(index, kind)| DbPickRow {
+                id: index as i32,
+                name: kind.label().to_string(),
+                chosen: current == Some(*kind),
+                // `title` is never a choice (a database is born with its one
+                // title column), and a column something else depends on is not
+                // a choice for *any* kind — hence the same sentence on every row.
+                disabled: moved.is_some() || kind.is_title(),
+                note: moved.unwrap_or(if kind.is_title() {
+                    "A database has one title column."
+                } else {
+                    ""
+                })
+                .to_string(),
+            })
+            .collect()
+    }
+
+    /// A new column of one of the menu's kinds, named for it. The name is the
+    /// kind's label, and only when it is free — `db_add_column` refuses a
+    /// duplicate, and a user adding a second `Text` column is doing something
+    /// ordinary that a name collision should not silently cancel. So the tail is
+    /// counted up (`Text 2`, `Text 3`) rather than the click being dropped.
+    pub fn db_column_add(&self, block: i32, kind: i32) -> Option<i32> {
+        let db = self.db_ref_of(block)?;
+        let kind = *PropertyKind::ALL.get(kind.max(0) as usize)?;
+        if kind.is_title() {
+            return None;
+        }
+        let base = kind.label();
+        let name = {
+            let catalog = self.databases.borrow();
+            let taken = |name: &str| {
+                catalog
+                    .properties_of(db)
+                    .any(|p| p.name.eq_ignore_ascii_case(name))
+            };
+            if !taken(base) {
+                base.to_string()
+            } else {
+                (2..)
+                    .map(|n| format!("{base} {n}"))
+                    .find(|name| !taken(name))
+                    .expect("a counted name eventually fits")
+            }
+        };
+        self.db_add_column(block, &name, kind)
+    }
+
+    /// Move a column's type — the only producer `Change::PropertyKindSet` ever
+    /// had (ADR-0062 wrote the change, D1 stored it, and nothing until the kind
+    /// menu asked for it).
+    ///
+    /// ADR-0062's rule is what makes this one thin write: **the values stay**.
+    /// This does not convert, clear or re-parse one cell, and the notice it says
+    /// out loud when it lands is the honest form of that — a `number` column
+    /// holding text shows nothing until its cells are typed again, and undoing
+    /// the change shows the text again. What a conversion would need is a rule
+    /// per type pair (D2's unbuilt half), and a type menu that quietly rewrote
+    /// values would be a write path no undo step covers.
+    pub fn db_column_kind_set(&self, block: i32, property: i32, kind: i32) -> Result<(), String> {
+        let db = self.db_ref_of(block).ok_or("this block draws no database")?;
+        let to = *PropertyKind::ALL
+            .get(kind.max(0) as usize)
+            .ok_or("that is not a column type")?;
+        let property_id = PropertyId(property as u64);
+        let from = {
+            let catalog = self.databases.borrow();
+            let Some(row) = catalog.properties.iter().find(|p| p.id == property_id) else {
+                return Err("that column no longer exists".into());
+            };
+            if row.db != db {
+                return Err("that column is not of this database".into());
+            }
+            row.kind
+        };
+        if let Some(why) = self.kind_move_refusal(property_id) {
+            return Err(why.to_string());
+        }
+        if from == to {
+            return Ok(());
+        }
+        let cmd = Command::SetDatabasePropertyKind {
+            block: BlockId(block as u64),
+            property: property_id,
+            from,
+            to,
+        };
+        if self.exec_editor(cmd).is_none() {
+            return Err("the change could not be recorded".into());
+        }
+        // The cells change meaning, not existence, so the window is re-read
+        // rather than the row re-filled: the same column list, painted through a
+        // different kind.
+        self.db_refresh(block);
+        // A kind that computes or points has no meaning without its config, and
+        // the column that just became one is the place the user is standing — so
+        // the caller opens its editor (the controller), and the notice is what
+        // the user hears when the type moved and the values did not.
+        self.db_say(if to.is_computed() || to == PropertyKind::Relation {
+            format!(
+                "\"{}\" is now \"{}\" — its cells are empty until it is defined.",
+                from.label(),
+                to.label()
+            )
+        } else {
+            format!(
+                "\"{}\" is now \"{}\" — the stored values did not change.",
+                from.label(),
+                to.label()
+            )
+        });
+        Ok(())
     }
 
     /// What a cell holds **as it is stored** — the text a live editor has to
@@ -8415,6 +8699,296 @@ impl AppState {
         Ok(())
     }
 
+    // ─── D10 (SPEC §三十九 「属性」): what each editor may offer ──────────────
+    //
+    // The three lists below answer "what can this be set to, right now?" for
+    // the relation picker and the rollup configurator. Each is built *with* the
+    // check that gates it — `check_pair` for a back-pointer, `check_config` for
+    // a rollup's target column — rather than with a copy of that check's rules:
+    // the menu and the save path must not be able to disagree about what is
+    // legal, and a disagreement would show up as a row that greys out and then
+    // commits anyway.
+    //
+    // A row a check refuses is **listed and greyed**, with the refusal as its
+    // caption. Hiding it would leave the user counting columns in a database
+    // they can see, looking for the one that is missing.
+
+    /// Every database a relation column may point at.
+    ///
+    /// The column's own database is on the list: ADR-0088 refuses a column
+    /// being *its own* back-pointer, not a database pointing at itself, and a
+    /// self-relation ("this task blocks that task") is the ordinary case the
+    /// rule leaves open. The note says which row is that one.
+    pub fn db_relation_databases(&self, block: i32, chosen: i32) -> Vec<DbPickRow> {
+        let here = self.db_ref_of(block);
+        let catalog = self.databases.borrow();
+        catalog
+            .databases
+            .iter()
+            .map(|d| DbPickRow {
+                id: d.id.as_u64() as i32,
+                name: d.name.clone(),
+                chosen: chosen == d.id.as_u64() as i32,
+                disabled: false,
+                note: if Some(d.id) == here {
+                    "this database".into()
+                } else {
+                    String::new()
+                },
+            })
+            .collect()
+    }
+
+    /// The columns of `target` that may be this relation's back-pointer, with
+    /// "no back-pointer" first (`id` -1) — the one-way relation ADR-0088 keeps
+    /// legal because a mirror costs a second column to write into.
+    ///
+    /// Only a target database's *relation* columns can be a mirror (pairing
+    /// with a text column would store the back-pointers nowhere), so the other
+    /// kinds are absent rather than refused; among the relations, a row
+    /// `check_pair` refuses is still drawn, greyed, saying why.
+    pub fn db_relation_mirrors(&self, block: i32, property: i32, target: i32) -> Vec<DbPickRow> {
+        let mut rows = vec![DbPickRow {
+            id: -1,
+            name: "No back-pointer".into(),
+            chosen: self.db_relation_config(property).1 < 0,
+            disabled: false,
+            note: "one-way - the related rows will not name this one".into(),
+        }];
+        let Some(db) = self.db_ref_of(block) else {
+            return rows;
+        };
+        if target < 0 {
+            return rows;
+        }
+        let target_db = DatabaseId(target as u64);
+        let forward = PropertyId(property as u64);
+        let chosen = self.db_relation_config(property).1;
+        let catalog = self.databases.borrow();
+        rows.extend(catalog.properties_of(target_db).filter(|p| {
+            p.kind == PropertyKind::Relation
+        }).map(|p| {
+            let theirs = database_relation::config_relation(&p.config);
+            let refusal = database_relation::check_pair(
+                forward,
+                db,
+                target_db,
+                p.id,
+                &database_relation::ColumnFacts {
+                    kind: p.kind,
+                    db: p.db,
+                    target: theirs.target,
+                    mirror: theirs.mirror,
+                },
+            )
+            .err();
+            DbPickRow {
+                id: p.id.as_u64() as i32,
+                name: p.name.clone(),
+                chosen: chosen == p.id.as_u64() as i32,
+                disabled: refusal.is_some(),
+                note: refusal.map(|r| r.message().to_string()).unwrap_or_default(),
+            }
+        }));
+        rows
+    }
+
+    /// The records one relation cell holds, as ids — what the picker ticks, and
+    /// what a toggle adds to or takes away from.
+    pub fn db_relation_held(&self, property: i32, record: i64) -> Vec<i32> {
+        let Some(repo) = self.db_repo() else {
+            return Vec::new();
+        };
+        let Ok(value) = repo.cell(RecordId(record as u64), PropertyId(property as u64)) else {
+            return Vec::new();
+        };
+        match value {
+            CellValue::Items(items) => items
+                .iter()
+                .filter_map(|target| target.parse::<u64>().ok())
+                .map(|target| target as i32)
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The picker's candidate list: the target database's rows by title, this
+    /// cell's own targets ticked. `limit` caps it for the reason
+    /// [`Self::db_relation_candidates`] gives.
+    pub fn db_relation_rows(
+        &self,
+        property: i32,
+        record: i64,
+        needle: &str,
+        limit: usize,
+    ) -> Vec<DbPickRow> {
+        let held = self.db_relation_held(property, record);
+        self.db_relation_candidates(property, needle, limit)
+            .into_iter()
+            .map(|(id, name)| DbPickRow {
+                id,
+                name: if name.is_empty() { "Untitled".into() } else { name },
+                chosen: held.contains(&id),
+                disabled: false,
+                note: String::new(),
+            })
+            .collect()
+    }
+
+    /// Add or remove one record from a relation cell — the picker's click.
+    ///
+    /// The whole list is rewritten rather than the one id, because
+    /// [`Self::db_pick_relation`] writes a cell *and* every back-pointer the
+    /// change implies as one command: a pick is one Ctrl+Z whether it added the
+    /// third target or cleared the last. `false` means nothing was written —
+    /// the column has no target database, or the write refused — and the caller
+    /// is what says so out loud.
+    pub fn db_relation_toggle(&self, block: i32, record: i64, property: i32, target: i32) -> bool {
+        let mut held: Vec<String> = self
+            .db_relation_held(property, record)
+            .into_iter()
+            .map(|id| id.to_string())
+            .collect();
+        let id = target.to_string();
+        match held.iter().position(|h| *h == id) {
+            Some(at) => {
+                held.remove(at);
+            }
+            None => held.push(id),
+        }
+        self.db_pick_relation(block, record, property, &held)
+    }
+
+    /// What one column is called, as every editor's header and summary line
+    /// says it. A negative id and an id that no longer resolves both answer
+    /// "Not set": clearing a slot and never having filled it are one state
+    /// (ADR-0062's rule about `Empty`, applied to a config key).
+    pub fn db_property_label(&self, property: i32) -> String {
+        let catalog = self.databases.borrow();
+        catalog
+            .properties
+            .iter()
+            .find(|p| p.id == PropertyId(property as u64))
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| "Not set".into())
+    }
+
+    /// What one database is called, as the relation editor's header says it.
+    /// `""` for the absence (`target < 0`) rather than a word for it: the
+    /// popup draws its own "no database yet" sentence, and a column named
+    /// "Not set" would read like a database someone really has.
+    pub fn db_database_name(&self, target: i32) -> String {
+        if target < 0 {
+            return String::new();
+        }
+        let catalog = self.databases.borrow();
+        catalog
+            .database(DatabaseId(target as u64))
+            .map(|d| d.name.clone())
+            .unwrap_or_else(|| "a database that is gone".into())
+    }
+
+    /// The relation columns of this database a rollup may fold through
+    /// (ADR-0089's first name). One with no target yet is greyed with the very
+    /// refusal the save path would answer with.
+    pub fn db_rollup_relations(&self, block: i32, chosen: i32) -> Vec<DbPickRow> {
+        let Some(db) = self.db_ref_of(block) else {
+            return Vec::new();
+        };
+        let catalog = self.databases.borrow();
+        catalog
+            .properties_of(db)
+            .filter(|p| p.kind == PropertyKind::Relation)
+            .map(|p| {
+                let unready = database_relation::config_relation(&p.config).target.is_none();
+                DbPickRow {
+                    id: p.id.as_u64() as i32,
+                    name: p.name.clone(),
+                    chosen: chosen == p.id.as_u64() as i32,
+                    disabled: unready,
+                    note: if unready {
+                        database_rollup::ConfigRefusal::NoTarget.message().to_string()
+                    } else {
+                        String::new()
+                    },
+                }
+            })
+            .collect()
+    }
+
+    /// The columns a rollup may aggregate: every column of the database
+    /// `relation` points at, each judged by [`database_rollup::check_config`]
+    /// itself. "Not set" is offered first because `count` reads no column at all
+    /// — it folds the *number* of related records.
+    pub fn db_rollup_columns(&self, relation: i32, chosen: i32) -> Vec<DbPickRow> {
+        let mut rows = vec![DbPickRow {
+            id: -1,
+            name: "No column".into(),
+            chosen: chosen < 0,
+            disabled: false,
+            note: "count needs no column".into(),
+        }];
+        let catalog = self.databases.borrow();
+        let Some(rel) = catalog.properties.iter().find(|p| p.id == PropertyId(relation as u64))
+        else {
+            return rows;
+        };
+        let Some(target_db) = database_relation::config_relation(&rel.config).target else {
+            return rows;
+        };
+        rows.extend(catalog.properties_of(target_db).map(|p| {
+            let refusal = database_rollup::check_config(&database_rollup::RollupFacts {
+                relation_kind: rel.kind,
+                relation_target: Some(target_db),
+                column_kind: p.kind,
+                column_is_in_target: true,
+            })
+            .err();
+            DbPickRow {
+                id: p.id.as_u64() as i32,
+                name: p.name.clone(),
+                chosen: chosen == p.id.as_u64() as i32,
+                disabled: refusal.is_some(),
+                // A live row's caption is the kind's own word, so the chooser
+                // also answers "what sort of column is this one".
+                note: refusal
+                    .map(|r| r.message().to_string())
+                    .unwrap_or_else(|| p.kind.label().to_string()),
+            }
+        }));
+        rows
+    }
+
+    /// The six folds, in `Aggregate::ALL`'s order — the index every rollup
+    /// callback hands back.
+    pub fn db_rollup_aggregates(&self, chosen: i32) -> Vec<DbPickRow> {
+        Aggregate::ALL
+            .iter()
+            .enumerate()
+            .map(|(index, aggregate)| DbPickRow {
+                id: index as i32,
+                name: aggregate.label().to_string(),
+                chosen: chosen == index as i32,
+                disabled: false,
+                note: String::new(),
+            })
+            .collect()
+    }
+
+    /// A rollup column's three settings as words, in the order the editor
+    /// lists them: the relation, the column, the fold.
+    pub fn db_rollup_labels(&self, property: i32) -> (String, String, String) {
+        let (relation, column, aggregate) = self.db_rollup_config(property);
+        (
+            self.db_property_label(relation),
+            self.db_property_label(column),
+            Aggregate::ALL
+                .get(aggregate as usize)
+                .map(|a| a.label().to_string())
+                .unwrap_or_else(|| "Not set".into()),
+        )
+    }
+
     /// Delete one row: its values, the record, and the page it owns when it is
     /// page-backed — one `Entry`, one Ctrl+Z (ADR-0063).
     ///
@@ -8694,6 +9268,16 @@ impl AppState {
         let Some(op) = FilterOp::from_index(op_index) else {
             return false;
         };
+        // The kind's own admissible set, not the global list: an op the parser
+        // would drop on read-back is a rule that silently disappears, and the
+        // panel's menu is built from this same list — so a row that went stale
+        // under the menu says so instead of eating the clause.
+        let Some(kind) = self.db_filter_clause_kind(block, index) else {
+            return false;
+        };
+        if !FilterOp::ops_for(kind).contains(&op) {
+            return false;
+        }
         self.db_edit_filter(block, |flat| {
             if let Some(clause) = flat.clauses.get_mut(index) {
                 clause.clause.op = op;
@@ -9624,30 +10208,6 @@ impl AppState {
         true
     }
 
-    /// A brand-new formula column, from the Columns popup's row — the one
-    /// creation path this build has (the kind picker is still D7's), and the
-    /// reason it exists: a formula column without an editor is a column of
-    /// blanks, and an editor without a column to edit is a door to nowhere.
-    /// The name is "Formula", then "Formula 2", … until it is unique, because
-    /// `UNIQUE (db, name)` (ADR-0061) is the schema's own rule. The caller
-    /// opens the editor for the returned id.
-    pub fn db_formula_column_add(&self, block: i32) -> Option<i32> {
-        let db = self.db_ref_of(block)?;
-        let base = "Formula";
-        let mut name = base.to_string();
-        let mut suffix = 2;
-        while self
-            .databases
-            .borrow()
-            .properties_of(db)
-            .any(|p| p.name == name)
-        {
-            name = format!("{base} {suffix}");
-            suffix += 1;
-        }
-        self.db_add_column(block, &name, PropertyKind::Formula)
-    }
-
     // ─── D5: the view family (SPEC §三十九 「视图」) ─────────────────────────
     //
     // One new command (`AddDatabaseView`), one lazy-page path (`db_open_record`,
@@ -10487,6 +11047,7 @@ pub fn project_blocks(blocks: &[Block], hits: &FindHits, titles: &MentionTitles)
                 db_row_height: TableView::ROW_HEIGHT,
                 db_header_height: TableView::HEADER_HEIGHT,
                 db_layout: "".into(),
+                db_layout_index: 0,
                 db_layout_ok: true,
                 // the rules' header state (D4): neutral here — `db_fill_row`
                 // reads the view's document and fills these for a live block
@@ -10628,6 +11189,7 @@ fn block(kind: i32, text: &str) -> BlockRow {
         db_row_height: 0.0,
         db_header_height: 0.0,
         db_layout: "".into(),
+        db_layout_index: 0,
         db_layout_ok: false,
         // the rules' header state (D4): neutral here like the rest, filled by
         // db_fill_row for a live block
@@ -15840,5 +16402,760 @@ mod tests {
              \"commit_min_us\":{commit_min:.1},\"commit_median_us\":{commit_mid:.1},\"commit_max_us\":{commit_max:.1},\
              \"peers_lone_median_us\":{lone_mid:.1},\"peers_pair_median_us\":{pair_mid:.1}}}"
         );
+    }
+
+    // ─── D10 (SPEC §三十九 「属性」): the three editors a user can reach ───────
+    //
+    // D5's honest boundary was that the state layer was finished and the window
+    // was not: a relation could be paired by a test and not by a click. These
+    // drive the entry points the type menu, the record picker and the rollup
+    // configurator call, and read back what those popups draw — their rows, their
+    // ticks, their refusal captions — plus the models a pick repaints.
+    //
+    // The failure mode these are written against is a chooser that agrees with
+    // itself and not with the save path, so several assertions compare a row's
+    // `disabled`/`note` with the very sentence `check_pair`/`check_config` gives
+    // the same write.
+
+    /// The type menu as `(id, disabled, note)` — the three fields that decide
+    /// whether a row can be clicked and what it says about itself.
+    fn menu_of(rows: &[super::DbPickRow]) -> Vec<(i32, bool, String)> {
+        rows.iter()
+            .map(|r| (r.id, r.disabled, r.note.clone()))
+            .collect()
+    }
+
+    /// The type menu's order *is* the number every database callback carries, so
+    /// a row's index is compared against `PropertyKind::index()` rather than
+    /// against a remembered literal — the same `kind` int a delegate sends.
+    #[test]
+    fn the_type_menu_lists_every_kind_in_the_order_the_callbacks_mean() {
+        use crate::core::database::PropertyKind;
+        use crate::testing::ScratchDir;
+
+        let dir = ScratchDir::new("d10-menu-order");
+        let state = super::AppState::new(&plain_args(), Some(scratch_repo(&dir)));
+        state.create_page(None);
+        let block = a_database(&state);
+        let note = state
+            .db_add_column(block, "Note", PropertyKind::Text)
+            .expect("a text column");
+
+        let rows = state.db_column_kinds(note);
+        assert_eq!(rows.len(), PropertyKind::ALL.len(), "one row per kind");
+        for (index, kind) in PropertyKind::ALL.iter().enumerate() {
+            assert_eq!(rows[index].id, kind.index(), "{} at its own index", kind.label());
+            assert_eq!(rows[index].name, kind.label());
+        }
+        assert_eq!(
+            rows.iter().filter(|r| r.chosen).count(),
+            1,
+            "exactly one row is the answer the column already has"
+        );
+        assert!(rows.iter().any(|r| r.chosen && r.id == PropertyKind::Text.index()));
+        // `title` is never a choice, and says its own reason; a plain column is
+        // refused for nothing else.
+        let only = menu_of(&rows)
+            .into_iter()
+            .filter(|(_, disabled, _)| *disabled)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            only,
+            vec![(
+                PropertyKind::Title.index(),
+                true,
+                "A database has one title column.".to_string()
+            )],
+            "one greyed row, and it is the kind a database cannot have twice"
+        );
+
+        // The creation list is the same menu asked a different question: nothing
+        // is chosen, because there is no column yet.
+        let fresh = state.db_column_kinds(-1);
+        assert_eq!(fresh.len(), rows.len());
+        assert!(fresh.iter().all(|r| !r.chosen), "a new column has no kind to mark");
+        assert_eq!(
+            menu_of(&fresh),
+            menu_of(&rows),
+            "creation and conversion offer the identical list, refusal included"
+        );
+    }
+
+    /// The refusal that is not about the kind at all: a column the schema leans
+    /// on cannot move, and the menu says so on **every** row rather than hiding
+    /// a list the user has to discover is closed by clicking one.
+    #[test]
+    fn a_column_the_schema_depends_on_is_refused_on_every_row() {
+        use crate::core::database::PropertyKind;
+        use crate::testing::ScratchDir;
+
+        let dir = ScratchDir::new("d10-menu-refusal");
+        let (state, tasks, people, assignee, assigned) = two_databases(&dir);
+        let people_id = database_of(&state, people);
+
+        // A title column: rows are named by it, so it is not a movable column.
+        let title = state.db_column_kinds(title_column(&state, tasks));
+        assert!(title.iter().all(|r| r.disabled), "the whole menu is closed");
+        assert!(title
+            .iter()
+            .all(|r| r.note.contains("title column is what its rows are named by")));
+
+        // A paired relation: ADR-0088's involution is a fact about two columns,
+        // and moving one of them under the other breaks it by a side door.
+        state
+            .db_relation_configure(tasks, assignee, people_id, assigned)
+            .expect("the pairing is legal");
+        let paired = state.db_column_kinds(assignee);
+        assert!(paired.iter().all(|r| r.disabled));
+        assert!(paired
+            .iter()
+            .all(|r| r.note.contains("clear its back-pointer before changing its type")));
+        assert_eq!(
+            state.db_column_kind_set(tasks, assignee, PropertyKind::Text.index()).unwrap_err(),
+            "This relation is two-way — clear its back-pointer before changing its type.",
+            "the menu's sentence and the save's refusal are the same words"
+        );
+
+        // Drop the back-pointer and the column is an ordinary one-way relation:
+        // the menu opens again, with only `title` left refused.
+        state
+            .db_relation_configure(tasks, assignee, people_id, -1)
+            .expect("one-way is legal");
+        let freed = menu_of(&state.db_column_kinds(assignee));
+        assert_eq!(freed.iter().filter(|(_, disabled, _)| *disabled).count(), 1);
+        assert!(state.db_column_kind_set(tasks, assignee, PropertyKind::Number.index()).is_ok());
+    }
+
+    /// Creation through the same menu: a column named for the kind it was made
+    /// as, and a name that is taken counting up instead of the click being
+    /// dropped.
+    #[test]
+    fn a_new_column_from_the_menu_is_named_for_its_kind_and_a_collision_counts_up() {
+        use crate::core::database::PropertyKind;
+        use crate::testing::ScratchDir;
+
+        let dir = ScratchDir::new("d10-column-add");
+        let state = super::AppState::new(&plain_args(), Some(scratch_repo(&dir)));
+        state.create_page(None);
+        let block = a_database(&state);
+
+        let first = state.db_column_add(block, PropertyKind::Text.index()).expect("a column");
+        let second = state.db_column_add(block, PropertyKind::Text.index()).expect("a second");
+        assert_eq!(state.db_property_label(first), "Text");
+        assert_eq!(state.db_property_label(second), "Text 2", "the tail counts up");
+        let number = state.db_column_add(block, PropertyKind::Number.index()).expect("a number");
+        assert_eq!(state.db_property_label(number), "Number");
+
+        // A second title is not a thing a schema has a meaning for, and the menu
+        // greyed that row for exactly this reason.
+        assert!(state.db_column_add(block, PropertyKind::Title.index()).is_none());
+        // The created column really is of the kind that was clicked: its own menu
+        // row is the marked one.
+        assert!(state
+            .db_column_kinds(number)
+            .iter()
+            .any(|r| r.chosen && r.id == PropertyKind::Number.index()));
+    }
+
+    /// ADR-0062's rule, now reachable by a click: the type menu is the only
+    /// producer of `PropertyKindSet`, and what it changes is what a cell
+    /// **means** — never what it holds.
+    #[test]
+    fn moving_a_type_changes_what_a_cell_means_and_not_what_it_holds() {
+        use crate::core::database::PropertyKind;
+        use crate::testing::ScratchDir;
+
+        let dir = ScratchDir::new("d10-kind-move");
+        let state = super::AppState::new(&plain_args(), Some(scratch_repo(&dir)));
+        state.create_page(None);
+        let block = a_database(&state);
+        let note = state
+            .db_add_column(block, "Note", PropertyKind::Text)
+            .expect("a text column");
+        let row = a_row(&state, block);
+        assert!(state.db_set_cell_text(block, row, note, "hello"));
+        let at = column_of(&state, block, note);
+        assert_eq!(drawn(&state, block, 0, at), "hello");
+        let _ = state.take_db_notice();
+
+        state
+            .db_column_kind_set(block, note, PropertyKind::Number.index())
+            .expect("a plain column may move");
+        let notice = state.take_db_notice().expect("the move says what it did");
+        assert!(
+            notice.contains("\"Text\" is now \"Number\"") && notice.contains("did not change"),
+            "{notice}"
+        );
+        // The bytes are untouched and the *read* is shaped by the kind: a number
+        // column looks in the store's `num` slot and `hello` is in the text one,
+        // so the cell shows nothing. That is what "the values did not change"
+        // costs — the command's own doc says the undo puts the words back, and
+        // only untouched bytes make that true.
+        assert_eq!(state.db_cell_text(block, row, note).as_deref(), Some(""));
+        assert_eq!(
+            drawn(&state, block, 0, at),
+            "",
+            "the cell is empty through the new kind, not rewritten by it"
+        );
+
+        // One step back: the kind returns, and with it the meaning of the value.
+        state.undo_open_page().expect("the move is one undo step");
+        assert_eq!(state.db_property_kind(note), Some(PropertyKind::Text));
+        assert_eq!(
+            state.db_cell_text(block, row, note).as_deref(),
+            Some("hello"),
+            "undo has something to put back precisely because nothing was destroyed"
+        );
+        assert_eq!(drawn(&state, block, 0, at), "hello");
+    }
+
+    /// A move to a kind that computes has nothing to show until the column is
+    /// defined, and the notice says that instead of the "values did not change"
+    /// sentence — the one case where the two are not the same statement.
+    #[test]
+    fn a_move_into_a_computed_kind_says_the_cells_are_not_written_yet() {
+        use crate::core::database::PropertyKind;
+        use crate::testing::ScratchDir;
+
+        let dir = ScratchDir::new("d10-kind-computed");
+        let state = super::AppState::new(&plain_args(), Some(scratch_repo(&dir)));
+        state.create_page(None);
+        let block = a_database(&state);
+        let note = state
+            .db_add_column(block, "Note", PropertyKind::Text)
+            .expect("a text column");
+        let row = a_row(&state, block);
+        assert!(state.db_set_cell_text(block, row, note, "hello"));
+        let _ = state.take_db_notice();
+
+        state
+            .db_column_kind_set(block, note, PropertyKind::Formula.index())
+            .expect("a text column may become a formula");
+        let notice = state.take_db_notice().expect("the move says what it did");
+        assert!(notice.contains("until it is defined"), "{notice}");
+        assert!(!notice.contains("did not change"), "{notice}");
+
+        // The same click on the kind a column already has writes nothing at all,
+        // which is what keeps a menu that re-draws from costing an undo step.
+        // (`take_db_notice` joins the whole queue without draining it, so "said
+        // nothing" here is "said no *new* thing": the line is byte-identical.)
+        let before = state.take_db_notice();
+        let again = state.db_column_kind_set(block, note, PropertyKind::Formula.index());
+        assert!(again.is_ok(), "not a refusal — just nothing to do");
+        assert_eq!(
+            state.take_db_notice(),
+            before,
+            "and it says nothing new, either"
+        );
+    }
+
+    /// The relation editor's first question. Self-relations stay on the list —
+    /// ADR-0088 refuses a column being *its own* back-pointer, not a database
+    /// naming itself — and the note is what tells the two apart on screen.
+    #[test]
+    fn the_target_chooser_marks_this_database_and_leaves_a_self_relation_open() {
+        use crate::testing::ScratchDir;
+
+        let dir = ScratchDir::new("d10-relation-targets");
+        let (state, tasks, people, _assignee, _assigned) = two_databases(&dir);
+        let tasks_id = database_of(&state, tasks);
+        let people_id = database_of(&state, people);
+
+        let rows = state.db_relation_databases(tasks, -1);
+        assert!(rows.iter().all(|r| !r.disabled), "any database may be pointed at");
+        assert_eq!(
+            rows.iter().find(|r| r.id == tasks_id).expect("its own database is listed").note,
+            "this database",
+            "and the row says so, because a self-relation is an ordinary answer"
+        );
+        assert!(rows.iter().all(|r| !r.chosen), "the column has no target yet");
+
+        let rows = state.db_relation_databases(tasks, people_id);
+        assert!(rows.iter().any(|r| r.chosen && r.id == people_id));
+        assert_eq!(
+            state.db_database_name(-1),
+            "",
+            "the absence is an empty name, not a word for one"
+        );
+    }
+
+    /// The relation editor's second question: only a target's *relation* columns
+    /// can hold back-pointers, so the other kinds are absent, and among the
+    /// relations a refused one is drawn greyed with the save path's own sentence.
+    #[test]
+    fn the_back_pointer_chooser_offers_no_then_the_relations_that_can_pair() {
+        use crate::core::database::PropertyKind;
+        use crate::core::database_relation;
+        use crate::testing::ScratchDir;
+
+        let dir = ScratchDir::new("d10-relation-mirrors");
+        let (state, tasks, people, assignee, assigned) = two_databases(&dir);
+        let people_id = database_of(&state, people);
+        let tasks_id = database_of(&state, tasks);
+        let note = state
+            .db_add_column(people, "Note", PropertyKind::Text)
+            .expect("a text column in the target");
+
+        let rows = state.db_relation_mirrors(tasks, assignee, people_id);
+        assert_eq!(rows[0].id, -1, "one-way is offered first");
+        assert_eq!(rows[0].name, "No back-pointer");
+        assert!(rows[0].chosen, "and it is the answer an unpaired column has");
+        assert!(rows[0].note.contains("one-way"));
+        assert!(
+            rows.iter().all(|r| r.id != note),
+            "a text column has nowhere to store a back-pointer, so it is not a candidate"
+        );
+        let candidate = rows.iter().find(|r| r.id == assigned).expect("the relation is listed");
+        assert!(!candidate.disabled, "a free relation may be pointed back");
+
+        // Pair it, and the same list now ticks the answer instead.
+        state
+            .db_relation_configure(tasks, assignee, people_id, assigned)
+            .expect("the pairing is legal");
+        let rows = state.db_relation_mirrors(tasks, assignee, people_id);
+        assert!(rows.iter().any(|r| r.id == assigned && r.chosen));
+        assert!(!rows[0].chosen, "and one-way is no longer the answer");
+
+        // A relation that belongs to somebody *else* is drawn, greyed, refused:
+        // `assigned` re-points at a second relation of this database, so pairing
+        // it here would break the involution for that one (rule 4 of `check_pair`,
+        // reached because rules 1–3 all pass).
+        let reviewer = state
+            .db_add_column(tasks, "Reviewer", PropertyKind::Relation)
+            .expect("a second relation of this database");
+        state
+            .db_relation_configure(tasks, assignee, people_id, -1)
+            .expect("un-pairing is legal, and it clears the other half too");
+        assert_eq!(state.db_relation_config(assigned).1, -1, "one step un-does the pair");
+        state
+            .db_relation_configure(people, assigned, tasks_id, reviewer)
+            .expect("the target's relation may point back at a different column here");
+        let rows = state.db_relation_mirrors(tasks, assignee, people_id);
+        let busy = rows
+            .iter()
+            .find(|r| r.id == assigned)
+            .expect("listed, not hidden — hiding it is a missing column the user can see");
+        assert!(busy.disabled);
+        assert_eq!(
+            busy.note,
+            database_relation::PairRefusal::AlreadyPaired.message(),
+            "the menu's grey-out and the save's refusal are one sentence"
+        );
+    }
+
+    /// The picker itself: the target database's rows by title, this cell's own
+    /// targets ticked, and one click adding or taking away through the same path
+    /// the two-way write goes through.
+    #[test]
+    fn the_record_picker_ticks_what_the_cell_holds_and_one_click_moves_it() {
+        use crate::testing::ScratchDir;
+
+        let dir = ScratchDir::new("d10-relation-picker");
+        let (state, tasks, people, assignee, assigned) = two_databases(&dir);
+        state
+            .db_relation_configure(tasks, assignee, database_of(&state, people), assigned)
+            .expect("the pairing is legal");
+        for name in ["Ada", "Bob", "Cy"] {
+            let row = a_row(&state, people);
+            name_a_row(&state, people, row, name);
+        }
+        let task = a_row(&state, tasks);
+        name_a_row(&state, tasks, task, "Ship it");
+
+        let at = column_of(&state, tasks, assignee);
+        let mirror_at = column_of(&state, people, assigned);
+        assert_eq!(drawn(&state, tasks, 0, at), "", "an empty cell has nothing ticked");
+
+        let rows = state.db_relation_rows(assignee, task, "", 10);
+        assert_eq!(rows.len(), 3, "the target database's rows");
+        assert_eq!(rows[0].name, "Ada");
+        assert!(rows.iter().all(|r| !r.chosen));
+
+        assert!(state.db_relation_toggle(tasks, task, assignee, rows[0].id));
+        assert_eq!(drawn(&state, tasks, 0, at), "Ada", "the click is a real write");
+        assert_eq!(
+            drawn(&state, people, 0, mirror_at),
+            "Ship it",
+            "and the back-pointer half moved with it"
+        );
+        let rows = state.db_relation_rows(assignee, task, "", 10);
+        assert!(rows.iter().any(|r| r.chosen && r.name == "Ada"));
+        assert!(rows.iter().all(|r| !r.chosen || r.name == "Ada"));
+
+        // A second target, and the needle narrows the list without losing the
+        // ticks — the popup re-pushes through the same read every time.
+        assert!(state.db_relation_toggle(tasks, task, assignee, rows[1].id));
+        assert_eq!(drawn(&state, tasks, 0, at), "Ada, Bob");
+        let searched = state.db_relation_rows(assignee, task, "ad", 10);
+        assert_eq!(searched.len(), 1, "the needle is a filter");
+        assert_eq!(searched[0].name, "Ada");
+        assert!(searched[0].chosen, "and the tick survives the narrowing");
+
+        // The same gesture on a ticked row takes it away.
+        assert!(state.db_relation_toggle(tasks, task, assignee, searched[0].id));
+        assert_eq!(drawn(&state, tasks, 0, at), "Bob");
+        assert_eq!(state.db_relation_held(assignee, task), vec![rows[1].id]);
+    }
+
+    /// A relation with no target database has nothing to list: the picker says so
+    /// with an empty list rather than pointing at rows nothing can name.
+    #[test]
+    fn an_unconfigured_relation_lists_nothing_rather_than_the_wrong_rows() {
+        use crate::testing::ScratchDir;
+
+        let dir = ScratchDir::new("d10-relation-empty");
+        let (state, tasks, people, assignee, _assigned) = two_databases(&dir);
+        let ada = a_row(&state, people);
+        name_a_row(&state, people, ada, "Ada");
+        let task = a_row(&state, tasks);
+
+        assert!(state.db_relation_rows(assignee, task, "", 10).is_empty());
+        assert!(state.db_relation_held(assignee, task).is_empty());
+        assert!(
+            !state.db_relation_toggle(tasks, task, assignee, ada as i32),
+            "nothing to point at, so the click writes nothing"
+        );
+    }
+
+    /// The rollup configurator's first two lists, each built *with* the gate that
+    /// writes: an unconfigured relation is greyed with `NoTarget`'s own words, a
+    /// column `check_config` refuses is drawn and greyed, and a live row carries
+    /// its kind as its caption.
+    #[test]
+    fn the_rollup_choosers_are_gated_by_the_same_check_that_gates_the_write() {
+        use crate::core::database::PropertyKind;
+        use crate::core::database_rollup;
+        use crate::testing::ScratchDir;
+
+        let dir = ScratchDir::new("d10-rollup-choosers");
+        let (state, tasks, people, assignee, assigned) = two_databases(&dir);
+        let people_id = database_of(&state, people);
+        let points = state
+            .db_add_column(people, "Points", PropertyKind::Number)
+            .expect("a number column in the target");
+        let theirs = state
+            .db_add_column(people, "Their rollup", PropertyKind::Rollup)
+            .expect("a computed column in the target");
+
+        // Panel 1: this database's relation columns — and one with no target has
+        // nothing to fold through, so it is greyed with the save's refusal.
+        let relations = state.db_rollup_relations(tasks, -1);
+        assert_eq!(relations.len(), 1, "assignee is the only relation task rows have");
+        assert_eq!(relations[0].id, assignee);
+        assert!(relations[0].disabled);
+        assert_eq!(
+            relations[0].note,
+            database_rollup::ConfigRefusal::NoTarget.message()
+        );
+        state
+            .db_relation_configure(tasks, assignee, people_id, assigned)
+            .expect("the pairing is legal");
+        let relations = state.db_rollup_relations(tasks, assignee);
+        assert!(!relations[0].disabled, "now it has a database to fold through");
+        assert!(relations[0].chosen);
+
+        // Panel 2: the target database's columns, each judged by `check_config`.
+        let columns = state.db_rollup_columns(assignee, -1);
+        assert_eq!(columns[0].id, -1, "`count` reads no column, so that is a choice");
+        assert_eq!(columns[0].name, "No column");
+        assert_eq!(columns[0].note, "count needs no column");
+        let row_of = |property: i32| {
+            columns
+                .iter()
+                .find(|r| r.id == property)
+                .unwrap_or_else(|| panic!("{property} is listed"))
+                .clone()
+        };
+        let number = row_of(points);
+        assert!(!number.disabled);
+        assert_eq!(number.note, "Number", "a live row says what kind it is");
+        let relation = row_of(assigned);
+        assert!(relation.disabled);
+        assert_eq!(
+            relation.note,
+            database_rollup::ConfigRefusal::TargetIsRelation.message()
+        );
+        let computed = row_of(theirs);
+        assert!(computed.disabled);
+        assert_eq!(
+            computed.note,
+            database_rollup::ConfigRefusal::TargetIsComputed.message(),
+            "the one shape that could close a cycle is refused while the user is looking"
+        );
+
+        // Panel 3: the six folds, in the order the editor offers them.
+        let aggregates = state.db_rollup_aggregates(2);
+        assert_eq!(aggregates.len(), 6);
+        assert_eq!(aggregates[0].name, "None", "and `none` first, the state a new rollup is in");
+        assert_eq!(aggregates[2].name, "Sum");
+        assert!(aggregates.iter().all(|r| !r.disabled));
+        assert!(aggregates.iter().filter(|r| r.chosen).count() == 1);
+    }
+
+    /// The three parts a rollup is, as the editor's header shows them: a column
+    /// that reads as `Assignee · Points · Sum` is the same config
+    /// `db_rollup_configure` wrote, and an unset slot reads "Not set" rather than
+    /// an empty string the popup would have to invent a word for.
+    #[test]
+    fn a_rollup_editor_reads_its_three_parts_back_as_words() {
+        use crate::core::database::PropertyKind;
+        use crate::testing::ScratchDir;
+
+        let dir = ScratchDir::new("d10-rollup-labels");
+        let (state, tasks, people, assignee, assigned) = two_databases(&dir);
+        let points = state
+            .db_add_column(people, "Points", PropertyKind::Number)
+            .expect("a number column");
+        let total = state
+            .db_add_column(tasks, "Total", PropertyKind::Rollup)
+            .expect("a rollup column");
+
+        assert_eq!(
+            state.db_rollup_labels(total),
+            ("Not set".into(), "Not set".into(), "None".into()),
+            "a column nobody has defined yet"
+        );
+        state
+            .db_relation_configure(tasks, assignee, database_of(&state, people), assigned)
+            .expect("the pairing is legal");
+        state
+            .db_rollup_configure(tasks, total, assignee, points, 2)
+            .expect("a sum over the related points");
+        assert_eq!(
+            state.db_rollup_labels(total),
+            ("Assignee".into(), "Points".into(), "Sum".into())
+        );
+        assert_eq!(state.db_rollup_config(total), (assignee, points, 2));
+
+        // And the fold is real: the same three picks the editor makes are what
+        // the projection paints.
+        let task = a_row(&state, tasks);
+        name_a_row(&state, tasks, task, "Ship it");
+        for index in 0..2 {
+            let row = a_row(&state, people);
+            name_a_row(&state, people, row, &format!("P{index}"));
+            assert!(state.db_set_cell_text(people, row, points, &(index as f64 * 10.0).to_string()));
+            assert!(state.db_relation_toggle(tasks, task, assignee, row as i32));
+        }
+        assert_eq!(
+            drawn(&state, tasks, 0, column_of(&state, tasks, total)),
+            "10",
+            "0 + 10 folded with `sum`"
+        );
+    }
+
+    /// ADR-0087's view search, at the one layer that can see both the needle
+    /// and the model the delegate draws: the needle has to *narrow* the window,
+    /// and `db_view_search_set` has to say it did. A `false` here is the
+    /// `database-search` scene painting the unsearched table — which is what it
+    /// did, because a needle that matches every row leaves a window identical
+    /// to the cached one, and `unchanged` is the refresh's own answer.
+    #[test]
+    fn a_view_needle_narrows_the_window_the_delegate_draws() {
+        use crate::testing::ScratchDir;
+
+        let dir = ScratchDir::new("view-search");
+        let state = super::AppState::new(&plain_args(), Some(scratch_repo(&dir)));
+        state.create_page(None);
+        let block = a_database(&state);
+        for name in ["the first", "the second", "alpha"] {
+            let row = a_row(&state, block);
+            name_a_row(&state, block, row, name);
+        }
+        assert_eq!(drawn_rows(&state, block), 3, "three rows to start");
+
+        assert!(
+            state.db_view_search_set(block, "the"),
+            "a needle that drops a row is a change"
+        );
+        assert_eq!(
+            drawn_rows(&state, block),
+            2,
+            "the window holds the matching rows only"
+        );
+        assert_eq!(state.db_search_needle(block), "the");
+
+        // …and clearing it puts all three back, through the same door.
+        assert!(state.db_view_search_set(block, ""), "emptying the box changes");
+        assert_eq!(drawn_rows(&state, block), 3, "no needle, no constraint");
+    }
+
+    /// The block row the delegate draws for `block`, freshly re-projected.
+    fn block_row(state: &super::AppState, block: i32) -> crate::BlockRow {
+        use slint::Model as _;
+        state.reproject_blocks();
+        (0..state.blocks.row_count())
+            .filter_map(|at| state.blocks.row_data(at))
+            .find(|row| row.id == block)
+            .expect("the block is on the open page")
+    }
+
+    /// `db_columns` as the delegate reads it: `(property, permille)`.
+    fn drawn_columns(row: &crate::BlockRow) -> Vec<(i32, i32)> {
+        use slint::Model as _;
+        (0..row.db_columns.row_count())
+            .filter_map(|at| row.db_columns.row_data(at))
+            .map(|column| (column.property, column.permille))
+            .collect()
+    }
+
+    /// The layout the switcher's label says, and the number the delegate draws
+    /// against, from the same projection. D3's seven layouts painted nothing
+    /// for six slices because the predicates were written against the store's
+    /// lowercase keys while `db-layout` carries the capitalized label — so the
+    /// pair is pinned together, and the number is what a comparison must use.
+    #[test]
+    fn every_layout_arrives_as_its_own_index_alongside_its_label() {
+        use crate::core::database::ViewLayout;
+        use crate::testing::ScratchDir;
+
+        let dir = ScratchDir::new("layout-index");
+        let state = super::AppState::new(&plain_args(), Some(scratch_repo(&dir)));
+        state.create_page(None);
+        let block = a_database(&state);
+        assert_eq!(
+            block_row(&state, block).db_layout_index,
+            ViewLayout::Table.index(),
+            "a new database is a table"
+        );
+        for (at, layout) in ViewLayout::ALL.iter().enumerate() {
+            assert!(
+                state.db_add_view(block, at as i32),
+                "{} creates",
+                layout.label()
+            );
+            let row = block_row(&state, block);
+            assert_eq!(row.db_layout_index, at as i32, "the switch is the number");
+            assert_eq!(row.db_layout, layout.label(), "…and the word is still the word");
+            assert!(row.db_layout_ok, "{} is drawn by this build", layout.label());
+        }
+    }
+
+    /// An auto width is a **share**, worked out where the projection happens.
+    /// The delegate cannot fold a list, and Slint gives an explicit `width`
+    /// binding the last word over `horizontal-stretch`, so the `0` this used to
+    /// hand over was a column of no width at all — the second reason a table
+    /// body was blank for six slices.
+    #[test]
+    fn an_auto_column_width_is_a_share_of_the_grid_and_never_zero() {
+        use crate::core::database::PropertyKind;
+        use crate::testing::ScratchDir;
+
+        let dir = ScratchDir::new("auto-width");
+        let state = super::AppState::new(&plain_args(), Some(scratch_repo(&dir)));
+        state.create_page(None);
+        let block = a_database(&state);
+        let points = state
+            .db_add_column(block, "Points", PropertyKind::Number)
+            .expect("a number column");
+
+        // Untouched, every column is auto, so the grid divides equally.
+        let all = drawn_columns(&block_row(&state, block));
+        assert!(all.len() > 1, "a new database has more than its title");
+        let share = 1000 / all.len() as i32;
+        assert!(
+            all.iter().all(|(_, permille)| *permille == share),
+            "an equal split of the grid, not a zero: {all:?}"
+        );
+
+        // One dragged column takes its own width and the rest divide what the
+        // grid has left — and the dragged one keeps exactly what was set.
+        assert!(state.db_set_column_width(block, points, 300));
+        let after = drawn_columns(&block_row(&state, block));
+        let left = 1000 - 300;
+        let rest = left / (after.len() as i32 - 1);
+        for (property, permille) in &after {
+            let wanted = if *property == points { 300 } else { rest };
+            assert_eq!(*permille, wanted, "column {property} of {after:?}");
+        }
+    }
+
+    /// The round trip D4 promised and did not make: "add a rule" writes a
+    /// clause with no value, the document stores that as `"value": null`, and
+    /// the parser read a `null` as a value of the wrong shape — so the rule
+    /// vanished on the way back out, the panel drew itself empty, and the next
+    /// edit (`set_op`, `set_text`) had no clause at index 0 to edit.
+    #[test]
+    fn a_half_written_filter_rule_survives_the_document() {
+        use crate::core::database::PropertyKind;
+        use crate::testing::ScratchDir;
+
+        let dir = ScratchDir::new("filter-half-written");
+        let state = super::AppState::new(&plain_args(), Some(scratch_repo(&dir)));
+        state.create_page(None);
+        let block = a_database(&state);
+        let points = state
+            .db_add_column(block, "Points", PropertyKind::Number)
+            .expect("a number column");
+        for (name, value) in [("big", "40"), ("small", "2")] {
+            let row = a_row(&state, block);
+            name_a_row(&state, block, row, name);
+            assert!(state.db_set_cell_text(block, row, points, value));
+        }
+
+        assert!(state.db_filter_add_clause(block, points), "the rule is added");
+        let (any, rows) = state.db_filter_panel(block);
+        assert!(!any, "a new root is match-all");
+        assert!(state.db_filter_editable(block), "and the panel may edit it");
+        assert_eq!(rows.len(), 1, "…and it is still here to edit");
+        assert!(!rows[0].has_value, "unfilled, exactly as written");
+        assert_eq!(
+            drawn_rows(&state, block),
+            2,
+            "a half-written rule hides nothing"
+        );
+
+        // The two edits that were unreachable while the clause was dropped.
+        assert!(state.db_filter_set_op(block, 0, 3), "gt is a number's own");
+        assert!(state.db_filter_set_text(block, 0, "5"));
+        let (_, rows) = state.db_filter_panel(block);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].op_name, ">", "the number's own word for gt");
+        assert!(rows[0].has_value, "the rule is filled in now");
+        assert_eq!(
+            drawn_rows(&state, block),
+            1,
+            "and the window answers to it"
+        );
+    }
+
+    /// The other half of the same door: a comparison the column's kind cannot
+    /// make is **refused** rather than written. The panel's menu is built from
+    /// the same list, so this only fires on a row that went stale under an open
+    /// menu — and what it prevents is a clause the parser would drop on
+    /// read-back, which is a rule silently eaten.
+    #[test]
+    fn the_filter_refuses_a_comparison_its_column_cannot_make() {
+        use crate::core::database::PropertyKind;
+        use crate::core::database_view::FilterOp;
+        use crate::testing::ScratchDir;
+
+        let dir = ScratchDir::new("filter-op-refused");
+        let state = super::AppState::new(&plain_args(), Some(scratch_repo(&dir)));
+        state.create_page(None);
+        let block = a_database(&state);
+        let points = state
+            .db_add_column(block, "Points", PropertyKind::Number)
+            .expect("a number column");
+        let row = a_row(&state, block);
+        name_a_row(&state, block, row, "only");
+        assert!(state.db_filter_add_clause(block, points));
+
+        // `contains` is not a number's comparison — the control the refusal
+        // rests on, asserted before the refusal itself so a future list that
+        // admits it fails here rather than passing a vacuous test.
+        assert!(!FilterOp::ops_for(PropertyKind::Number).contains(&FilterOp::Contains));
+        assert!(
+            !state.db_filter_set_op(block, 0, FilterOp::Contains.index()),
+            "a number is not a substring"
+        );
+        let (_, rows) = state.db_filter_panel(block);
+        assert_eq!(rows.len(), 1, "and the rule it was refused is still there");
+        assert_eq!(rows[0].op_name, "is", "with the comparison it started with");
+
+        // Out of the list entirely, and out of the clause list: both no-ops.
+        let past_the_end = crate::core::database_view::FILTER_OPS.len() + 1;
+        assert!(!state.db_filter_set_op(block, 0, past_the_end));
+        assert!(!state.db_filter_set_op(block, 7, FilterOp::Gt.index()));
     }
 }

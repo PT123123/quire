@@ -1,0 +1,100 @@
+// The one list shape D10's editors share (SPEC §三十九 「属性」): a column type
+// menu, a relation's target database, a relation's back-pointer, the records a
+// relation cell holds, and a rollup's three parts. They are five questions and
+// one shape of answer — "which of these?" — so they are one component, and the
+// rows arrive already decided (`DbPickRow`, pushed by Rust) exactly like every
+// other database list in this build.
+//
+// Two things a delegate may draw here and must not decide:
+//
+//   * **the tick** — `chosen` is the *current* answer, so the list doubles as
+//     the display of what a column is set to. A relation picker's ticks are
+//     that cell's own targets, which is what makes "add another" and "take one
+//     away" the same gesture on different rows.
+//   * **the greyed row** — `disabled` never stands alone: `note` carries the
+//     refusal's own words under the name, so a row that cannot be picked is an
+//     answer rather than a mystery. The alternative (dropping the row) would
+//     leave the user counting a database's columns for the one that is missing.
+
+import { Theme } from "../Theme.slint";
+import { Colors } from "../Colors.slint";
+import { Typography } from "../Typography.slint";
+import { Icon } from "../Icons.slint";
+import { DbPickRow } from "../Types.slint";
+
+export component DatabasePickList inherits Rectangle {
+    in property <[DbPickRow]> rows;
+    // The two-line rows (a name and its reason) are the kind menu's; a plain
+    // chooser list is one line and tighter.
+    in property <length> row-height: 30px;
+    callback picked(int); // the picked row's id
+
+    // The width is the declaring popup's — every one of them inset the list by
+    // its own margin, so the component has nothing to inherit here.
+    height: rows.length * root.row-height;
+
+    for item[index] in rows : Rectangle {
+        x: 0px;
+        y: index * root.row-height;
+        width: parent.width;
+        height: root.row-height;
+        border-radius: Theme.radius-sm;
+        background: row-ta.has-hover && !item.disabled ? Colors.surface-hover : transparent;
+        animate background { duration: Theme.duration-instant; }
+
+        // The name and its caption: one line when there is nothing to say, two
+        // when the row is refused (or when the caption is the column's own kind,
+        // which is how the rollup's chooser answers "which of these is a
+        // number?"). Absolute because a row's two lines are a fixed pair of
+        // offsets, not a layout to negotiate.
+        Text {
+            x: 8px;
+            y: item.note == "" ? 0px : 3px;
+            width: parent.width - 26px;
+            height: item.note == "" ? parent.height : 16px;
+            vertical-alignment: center;
+            overflow: elide;
+            text: item.name;
+            font-family: Typography.ui-font;
+            font-size: Typography.size-ui;
+            font-weight: Typography.weight-medium;
+            color: item.disabled ? Colors.text-muted
+                : (row-ta.has-hover ? Colors.text-primary : Colors.text-secondary);
+        }
+        if item.note != "" : Text {
+            x: 8px;
+            y: 18px;
+            width: parent.width - 16px;
+            height: 13px;
+            overflow: elide;
+            text: item.note;
+            font-family: Typography.ui-font;
+            font-size: Typography.size-caption;
+            color: Colors.text-muted;
+        }
+        // The tick is a drawn path, not a glyph: `✓` (U+2713) is outside Segoe
+        // UI's face, so a `Text` here is a blank rectangle in every renderer
+        // that does not silently fall back — which is how this row's mark went
+        // unseen through its first slice.
+        if item.chosen : Icon {
+            x: parent.width - 22px;
+            y: item.note == "" ? (parent.height - 14px) / 2 : 4px;
+            width: 14px;
+            height: 14px;
+            size: 14px;
+            name: "todo-check";
+            stroke-width: 2.6px;
+            color: Colors.accent-text;
+        }
+
+        row-ta := TouchArea {
+            width: parent.width;
+            height: parent.height;
+            enabled: !item.disabled;
+            mouse-cursor: item.disabled ? MouseCursor.default : MouseCursor.pointer;
+            clicked => {
+                root.picked(item.id);
+            }
+        }
+    }
+}

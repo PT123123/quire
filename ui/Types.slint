@@ -256,6 +256,11 @@ export struct BlockRow {
     db-row-height: length,
     db-header-height: length,
     db-layout: string,     // the active view's layout, as its label
+    // ...and as its number: the eight `ViewLayout::ALL` indices, which is what
+    // the delegate compares when it decides *what to draw*. The label is for
+    // reading ("Table"); a predicate written against it broke every layout for
+    // six slices because the word is capitalized and the key was not.
+    db-layout-index: int,
     db-layout-ok: bool,    // false = this build does not draw that layout yet
     // D4 (SPEC §三十九 「操作」): the view's rules, as the header reads them.
     // `db-filter-note` is the visible degradation — a filter the document held
@@ -314,6 +319,26 @@ export struct DbColumnToggle {
     kind: string,
     visible: bool,
     locked: bool, // the title column: listed, never hideable
+}
+
+// D10 (SPEC §三十九 「属性」): one row of any of the schema editors' chooser
+// lists — the column type menu, a relation's target database and back-pointer,
+// the records a relation cell holds, and a rollup's three parts. One struct
+// because every list asks the same question ("which of these?") and the three
+// things a delegate may draw about an answer are a tick, a greying-out and a
+// sentence; `id` is whatever that list's callback names back (a kind index, a
+// property id, a database id, a record id, an aggregate index).
+//
+// A `disabled` row's `note` is never empty: it carries the refusal's own words,
+// so the user reads why the row is grey instead of finding out by clicking it.
+// On a live row `note` is the row's caption (what kind a column is, which
+// database is this one) or empty.
+export struct DbPickRow {
+    id: int,
+    name: string,
+    chosen: bool,
+    disabled: bool,
+    note: string,
 }
 
 // D4 (SPEC §三十九 「操作」): one filter-panel row. The ids name the clause to
@@ -873,7 +898,6 @@ export global UIState {
     callback db-formula-text-changed(string);    // the draft: parse + evaluate per keystroke
     callback db-formula-accepted();              // commit (one change, one undo step)
     callback db-formula-closed();                // dismissed (outside click / Escape)
-    callback db-formula-added(int);              // block: a new empty formula column (Columns popup)
     in-out property <bool> db-formula-open: false;
     in-out property <int> db-formula-block: -1;
     in-out property <int> db-formula-property: -1;
@@ -882,6 +906,68 @@ export global UIState {
     in-out property <string> db-formula-text: "";
     in-out property <string> db-formula-preview: "";
     in-out property <string> db-formula-error: "";
+
+    // ─── D10 (SPEC §三十九 「属性」): the schema's own editors ────────────────
+    //
+    // Three things, because a column's type is the fact every other database
+    // feature hangs off: the **type menu** (which column becomes which kind,
+    // and what a new column starts as) lives inside the Columns popup as a
+    // second panel; the **relation picker** and the **rollup configurator** are
+    // window-level popups of their own, opened by clicking a cell of their kind.
+    //
+    // The type menu reuses the Columns popup rather than opening a popup over
+    // it for the reason the filter panel gives for its own four lists: one
+    // popup that changes its list is a state machine, two popups are a fight
+    // over one click.
+    callback db-kind-opened(int, int);        // block, property (-1 = "a new column")
+    callback db-kind-back();                  // the menu's own "back to the columns"
+    callback db-kind-picked(int, int);        // block, PropertyKind index
+    in-out property <int> db-columns-panel: 0; // 0 visibility · 1 the type menu
+    in-out property <int> db-columns-property: -1; // the column the menu edits
+    in-out property <string> db-columns-title: ""; // ...named, on the menu's back row
+    in-out property <[DbPickRow]> db-kind-rows;
+
+    // A relation cell (kind 16): the picker lists the target database's rows
+    // and ticks the ones this cell holds. When the column has no target yet the
+    // same popup is its configurator — panel 1 names the database, panel 2 the
+    // back-pointer (or none) — because "point at nothing" and "point at rows"
+    // are one feature and two popups would be one more click than either.
+    callback db-relation-opened(int, int, int); // block, record, property
+    callback db-relation-closed();
+    callback db-relation-panel-set(int);        // 0 rows · 1 databases · 2 mirrors
+    callback db-relation-text-set(string);      // the needle, per keystroke
+    callback db-relation-database-picked(int);  // DatabaseId (panel 1)
+    callback db-relation-mirror-picked(int);    // PropertyId, -1 = one-way (panel 2)
+    callback db-relation-toggled(int);          // RecordId (panel 0)
+    in-out property <bool> db-relation-open: false;
+    in-out property <int> db-relation-block: -1;
+    in-out property <int> db-relation-record: -1;
+    in-out property <int> db-relation-property: -1;
+    in-out property <int> db-relation-panel: 0;
+    in-out property <string> db-relation-name: "";    // the column's own name
+    in-out property <string> db-relation-target: "";  // the database it points at
+    in-out property <string> db-relation-text: "";    // the needle
+    in-out property <[DbPickRow]> db-relation-rows;
+
+    // A rollup cell (kind 15): the editor of a fold, which is three names and
+    // so is one summary line each with its own chooser panel. No row travels
+    // with the call — a rollup edits its *column*, and the fold's answer is
+    // the cell's text, which the table behind repaints.
+    callback db-rollup-opened(int, int);        // block, property
+    callback db-rollup-closed();
+    callback db-rollup-panel-set(int);          // 0 summary · 1 relation · 2 column · 3 aggregate
+    callback db-rollup-relation-picked(int);    // PropertyId of this database's relation
+    callback db-rollup-column-picked(int);      // PropertyId of the related database
+    callback db-rollup-aggregate-picked(int);   // Aggregate index
+    in-out property <bool> db-rollup-open: false;
+    in-out property <int> db-rollup-block: -1;
+    in-out property <int> db-rollup-property: -1;
+    in-out property <int> db-rollup-panel: 0;
+    in-out property <string> db-rollup-name: "";       // the column's own name
+    in-out property <string> db-rollup-relation: "";   // its first name
+    in-out property <string> db-rollup-column: "";     // its second
+    in-out property <string> db-rollup-aggregate: "";  // its fold
+    in-out property <[DbPickRow]> db-rollup-rows;
     // rich paste (SPEC §二十七): true = the clipboard landed as blocks (the
     // key is consumed); false = fall through to the native plain paste
     callback rich-paste(int) -> bool;

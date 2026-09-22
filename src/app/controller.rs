@@ -9,6 +9,7 @@ use crate::app::state::{
     core_page_id, kind_from_int, palette_action, AppState, PaletteAction, PAGE_GETTING_STARTED,
     ROW_NEW_PAGE,
 };
+use crate::core::database::PropertyKind;
 use crate::core::{BlockId, Change, Command, Lang};
 use crate::{AppWindow, UIState};
 use slint::{ComponentHandle, Global, Model};
@@ -550,8 +551,9 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                             .unwrap_or("Untitled template")
                             .to_string();
                         s.save_as_template(id);
+                        // `…`, not `⋯` — see `AppState::note_locked`'s line.
                         g.set_db_notice(
-                            format!("Saved \"{name}\" as a template — ⋯ → Templates.").into(),
+                            format!("Saved \"{name}\" as a template — … → Templates.").into(),
                         );
                     }
                 }
@@ -1797,6 +1799,13 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         ui.global::<UIState>().on_db_columns_closed(move || {
             let g = gw.upgrade().unwrap();
             g.set_db_columns_open(false);
+            // The type menu is panel *1 of this same popup*, so Escape or a
+            // click outside has to send the popup home, not just hide it:
+            // left set, the next summons opened straight back onto a kind list
+            // for a column that is no longer selected.
+            g.set_db_columns_panel(0);
+            g.set_db_columns_property(-1);
+            g.set_db_columns_title("".into());
         });
     }
     {
@@ -2155,22 +2164,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                 // a cell editor's pending keystrokes land first: the same rule
                 // `db-cell-activated` follows, for the same reason
                 flush_pending_edit(&g, &s);
-                let text = s.db_formula_current(property);
-                let (preview, error) = s.db_formula_preview(record as i64, property, &text);
-                g.set_db_formula_block(block);
-                g.set_db_formula_property(property);
-                g.set_db_formula_record(record);
-                g.set_db_formula_name(
-                    s.db_column_toggles(block)
-                        .into_iter()
-                        .find(|t| t.property == property)
-                        .map(|t| t.name.into())
-                        .unwrap_or_default(),
-                );
-                g.set_db_formula_text(text.into());
-                g.set_db_formula_preview(preview.into());
-                g.set_db_formula_error(error.into());
-                g.set_db_formula_open(true);
+                db_show_formula(&g, &s, block, record, property);
             });
     }
     {
@@ -2212,37 +2206,322 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         let gw = gw.clone();
         ui.global::<UIState>().on_db_formula_closed(move || {
             let g = gw.upgrade().unwrap();
+            // Escape is the keyboard's way out, and the window flag is Rust's to
+            // clear — the same shape D10's two popups close with. Left unset,
+            // the sheet stayed up over its own reset ids.
+            g.set_db_formula_open(false);
             g.set_db_formula_block(-1);
             g.set_db_formula_property(-1);
             g.set_db_formula_record(-1);
         });
     }
+    // ─── D10 (SPEC §三十九 「属性」): the column type menu ────────────────────
+    //
+    // The menu is the door D5 left unbuilt. Every kind after `text` could
+    // already be stored (`AddDatabaseProperty` takes one, `PropertyKindSet`
+    // writes one) and projected (a relation points, a rollup folds, a formula
+    // computes); none of them could be *chosen*, so the whole of ADR-0088 and
+    // ADR-0089 was reachable from a test and not from a window.
+    //
+    // Creation and conversion are the same panel because a schema has one set
+    // of kinds and two menus would be two lists agreeing about it — and the
+    // same one refusal (`kind_move_refusal`, in the state layer) gates both.
     {
         let gw = gw.clone();
         let s = state.clone();
-        ui.global::<UIState>().on_db_formula_added(move |block| {
+        ui.global::<UIState>()
+            .on_db_kind_opened(move |block, property| {
+                let g = gw.upgrade().unwrap();
+                flush_pending_edit(&g, &s);
+                db_push_kinds(&g, &s, block, property);
+            });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_kind_back(move || {
             let g = gw.upgrade().unwrap();
-            flush_pending_edit(&g, &s);
-            // the Columns popup is the door this came from: close it, because a
-            // popup that opens a popup is two windows fighting over one click
-            g.set_db_columns_open(false);
-            if let Some(property) = s.db_formula_column_add(block) {
-                let (preview, error) = s.db_formula_preview(-1, property, "");
-                let name = s
-                    .db_column_toggles(block)
-                    .into_iter()
-                    .find(|t| t.property == property)
-                    .map(|t| t.name)
-                    .unwrap_or_default();
-                g.set_db_formula_block(block);
-                g.set_db_formula_property(property);
-                g.set_db_formula_record(-1);
-                g.set_db_formula_name(name.into());
-                g.set_db_formula_text("".into());
-                g.set_db_formula_preview(preview.into());
-                g.set_db_formula_error(error.into());
-                g.set_db_formula_open(true);
+            let block = g.get_db_columns_block();
+            if block >= 0 {
+                db_show_columns(&g, &s, block);
             }
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_kind_picked(move |block, kind| {
+            let g = gw.upgrade().unwrap();
+            let property = g.get_db_columns_property();
+            if property < 0 {
+                // Creation. A formula column goes straight into its editor,
+                // the way D6's one creation row left its user: a column that
+                // computes has nothing to show until one line of it exists.
+                let Some(created) = s.db_column_add(block, kind) else {
+                    g.set_db_notice("That column could not be added.".into());
+                    return;
+                };
+                db_show_columns(&g, &s, block);
+                db_refill_row(&s, block);
+                if kind == PropertyKind::Formula.index() {
+                    g.set_db_columns_open(false);
+                    db_show_formula(&g, &s, block, -1, created);
+                }
+                return;
+            }
+            if let Err(why) = s.db_column_kind_set(block, property, kind) {
+                g.set_db_notice(why.into());
+                return;
+            }
+            // The kind is what the header, the cells and every editor of that
+            // column read, so the row's shape goes back through the delegate —
+            // and the sentence about what happened to the stored values is the
+            // state layer's to say, which it does through the notice line.
+            db_show_columns(&g, &s, block);
+            db_refill_row(&s, block);
+            if kind == PropertyKind::Formula.index() {
+                // …and the sheet is the one popup: the menu it was opened from
+                // goes away rather than sitting behind it.
+                g.set_db_columns_open(false);
+                db_show_formula(&g, &s, block, -1, property);
+            }
+        });
+    }
+
+    // ─── D10 (ADR-0088): the relation picker ─────────────────────────────────
+    //
+    // One popup, three states, and the write is always the *whole* list plus
+    // the back-pointers it implies — so a pick is one Ctrl+Z whether it added
+    // the third target or cleared the last. Every refusal here is
+    // `check_pair`'s or the state layer's, said in the notice line rather than
+    // by a silent no-op: a click that did nothing has to be a click the user
+    // can hear.
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>()
+            .on_db_relation_opened(move |block, record, property| {
+                let g = gw.upgrade().unwrap();
+                flush_pending_edit(&g, &s);
+                // the cell editor and the option list are the two live
+                // surfaces a click can otherwise leave up behind this popup
+                g.set_db_editing_block(-1);
+                g.set_db_editing_record(-1);
+                g.set_db_editing_property(-1);
+                g.set_db_picking_record(-1);
+                g.set_db_picking_property(-1);
+                g.set_db_formula_open(false);
+                g.set_db_rollup_open(false);
+                g.set_db_relation_block(block);
+                g.set_db_relation_record(record);
+                g.set_db_relation_property(property);
+                g.set_db_relation_name(s.db_property_label(property).into());
+                g.set_db_relation_text("".into());
+                let target = s.db_relation_config(property).0;
+                g.set_db_relation_target(s.db_database_name(target).into());
+                // An unconfigured column opens on its configuration: a picker
+                // over a database nobody has named would be a text field above
+                // an empty box.
+                g.set_db_relation_open(true);
+                db_push_relation(&g, &s, if target < 0 { 1 } else { 0 });
+            });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_relation_panel_set(move |panel| {
+            let g = gw.upgrade().unwrap();
+            db_push_relation(&g, &s, panel);
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_relation_text_set(move |_needle| {
+            let g = gw.upgrade().unwrap();
+            // the text itself is the binding's job; this is the narrowed list
+            db_push_relation(&g, &s, 0);
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>()
+            .on_db_relation_database_picked(move |target| {
+                let g = gw.upgrade().unwrap();
+                let block = g.get_db_relation_block();
+                let property = g.get_db_relation_property();
+                // Re-pointing a relation drops its back-pointer with the
+                // database it pointed at: a mirror of the old target is not a
+                // mirror of the new one, and ADR-0088's involution is the
+                // property that would quietly break.
+                if let Err(why) = s.db_relation_configure(block, property, target, -1) {
+                    g.set_db_notice(why.into());
+                    return;
+                }
+                g.set_db_relation_target(s.db_database_name(target).into());
+                db_push_relation(&g, &s, 2);
+            });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>()
+            .on_db_relation_mirror_picked(move |mirror| {
+                let g = gw.upgrade().unwrap();
+                let block = g.get_db_relation_block();
+                let property = g.get_db_relation_property();
+                let target = s.db_relation_config(property).0;
+                if let Err(why) = s.db_relation_configure(block, property, target, mirror) {
+                    g.set_db_notice(why.into());
+                    return;
+                }
+                // Home to the picker: the column is configured now, and which
+                // rows it holds is the question the user was on their way to.
+                db_push_relation(&g, &s, 0);
+            });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_relation_toggled(move |record| {
+            let g = gw.upgrade().unwrap();
+            let block = g.get_db_relation_block();
+            let property = g.get_db_relation_property();
+            let row = g.get_db_relation_record();
+            if !s.db_relation_toggle(block, row as i64, property, record) {
+                g.set_db_notice("That link could not be written.".into());
+                return;
+            }
+            // The cell's own list changed, so its painted text did — one row,
+            // not one page (`db_refill_row`'s reasoning), and the tick list is
+            // re-read from storage rather than toggled in place here.
+            db_push_relation(&g, &s, 0);
+            db_refill_row(&s, block);
+        });
+    }
+    {
+        let gw = gw.clone();
+        ui.global::<UIState>().on_db_relation_closed(move || {
+            let g = gw.upgrade().unwrap();
+            // the callback is the *keyboard's* way out (Enter/Escape in the
+            // needle); the window flag is Rust's to clear, as
+            // `db-formula-accepted`'s handler does. Without it the popup stays
+            // up with its ids reset, and the next click writes to nothing.
+            g.set_db_relation_open(false);
+            g.set_db_relation_block(-1);
+            g.set_db_relation_record(-1);
+            g.set_db_relation_property(-1);
+            g.set_db_relation_panel(0);
+            g.set_db_relation_text("".into());
+        });
+    }
+
+    // ─── D10 (ADR-0089): the rollup configurator ─────────────────────────────
+    //
+    // Three names, one config, one write per pick — and the user lands back on
+    // the sentence each time, because a fold that half-exists is a fact about
+    // the column the header should be able to show. The choosers list what
+    // `check_config` accepts, so a pick here refuses on the way in rather than
+    // surprising the next projection.
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>()
+            .on_db_rollup_opened(move |block, property| {
+                let g = gw.upgrade().unwrap();
+                flush_pending_edit(&g, &s);
+                g.set_db_editing_block(-1);
+                g.set_db_editing_record(-1);
+                g.set_db_editing_property(-1);
+                g.set_db_picking_record(-1);
+                g.set_db_picking_property(-1);
+                g.set_db_formula_open(false);
+                g.set_db_relation_open(false);
+                g.set_db_rollup_block(block);
+                g.set_db_rollup_property(property);
+                g.set_db_rollup_name(s.db_property_label(property).into());
+                g.set_db_rollup_open(true);
+                db_push_rollup(&g, &s, 0);
+            });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_rollup_panel_set(move |panel| {
+            let g = gw.upgrade().unwrap();
+            db_push_rollup(&g, &s, panel);
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>()
+            .on_db_rollup_relation_picked(move |relation| {
+                let g = gw.upgrade().unwrap();
+                let block = g.get_db_rollup_block();
+                let property = g.get_db_rollup_property();
+                let (_was_relation, _was_column, aggregate) = s.db_rollup_config(property);
+                // The second name goes with the first: it belonged to a
+                // different database's columns, and a fold whose two names
+                // disagree about which database is ADR-0089's cycle waiting to
+                // happen. Straight on to the column chooser, so the sentence
+                // is never left half-spoken on screen.
+                if let Err(why) =
+                    s.db_rollup_configure(block, property, relation, -1, aggregate)
+                {
+                    g.set_db_notice(why.into());
+                    return;
+                }
+                db_push_rollup(&g, &s, 2);
+            });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>()
+            .on_db_rollup_column_picked(move |column| {
+                let g = gw.upgrade().unwrap();
+                let block = g.get_db_rollup_block();
+                let property = g.get_db_rollup_property();
+                let (relation, _was_column, aggregate) = s.db_rollup_config(property);
+                if let Err(why) = s.db_rollup_configure(block, property, relation, column, aggregate)
+                {
+                    g.set_db_notice(why.into());
+                    return;
+                }
+                db_push_rollup(&g, &s, 0);
+                // the fold's answer is a cell's text now, so the row repaints
+                db_refill_row(&s, block);
+            });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>()
+            .on_db_rollup_aggregate_picked(move |aggregate| {
+                let g = gw.upgrade().unwrap();
+                let block = g.get_db_rollup_block();
+                let property = g.get_db_rollup_property();
+                let (relation, column, _was_aggregate) = s.db_rollup_config(property);
+                if let Err(why) =
+                    s.db_rollup_configure(block, property, relation, column, aggregate)
+                {
+                    g.set_db_notice(why.into());
+                    return;
+                }
+                db_push_rollup(&g, &s, 0);
+                db_refill_row(&s, block);
+            });
+    }
+    {
+        let gw = gw.clone();
+        ui.global::<UIState>().on_db_rollup_closed(move || {
+            let g = gw.upgrade().unwrap();
+            g.set_db_rollup_open(false);
+            g.set_db_rollup_block(-1);
+            g.set_db_rollup_property(-1);
+            g.set_db_rollup_panel(0);
         });
     }
 
@@ -3633,6 +3912,127 @@ fn db_push_group(g: &UIState<'_>, state: &Rc<AppState>, block: i32) {
     g.set_db_group_current(state.db_group_current(block));
 }
 
+/// Open the formula editor for one column (D6), with the draft, the live
+/// answer and the error line all seeded from the **stored** expression
+/// evaluated on `record` — the row whose cell was clicked, or -1 for an empty
+/// row when the column has just been created and has nothing to compute on.
+fn db_show_formula(
+    g: &UIState<'_>,
+    state: &Rc<AppState>,
+    block: i32,
+    record: i32,
+    property: i32,
+) {
+    let text = state.db_formula_current(property);
+    let (preview, error) = state.db_formula_preview(record as i64, property, &text);
+    g.set_db_formula_block(block);
+    g.set_db_formula_property(property);
+    g.set_db_formula_record(record);
+    g.set_db_formula_name(state.db_property_label(property).into());
+    g.set_db_formula_text(text.into());
+    g.set_db_formula_preview(preview.into());
+    g.set_db_formula_error(error.into());
+    g.set_db_formula_open(true);
+}
+
+/// How many rows the relation picker lists at once. The cap is the feature's
+/// shape rather than a performance tweak — `records_named` is capped for the
+/// reason `database::window` exists — and the needle is what a user past the
+/// cap has: they narrow the list, they do not scroll a thousand titles.
+const DB_RELATION_PICK_LIMIT: usize = 10;
+
+/// One chooser list as the UI reads it (D10). The type menu, the relation
+/// picker and the rollup editor all draw `DbPickRow`s, and Rust has already
+/// decided every field of one — including whether the row can be picked and
+/// what sentence says why not — so this is a copy, not a conversion.
+fn db_pick_model(rows: Vec<crate::app::state::DbPickRow>) -> slint::ModelRc<crate::DbPickRow> {
+    let rows: Vec<crate::DbPickRow> = rows
+        .into_iter()
+        .map(|r| crate::DbPickRow {
+            id: r.id,
+            name: r.name.into(),
+            chosen: r.chosen,
+            disabled: r.disabled,
+            note: r.note.into(),
+        })
+        .collect();
+    Rc::new(slint::VecModel::from(rows)).into()
+}
+
+/// Open the Columns popup's second panel: the type menu. `property < 0` is the
+/// **creation** list — what a new column can start as — which is why the panel
+/// is the same one for both questions: a schema has one set of kinds, and a
+/// menu per question would be two menus agreeing about it.
+fn db_push_kinds(g: &UIState<'_>, state: &Rc<AppState>, block: i32, property: i32) {
+    // The delegate's own block is the authority for which panel is being
+    // filled, so it travels with the call rather than being read back.
+    g.set_db_columns_block(block);
+    g.set_db_kind_rows(db_pick_model(state.db_column_kinds(property)));
+    g.set_db_columns_property(property);
+    let title = if property < 0 {
+        String::new()
+    } else {
+        state.db_property_label(property)
+    };
+    g.set_db_columns_title(title.into());
+    g.set_db_columns_panel(1);
+}
+
+/// Home from the type menu to the visibility list, with the rows re-pushed:
+/// the popup's own content is stale the instant the panel changes, and a kind
+/// that moved while it was open is exactly what the list has to say now.
+fn db_show_columns(g: &UIState<'_>, state: &Rc<AppState>, block: i32) {
+    db_push_columns(g, state, block);
+    g.set_db_columns_property(-1);
+    g.set_db_columns_title("".into());
+    g.set_db_columns_panel(0);
+}
+
+/// Push one panel of the relation editor (D10, ADR-0088). The three lists are
+/// one function because they are one question in three tenses — what does this
+/// point at, what points back at it, what does this row hold — and because
+/// every one of them is read back out of the **column's config**, not out of
+/// what the user last clicked: a pick that was refused leaves the popup
+/// showing what the column still is.
+fn db_push_relation(g: &UIState<'_>, state: &Rc<AppState>, panel: i32) {
+    let block = g.get_db_relation_block();
+    let property = g.get_db_relation_property();
+    let target = state.db_relation_config(property).0;
+    let rows = match panel {
+        1 => state.db_relation_databases(block, target),
+        2 => state.db_relation_mirrors(block, property, target),
+        _ => state.db_relation_rows(
+            property,
+            g.get_db_relation_record() as i64,
+            &g.get_db_relation_text(),
+            DB_RELATION_PICK_LIMIT,
+        ),
+    };
+    g.set_db_relation_rows(db_pick_model(rows));
+    g.set_db_relation_panel(panel);
+}
+
+/// Push one panel of the rollup editor (D10, ADR-0089), and with it the three
+/// summary lines — the sentence the choosers edit, always from the current
+/// config rather than from the click that opened a panel.
+fn db_push_rollup(g: &UIState<'_>, state: &Rc<AppState>, panel: i32) {
+    let block = g.get_db_rollup_block();
+    let property = g.get_db_rollup_property();
+    let (relation, column, aggregate) = state.db_rollup_config(property);
+    let rows = match panel {
+        1 => state.db_rollup_relations(block, relation),
+        2 => state.db_rollup_columns(relation, column),
+        3 => state.db_rollup_aggregates(aggregate),
+        _ => Vec::new(),
+    };
+    g.set_db_rollup_rows(db_pick_model(rows));
+    let (rel, col, agg) = state.db_rollup_labels(property);
+    g.set_db_rollup_relation(rel.into());
+    g.set_db_rollup_column(col.into());
+    g.set_db_rollup_aggregate(agg.into());
+    g.set_db_rollup_panel(panel);
+}
+
 /// Where the caret belongs after a row or column delete: `at` was the focused
 /// cell's row-major slot, so the same slot of the smaller grid is the cell
 /// nearest to it. `None` means the caret was never in this grid — the delete
@@ -4397,7 +4797,7 @@ fn seed_database_table(state: &Rc<AppState>) -> Option<i32> {
 /// Seed the database-filter scene (SPEC §三十九 「操作」, D4): the table seed plus
 /// one number rule — Points > 5 — written through the **same helpers the filter
 /// panel drives**, so the shot shows the real write path's result, not a
-/// hand-built fixture: 3 of the 5 rows, the header chip reading "Filter 1",
+/// hand-built fixture: 4 of the 5 rows, the header chip reading "Filter 1",
 /// and the rules persisted in the view's document (`{"and":[{…,"op":"gt",
 /// "value":5}]}`). The values are literals: a sweep that runs tomorrow must
 /// photograph the same table.
@@ -4408,13 +4808,13 @@ fn seed_database_filter(state: &Rc<AppState>) -> Option<i32> {
         .into_iter()
         .find(|t| t.name == "Points")
         .map(|t| t.property)?;
-    if !state.db_filter_add_clause(id, points) {
-        return None;
-    }
+    let a = state.db_filter_add_clause(id, points);
     // `gt` is FILTER_OPS[3] (contains, eq, ne, gt, …), and the value goes
     // through the kind's own validation — the same door a user's keystroke
     // would.
-    if !state.db_filter_set_op(id, 0, 3) || !state.db_filter_set_text(id, 0, "5") {
+    let b = state.db_filter_set_op(id, 0, 3);
+    let c = state.db_filter_set_text(id, 0, "5");
+    if !(a && b && c) {
         return None;
     }
     db_refill_row(state, id);
@@ -4557,6 +4957,168 @@ fn seed_database_linked(state: &Rc<AppState>) -> Option<i32> {
     }
     db_refill_row(state, block);
     Some(id)
+}
+
+/// The pair D10's two popups need on screen at once: the table seed, a second
+/// database with three named rows, and the two relation columns ADR-0088
+/// declares together.
+struct DbPair {
+    tasks: i32,
+    people: i32,
+    assignee: i32,
+    people_rows: Vec<i64>,
+}
+
+/// …and the way a user would build it: `db_add_column` for each relation
+/// column and one `db_relation_configure` for the pair, so no shot photographs
+/// a schema the type menu could not have made.
+///
+/// The target database is appended **below the fold**. The two popups this feeds
+/// are centered sheets, so what the picture needs is that the pair exists and
+/// what it points at; where the second table's own rows paint is not the thing
+/// being measured.
+fn seed_database_pair(state: &Rc<AppState>) -> Option<DbPair> {
+    use crate::core::database::PropertyKind;
+    use crate::core::BlockKind;
+
+    let tasks = seed_database_table(state)?;
+    let people = {
+        let id = state
+            .exec_on_open_page(Command::AppendBlock {
+                kind: BlockKind::Paragraph,
+                text: String::new(),
+            })
+            .as_deref()
+            .and_then(find_inserted_id)?;
+        if state.make_database(id) {
+            id
+        } else {
+            return None;
+        }
+    };
+    let assigned = state.db_add_column(people, "Assigned", PropertyKind::Relation)?;
+    let assignee = state.db_add_column(tasks, "Assignee", PropertyKind::Relation)?;
+    let target = state.db_ref_of(people).map(|db| db.as_u64() as i32)?;
+    state
+        .db_relation_configure(tasks, assignee, target, assigned)
+        .ok()?;
+    let title = state
+        .db_column_toggles(people)
+        .into_iter()
+        .find(|t| t.locked)
+        .map(|t| t.property)?;
+    let mut people_rows = Vec::new();
+    for name in ["Ada Lovelace", "Grace Hopper", "Alan Turing"] {
+        let row = state.db_add_record(people, state.db_next_row_ord(people))?;
+        state.db_set_cell_text(people, row, title, name);
+        people_rows.push(row);
+    }
+    Some(DbPair {
+        tasks,
+        people,
+        assignee,
+        people_rows,
+    })
+}
+
+/// One column of a seeded database, by name.
+fn column_named(state: &Rc<AppState>, block: i32, name: &str) -> Option<i32> {
+    state
+        .db_column_toggles(block)
+        .into_iter()
+        .find(|t| !name.is_empty() && t.name == name)
+        .map(|t| t.property)
+}
+
+/// Seed the `database-kinds` scene (SPEC §三十九 「属性」, D10): the table seed
+/// with the type menu open **on a column**, which is the half of the menu that
+/// carries the gates — a conversion the stored values cannot survive is drawn
+/// greyed with the sentence that says why, not hidden from the list.
+fn seed_database_kinds(state: &Rc<AppState>, g: &UIState<'_>) -> Option<i32> {
+    let id = seed_database_table(state)?;
+    db_push_kinds(g, state, id, column_named(state, id, "Points")?);
+    // The click anchors the menu to the header's own button; a headless scene
+    // has no click, so it is pinned inside the grid at the popup's own width.
+    g.set_db_columns_x(520.0);
+    g.set_db_columns_y(300.0);
+    Some(id)
+}
+
+/// Seed the `database-relation` scene (ADR-0088): the pair, and a task row
+/// already holding two of the three people — the picker photographed on its way
+/// back from a half-done pick, which is the one state a write-path test cannot
+/// show.
+fn seed_database_relation(state: &Rc<AppState>, g: &UIState<'_>) -> Option<i32> {
+    let pair = seed_database_pair(state)?;
+    let title = state
+        .db_column_toggles(pair.tasks)
+        .into_iter()
+        .find(|t| t.locked)
+        .map(|t| t.property)?;
+    let task = state.db_add_record(pair.tasks, state.db_next_row_ord(pair.tasks))?;
+    state.db_set_cell_text(pair.tasks, task, title, "Pair the columns");
+    for held in &pair.people_rows[..2] {
+        state.db_relation_toggle(pair.tasks, task, pair.assignee, *held as i32);
+    }
+    // The ids first, then the list — the order the cell's own click runs them,
+    // because `db_push_relation` reads the popup's state rather than a copy.
+    g.set_db_relation_block(pair.tasks);
+    g.set_db_relation_record(task as i32);
+    g.set_db_relation_property(pair.assignee);
+    g.set_db_relation_name(state.db_property_label(pair.assignee).into());
+    // The popup's `target` is a *database* id, not the block that holds it —
+    // the first cut of this seed passed the block and the header answered with
+    // `db_database_name`'s dangling-name fallback, which the shot then
+    // photographed as a placeholder sentence about a missing database.
+    let people_db = state.db_ref_of(pair.people).map(|db| db.as_u64() as i32)?;
+    g.set_db_relation_target(state.db_database_name(people_db).into());
+    g.set_db_relation_text("".into());
+    db_push_relation(g, state, 0);
+    db_refill_row(state, pair.tasks);
+    Some(pair.tasks)
+}
+
+/// Seed the `database-rollup` scene (ADR-0089): the pair plus a `Total` fold
+/// over it, then the editor on its **second** chooser — the state where the
+/// three summary lines are half-spoken, which is what the configurator looks
+/// like while it is being filled in.
+///
+/// The folded column belongs to the *target* database, because `check_config`
+/// requires it (`NotAColumnOfTheTarget`): a rollup over the near side's own
+/// column is not a fold of anything, and the first cut of this seed asked for
+/// exactly that, so the configure was refused and the popup never opened.
+fn seed_database_rollup(state: &Rc<AppState>, g: &UIState<'_>) -> Option<i32> {
+    use crate::core::database::PropertyKind;
+
+    let pair = seed_database_pair(state)?;
+    let hours = state.db_add_column(pair.people, "Hours", PropertyKind::Number)?;
+    for (row, value) in pair.people_rows.iter().zip(["8", "6", "4"]) {
+        state.db_set_cell_text(pair.people, *row, hours, value);
+    }
+    // One task that actually links to two of them, so the fold has a sum to
+    // answer and the shot shows the configured column doing its job.
+    let title = state
+        .db_column_toggles(pair.tasks)
+        .into_iter()
+        .find(|t| t.locked)
+        .map(|t| t.property)?;
+    let task = state.db_add_record(pair.tasks, state.db_next_row_ord(pair.tasks))?;
+    state.db_set_cell_text(pair.tasks, task, title, "Fold the hours");
+    for held in &pair.people_rows[..2] {
+        state.db_relation_toggle(pair.tasks, task, pair.assignee, *held as i32);
+    }
+    let total = state.db_add_column(pair.tasks, "Total", PropertyKind::Rollup)?;
+    // `2` is `sum` in `Aggregate::ALL`, the same int the editor's own list
+    // hands back; the fold then answers over the two people the row links to.
+    state
+        .db_rollup_configure(pair.tasks, total, pair.assignee, hours, 2)
+        .ok()?;
+    g.set_db_rollup_block(pair.tasks);
+    g.set_db_rollup_property(total);
+    g.set_db_rollup_name(state.db_property_label(total).into());
+    db_push_rollup(g, state, 1);
+    db_refill_row(state, pair.tasks);
+    Some(pair.tasks)
 }
 
 /// Seed the database-template scene (SPEC §三十九 「操作」, D7, ADR-0086): the
@@ -4938,6 +5500,21 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             g.set_dark(true);
             apply_scene(ui, state, "database-template");
         }
+        // D10's three popups in the dark theme: `accent-text` is a different
+        // brush there, and the tick that went unseen in a light shot was drawn
+        // from that brush, so the dark picture is the other half of the check.
+        "dark-database-kinds" => {
+            g.set_dark(true);
+            apply_scene(ui, state, "database-kinds");
+        }
+        "dark-database-relation" => {
+            g.set_dark(true);
+            apply_scene(ui, state, "database-relation");
+        }
+        "dark-database-rollup" => {
+            g.set_dark(true);
+            apply_scene(ui, state, "database-rollup");
+        }
         "title-edit" => {
             g.set_page_title("Renaming in place…".into());
             g.set_title_editing(true);
@@ -5071,7 +5648,7 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
         }
 
         // SPEC §三十九 「操作」(D4): the same table with one rule compiled into
-        // SQL — Points > 5 keeps 3 of the 5 rows. The shot shows the red
+        // SQL — Points > 5 keeps 4 of the 5 rows. The shot shows the red
         // line's visible half: the count and the rows answer to the rules,
         // the chip says "Filter 1", and nothing filtered happens anywhere but
         // in the statement.
@@ -5150,6 +5727,22 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
         // came from the template in the creation batch.
         "database-template" => {
             seed_database_template(state);
+        }
+
+        // SPEC §三十九 「属性」 (D10): the three doors the state layer had and
+        // the window did not. Each seeds through the same helpers the click
+        // drives and stops one step short of *showing* — the popup's own open
+        // bit belongs to `apply_scene_overlay`, because a delegate-owned
+        // `PopupWindow` only fires its `changed` handler on a false → true
+        // transition, and a flag already true at the first render never moves.
+        "database-kinds" => {
+            seed_database_kinds(state, &g);
+        }
+        "database-relation" => {
+            seed_database_relation(state, &g);
+        }
+        "database-rollup" => {
+            seed_database_rollup(state, &g);
         }
 
         // SPEC §四十 / ADR-0052: a mirror, and a mirror whose source is gone.
@@ -6181,6 +6774,29 @@ pub fn apply_scene_overlay(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             g.set_link_url("https://github.com/slint-ui/slint".into());
             g.set_link_open(true);
         }
+
+        // SPEC §三十九 「属性」 (D10): the three popups' open bits, one render
+        // pass after their content landed in `apply_scene`. Each is guarded by
+        // the id its seed wrote — a scene whose seed refused leaves the popup
+        // shut rather than showing an empty one.
+        "database-kinds" => {
+            if g.get_db_columns_property() >= 0 {
+                g.set_db_columns_open(true);
+            }
+        }
+        "database-relation" => {
+            if g.get_db_relation_property() >= 0 {
+                g.set_db_relation_open(true);
+            }
+        }
+        "database-rollup" => {
+            if g.get_db_rollup_property() >= 0 {
+                g.set_db_rollup_open(true);
+            }
+        }
+        "dark-database-kinds" => apply_scene_overlay(ui, state, "database-kinds"),
+        "dark-database-relation" => apply_scene_overlay(ui, state, "database-relation"),
+        "dark-database-rollup" => apply_scene_overlay(ui, state, "database-rollup"),
 
         _ => {}
     }

@@ -2304,3 +2304,185 @@ cargo test --release --lib -- --ignored --nocapture <三个探针>  → 三组�
 * 「relation 的形态」与 ADR-0084 的措辞有一处**有意偏离**（存 `RecordId` 而非 §四十 的 `PageId`，
   因为 ADR-0063 的 record 是无页的），已在 ADR-0088 里写明理由；整合时不要按 ADR-0084 的字面
   把它改回去。
+
+---
+
+# D10 · D5 欠的那三个入口落地，而像素在四处说了「不」（2026-09-23，on `m14-database`，ADR-0092）
+
+D9 §6.1 的原话是「UI 一个字都没写」，D9 §3 又顺手记了一句「`.slint` 一个字都没改（UI 见 §6）」。
+这一刀就是那三个入口：**列类型选单**、**relation 的记录选择器**、**rollup 的三段配置器**——它们
+是 D5 从 D4 起一直挂着的账，不是 D9 的。状态层 D9 已经齐了，所以这刀没有新语义，只有新**接缝**；
+真正的产出是「第一次能拍」，而四个缺陷全是拍出来的，一个都不是想出来的。
+
+## 1 · 交付的形状
+
+1. **一个列表形状回答五种「选哪个」**：`ui/components/DatabasePickList.slint` +
+   `DbPickRow { id, name, chosen, disabled, note }`。五种问题共用一个形状（类型菜单、relation
+   的目标库、反向指针、记录列表、rollup 的三段），行由 Rust 推——和这个 build 里所有数据库列表
+   一样，delegate 只画不决定。两条不可让的规矩：**tick 画的是「当前答案」**（所以同一份列表既是
+   选择器也是显示，relation 的 tick 就是这一格真正持有的目标，「再加一个」和「拿走一个」是不同
+   行上的同一个手势）；**拒绝要说得出理由**（灰行 + 名字下面那行字，而不是把行删掉——删掉会让
+   用户去数一个库有几列、少了哪一列）。
+2. **三个弹层的落点各不相同，而且是有意不同**：类型菜单复用 Columns 弹层的 **panel 1**（不在它
+   上面再开一层；理由同 filter 面板为它的四个列表给出的那条）；relation 是 360px 的窗级弹层
+   （panel 0 记录 + needle、panel 1 目标库、panel 2 反向列或「单向」）；rollup 是 340px 的三段
+   （panel 1/2/3）。后两个**居中**而不是锚定在格子上，跟 formula 同一个理由：它们改的是**列**
+   （schema 的事实），而格子可能在你选到一半时已经滚走了。
+3. **接缝的账目**：`UIState` +16 callback / +22 in-out property / +1 struct；`AppState` +14 个
+   入口（`db_column_kinds`、`db_relation_rows`、`db_rollup_labels`…）；`core::command` 新增
+   `SetDatabasePropertyKind` —— ADR-0062 的 `PropertyKindSet` 从此**第一次有手去够它**，命令本身
+   只有一个词的前后两向，**不带任何值转换**（值留在原地，下次投影用新类型去读那些字节；按类型对
+   做转换是 D2 没建的那一半，不从这里偷渡）；`.slint` 三个新文件。
+4. **弹层的 open 位属于 `apply_scene_overlay`**，内容属于 `apply_scene`：delegate-owned popup 要
+   看到一次 false→true 才会跑它的 `changed` 处理。D7 的搜索框是 header 里的 inline
+   `if search-open : Rectangle`，**不是** PopupWindow，所以它不需要这一层——这个区别在 §3.3 里
+   害我猜错了一次。
+5. **顺手修了 D6 的一处**：`on_db_formula_closed` 只重置了三个 id，没清 `db-formula-open`，于是
+   Escape 之后那张 sheet 停在自己的 reset 之上。窗口标志是 Rust 的责任，D10 的两个弹层同形。
+
+## 2 · 为什么这刀要连状态层一起动
+
+三个弹层接上之后，它们各自**要求**一件状态层此前没有的事：
+
+* 类型菜单要能拒绝一次移动，而且拒绝的理由得能画在行上 → `kind_move_refusal`（一个列被别的列
+  依赖时，**每一行**都挂同一句话，因为那句话是关于这个列的，不是关于用户要点谁）。
+* 筛选面板的 op 选单要按列类型给候选 → `db_filter_set_op` 现在拿**该列自己的**
+  `FilterOp::ops_for(kind)` 判定，而不是全局 10 项；解析器读回来会丢的比较符，就是一条会静默
+  消失的规则。
+* 记录选择器的 needle 要真的能筛 → §3.3。
+
+## 3 · 四个测出来的缺陷
+
+| # | 缺陷 | 怎么发现的 | 修法 |
+|---|------|-----------|------|
+| 1 | **✓ / ✕ / ⋯ 三个码位画不出来**：选中标记整列不存在；筛选行的清除按钮是个空盒子（TouchArea 还在，所以它「能用」）；锁定页的提示条拍成 `Page locked ·  to unlock` | `database-kinds` 首拍：右侧槽 x 695..742 除卡片描边外**全白**，而同一个 delegate 的名字与副标题正常 → 行是齐的，只有字形没了。`page-lock` 场景早就在拍，只是没人把它和「字没画出来」联系起来 | 标记改画 `Icons.slint` 的 `todo-check` / `x` 路径（跟着 `Colors.accent-text`，明暗各一张已拍）；文案里 `⋯` → `…`。用 fontTools 读 `segoeui.ttf` 的 cmap（3996 个码位）做了全仓字面量审计：`ui/**/*.slint` + `src/**/*.rs`，非 CJK 且未覆盖的只剩 emoji 与测试夹具。写成 **ADR-0092** |
+| 2 | **半填的筛选规则会消失**：面板刚写下的规则在下一次刷新蒸发 | `database-filter` 与 `database-table` 的 PNG **逐字节相同**（这两张本该差一个 WHERE） | `build_clause` 读 `value: null` 时按 `FilterValue::Missing` 答（这个 build 已经承诺了它的语义：不加约束 + 画空框），而不是按列类型解析失败就丢整条规则 |
+| 3 | **needle 不进计数、也不进缓存键**：有搜索词时 header 答整表 `COUNT(*)`，而 `DbWindow.unchanged` 看不见 needle，所以「搜索」根本不触发重读 | 同上：`database-search` 与 `database-table` 逐字节相同。先写了状态层单测复现（`a_view_needle_narrows_the_window_the_delegate_draws`），再修 | `layout_total` 与 `realized_rows` 把 `search` 与 `filter` 同等对待；`DbWindow` 键里多一个 `search`（理由同 `stamp`：它在语句里，不在其他五个字段看得见的东西里） |
+| 4 | **我自己的 seed 错两处**（harness 缺陷，不是产品的） | (a) 弹层标题栏读出「a database that is gone」——`db_database_name` 要的是 **DatabaseId**，seed 传了 block id；(b) rollup 那张图**哈希完全没变**，因为弹层根本没开：seed 折的是**近侧**的 Points 列，`check_config` 按 ADR-0089 的 `NotAColumnOfTheTarget` 拒了，`.ok()?` 一路吃掉 | (a) 传 `db_ref_of(people)`；(b) 给 people 库加 `Hours` 数字列 + 一行真链接两个人，于是这张图同时端到端证明了 fold = 8+6 = **14** 画在 `Total` 列里 |
+
+第 3 条值得单独说一句：它不是 D7 的 needle 写错了，是**缓存键和计数都不认识它**——ADR-0087 落地时
+没有像素能证明这件事（当时的场景没有搜索框）。ADR-0090 补了内容的半边，这一刀补了 needle 的半边。
+
+而补上它是要花钱的，这刀把价钱量了出来（`docs/PERFORMANCE.md` 的 D10 一节，探针
+`a_search_needle_costs_one_count_and_one_window`）：10 000 条记录的库上，`record_count` 是
+**~0.18 ms**，`filtered_count` 不带 needle 是 **1.8–2.1 ms**，带 needle 是 **3.4–3.7 ms**——
+每次刷新**一条语句**的代价从 0.2 ms 变成 3.5 ms（`LIKE '%…%'` 用不上索引，这是 D4 起 filter
+一直在付的那条 `count_query`）。反直觉的一条：needle 越窄，窗口读取越贵（1 命中 = 8.3 ms，
+1 111 命中 = 3.6 ms），因为读是按 `ord` 走到窗满为止，而夹具里唯一命中 `"Task 9999"` 的那行
+正好是**最后写入**的一行——D8 那条「OFFSET 会走完它跳过的行」从 filter 这一侧又出现了一次。
+两臂都没抓 `EXPLAIN QUERY PLAN`，所以计划的差异是推断而不是实测，写在 `PERFORMANCE.md` 里。
+
+## 4 · 门槛
+
+```
+cargo check --all-targets               → Finished，0 warning
+cargo test --all-targets --no-fail-fast → 565 passed / 0 failed / 23 ignored（+18 新测试，+1 新探针）
+cargo build --release                  → Finished `release` in 9 m 34 s，0 warning
+```
+
+三条都在**最后两处改动之后**重跑过（`on_db_columns_closed` 的复位、needle 计价的 `#[ignore]` 探针），
+23 那个 ignored 就是后者带来的。这一刀首轮 release 是 4 m 42 s，收尾那次重跑 **9 m 34 s**（它和同批的
+`cargo test` 抢同一台机器的 CPU，所以两个数不能比长短；能比的是**两轮都是 0 warning**）。
+
+**一处要撤回的数字**：这一刀中途我记的是 **564 passed / 1 failed**，唯一失败是
+`platform::tests::clipboard_write_and_read_round_trip_unicode`。当时判定为环境阻塞而非回归，依据是
+同一时刻独立进程的 `Set-Clipboard` 探针也报「打开剪贴板失败」（两次，间隔数分钟），以及本会话早先
+该测试通过过。收尾时重跑（`on_db_columns_closed` 复位那一处之后）**它是绿的**——所以那条失败确实是
+本机剪贴板被占，测试本身没问题：它是唯一读**用户真实剪贴板**的非 `#[ignore]` 测试，桌面会话状态会
+直接决定它。上面的数字是重跑后的。
+
+收尾重跑还第二回逮到同类洞：从类型面板里 Escape/点外面关掉 Columns 弹层，会把 `db-columns-panel`
+留在 1，下次打开直接落在一个过期的类型菜单上（relation / rollup 两个 popups 的 closed 回调本来就
+复位了自己的 panel，只有 Columns 这个「同窗双面板」漏了）。修在 `on_db_columns_closed`
+（`set_db_columns_panel(0)` + `-1` property + 空 title），修完 check/test/release 三门槛如上，
+sweep 的对照见 §5 的 d13→d14 行。
+
+新增 18 条 state 层测试（`src/app/state.rs` 的测试模块；core/store 单测够不到这一层，因为只有它
+同时握着 catalog 与文件）：
+
+| 测试 | 钉住什么 |
+|------|----------|
+| `the_type_menu_lists_every_kind_in_the_order_the_callbacks_mean` | 17 行的顺序**就是** callback 里那个 int 的顺序 |
+| `a_column_the_schema_depends_on_is_refused_on_every_row` | 被依赖的列：整份菜单灰掉，且每行同一句话 |
+| `a_new_column_from_the_menu_is_named_for_its_kind_and_a_collision_counts_up` | 「+ New column」按类型命名，撞名数上去（`Text 2`），而不是丢掉这次点击 |
+| `moving_a_type_changes_what_a_cell_means_and_not_what_it_holds` | ADR-0062 的规矩：换类型不动字节，撤销只把词换回去 |
+| `a_move_into_a_computed_kind_says_the_cells_are_not_written_yet` | 移进 formula 这类计算列要说「还没定义」，不是静默 |
+| `the_target_chooser_marks_this_database_and_leaves_a_self_relation_open` | 自指关系**留在**候选里（ADR-0088 拒的是拿自己当反向列），note 就是区分这两件事的地方 |
+| `the_back_pointer_chooser_offers_no_then_the_relations_that_can_pair` | 反向列候选：先「单向」，再且仅再那些配得上的 |
+| `the_record_picker_ticks_what_the_cell_holds_and_one_click_moves_it` | tick 是当前答案，且一次点击 = 一次 involution |
+| `an_unconfigured_relation_lists_nothing_rather_than_the_wrong_rows` | 没目标 = 没有可指的对象，列表空而不是猜 |
+| `the_rollup_choosers_are_gated_by_the_same_check_that_gates_the_write` | 选单候选与写路径共用 `check_config`，不另写一份判断 |
+| `a_rollup_editor_reads_its_three_parts_back_as_words` | 三段各自读回一个词（含「没设」的那个词） |
+| `a_view_needle_narrows_the_window_the_delegate_draws` | §3.3：needle 改窗口行数，清掉 needle 行数回来 |
+| `every_layout_arrives_as_its_own_index_alongside_its_label` | 八种布局各自的 index 与 label 成对到达（delegate 用 index 判定） |
+| `an_auto_column_width_is_a_share_of_the_grid_and_never_zero` | `WIDTH_AUTO` 是栅格的**份额**，不是 0 像素 |
+| `a_half_written_filter_rule_survives_the_document` | §3.2：半条规则写进文档再读回来还在，且窗口没变 |
+| `the_filter_refuses_a_comparison_its_column_cannot_make` | §2.2：op 按列类型判，越界 index 也拒 |
+
+## 5 · 像素
+
+`benchmarks/scripts/sweep.ps1` 的默认 `$all` 收了 **32 张**数据库场景（16 明 + 16 暗）。此前默认表
+里**一张数据库场景都没有**——它们是六刀里另开一张表跑的，而那张表没人天天扫，所以 §3.2/§3.3 那两张
+图有六刀时间都在拍**同一张静帧**。
+
+* `d11 → d12`：**99 张逐字节不变** + 32 张数据库场景首次入列（其中 6 张是本刀的 kinds/relation/
+  rollup 明暗各一）。也就是说：接了三个弹层、改了五个 `.slint` 文件，**没有碰任何既有像素**。
+* `d12 → d13`：**4 张变**（`page-lock`、`page-lock-menu`、`page-lock-block-menu`、`dark-page-lock`）
+  + 127 张不变 —— 正是 `…` 那个字，一张不多。
+* `d13 → d14`：**0 张变 / 131 张不变**。这是 §4 收尾那处复位（`on_db_columns_closed`）的对照：它只
+  动回调，而场景驱动器走 `apply_scene` 摆状态、不经过回调，所以「一个像素都不该动」是**可证的预言**
+  —— 跑出来正是那样。反过来看，这一行也再次确认了 §6.7 那条界限：像素看不见回调。
+* tick 修复的 A/B：改前后只有 kinds/relation 两张动（relation 差 **90 个像素**，恰好一枚 tick），
+  rollup 那张**一点没动** —— 顺着这条才查出 §3.4(b)：它根本没开。
+* 明暗都看了：`dark-database-kinds` 的 tick 是 `#a8a2f5`，`dark-database-rollup` 的三段第一问
+  「Fold through which relation?」带着 `Assignee` 的 tick。
+
+## 6 · 未验证（诚实清单）
+
+1. **真窗口的键盘与焦点**：三个弹层都是 `close-on-click-outside`，needle 输入框靠
+   `changed opened => focus()`。headless 拍得到画面、按不了键。要人手测：Escape 关、点外面关、
+   打开就能打字、以及 relation 的 tick 点完格子有没有立刻变。
+2. **group 弹层的两枚 tick 没有场景**（D4 起就在）。本刀按同一条规则把它也改成画的了，但**没有
+   像素证明它现在画得出来**——它不在 §5 的 32 张里，也不在任何一张里。同理，筛选面板的清除 ✕
+   也没有场景（`database-filter` 拍的是**被筛过的表**，不是那个面板）。
+3. relation 格多目标的 chip 截断像素、六个聚合各自的宽度：仍然没看（D9 §6.2 原样欠着）。
+4. **fan-out 没有上限**：D9 §5 第三行那条**产品问题**没被这一刀改变（10 000 目标 = 28.5 ms，
+   对照 9.1 ms，3.12×）。今天唯一的约束是 picker 的 `limit` 参数，那是调用者的选择，不是规则的。
+5. `take_db_notice` 的文档说「Drain」，实现**不 drain**（只 `join`）。今天无害：唯一的读者是
+   `bind()`，它只跑一次，而带窗口时 `db_say` 是直接写栏的。顺带 `bind()` 里连着调了两次，第二次
+   拿到的是同一行。**没有改**：D10 的一条测试（`a_move_into_a_computed_kind_…`）正是拿「不 drain
+   所以逐字节相同」当断言用的，改它的语义超出本刀。记在这里，等下一次真正需要清栏的时候一起动。
+6. `core/math.rs` 的符号表里约 70 个码位同样不在 Segoe UI 里（ADR-0092 明写它**不在**这条规则内）。
+   `math` / `math-inline` 两张场景恰好只用被覆盖的那些（`≤ √ ≠ ∫` 与上标数字，逐个查过 cmap），
+   所以没看见洞；`\aleph` / `\therefore` 那一类是**未答的问题**，不是已验的事实。
+7. **四个 `*_closed` 回调没有测试**（columns / formula / relation / rollup）。它们是「UI 的旗子由
+   Rust 收」这条约定的执行处，也是 §4 收尾那个洞的所在——而 headless 场景驱动器走 `apply_scene`
+   直接摆状态，**不经过回调**，所以这一层除了编译器之外没人看着。要真钉住它，得有一个能持有
+   `AppWindow` 句柄、又能从测试里点 `PopupWindow` 的脚手架；那超出本刀（也和 §6.1 同一条界限：
+   本环境不许脚本点桌面 UI）。
+
+## 7 · 给整合者的注意事项
+
+* 本刀是 `m14-database` 上 D9 之后的**唯一未提交内容**（`git status`：**20 改 + 4 新**——三个
+  `.slint` 组件与一行探针的 `benchmarks/results/*.jsonl`），可独立成一个 commit；
+  `CURRENT_VERSION` 不动、零新依赖、`Cargo.toml` 没碰。
+* ADR 号：**0092**（0091 是本会话为版本历史让号腾出来的那条，见 `fb789eb`）。
+* **docs/PERFORMANCE.md** 多了 `## M14 · a search needle is one statement…` 一节，量的是这一刀
+  唯一碰存储的那处：needle 让 header 的计数从 `record_count`（~0.18 ms）换成
+  `filtered_count`（带 needle 3.4–3.7 ms），每次刷新一条语句；新探针
+  `storage::database_store::probe::a_search_needle_costs_one_count_and_one_window` 留成
+  `#[ignore]`，因为它是一个会被后来人重量的数字而不是一条断言（D8/D9 同一先例）。
+* 整合者的笔已补，且各归其位：**SPEC §三十九** 的 D10 交付标记（写在 D9 那句「仍未接」之后，把
+  那句变成历史而不是现状）、**PLAN.md** 的 `## Track 3 · D10`、**docs/ROADMAP.md** 的
+  **M13 与 M14 两行**（两行此前都还写着 `⏳ planned`，M13 是上一刀漏的，一并改了；顺手把
+  「23 kinds as of ADR-0040」改成 25）、**CHANGELOG.md** 新加 `### References` 与
+  `### Databases` 两节（此前 M13/M14 在 CHANGELOG 里**一个字都没有**，而它明写着数据库视图
+  「cannot be picked yet」——那是与代码相反的话），外加 `### Known limitations` 四条
+  （formula/rollup 不可排序过滤、relation 扇出无上限、侧栏删页仍不进 undo）。
+* 门槛三条都在**收尾那两处改动之后**重跑过（复位 panel 与探针），数字见 §4；`.scratch/` 的证据
+  （`track3-sweep-d11…d14`、`probe-d10-search*.txt`、`gate-*.txt`、glyph 审计报告）按约定不进提交
+  ——`.scratch` 在每个 worktree 各自 gitignore，同名不是同物。
+* **不要**按 ADR-0084 的字面把 relation 的存法改回去（见 D9 §7），也**不要**把这三枚标记改回
+  字形：`✓` 的缺席是量出来的，不是猜的。
+* 推之前扫过了 author/committer 与 `origin/master..m14-database` 全量 diff（40 404 行）：邮箱一律
+  是 GitHub noreply，`Users\<user>` / QQ / 个人邮箱 0 命中。

@@ -1908,3 +1908,52 @@ window; the picker popup's own behaviour, which is UI that does not exist yet; a
 pass on a page holding **several large** databases, which is bounded by the page's blocks but
 has no scene to photograph yet. The frames are still unmeasured for the same reason D8
 recorded: a headless probe is not a window.
+
+## M14 · a search needle is one statement, and D10 buys the header's number with it (2026-09-23, Track 3 D10)
+
+Raw rows: `benchmarks/results/2026-09-23-track3-d10-search.jsonl`. Probe:
+`storage::database_store::probe::a_search_needle_costs_one_count_and_one_window`
+(`cargo test --release --lib -- --ignored --nocapture a_search_needle`), 10 000 records whose
+titles are `Task 0 … Task 9999`, one Number column, `RowRequest` window 32/720.
+
+D10's one storage-facing change is that `AppState::layout_total` consults the needle: with a
+search term set, the header's "N rows" is `filtered_count(request)` instead of
+`record_count(db)`. Before that it printed the size of the table under a filter that had just
+narrowed it — the same blind spot ADR-0090 fixed for *content*, in the other half of the
+window. So the number to publish is what that one extra statement costs:
+
+| statement (10 000 records, release) | run 1 / run 2 |
+|---|---:|
+| `record_count` — the table's count, what the header used to say | 185 / 179 µs |
+| `filtered_count`, **no** needle | 2 092 / 1 791 µs |
+| `filtered_count`, needle `"Task 9"` (1 111 hits) | 3 712 / 3 469 µs |
+| `filtered_count`, needle `"Task 9999"` (1 hit) | 3 657 / 3 371 µs |
+| window fetch, needle `"Task 9"` | 5 256 / 3 631 µs (31 rows realized) |
+| window fetch, needle `"Task 9999"` | 8 957 / 8 317 µs (1 row realized) |
+
+Three readings, none of them the obvious one:
+
+* **The needle costs the count ~1.8 ms, not the ~0.18 ms the plain count costs** — about 20×,
+  once per refresh and not per row. That is the whole invoice for the fix, and it is the same
+  `count_query` a filter has paid since D4 (1.8–2.1 ms for a *no*-filter `filtered_count` is
+  the shape of that statement over a joined table, not something search adds): a `LIKE '%…%'`
+  cannot use an index, so it scans what the join hands it.
+* **The narrow needle's window read is the *slower* one** (8.3 ms for one hit against 3.6 ms
+  for 1 111). That is the fixture's ordering, not a paradox: the read walks rows in `ord`
+  order until the window is full, `"Task 9"` hits early and often (indices 9, 90–99,
+  900–999 …), and `"Task 9999"` has exactly one match — the last row written. It is the same
+  "an offset walks what it skips" mechanism D8 put a number on, arriving from the filter side.
+  Not separated here: which of the two plans SQLite actually picked, since no
+  `EXPLAIN QUERY PLAN` was captured for these arms.
+* **Nothing moved that D8 and D9 recorded.** The cache's 29 µs unchanged-refresh is unchanged
+  (the needle is now part of the key, so a new needle *misses* — which is the point), and the
+  `realized()`/`total()` assertions in the probe are what keep "still a window, never the
+  table" from being an assumption.
+
+**What this does not measure**: typing into the box (one refresh per debounce, and the
+debounce is the persistence layer's, not the search's), the frame the re-read paints, and any
+needle against a *page*'s text rather than a title — `search_predicate` covers the columns the
+request names, and this fixture gives it exactly one to look at. D9's line above this one —
+"the picker popup's own behaviour, which is UI that does not exist yet" — is the thing D10
+built; its pixels are on record (`docs/REPORT_TRACK3.md` §D10, 32 database scenes) and its
+keyboard is not.

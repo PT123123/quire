@@ -1,0 +1,236 @@
+// The rollup editor (D10, SPEC §三十九 「属性」, ADR-0089): the popup a rollup
+// cell's click opens, and the only door to a fold's three names.
+//
+// A rollup is a *sentence* — "of the rows this relation points at, take that
+// column and fold it" — so the editor is the sentence first: three lines, each
+// one of its names, each opening its own chooser. That shape is also what makes
+// a half-configured column legible: `count` needs one name, the other folds
+// need two, and a line reading "Not set" says which half is missing without a
+// message about it.
+//
+// Every pick is a write of the **whole** config — one change, one Ctrl+Z, the
+// same contract the formula editor's save has (ADR-0082) — and lands the user
+// back on the sentence, so what is on screen after a click is what the column
+// now is. Picking a relation drops the column it used to name: that column
+// belonged to a different database, and a fold through two databases that
+// disagree about which one is ADR-0089's cycle waiting to happen.
+//
+// The choosers are `DatabasePickList`s, and each one lists what the *save path*
+// would accept: `check_config` itself judges every row of the column chooser,
+// so a rollup cannot aggregate a relation, a formula or another rollup, and the
+// user reads that refusal here rather than discovering it by clicking.
+
+import { Theme } from "../Theme.slint";
+import { Colors } from "../Colors.slint";
+import { Typography } from "../Typography.slint";
+import { UIState } from "../Types.slint";
+import { DatabasePickList } from "./DatabasePickList.slint";
+
+export component DatabaseRollupPopup inherits PopupWindow {
+    width: 340px;
+    // The sentence's state is fixed (three lines and a caption); a chooser is as
+    // tall as its list — plus the 22px it spends when it has to say why the list
+    // is short (`note` below).
+    height: UIState.db-rollup-panel == 0
+        ? 150px
+        : UIState.db-rollup-rows.length * 32px + 60px + (root.note != "" ? 22px : 0px);
+    // outside click / Escape dismiss; UIState syncs via the is-open mirror
+    close-policy: PopupClosePolicy.close-on-click-outside;
+
+    // Why a chooser can be short: not "broken", but a step the column has not
+    // taken yet. An empty relation list and a column list holding only the row
+    // `count` needs are the same story — the rollup's first name is missing —
+    // and both read as a bug without a sentence under them.
+    property <string> note: UIState.db-rollup-panel == 1
+            && UIState.db-rollup-rows.length == 0
+        ? "This database has no relation column to fold through."
+        : UIState.db-rollup-panel == 2 && UIState.db-rollup-rows.length == 1
+            ? "That relation has no target database yet - link it from its own cell."
+            : "";
+
+    // The sentence's three names, in the order the chooser panels open them.
+    property <[string]> parts: [
+        UIState.db-rollup-relation,
+        UIState.db-rollup-column,
+        UIState.db-rollup-aggregate,
+    ];
+
+    Rectangle {
+        x: 2px; y: 3px;
+        width: parent.width - 4px;
+        height: parent.height - 5px;
+        border-radius: Theme.radius-md + 2px;
+        background: Colors.shadow;
+    }
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        border-radius: Theme.radius-md;
+        background: Colors.surface-overlay;
+        border-width: 1px;
+        border-color: Colors.border;
+        clip: true;
+
+        // ── the header ─────────────────────────────────────────────────────
+        Text {
+            x: 12px;
+            y: 10px;
+            width: parent.width - 24px;
+            height: 20px;
+            vertical-alignment: center;
+            overflow: elide;
+            text: UIState.db-rollup-name;
+            font-family: Typography.ui-font;
+            font-size: Typography.size-ui;
+            font-weight: Typography.weight-semibold;
+            color: Colors.text-primary;
+        }
+        Text {
+            x: 12px;
+            y: 10px;
+            width: parent.width - 24px;
+            height: 20px;
+            vertical-alignment: center;
+            horizontal-alignment: right;
+            text: UIState.db-rollup-panel == 0
+                ? "Rollup"
+                : (UIState.db-rollup-panel == 1 ? "Rollup - relation"
+                    : (UIState.db-rollup-panel == 2 ? "Rollup - column"
+                        : "Rollup - fold"));
+            font-family: Typography.ui-font;
+            font-size: Typography.size-caption;
+            color: Colors.text-muted;
+        }
+
+        // ── state 0: the sentence ──────────────────────────────────────────
+        if UIState.db-rollup-panel == 0 : Rectangle {
+            width: parent.width;
+            height: parent.height;
+            background: transparent;
+
+            for value[index] in root.parts : Rectangle {
+                x: 8px;
+                y: 34px + (index * 30px);
+                width: parent.width - 16px;
+                height: 28px;
+                border-radius: Theme.radius-sm;
+                background: part-ta.has-hover ? Colors.surface-hover : transparent;
+
+                Text {
+                    x: 8px;
+                    y: 0px;
+                    width: 64px;
+                    height: parent.height;
+                    vertical-alignment: center;
+                    text: index == 0 ? "Relation" : (index == 1 ? "Column" : "Fold");
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-caption;
+                    color: Colors.text-muted;
+                }
+                Text {
+                    x: 76px;
+                    y: 0px;
+                    width: parent.width - 92px;
+                    height: parent.height;
+                    vertical-alignment: center;
+                    horizontal-alignment: right;
+                    overflow: elide;
+                    text: value;
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-ui;
+                    color: value == "Not set" ? Colors.text-muted : Colors.text-primary;
+                }
+                part-ta := TouchArea {
+                    width: parent.width;
+                    height: parent.height;
+                    mouse-cursor: MouseCursor.pointer;
+                    clicked => {
+                        UIState.db-rollup-panel-set(index + 1);
+                    }
+                }
+            }
+
+            Text {
+                x: 12px;
+                y: 126px;
+                width: parent.width - 24px;
+                height: 16px;
+                vertical-alignment: center;
+                overflow: elide;
+                text: "Count folds the related rows - the rest fold one column of them";
+                font-family: Typography.ui-font;
+                font-size: Typography.size-caption;
+                color: Colors.text-muted;
+            }
+        }
+
+        // ── states 1–3: the three choosers ─────────────────────────────────
+        if UIState.db-rollup-panel != 0 : Rectangle {
+            width: parent.width;
+            height: parent.height;
+            background: transparent;
+
+            // the question, and from the second and third panel the way back to
+            // the sentence ("‹", the same affordance the filter panel uses)
+            Text {
+                x: 12px;
+                y: 32px;
+                width: parent.width - 24px;
+                height: 18px;
+                vertical-alignment: center;
+                text: UIState.db-rollup-panel == 1
+                    ? "Fold through which relation?"
+                    : (UIState.db-rollup-panel == 2
+                        ? "‹ Which column of the related rows?"
+                        : "‹ Fold them how?");
+                font-family: Typography.ui-font;
+                font-size: Typography.size-caption;
+                color: UIState.db-rollup-panel == 1 ? Colors.text-muted
+                    : (back-ta.has-hover ? Colors.text-primary : Colors.text-muted);
+            }
+            back-ta := TouchArea {
+                x: 12px;
+                y: 30px;
+                width: parent.width - 24px;
+                height: 22px;
+                enabled: UIState.db-rollup-panel != 1;
+                mouse-cursor: MouseCursor.pointer;
+                clicked => {
+                    UIState.db-rollup-panel-set(0);
+                }
+            }
+
+            DatabasePickList {
+                x: 8px;
+                y: 54px;
+                width: parent.width - 16px;
+                row-height: 32px;
+                rows: UIState.db-rollup-rows;
+                picked(id) => {
+                    if (UIState.db-rollup-panel == 1) {
+                        UIState.db-rollup-relation-picked(id);
+                    } else if (UIState.db-rollup-panel == 2) {
+                        UIState.db-rollup-column-picked(id);
+                    } else {
+                        UIState.db-rollup-aggregate-picked(id);
+                    }
+                }
+            }
+
+            // …and the reason, under the list rather than over it: the row(s)
+            // the chooser *does* offer are still the ones to click.
+            if root.note != "" : Text {
+                x: 12px;
+                y: 54px + (UIState.db-rollup-rows.length * 32px) + 2px;
+                width: parent.width - 24px;
+                height: 18px;
+                vertical-alignment: center;
+                overflow: elide;
+                text: root.note;
+                font-family: Typography.ui-font;
+                font-size: Typography.size-caption;
+                color: Colors.text-muted;
+            }
+        }
+    }
+}

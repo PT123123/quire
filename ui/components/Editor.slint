@@ -351,7 +351,12 @@ export component Editor inherits Rectangle {
         lock-label := Text {
             x: Theme.spacing-sm + 14px + Theme.spacing-sm;
             width: parent.width - self.x - Theme.spacing-sm;
-            text: "Page locked · ⋯ to unlock";
+            // `⋯` (U+22EF) is not in Segoe UI's face, and the `page-lock` shot
+            // proved it: the label painted "Page locked ·  to unlock" with a
+            // hole where the button's name should be. `…` (U+2026) is in the
+            // face, and is the same word the palette and search placeholders
+            // already use.
+            text: "Page locked · … to unlock";
             font-family: Typography.ui-font;
             font-size: Typography.size-caption;
             color: Colors.text-secondary;

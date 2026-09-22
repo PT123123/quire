@@ -14,6 +14,7 @@
 import { Theme } from "../Theme.slint";
 import { Colors } from "../Colors.slint";
 import { Typography } from "../Typography.slint";
+import { Icon } from "../Icons.slint";
 import { UIState } from "../Types.slint";
 
 export component DatabaseGroupPopup inherits PopupWindow {
@@ -63,12 +64,14 @@ export component DatabaseGroupPopup inherits PopupWindow {
                     horizontal-stretch: 1;
                     overflow: elide;
                 }
-                if UIState.db-group-current == -1 : Text {
-                    text: "✓";
-                    font-family: Typography.ui-font;
-                    font-size: Typography.size-ui;
+                if UIState.db-group-current == -1 : Icon {
+                    vertical-stretch: 0;
+                    cross-axis-self-alignment: center;
+                    width: 14px;
+                    height: 14px;
+                    size: 14px;
+                    name: "todo-check";
                     color: Colors.accent-text;
-                    vertical-alignment: center;
                 }
             }
             no-group-ta := TouchArea {
@@ -113,12 +116,14 @@ export component DatabaseGroupPopup inherits PopupWindow {
                     color: Colors.text-muted;
                     vertical-alignment: center;
                 }
-                if item.property == UIState.db-group-current : Text {
-                    text: "✓";
-                    font-family: Typography.ui-font;
-                    font-size: Typography.size-ui;
+                if item.property == UIState.db-group-current : Icon {
+                    vertical-stretch: 0;
+                    cross-axis-self-alignment: center;
+                    width: 14px;
+                    height: 14px;
+                    size: 14px;
+                    name: "todo-check";
                     color: Colors.accent-text;
-                    vertical-alignment: center;
                 }
             }
             row-ta := TouchArea {

@@ -64,14 +64,20 @@ export component DatabaseView inherits Rectangle {
     // which is what keeps the page's scroll the view's scroll for every
     // layout — the red line is about rows, and each layout's window is its own
     // answer to it.
-    property <bool> is-table: root.block.db-layout == "table";
-    property <bool> is-board: root.block.db-layout == "board";
-    property <bool> is-list: root.block.db-layout == "list";
-    property <bool> is-calendar: root.block.db-layout == "calendar";
-    property <bool> is-gallery: root.block.db-layout == "gallery";
-    property <bool> is-timeline: root.block.db-layout == "timeline";
-    property <bool> is-form: root.block.db-layout == "form";
-    property <bool> is-chart: root.block.db-layout == "chart";
+    // The eight are Rust's `ViewLayout::ALL` indices, not words: `db-layout` is
+    // the switcher's label ("Table", capital), and these predicates were written
+    // against the store's lowercase keys — so every arm below was false, the
+    // header drew, and the body of every layout was blank for six slices. A
+    // number cannot drift away from a display string because it is not one.
+    property <int> layout: root.block.db-layout-index;
+    property <bool> is-table: root.layout == 0;
+    property <bool> is-board: root.layout == 1;
+    property <bool> is-list: root.layout == 2;
+    property <bool> is-calendar: root.layout == 3;
+    property <bool> is-gallery: root.layout == 4;
+    property <bool> is-timeline: root.layout == 5;
+    property <bool> is-form: root.layout == 6;
+    property <bool> is-chart: root.layout == 7;
     // The three layouts that place one row per unit and share the row
     // rectangle below; the others draw their own body arms.
     property <bool> row-based: root.is-table || root.is-list || root.is-timeline;
@@ -121,15 +127,12 @@ export component DatabaseView inherits Rectangle {
     // view's `db_views.layout` as a word (ADR-0060's fold, on screen).
     property <bool> foreign: block.db-ok && !block.db-layout-ok;
 
-    // The width of one column: a stored permille is a pixel width, and an "auto"
-    // one (0) asks the layout for a share (see the header comment).
+    // The width of one column: a permille of the grid, which Rust has already
+    // resolved — an "auto" column arrives here with its equal share of what the
+    // dragged ones left, because a delegate cannot fold a list and a `width`
+    // binding beats `horizontal-stretch` in a layout.
     function col-w(index: int) -> length {
-        root.block.db-columns[index].permille > 0
-            ? root.grid-w * root.block.db-columns[index].permille / 1000
-            : 0px
-    }
-    function col-fixed(index: int) -> bool {
-        root.block.db-columns[index].permille > 0
+        root.grid-w * root.block.db-columns[index].permille / 1000
     }
 
     background: transparent;
@@ -475,7 +478,6 @@ export component DatabaseView inherits Rectangle {
 
             for column[index] in root.block.db-columns : Rectangle {
                 width: root.col-w(index);
-                horizontal-stretch: root.col-fixed(index) ? 0 : 1;
                 background: head-ta.has-hover ? Colors.surface-hover : transparent;
                 border-width: 1px;
                 border-color: Colors.border;
@@ -632,7 +634,6 @@ export component DatabaseView inherits Rectangle {
 
                 for cell[ci] in row.cells : DatabaseCell {
                     width: root.col-w(ci);
-                    horizontal-stretch: root.col-fixed(ci) ? 0 : 1;
                     height: parent.height;
                     cell: cell;
                     column: root.block.db-columns[ci];
