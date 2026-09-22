@@ -1,3 +1,19 @@
+[workspace]
+# Two crates, one boundary: `crates/data` is the model and the store and knows
+# nothing about windows, the root package is the Slint shell that draws them.
+# The Android port is meant to be a second consumer of the first one.
+members = [".", "crates/data"]
+
+[workspace.dependencies]
+# gif is listed because `attachment_store` names a GIF row `gif` / `image/gif`.
+# It is pinned here rather than in one crate so the store never relies on a
+# dependency's choice for its own row format, and so both crates resolve the
+# same feature set.
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "bmp", "gif"] }
+# `bundled` in one place for the same reason: two different feature sets for
+# rusqlite across the workspace would compile SQLite twice.
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+
 [package]
 name = "quire"
 version = "0.1.0"
@@ -7,13 +23,10 @@ description = "A local, GPU-accelerated, Notion-like document app built with Rus
 default-run = "quire"
 
 [dependencies]
-# gif is listed because `attachment_store` names a GIF row `gif` / `image/gif`.
-# Without it here the decoder would still be compiled in — slint's
-# `image-default-formats` unifies `image`'s features across the graph — so the
-# store would be relying on a dependency's choice for its own row format.
-image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "bmp", "gif"] }
+quire-data = { path = "crates/data" }
+image = { workspace = true }
 rfd = "0.17.2"
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+rusqlite = { workspace = true }
 # Renderer is selected per cargo feature (see [features]); default-features are off so
 # exactly one GPU renderer is compiled per binary, keeping the binary lean.
 slint = { version = "1.18", default-features = false, features = [
@@ -41,33 +54,15 @@ software = ["slint/renderer-software"]
 embed-resource = "3.0.11"
 slint-build = "1.18"
 
+# The two tests that name `quire::app`, so they belong to the shell. The data
+# crate carries the other five.
 [[test]]
 name = "workspace"
 path = "tests/integration/workspace_test.rs"
 
 [[test]]
-name = "storage"
-path = "tests/integration/storage_test.rs"
-
-[[test]]
 name = "persistence"
 path = "tests/integration/persistence_test.rs"
-
-[[test]]
-name = "markdown"
-path = "tests/integration/markdown_test.rs"
-
-[[test]]
-name = "search"
-path = "tests/integration/search_test.rs"
-
-[[test]]
-name = "find"
-path = "tests/integration/find_test.rs"
-
-[[test]]
-name = "backup"
-path = "tests/integration/backup_test.rs"
 
 # Headless screenshot tool (visual regression); built only with the
 # software renderer feature so the shipped binary stays lean.

@@ -1,16 +1,17 @@
 // Quire library crate: all modules live here so `tests/` integration tests
 // and the thin binary share one compiled unit. The binary (main.rs) only
 // parses args, builds the window, and runs the event loop.
+//
+// The model and the store moved out into `crates/data` (`quire-data`), which
+// is the crate the Android port will consume. These re-exports are what makes
+// that move invisible from inside the shell: `crate::core::…` here and
+// `quire::services::…` from an integration test both resolve through them, so
+// the split is a directory change and not a 950-line path rewrite. Delete them
+// when the shell starts naming `quire_data::` directly.
 
 pub mod app;
-// Filled by later milestones; kept declared so the skeleton is real code,
-// not wishes in a directory listing (docs/ARCHITECTURE.md).
-pub mod core;
 pub mod platform;
-pub mod services;
-pub mod storage;
-// Scratch-directory guard for tests; see the module header for why it is not
-// `#[cfg(test)]`.
-pub mod testing;
+
+pub use quire_data::{core, services, storage, testing};
 
 slint::include_modules!();

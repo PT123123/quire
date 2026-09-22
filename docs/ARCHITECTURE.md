@@ -42,16 +42,26 @@ See `docs/DECISIONS.md` for the rationale of every non-obvious pick
 ## Directory map
 
 ```
-src/
-  lib.rs             module root; slint include_modules (one compiled unit)
+Cargo.toml           workspace root + the shell package; [workspace.dependencies]
+                     pins rusqlite/image once so the two crates cannot diverge
+crates/data/         quire-data — everything that stores, with no window in sight
+  src/lib.rs         module root; the rule: no Slint, no dialog, no clipboard,
+                     no platform API anywhere under here (ADR-0093)
+  src/core/          document model, commands, history, database model
+  src/storage/       SQLite, migrations, repository, search index, backups
+  src/services/      persistence, import/export, search, attachments, settings,
+                     the LAN framing a sync module will grow out of
+  src/testing.rs     scratch-directory guard for tests
+  tests/             the five integration suites that name only the data layer
+src/                 the shell
+  lib.rs             app + platform, and `pub use quire_data::{core, services,
+                     storage, testing}` so the split is invisible from in here;
+                     slint include_modules (one compiled unit)
   main.rs            args parse, 8 MB-stack UI thread (ADR-0009), bench timers
   bin/quire_shot.rs  headless visual-regression renderer (ADR-0011)
   app/               controller.rs (callback dispatch), state.rs (view
                      projection + mock content), workspace.rs (pure page-tree
                      model; the seed of core/'s real model)
-  core/              document model, commands, history  (M3+)
-  storage/           SQLite, migrations, repository     (M3)
-  services/          document/search/import/export      (M3+)
   platform/          Windows adapters only if forced    (M8)
 ui/
   AppWindow.slint    root window, composition, keybindings, popup roots
@@ -65,10 +75,11 @@ ui/
                      SearchPanel, ContextMenu, Dialog, SettingsDialog,
                      Button, IconButton
 tests/
-  integration/       workspace + state projection tests (cargo test)
+  integration/       workspace + persistence: the two that name app::state
+                     (the other five moved to crates/data/tests with the code)
   fixtures/          editor/storage fixtures land here in M3+
 benchmarks/
-  scripts/           bench.ps1 (scenes A–G), shot2png.ps1
+  scripts/           bench.ps1 (scenes A–G), shot2png.ps1, sweep.ps1
 docs/                ARCHITECTURE, UI_ARCHITECTURE, EDITOR_ARCHITECTURE,
                      PERFORMANCE, DECISIONS, ROADMAP
 ```

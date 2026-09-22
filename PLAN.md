@@ -3195,3 +3195,52 @@ d13→d14 **0 变 / 131 同**（复位只动回调，而场景驱动器不经过
 里还有约 70 个码位不在 Segoe UI 脸上（ADR-0092 明写它**不在**本刀这条规则内，因为那是另一条
 territory 与另一刀的事）——现有的 `math` / `math-inline` 两张场景恰好只用查过的 `≤ √ ≠ ∫`
 与上标数字，所以没看见洞，那是**未答的问题**不是已验的事实。
+
+## 拆分 · 数据层成了自己的 crate（2026-09-23，on `split/quire-data`，ADR-0093）
+
+**缘起**：用户要开始做安卓版本，并打算往数据层里加 Rust 同步模块。所以先把「模型 + 存储 +
+不需要窗口的服务」从 Slint 壳里剥出来，剥成 cargo workspace 的两枚 package。四条决定是用户
+当轮点定的：**先在本仓拆 workspace、验证边界之后再物理搬**；范围**含 services**；新仓**用
+`git filter-repo` 带走历史**；壳仓**以锁 rev 的 git 依赖**消费它。本刀只做前两条。
+
+**形状**：`crates/data/`（31 455 行 src + 6 009 行测试）= `core/` + `storage/` +
+`services/` + `testing.rs`，外部依赖只有 `image` 与 `rusqlite`，两者都钉在
+`[workspace.dependencies]` 一处（防两枚 crate 给出不同的 feature 而把 SQLite 编两遍）。根包
+`quire`（26 972 行 + `ui/` 11 910 行 + `build.rs`）留下壳。规则一句话：`crates/data/src` 里
+不许出现 Slint、文件对话框、剪贴板或平台 API。
+
+**动手前先量的**：core/storage/services 对 `crate::app|services|platform` 的引用 **0 处**，
+`slint::` 只出现在 `app/`、`bin/`、`main.rs` 和 `lib.rs` 那一行 `include_modules!`。边界本来
+就在，只是从没被单独编译过。
+
+**959 处跨层引用一处没改**：`src/lib.rs` 加 `pub use quire_data::{core, services, storage,
+testing};`，于是壳里的 `crate::core::…` 与集成测试里的 `quire::services::…` 原样解析。省掉那
+950 行 diff 是有代价的取舍，理由是**这么大的 diff 会埋掉唯一值得发现的东西**——而编译器确实抓到
+了它：`services::search_service::snap_to_words` 是 `pub(crate)`，被 `app/workspace.rs` 调用，
+那只在一枚 crate 时合法。改成 `pub`，doc 注释写明原因。这是本刀**唯一**一处代码修复。只有搬走
+的 5 个测试文件被 sed 过（59 处 `quire::` → `quire_data::`）。
+
+**门槛（全在 `0089008` 之上、拆分后的树上跑）**：
+
+| 关 | 命令 | 结果 |
+|---|---|---|
+| 类型 | `cargo check --workspace --all-targets` | Finished，0 warning |
+| 测试 | `cargo test --workspace --all-targets --no-fail-fast` | **565 passed / 0 failed / 23 ignored**，与 D10 门槛逐字相同；壳侧 134、数据侧 389 |
+| 名单 | `comm` 双向比对 D10 的 `gate-test-d15.txt` | 589 个测试名，**双向 0 差**——不是「数字对得上」，是「同一批测试」 |
+| release | `cargo build --workspace --release` | Finished in **5m31s、0 warning**（`target/release/quire.exe` 27 846 656 B）；这是最后一处 doc 注释改动之后重跑的那一轮，它之前一轮 6m36s——长短差在缓存不在代码，能比的只有两轮都 0 warning |
+| 像素 | `sweep.ps1 -OutDir .scratch/split-after -Baseline .scratch/split-control` | **0 changed / 131 identical**；控制臂在任何文件移动之前建并扫（exe md5 `63f021af…`），后臂 `1851e577…` |
+
+**本刀买到最重要的一条不是编译，是门禁命令本身**：`cargo test` 在工作区根**只测根包**。第一次
+跑报的是 134 passed / 0 failed / **exit 0**，把 `quire-data` 的 389 个测试静默跳过了——这正是
+「静默探针 ≠ 阴性」的形状。`just check` 三行都补了 `--workspace`，注释写明不加会怎样。
+
+**未验证（诚实）**：① `cargo check -p quire-data --target aarch64-linux-android` **没跑过**。
+ADR-0093 说的是「这条边界是安卓的前提」，不等于「已经能为安卓编出来」；`rusqlite` bundled 要
+NDK 的 clang，M9 那次实测是在拆分前的树上；② `benchmarks/` 与 `install/` 下的 ps1 只在新布局上
+验过 `sweep.ps1` 一支，`dist.ps1`、`verify-installer.ps1`、`verify-portable.ps1` 没跑过——而
+master 本来就没在当前 head 上跑过它们（ROADMAP:108 自己记着），这条债本刀没还也没弄坏；③
+`data_location::roaming_root()` 仍读 `%APPDATA%`，安卓侧要自己注入路径，本刀只是把那个接缝
+**量出来**了（同文件的 `app_data(&Path)` 已经是收参数的可测那半），没改调用方；④ `crate::core`
+这类拼写靠 4 行 re-export 撑着，边界目前是「编译强制 + 注释维持的命名习惯」的混合体，物理搬仓
+之后要删掉 re-export 才算真强制；⑤ **git 历史剥离与建仓未做**，仓名要用户定，且 `filter-repo`
+会重写 SHA、只能在一次性 clone 上跑。

@@ -2,6 +2,74 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0093 · The model and the store become their own crate, so a second shell can compile them without a window
+
+Decision: the repository is now a cargo workspace of two packages. `quire-data`
+(`crates/data/`) holds `core/`, `storage/`, `services/` and `testing.rs` — the
+document and database model, SQLite behind it, and the work that runs without a
+window: import, export, search, attachments, settings, and the LAN framing a
+sync module will grow out of. The root package `quire` keeps `app/`, `platform/`,
+`ui/`, `build.rs` and the three binaries. The rule the split exists to keep is
+one sentence: **nothing under `crates/data/src` may name Slint, a file dialog, a
+clipboard or a platform API.**
+
+Why now: M9 (Android) is parked, not cancelled, and the thing that would make it
+cheap is the ability to build the model for `aarch64-linux-android` with no GPU
+renderer, no `rfd`, no `embed-resource` and no `.slint` in the graph. Measured
+before deciding: `core/` + `storage/` + `services/` referenced **nothing** outside
+themselves (`grep 'crate::app\|crate::services\|crate::platform'` over them: 0
+hits), and `slint::` appeared in exactly `app/`, `bin/`, `main.rs` and one line of
+`lib.rs`. The boundary was already there; it was only never compiled separately.
+
+What the 950 references did **not** become: this is not a path rewrite. `src/lib.rs`
+now says `pub use quire_data::{core, services, storage, testing};`, which keeps
+`crate::core::…` inside the shell and `quire::services::…` from an integration
+test resolving exactly as before — so the 959 cross-layer references (398
+`crate::core`, 30 `crate::storage`, 23 `crate::services`, 57 `crate::testing`,
+118 spelled through `quire::`) stayed untouched, and the five moved test targets
+were the only files sed'd (59 `quire::` → `quire_data::`). The shims are marked
+in `src/lib.rs` as deletable. Trading a 950-line diff for four lines was worth it
+because a diff that large hides the one thing worth finding, and the compiler
+found it: `services::search_service::snap_to_words` was `pub(crate)` and called
+from `app::workspace.rs`, which was legal only while one crate held both. It is
+`pub` now, and its doc comment says why.
+
+Consequences:
+
+- **The gate command changed, and that is the load-bearing part.** `cargo test` at a
+  workspace root tests the *root package only*. Caught on the first run here: bare
+  `cargo test --all-targets` reported **134 passed / 0 failed and exit 0** while
+  `quire-data`'s 389 tests never executed. `just check` now passes `--workspace` to all
+  three cargo lines, and a future green gate has to name which scope it ran.
+- The suite is proved *carried*, not merely counted: the two runs' test **name** sets are
+  identical (`comm` both directions empty, 589 names) and the totals match the D10 gate
+  exactly — 565 passed / 0 failed / 23 ignored, now 134 on the shell side and 389 on the
+  data side.
+- Pixels prove the shell did not move, with each arm identifying itself: the control was
+  built and swept at `0089008` **before any file moved** (`.scratch/split-control`, exe
+  md5 `63f021af…`), the post-split arm swept the same tree afterwards
+  (`.scratch/split-after`, exe md5 `1851e577…`) → **0 changed of 131**. Reusing an older
+  baseline would have mixed this slice's result with whatever had drifted since it was
+  shot.
+- `crates/data` depends on `image` and `rusqlite` and nothing else, both pinned once in
+  `[workspace.dependencies]` — two crates choosing different feature sets for `rusqlite`
+  would compile SQLite twice, which is the kind of thing that only surfaces as a
+  mysterious binary size.
+- `workspace_test` and `persistence_test` stayed on the shell side on purpose: both name
+  `app::state`, and pulling them in would mean pulling `AppState` into the data crate,
+  which is exactly the edge this split exists to forbid.
+- What this does **not** do yet: it is still one repository, and `path = "crates/data"`
+  is the entire coupling. The next step is `git filter-repo` over a throwaway clone,
+  carrying `crates/data` out as its own history, with the shell depending on it by pinned
+  rev.
+- One seam left visible rather than papered over: `storage::data_location::roaming_root()`
+  is the only function in the data crate that reads an environment variable
+  (`%APPDATA%`), and its neighbour `app_data(&Path)` already takes the value as a
+  parameter — an Android shell hands its own documents dir in rather than restructuring
+  the module. The crate's only two `#[cfg(windows)]` blocks are a probe's
+  `K32GetProcessMemoryInfo` call, and the `not(windows)` fallback beside it already
+  returns `None`.
+
 ## ADR-0092 · A mark the user has to see is drawn from the icon set, because the UI face has no tick
 
 Decision: a mark that carries meaning — which row of a chooser is the answer, which button

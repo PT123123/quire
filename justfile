@@ -14,11 +14,14 @@ run *args:
     cargo run {{ args }}
 
 # local CI replacement (the GitHub workflow was removed on purpose):
-# everything a push would run, before you commit
+# everything a push would run, before you commit.
+# --workspace is not decoration: since the data layer moved into crates/data,
+# a bare `cargo test` at this root silently tests only the shell (134 of 565)
+# and exits 0.
 check:
-    cargo check --all-targets
-    cargo test
-    cargo build --release
+    cargo check --workspace --all-targets
+    cargo test --workspace
+    cargo build --workspace --release
 
 # headless visual shot: software-rendered PNG of the real UI, no window.
 # Scene names: default dark palette search-notes menu rename settings dialog empty

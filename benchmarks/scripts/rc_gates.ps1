@@ -42,12 +42,12 @@ $dirty = (git status --porcelain | Measure-Object -Line).Lines
 Write-Output "rc gates at $head (dirty entries: $dirty) -> $OutDir"
 
 # 1 · check — exit 0 and not one warning line
-$code = Run-Gate "check" { cargo check --all-targets }
+$code = Run-Gate "check" { cargo check --workspace --all-targets }
 $warns = (Select-String -Path (Join-Path $OutDir "check.log") -Pattern "^warning:" -CaseSensitive:$false | Measure-Object).Count
 Record "check" (($code -eq 0) -and ($warns -eq 0)) "exit $code, $warns warning lines"
 
 # 2 · tests — every target green; counts are printed from the log, not trusted
-$code = Run-Gate "test" { cargo test --all-targets }
+$code = Run-Gate "test" { cargo test --workspace --all-targets }
 $testlog = Get-Content (Join-Path $OutDir "test.log")
 $p = 0; $f = 0; $i = 0
 foreach ($line in $testlog) {
@@ -58,7 +58,7 @@ foreach ($line in $testlog) {
 Record "test" (($code -eq 0) -and ($f -eq 0)) "$p passed, $f failed targets, $i ignored (per-target: test.log)"
 
 # 3 · release — exit 0 and zero warning lines
-$code = Run-Gate "release" { cargo build --release }
+$code = Run-Gate "release" { cargo build --workspace --release }
 $warns = (Select-String -Path (Join-Path $OutDir "release.log") -Pattern "^warning:" -CaseSensitive:$false | Measure-Object).Count
 $exe = Get-Item "target/release/quire.exe" -ErrorAction SilentlyContinue
 Record "release" (($code -eq 0) -and ($warns -eq 0)) "exit $code, $warns warning lines, exe $($exe.Length) B"

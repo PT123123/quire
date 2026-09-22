@@ -520,6 +520,15 @@ First functional release: a local, single-file-database notes workspace.
   free: a change whose whole per-row cost is a string function is below what this
   instrument resolves, and `docs/PERFORMANCE.md` now says that instead of
   publishing a ratio that only looks like a measurement
+- The workspace is two crates now (ADR-0093): `crates/data` holds the model, the store
+  and the windowless services — 31 455 lines that compile against nothing but `std`,
+  `rusqlite` and `image` — and the root package keeps the Slint shell. That is the
+  precondition for the Android port and for a Rust sync module, and it moved the gate
+  command: **`cargo test` at a workspace root tests only the root package**, so the bare
+  form here reported 134 passed and exit 0 while 389 data-layer tests sat unrun. `just
+  check` says `--workspace` on all three lines now. Nothing else moved: 565 passed / 23
+  ignored with the 589 test names proved identical to the run before, and 131 of 131
+  sweep PNGs byte-identical between two shot binaries that differ by md5
 
 ### Known limitations
 - Switching directly from one open menu to another (e.g. ⋮⋮ on a different

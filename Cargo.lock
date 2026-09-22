@@ -3891,10 +3891,19 @@ version = "0.1.0"
 dependencies = [
  "embed-resource",
  "image",
+ "quire-data",
  "rfd",
  "rusqlite",
  "slint",
  "slint-build",
+]
+
+[[package]]
+name = "quire-data"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "rusqlite",
 ]
 
 [[package]]

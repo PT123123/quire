@@ -1,0 +1,35 @@
+[package]
+name = "quire-data"
+version = "0.1.0"
+edition = "2021"
+description = "Quire's document, storage and service layers — the SQLite-backed model behind the desktop UI, the Android port, and the future sync module. Depends on nothing graphical."
+
+[dependencies]
+# The two versions and feature sets are pinned once, in the root
+# [workspace.dependencies], so this crate and the app cannot disagree about
+# `rusqlite`'s `bundled` feature and end up compiling SQLite twice.
+image = { workspace = true }
+rusqlite = { workspace = true }
+
+# Integration tests, one target each, keeping the names `cargo test --test …`
+# has used since M3 even though the files moved here. `workspace_test` and
+# `persistence_test` stayed with the app: both reach into `app::state`.
+[[test]]
+name = "storage"
+path = "tests/storage_test.rs"
+
+[[test]]
+name = "markdown"
+path = "tests/markdown_test.rs"
+
+[[test]]
+name = "search"
+path = "tests/search_test.rs"
+
+[[test]]
+name = "find"
+path = "tests/find_test.rs"
+
+[[test]]
+name = "backup"
+path = "tests/backup_test.rs"
