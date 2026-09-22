@@ -53,11 +53,18 @@ Consequences:
   records and Track 3's handoff had claimed the metadata was clean; what had actually
   been scanned was the diff, never `%ae`/`%ce`, and `docs/REPORT_TRACK3.md` now says so
   instead of keeping the wrong sentence. `--mailmap` rewrote the whole range, and the
-  same run took `--replace-text` over the two benchmark rows that spell an absolute
-  `%TEMP%` path with the local username in it — the other 12 `jsonl` files recorded
-  their fixtures through `$env:TEMP`, which is why they never needed fixing. Every
-  SHA quoted anywhere in these documents predates that pass, including the `09ef5aa`
-  above and the pre-split control arm's `0089008`; the commit subjects still find them.
+  same run took `--replace-text`: **22 of the 147 tracked files** — every one a
+  `benchmarks/results/*.jsonl` — had recorded its `exe` and `db` fixtures as absolute
+  paths carrying the local username, and one older revision of a report named that
+  username in prose. The control that makes that claim mean anything: replaying the
+  same substitution file over the 22 original blobs reproduces **22 of 22** rewritten
+  hashes, so the delta inside a measured row is the path and not the measurement, and
+  the other 125 files are byte-identical. A first attempt at that run reported
+  success and changed nothing, because `--replace-text` separates on `==>`, not `=>`,
+  and silently treated each whole line as a pattern that could never match — the tree
+  diff against the pre-rewrite commit is what caught it. Every SHA quoted anywhere in
+  these documents predates that pass, including the `09ef5aa` above and the pre-split
+  control arm's `0089008`; the commit subjects still find them.
 - `Cargo.lock` is committed **in the extracted repository** as well, which a library
   normally would not: the Android shell will consume it as a git dependency with no
   workspace root above it to inherit a lock from, and `rusqlite` is `bundled` there,
