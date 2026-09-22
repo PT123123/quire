@@ -1833,3 +1833,78 @@ grouped-switch `GROUP BY` over 10 000 rows (5 – 18 ms) is real and grows with 
 table — it is the one per-refresh term here that is *not* window-bounded, and it
 is the input to whichever view the user is switching to, not to scrolling.
 
+
+## M14 · relation and rollup cost their window's fan-out, and the cache gets the half it was missing (2026-09-22, Track 3 D9, ADR-0088…0090)
+
+ADR-0084 handed relation and rollup over with their shape written down and their code
+deliberately unwritten; ADR-0088/0089 build them, and this section is the price. Three
+`#[ignore]` printing probes at the **state** layer — the layer that holds a catalog and a
+file at once, which is where a pick's cost and a window's repaint actually live — all in
+`src/app/state.rs`, raw rows in `benchmarks/results/2026-09-22-m14-relation-rollup.jsonl`:
+
+```
+cargo test --release --lib -- --ignored --nocapture a_relation_pick_on_a_ten_thousand_row_target_is_bounded
+cargo test --release --lib -- --ignored --nocapture a_rollup_folds_a_window_and_never_the_related_table
+cargo test --release --lib -- --ignored --nocapture the_content_stamp_costs_one_reread_after_a_change_and_nothing_when_cached
+```
+
+Warm ranges over one sitting, medians of 20–50 rounds, on a **10 000-row** target database
+with two database blocks on one page (the fixture seeds the rows straight into SQL — the
+app's own add path re-reads a window per row, which would be timing the seed).
+
+### 1 · A relation pick (ADR-0088)
+
+| what | min / median / max |
+|------|--------------------|
+| the picker, capped at 20 rows out of 10 000 (`db_relation_candidates`) | 56.5 / **59.7** / 313.1 µs |
+| one pick of **200 targets**, end to end (flush + plan + write + mirror cells + window re-read + peer pass) | 8999 / **13 025** / 17 883 µs |
+| **control** — the whole target table as objects (`unwindowed_rows`) | 22.0 ms, 10 000 rows |
+
+The picker is a capped query whose cost does not follow the table (a `LIMIT 20` with a
+folded `INSTR`, 60 µs); a pick costs its **fan-out** — 200 mirror cells written on 200 target
+rows, plus the target window's re-read — and is ~2× cheaper than reading the table it points
+at. The shape is asserted alongside the number: the source window is **1 row** and the target
+window is **31 rows**, whatever the table size.
+
+### 2 · A rollup over a window (ADR-0089) — and the honest edge
+
+| what | value |
+|------|-------|
+| window re-read, one drawn row, **fan-out = 10 000** (the whole table related) | 27 520 / **28 460** / 31 669 µs |
+| computed cells evaluated per read | **1** (1 drawn row × 1 rollup column) |
+| **control** — the same fold over every related record (one batched value read + fold) | 8759 µs + 356 µs = **9 115 µs** |
+| the window against the control | **3.12×** |
+
+This is the number that had to be reported rather than smoothed: **the window is *slower*
+than the control in exactly the case where the fan-out is the whole table**, because a
+window pays for the relation's live titles as well as for the values (two `IN (…)` reads of
+10 000 ids), while the control pays for the values only. The contract ADR-0089 states is
+「bounded by the window's fan-out, never by the target table's size」, and that is what holds
+— one eval instead of 10 000, and the count query does not grow — but **the fan-out is a
+user-authored fact with no ceiling of its own**: one cell may name every row of the table.
+The picker's cap is the only bound on it today, and that is where a product decision still
+sits (see the report's open questions).
+
+### 3 · The content stamp (ADR-0090) — what the cache fix moved
+
+| what | min / median / max |
+|------|--------------------|
+| a **cached** refresh (a scroll that changes nothing) | 13.3 / **29.0** / 59.0 µs |
+| one committed cell end to end (flush + plan + write + re-read + peers), 41-row database | 1200 / **2571** / 3281 µs |
+| peer pass with **one** database block on the page — every scene D8 measured | 18.7 / **20.4** / 85.7 µs |
+| peer pass with **two** database blocks on the page, after a write | 26.2 / **29.4** / 69.8 µs |
+
+The cache's key gained a counter, so a refresh after *any* recorded change re-reads and a
+refresh with nothing recorded still costs only the count query — 29 µs, which is the number
+that says a scroll inside an unchanged window is still free. The peer pass (the writer
+handing the page's other database blocks the chance to repaint, which is what makes a
+relation's live title and a back-pointer cell appear without a scroll) is **~20 µs on the
+one-database pages the D8 numbers were taken on** and ~29 µs on a two-database page, i.e. it
+does not disturb those numbers, and it is bounded by the page's blocks.
+
+**What this section does not measure**, stated rather than implied: the six aggregates'
+*pixels* (a rollup cell's rendered width, a relation chip's truncation) — those need the real
+window; the picker popup's own behaviour, which is UI that does not exist yet; and the peer
+pass on a page holding **several large** databases, which is bounded by the page's blocks but
+has no scene to photograph yet. The frames are still unmeasured for the same reason D8
+recorded: a headless probe is not a window.

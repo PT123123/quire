@@ -2180,3 +2180,127 @@ release 全量 build + 像素 sweep 本 session **未跑**（探针只 `--lib` �
   PERFORMANCE 的 `## M14`，帧的墙钟与 release/sweep 仍待一次真窗口运行。
 - rollup / relation 仍欠（ADR-0084）；Track 2 引用层已落地，relation 的依赖已不阻塞，但那是一整刀新
   语义，不属 D8。
+
+# D9 · relation + rollup 落地，而窗口缓存补上它缺的那一半（2026-09-22，on `m14-database`，ADR-0088…0090）
+
+D8 结束时写着「rollup / relation 仍欠（ADR-0084）」——这一刀把它欠完，并在做的过程中撞出
+一个**比它更早、更大的缺陷**：窗口缓存是按「形状」做键的，而它缓存的是「画好的像素」。
+
+## 1 · 缘起：为什么 relation/rollup 必须先补缓存
+
+ADR-0084 把两者的形状写死了，ADR-0088/0089 只是把它实现出来：relation 存目标 `RecordId`
+列表（`db_value_items`，ADR-0062 的第三种用户，**零迁移**），mirror 是列上的对合（环不可表示，
+而不是事后拒绝）；rollup 在投影时折叠（`sum`/`average`/`min`/`max` 复用 formula 引擎的
+`arith`/`extreme`，六种聚合里两种不读列）。
+
+写完 core + store + 投影 + 命令之后，第一版端到端测试里最朴素的那条
+（`a_cell_write_repaints_the_window_the_delegate_reads`：写一个普通文本格，断言 delegate 读到的
+模型变了）**失败了**。原因不在新代码：`db_refresh` 的 `unchanged` 缓存键是
+`(view, definition, layout, stamp, total, window)` —— 全是**形状**，没有一个字关于内容。于是
+一次同窗口的 cell 写入、一次公式配置修改、一次撤销，都不会重读窗口，屏幕上留着旧像素。
+
+这不是 M14 引入的：D3 的 cell 写入、D6 的公式编辑各自都踩在同一个坑上，只是 D3 的 sweep 是
+**静帧**（场景不模拟输入），静态像素对不出来。M14 是第一个「整个卖点就是计算出来的像素」的
+特性，所以它是第一个能**证明**这件事的东西。
+
+## 2 · 存成什么形状（三件事）
+
+1. **`db_content_stamp`（ADR-0090）**：`AppState::record` 是所有 change 批的唯一漏斗，在那里
+   `+1`；`DbWindow` 多存一个 `content`，`unchanged` 多比一次。**故意钝**：不做「哪些 change 会
+   改变画出来的格子」的枚举——那张表每加一种列都要续写，漏一次就是这个 bug。代价由缓存的
+   不对称性兜住：戳被**消费**（重建窗口即写回），所以一串编辑只让每个可见数据库窗口重读一次，
+   而滚动在一个没变过的窗口里仍然一条查询都不发。
+2. **写者把机会交给同伴（`db_refresh_page(skip)`）**：一次 pick 会写**另一个数据库**的格子
+   （目标行的 back-pointer），一次改名会移动**另一个数据库**里 relation 格画出的标题。这两个
+   窗口的键都看不见这次写，所以写路径要主动给它们机会。上界是**当前页的**数据库块（几个），
+   不是整个库；调用点在五条会跨库的写路径上，undo/redo 以 `skip = None` 调用（一步撤销没有
+   自己的写调用点）。
+3. **`check_pair` 允许一个「还没声明目标」的候选**：原实现要求 back-pointer 列**已经**声明本列
+   所在库为目标——可这次配对本身就是写它的那次写。于是「一次手势配上双向关系」在实现上不可能
+   （先配 A→B，再配 B→A 才行）。改成「指向本库**或尚未指向任何库**」，环仍然不可表示（映射仍是
+   大小 ≤ 2 的轨道），ADR-0088 的措辞就地修正。
+
+## 3 · 接缝
+
+* `core/types.rs`：**没碰**（不新增枚举变体）。
+* `storage/migrations.rs`：**没碰**（`CURRENT_VERSION` 不动，relation 是既有 `db_value_items`
+  的第三种用户，rollup 的配置住在既有 `config` 列里）。
+* `[dependencies]` / `[profile.release]` / `[features]`：**没碰**。
+* 四热文件里动了三个：`src/app/state.rs`（entry points + 两个投影 pass + 缓存键 + 撤回刷新）、
+  新增 `src/core/database_relation.rs` 与 `src/core/database_rollup.rs`、`src/core/command.rs`
+  三条新命令（`SetRelation` / `SetRelationConfig` / `SetDatabaseRollup`）、
+  `src/storage/database_store.rs` 四个批量读、`src/core/database_view.rs` 一位
+  （relation 不做行内编辑）。`.slint` **一个字都没改**（UI 见 §6）。
+* ADR 号：0088/0089（上一步已提交）、本步新增 **0090**；同时**修正 ADR-0089 里一处不实的
+  承诺**（它写着读路径有 `ROLLUP_MAX_DEPTH` 上限，实际代码的深度上限是 **0** —— `values_of`
+  对计算列回空 map，空 map 折叠成 `Empty`，所以根本不需要那个常量；改成如实描述，而不是留一个
+  靠旧决策活着的死代码路径）。
+
+## 4 · 验证（门槛）
+
+```
+cargo check --all-targets   → Finished，0 warning
+cargo test  --all-targets   → 549 passed / 0 failed / 19 ignored
+                              （lib 371 / backup 20+2 / find 9 / markdown 70 / persistence 5
+                                / search 18 / storage 42+2 / workspace 14）
+cargo build --release       → 见 §7（本次会话内跑过，零警告）
+cargo test --release --lib -- --ignored --nocapture <三个探针>  → 三组数字，见 §5
+```
+
+新增的**非** `#[ignore]` 测试 12 条，全在 `src/app/state.rs` 的测试模块里（这一层是唯一同时
+握有 catalog 与文件的层，也是 core/store 的单测够不着的地方）：
+
+| 测试 | 钉住什么 |
+|------|----------|
+| `a_cell_write_repaints_the_window_the_delegate_reads` | 缓存的内容半边：写入即重绘、撤销也重绘 |
+| `a_pairing_writes_both_configs_in_one_undo_step` | 一次配对写两份 config、一次 Ctrl+Z 两份一起回退 |
+| `a_relation_cell_paints_the_targets_live_title` | 改名跟随、**没有**任何写落在 relation 列上 |
+| `one_pick_writes_the_back_pointer_and_one_undo_takes_both_back` | 反向指针是真格子（在目标行的列里），且同一次 pick / 同一次清空 |
+| `a_pairing_that_is_not_an_involution_is_refused_and_changes_nothing` | 自指 / 非 relation / 指向第三个库三种拒绝，且一个字都没落盘 |
+| `a_relation_without_a_target_refuses_every_pick` | 未配置 = 没有可指的对象，picker 也是空列表 |
+| `a_relation_picker_lists_the_target_rows_and_honours_its_cap` | 候选查询的三件事：有序、封顶、needle 折叠大小写 |
+| `a_deleted_target_degrades_to_the_word_and_the_cell_still_counts` | 悬垂降级成 `(deleted record)`，且 rollup 仍然数它 |
+| `a_rollup_folds_its_six_aggregates_over_the_relation_it_names` | 六个词各自折叠 4/6/2；空关系下 `count`=0 而四种读列的折叠=空（永不 0） |
+| `a_rollup_refuses_a_column_of_the_wrong_database_and_one_that_computes` | 四种配置拒绝，含**跨库**依赖成环那一条 |
+| `a_fold_that_cannot_fold_paints_the_error_word` | 文本列求和画 `Error`（配置合法、绘制失败），而 `min` 对同一列是好的 |
+| `a_rollup_costs_one_eval_per_drawn_row_and_not_the_target_tables_size` | 计数器：3 行 × 1 列 = 3 次求值，10 个目标不是 10 行；未变窗口 0 次 |
+
+另外 `core::database_relation` / `core::database_rollup` 各有一条新单测（自由的候选可被配对；
+六种折叠与拒绝集合），`database_property` 多一条（relation 收一串 record id，空列表即无值）。
+
+## 5 · 数字（全文与读法在 `docs/PERFORMANCE.md` 的 `## M14`（D9 那一节））
+
+| 探针 | 中位 | 诚实读法 |
+|------|------|----------|
+| picker，10 000 行里取 20 | **59.7 µs** | 与表大小无关（`LIMIT 20`） |
+| 一次 pick **200 个目标**端到端 | **13.0 ms** | 代价是 **fan-out**（200 个反向格 + 目标窗口重读），比读整表（22 ms）便宜 ~2× |
+| 一个窗口行的 rollup，fan-out = 10 000 | **28.5 ms** | **比对照（9.1 ms）慢 3.12×** —— 窗口同时为「活标题」和「值」各付一次 10 000 个 id 的 `IN (…)`；上界是 fan-out 而不是表大小，而 fan-out **没有上限**（一个格子可以点名整张表） |
+| 缓存刷新（什么都没变） | **29 µs** | 不变窗口里的滚动仍然免费 |
+| peer pass（一库 / 两库的页） | **20.4 / 29.4 µs** | D8 数字所在场景是「一库一页」，所以那三个数字不变 |
+
+## 6 · 未验证（诚实清单）
+
+1. **UI 一个字都没写**。没有「列类型选单」（这是 D5 的欠账，不是本刀的）、没有 relation 的
+   记录选择弹窗、没有 rollup 的三段配置编辑器。也就是说：**状态层的 API 完整且被测过，但从
+   用户视角这个特性还不可达**。ADR-0088/0089 里「picker 的点击、chip 的像素」被列为未验证，
+   原因就在这里——不是没测，是没有可点的东西。
+2. **像素**：六个聚合画出来的宽度、relation 格多目标时的截断、chip 的样子，全部没看。
+   D8 记的「帧没测」这条界限原样成立（headless 探针替不了真窗口）。
+3. **fan-out 没有上限**，见 §5 第三行。这是**产品决定**，不是实现缺陷：要不要给一个 relation
+   格子设上限（例如 200 个目标）？今天的唯一约束是 picker 的 `limit` 参数，那是调用者的选择。
+4. **多库大页的 peer pass**：上界是「当前页的数据库块个数」，但「一页挂三个 10 000 行的库」
+   没有场景可拍，所以只有形状上的界，没有数字。
+5. **`check_pair` 的放宽**（§2.3）只在 core 单测与 state 端到端上验过「自由的候选可以配对」；
+   「UI 先配 A→B 再配 B→A」那条老路径也仍然合法（幂等），但没有 UI 去走它。
+6. **本刀没有跑 sweep**：没有任何 `.slint` 改动，像素在构造上不可能变；没有基线对照就不声称
+   「逐字节相同」，只声称「没碰渲染面」。
+
+## 7 · 给整合者的注意事项
+
+* 本刀可独立成一个 commit；与 `m14-database` 上的前两个 commit（`a9f1129` 形状层、`8e29c4a`
+  投影/命令层）是同一条线。`CURRENT_VERSION` 不动、零新依赖，与主树的 Track 4 PDF 改动正交。
+* **CHANGELOG / ROADMAP 未改**（约定：只有整合者动）。若为 M14 补一笔：relation/rollup 是
+  **新功能**（用户可见的入口还缺 UI，见 §6.1），窗口缓存的修复是 **bug fix**（D3/D6 起就存在）。
+* 「relation 的形态」与 ADR-0084 的措辞有一处**有意偏离**（存 `RecordId` 而非 §四十 的 `PageId`，
+  因为 ADR-0063 的 record 是无页的），已在 ADR-0088 里写明理由；整合时不要按 ADR-0084 的字面
+  把它改回去。

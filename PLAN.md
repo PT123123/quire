@@ -3075,3 +3075,71 @@ database / 模板 / 视图内搜索）。工作树里 Track 4 的 0080/0081、Tr
 **rollup / relation 仍欠**（ADR-0084）：Track 2 的引用层已随合并落地，relation 的依赖不再阻塞，
 但它是一整刀新语义（存 id 不存标题、双向一批写、保存时环检测、rollup 六种聚合），形态已写死在
 ADR-0084，不属 D8 的「测量与收口」范围。
+
+## Track 3 · D9 relation + rollup 落地 —— 而窗口缓存补上它缺的那一半（2026-09-22，on `m14-database`，ADR-0088…0090）
+
+D8 收尾时留着「rollup / relation 仍欠（ADR-0084）」。这一刀把它欠完，做法与代价如下。
+
+**缘起**：ADR-0084 把两者的形状写死了（存 id 不存标题、双向一批写、保存时环检测、rollup 六种
+聚合），D8 报告说它「是一整刀新语义，不属 D8 的测量范围」——这一刀就是那一整刀。
+
+**存成什么形状**：
+
+1. **relation = 一串目标 `RecordId`，存在既有 `db_value_items` 里**（ADR-0088）。这是 ADR-0062
+   列表机制的第三个用户（多选、文件之后），所以 **`CURRENT_VERSION` 不动、零迁移**。与
+   ADR-0084 字面有一处有意偏离：它写「指向 §四十 的引用层」，而 §四十 的引用层地址是
+   `PageId`，ADR-0063 的 record 在没人打开前**没有页**——存 page id 会给大多数行造页，正是
+   ADR-0063 刻意避免的。存 `RecordId`、投影时用既有的 `record_title`（ADR-0063 的 `COALESCE`）
+   取活标题，**纪律照抄、管道换掉**，理由写在 ADR-0088 里。
+2. **双向 = 一次写**。`Command::SetRelation` 同时携带正向格与全部反向格，`plan` 编成**一个
+   `Entry`** —— 一次 Ctrl+Z 把一对关系整个回退（ADR-0084 的「一批」照字面做到）。
+3. **mirror 是对合，不是一个要走的图**（ADR-0088）。写只碰直接镜像、绝不下行，所以终止性由构造
+   保证——**前提是配对合法**，合法 = `mirror(mirror(a)) == a` 且 `mirror(a) != a`。四种拒绝：
+   自己是自己的镜像 / 对方不是 relation 列 / 对方不指向本库 / 对方已经是别人的另一半。
+   **环不可表示**，比「事后检测环」强：读路径不需要为环准备深度上限。
+   *实现中改了一处*：原本还要求对方**已经**声明本库为目标，可这次配对本身就是写它的那次写，
+   于是「一次手势配双向」在实现上不可能；改成「指向本库**或尚未指向任何库**」，环仍然不可
+   表示（映射仍是大小 ≤ 2 的轨道）。
+4. **rollup = 配置 + 投影时折叠**（ADR-0089）：`{"relation": …, "column": …, "aggregate": …}`，
+   六个词里 `none`/`count` 不读列。`sum`/`average` 走 `database_formula::arith`、
+   `min`/`max` 走 `extreme`（为此把这两个函数与三个枚举开到 `pub(crate)`），所以一个 rollup 和
+   一个公式不可能对「两个日期的最小值」给出两种答案；多出来的只有**严格性**——sum/avg 要求数字，
+   因为「文本列求和」是配置错误，画一个 `Error` 比悄悄粘出一个字符串好。**值不落盘、跨刷新不
+   缓存**（ADR-0083 整条继承），配置检查拒绝「聚合另一个计算列」——这是唯一能闭环的形状，所以
+   **一个 rollup 依赖另一个 rollup 不可表示**（连跨库的那种也拒）。
+5. **窗口缓存补上「内容」那一半**（ADR-0090，本刀撞出来的**既有缺陷**）：`unchanged` 的键是
+   `(view, definition, layout, stamp, total, window)`，全是形状——一次同窗口的 cell 写入、
+   一次公式配置修改、一次撤销都不会重读窗口。修法是 `db_content_stamp`（`record` 这个唯一漏斗
+   里 `+1`，故意钝、不做枚举）+ 写者把机会交给**同页其他数据库块**（`db_refresh_page`，上界是
+   当前页的块数）。D3 的 sweep 是静帧，对不出这个 bug；M14 整个卖点就是计算出来的像素，所以
+   它是第一个能证明它的特性。
+
+**接缝**：`core/types.rs` 没碰；`storage/migrations.rs` 没碰；依赖/feature/profile 没碰；
+`.slint` **一个字都没改**（所以没跑 sweep，也不声称像素逐字节相同）。新增 `core/database_relation.rs`
+与 `core/database_rollup.rs`；`command.rs` 三条命令；`database_store.rs` 四个批量读
+（`record_titles`/`cell_items`/`values_of`/`records_named`，全部按**窗口的行集**取键，没有一条
+按目标表的大小）；`state.rs` 四个 entry point、两个投影 pass、缓存键与撤回刷新。
+
+**验证**：`cargo check --all-targets` 0 warning；`cargo test --all-targets` **549 passed / 0 failed
+/ 19 ignored**（lib 371，比 D8 的 359 多 12 条）；`cargo build --release` 零警告；三个
+`#[ignore]` 打印探针在 release 下出数（原始行 `benchmarks/results/2026-09-22-m14-relation-rollup.jsonl`）。
+
+**数字**（全文 `docs/PERFORMANCE.md` `## M14`（D9 节））：picker 在 10 000 行里取 20 = **59.7 µs**
+（与表大小无关）；一次 pick 200 个目标端到端 = **13.0 ms**（代价是 fan-out，比读整表 22 ms 便宜
+~2×）；一个窗口行的 rollup 在 **fan-out = 10 000** 时 = **28.5 ms**，**比「把 10 000 个值读出来
+再折」的对照（9.1 ms）慢 3.12×**——窗口同时为活标题与值各付一次大 `IN (…)`，所以上界诚实地写成
+**fan-out 而不是表大小**，而 fan-out 今天**没有上限**（picker 的 `limit` 是调用者的选择，这是
+留给产品的一个决定）；缓存刷新（什么都没变）= **29 µs**，也就是说「不变窗口里的滚动仍然免费」
+这条 D8 数字仍然成立；peer pass 在一库页 / 两库页 = **20.4 / 29.4 µs**，D8 那三个数字的场景是
+「一库一页」，所以不受影响。
+
+**未验证（诚实）**：① **UI 一个字都没写**——没有列类型选单（D5 的欠账）、没有记录选择弹窗、
+没有 rollup 配置编辑器，所以**状态层完整且被测过，用户视角特性仍不可达**，ADR 里「picker 的
+点击、chip 的像素」未验证的原因正是「没有可点的东西」；② 六个聚合的像素、多目标 relation 格的
+截断、chip 的样子全没看（帧没测这条界限与 D8 相同）；③ fan-out 无上限（见上）；④ 「一页挂三个
+10 000 行的库」的 peer pass 只有形状上的界、没有数字；⑤ 本刀没跑 sweep（没碰渲染面，但没有基线
+对照就不声称逐字节相同）。
+
+**顺带修掉一处 ADR 的不实**：ADR-0089 写着读路径有 `ROLLUP_MAX_DEPTH` 上限，实际代码的深度上限
+是 **0**（`values_of` 对计算列回空 map，空 map 折叠成 `Empty`），常量从未存在。改成如实描述，
+而不是为了对齐 ADR 去加一个常量。

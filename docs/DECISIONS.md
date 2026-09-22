@@ -4357,10 +4357,13 @@ ADR-0084 wrote down is the shape that landed:
   terminates by construction — *if* the pairing is legal. It is legal exactly when
   `mirror(mirror(a)) == a` and `mirror(a) != a`. So the save refuses four things: a column
   that would be its own mirror; a `mirror` naming a property that is not a `relation` in
-  the target database; a `mirror` whose own target is not this column's database (then it is
-  not a back-pointer, it is a coincidence); and a `mirror` that already declares a
-  *different* partner. The first accepted declaration writes both sides in one batch; after
-  that the two are each other's, and the refusal is what keeps them so.
+  the target database; a `mirror` whose own target is neither this column's database nor
+  *absent* (a column pointing at a third database is not a back-pointer, it is a coincidence
+  of ids — while an absent target is a brand-new column the accepted declaration points
+  back itself, so the one-shot pairing a user actually makes is possible); and a `mirror`
+  that already declares a *different* partner. The first accepted declaration writes both
+  sides in one batch; after that the two are each other's, and the refusal is what keeps
+  them so.
 
   This is ADR-0084's 「relation 环检测在保存时做」 read precisely. The only cycle a relation
   can have is a cycle in the mirror map, because a relation's *value* is a stored fact and
@@ -4430,8 +4433,13 @@ fixed the shape; this is the code, and every part of it is that ADR's handover t
   for) and a target that is not a column of the relation's target database at all. The two
   derived stamps (`created time` / `last edited time`) *are* admitted, because they are
   readable through the same one batched read and aggregating them is a common rollup. What
-  remains for the read path is the cap ADR-0084 promised: `ROLLUP_MAX_DEPTH`, small, for a
-  document that arrived by hand and nests a rollup where the writer would have refused.
+  remains for the read path is therefore **nothing to cap**: a hand-edited document that nests
+  a rollup where the writer would have refused reads `nothing` rather than recursing, because
+  `values_of` answers an empty map for a computed column and an empty map folds to `Empty` —
+  the read path's depth cap is zero, and it is the strictest cap there is. (An earlier draft
+  of this ADR promised a `ROLLUP_MAX_DEPTH` constant here; the implementation showed it was
+  unnecessary, and this sentence is the correction rather than a code path kept alive by a
+  decision that no longer needs it.)
 
 Consequences:
 
@@ -4445,3 +4453,54 @@ Consequences:
   a rollup exists.
 * Unverified: the six aggregates' pixels, the rollup editor's behaviour, and the measured
   cost of a rollup column over a 10 000-row target database. Named in the report.
+
+## ADR-0090 · A window caches painted rows, so its key carries a content stamp and not only a shape
+
+Decision: the window cache (`AppState::db_windows`) gains the half of its key it never had. A
+window holds **painted** cells — a text cell's string, a formula's value, a relation's live
+targets, a rollup's folded number — and every one of those is a function of stored data that
+the rest of the key cannot see. The view, the definition text, the layout, the session stamp,
+the total and the row window are all *identical* after a cell edit, after a rename in another
+database, and after a computed column's config changes. So the key gains one number:
+`AppState::db_content_stamp`, incremented once per recorded change batch in the one funnel
+every change passes (`AppState::record`), stored into the window as it is rebuilt and compared
+when the next refresh asks whether it may skip the read.
+
+Deliberately blunt: **any** recorded change moves it, rather than an enumeration of "changes
+that can alter a painted cell" (a cell, a page title a relation names, a column's kind, a
+column's config, a record gaining a page…). That list is one every future column kind would
+have to be appended to, and forgetting it *is* this bug; "any change may have" is always true.
+The asymmetry the cache exists for is preserved — the stamp is *consumed* by the rebuild, so a
+burst of edits costs one re-read per visible database window rather than one per edit, and a
+scroll inside an unchanged window still touches no query at all.
+
+Two consequences the shape-only key could not express:
+
+* **A writer hands the chance to its peers.** A pick writes the target row's back-pointer
+  cell, which is a cell of a *different* database; a rename in one database moves the title a
+  relation cell in another one paints. `AppState::db_refresh_page(skip)` re-reads every
+  database block on the open page — bounded by that page's blocks, never by the library — and
+  is called from the five write paths that can reach another database's paint. Undo and redo
+  call it with no `skip`, because a step moves stored data with no write call site of its own.
+* **The D8 cost story is unchanged where it was measured.** Those numbers were taken on scenes
+  with one database block per page, where the peer pass is a no-op and a scroll records
+  nothing. `the_content_stamp_costs_one_reread_after_a_change_and_nothing_when_cached` prints
+  the price on both shapes rather than asking anyone to take it on faith.
+
+Why this is an ADR rather than a footnote: the first version of the cache was keyed on *shape*,
+and that key is **correct for the queries it gates and wrong for the pixels it keeps** — two
+different questions, which the D3 sweep could not tell apart because a scene is a still
+photograph of a shape. M14 made the difference visible, because a relation cell that paints a
+live title and a rollup that folds at projection time are claims about *content*; the first
+end-to-end test written for them failed on a plain committed cell.
+
+Consequences:
+
+* `DbWindow` gains one field, `AppState` one `Cell<u64>`, `record` one increment, `db_refresh`
+  one comparison and one assignment. No migration, no schema change, no store change.
+* The defect this fixes is **not M14's**: a committed cell (D3), a formula edit (D6), and an
+  undo of either all failed to repaint before this ADR. It surfaced now because a feature whose
+  whole point is a computed paint is the first thing that could *prove* it.
+* Unverified: the real cost of `db_refresh_page` on a page holding several large databases —
+  the peer pass is bounded by the page's blocks, but three 10 000-row databases on one page is
+  a page nobody has drawn yet. Named in `docs/REPORT_TRACK3.md`.

@@ -169,6 +169,29 @@ pub struct AppState {
     /// through the block's row, and a re-read must update the UI without
     /// rebuilding the page's row list.
     db_windows: RefCell<HashMap<i32, DbWindow>>,
+    /// How many change batches this session has recorded — the window cache's
+    /// **content** half.
+    ///
+    /// A window caches *painted* rows (a cell's text, a relation's live titles,
+    /// a rollup's folded value), and every one of those depends on stored data
+    /// that the rest of the cache key cannot see: the view, the definition
+    /// text, the layout, the total and the row window are all identical after a
+    /// cell edit, after a rename in *another* database, and after a computed
+    /// column's config changes. Without this number the cache answers "nothing
+    /// changed" to all three and the user watches their edit not appear — the
+    /// defect D3's sweep could not see, because a scene is a still photograph.
+    ///
+    /// Deliberately blunt: *any* recorded change bumps it, rather than an
+    /// enumeration of "changes that can alter a painted cell" (a cell, a page
+    /// title a relation names, a column's kind, a column's config, a record
+    /// gaining a page…). That list is one every future kind would have to be
+    /// added to, and missing it is exactly this bug; "any change may have" is
+    /// always true. The cost is bounded by the same asymmetry the cache exists
+    /// for: the stamp is *consumed* when a window is rebuilt, so a burst of
+    /// edits costs one re-read of each visible database window — not one per
+    /// edit, and never one per scroll frame (a scroll inside an unchanged
+    /// window still touches no query).
+    db_content_stamp: Cell<u64>,
     /// Which view each database block is showing. Session state (ADR-0073) and
     /// not a column: it is a fact about a window, not about a document.
     db_active_view: RefCell<HashMap<i32, ViewId>>,
@@ -789,6 +812,7 @@ impl AppState {
             version_pins: RefCell::new(version_pins),
             databases: RefCell::new(database_catalog),
             db_windows: RefCell::new(HashMap::new()),
+            db_content_stamp: Cell::new(0),
             db_active_view: RefCell::new(HashMap::new()),
             db_anchor: RefCell::new(HashMap::new()),
             db_cal_month: RefCell::new(HashMap::new()),
@@ -1346,6 +1370,10 @@ impl AppState {
         // as `DatabaseCreated` + `PropertyAdded` + `ViewAdded`, its undo as the
         // three deletions, and no call site has to remember to say so.
         self.db_absorb(&changes);
+        // …and the window cache's content half is spent with it (see
+        // `db_content_stamp`): whatever the change was, what a database cell
+        // paints may have moved, and no other part of the cache key can see it.
+        self.db_content_stamp.set(self.db_content_stamp.get() + 1);
         if let Some(p) = &self.persistence {
             p.record(changes);
         }
@@ -2853,6 +2881,9 @@ impl AppState {
         )?;
         self.record(applied.clone());
         self.reproject_blocks();
+        // A step moves stored data with no write call site of its own, so the
+        // page's database windows are the one place that has to be told.
+        self.db_refresh_page(None);
         Some(applied)
     }
 
@@ -2869,6 +2900,7 @@ impl AppState {
         )?;
         self.record(applied.clone());
         self.reproject_blocks();
+        self.db_refresh_page(None);
         Some(applied)
     }
 
@@ -5814,6 +5846,11 @@ struct DbWindow {
     /// a board's slots are not a table's rows — while the definition text may
     /// not change at all.
     layout: crate::core::database::ViewLayout,
+    /// The content stamp this window was read at (see
+    /// [`AppState::db_content_stamp`]) — the half of the key that says whether
+    /// what the rows *paint* can still be trusted, as opposed to whether the
+    /// same rows are still the ones on screen.
+    content: u64,
     /// A per-layout session nonce, part of the cache key: the calendar's month
     /// (year × 12 + month) and the gallery's cards-per-row both change what the
     /// realized model holds without touching the view, the document or the
@@ -6523,6 +6560,9 @@ impl AppState {
         // the layouts that own them; every layout that reaches the tail fills
         // `body`, so it needs no default.
         let mut stamp: u64 = 0;
+        // The change batches recorded since this session began: the cache key's
+        // content half, read once here and written into the window at the tail.
+        let content = self.db_content_stamp.get();
         let body: f32;
         let mut tl_start: i64 = 0;
         let mut tl_days: i64 = 0;
@@ -6626,6 +6666,10 @@ impl AppState {
                         && existing.stamp == stamp
                         && existing.window == wanted
                         && existing.total == total
+                        // …and nothing has been recorded since this window was
+                        // read, because *what a row paints* is a fact about
+                        // stored data and not about the window's shape.
+                        && existing.content == content
                 }
                 None => false,
             }
@@ -7300,6 +7344,7 @@ impl AppState {
             view,
             definition: String::new(),
             layout,
+            content,
             stamp: 0,
             columns: Vec::new(),
             total,
@@ -7317,6 +7362,7 @@ impl AppState {
         entry.view = view;
         entry.definition = definition_text;
         entry.layout = layout;
+        entry.content = content;
         entry.stamp = stamp;
         entry.columns = columns;
         entry.total = total;
@@ -7331,6 +7377,44 @@ impl AppState {
         entry.chart_path = Rc::new(chart_path);
         entry.chart_kind = chart_kind;
         true
+    }
+
+    /// Give every database block on the open page the chance to re-read its
+    /// window, `skip` being the one whose window the caller has just settled.
+    ///
+    /// A database write can change what a *different* block paints, and M14 is
+    /// the first slice that makes that true: a pick writes the target row's
+    /// back-pointer cell (in the target database's own block), and a rename in
+    /// one database moves the title a relation cell in another one shows. Both
+    /// of those windows are caches whose own key cannot see the write — the same
+    /// blindness [`AppState::db_content_stamp`] fixes for the writing block — so
+    /// the writer has to hand the peers the chance, and the stamp makes the
+    /// chance free when there is nothing to see.
+    ///
+    /// Undo and redo call it with no `skip`: a step walks stored data back (or
+    /// forward) with no write call site of its own, which is exactly the shape
+    /// that would otherwise leave the screen holding a value the file no longer
+    /// has.
+    ///
+    /// Bounded by the **open page's** database blocks (a handful), never by the
+    /// library: a block on another page re-reads when that page is projected,
+    /// which is the same "a window is read where it is drawn" rule the row table
+    /// follows. Nothing here writes, and nothing recurses — the peers are handed
+    /// to `db_refresh` directly, so a page of three databases costs at most
+    /// three reads for one edit.
+    fn db_refresh_page(&self, skip: Option<i32>) {
+        let page = core_page_id(self.open_page.get());
+        let peers: Vec<i32> = {
+            let doc = self.doc.borrow();
+            doc.page_blocks(page)
+                .iter()
+                .filter(|b| b.db_ref.is_some() && skip != Some(b.id.0 as i32))
+                .map(|b| b.id.0 as i32)
+                .collect()
+        };
+        for peer in peers {
+            self.db_refresh(peer);
+        }
     }
 
     /// The group headers' order. SQL returned the keys unordered on purpose:
@@ -7941,6 +8025,9 @@ impl AppState {
         // one window read, which is the same cost the projection pays and the
         // only way the cell and its neighbours stay consistent.
         self.db_refresh(block);
+        // …and the page's other databases, because a cell in *this* one can be
+        // the title a relation cell over there paints (ADR-0088's live name).
+        self.db_refresh_page(Some(block));
         true
     }
 
@@ -8110,6 +8197,9 @@ impl AppState {
             return Err("the declaration could not be recorded".into());
         }
         self.db_refresh(block);
+        // The back-pointer's own block is a different database on this page, and
+        // its column headers/rows may now say something else.
+        self.db_refresh_page(Some(block));
         Ok(())
     }
 
@@ -8162,6 +8252,9 @@ impl AppState {
             return false;
         }
         self.db_refresh(block);
+        // The pick landed in the *target* database's rows too: the mirror cell
+        // the write implied is a cell of another block on this page (ADR-0088).
+        self.db_refresh_page(Some(block));
         true
     }
 
@@ -8316,6 +8409,9 @@ impl AppState {
             return Err("the rollup could not be recorded".into());
         }
         self.db_refresh(block);
+        // A rollup's second name is a column of the related database, whose own
+        // block may be on this page and whose header the user is looking at.
+        self.db_refresh_page(Some(block));
         Ok(())
     }
 
@@ -8348,6 +8444,9 @@ impl AppState {
             return false;
         }
         self.db_refresh(block);
+        // A deleted record may be a relation target, so every other database on
+        // this page has to be able to move to the degradation word (ADR-0051).
+        self.db_refresh_page(Some(block));
         true
     }
 
@@ -14717,5 +14816,1029 @@ mod tests {
         let row = state.version_diff.row_data(0).unwrap();
         assert!(row.added);
         assert_eq!(row.kind, "To-do");
+    }
+
+    // ─── M14: the database's two computed kinds, through a real session ─────
+    //
+    // `core::database_relation` and `core::database_rollup` pin the rules and
+    // the folds; the store's own tests pin the batched reads. Neither can reach
+    // the layer that holds a catalog *and* a file at once, and that layer is
+    // where the feature either works or does not: a pick that writes one side
+    // of a pair, a rollup that reads the whole target table, a cell whose paint
+    // never reaches the model the delegate draws. Every test below drives the
+    // entry points a delegate calls and then reads back **the model the
+    // delegate reads** — `db_windows`, not a second copy of the numbers.
+
+    /// One paragraph at the end of the open page, by id.
+    fn a_line(state: &super::AppState) -> i32 {
+        use crate::core::{BlockKind, Command};
+        state
+            .exec_on_open_page(Command::AppendBlock {
+                kind: BlockKind::Paragraph,
+                text: String::new(),
+            })
+            .as_deref()
+            .and_then(find_inserted_block_id)
+            .expect("the line lands on the open page")
+    }
+
+    /// A fresh database on its own line. The catalog learns it through
+    /// `db_absorb` on the way through `record`, so `db_ref_of` and
+    /// `db_add_column` work the moment this returns.
+    fn a_database(state: &super::AppState) -> i32 {
+        let block = a_line(state);
+        assert!(state.make_database(block), "the line becomes a database");
+        block
+    }
+
+    /// One row at the end of `block`'s listing; its record id.
+    fn a_row(state: &super::AppState, block: i32) -> i64 {
+        let ord = state.db_next_row_ord(block);
+        state.db_add_record(block, ord).expect("a row")
+    }
+
+    /// Name a row through the ordinary cell path. The title column is the one
+    /// ADR-0063's `COALESCE` reads, so this is exactly the string a relation
+    /// cell will paint.
+    fn name_a_row(state: &super::AppState, block: i32, record: i64, title: &str) {
+        let column = title_column(state, block);
+        assert!(state.db_set_cell_text(block, record, column, title), "the row is named");
+    }
+
+    /// A database's title column, by id.
+    fn title_column(state: &super::AppState, block: i32) -> i32 {
+        let db = state.db_ref_of(block).expect("a database");
+        state
+            .databases
+            .borrow()
+            .properties_of(db)
+            .find(|property| property.kind.is_title())
+            .expect("a title column")
+            .id
+            .as_u64() as i32
+    }
+
+    /// The database id behind a block, as a config document stores it.
+    fn database_of(state: &super::AppState, block: i32) -> i32 {
+        state.db_ref_of(block).expect("a database").as_u64() as i32
+    }
+
+    /// The text the delegate draws at `(row, column)` of `block`'s window.
+    fn drawn(state: &super::AppState, block: i32, row: usize, column: usize) -> String {
+        use slint::Model as _;
+        let windows = state.db_windows.borrow();
+        let window = windows.get(&block).expect("a window was read");
+        window
+            .rows
+            .row_data(row)
+            .expect("the row is inside the window")
+            .cells
+            .row_data(column)
+            .expect("the column is inside the row")
+            .text
+            .to_string()
+    }
+
+    /// Where a property sits among the columns the delegate draws.
+    fn column_of(state: &super::AppState, block: i32, property: i32) -> usize {
+        let windows = state.db_windows.borrow();
+        windows
+            .get(&block)
+            .expect("a window was read")
+            .columns
+            .iter()
+            .position(|column| column.property.as_u64() as i32 == property)
+            .expect("the column is visible")
+    }
+
+    /// How many entries the delegate's model holds for `block` — the window's
+    /// size, which is the number that must never be the table's.
+    fn drawn_rows(state: &super::AppState, block: i32) -> usize {
+        use slint::Model as _;
+        state
+            .db_windows
+            .borrow()
+            .get(&block)
+            .map(|window| window.rows.row_count())
+            .unwrap_or(0)
+    }
+
+    /// Two databases on one page — `tasks` with a relation column pointing at
+    /// `people`, and a relation column in `people` for it to pair with — as the
+    /// corner a user would build with three clicks each. Returns
+    /// `(state, tasks, people, assignee, assigned)`.
+    fn two_databases(
+        dir: &crate::testing::ScratchDir,
+    ) -> (std::rc::Rc<super::AppState>, i32, i32, i32, i32) {
+        use crate::core::database::PropertyKind;
+
+        let state = super::AppState::new(&plain_args(), Some(scratch_repo(dir)));
+        state.create_page(None);
+        let tasks = a_database(&state);
+        let people = a_database(&state);
+        let assignee = state
+            .db_add_column(tasks, "Assignee", PropertyKind::Relation)
+            .expect("a relation column");
+        let assigned = state
+            .db_add_column(people, "Assigned", PropertyKind::Relation)
+            .expect("its back-pointer");
+        (state, tasks, people, assignee, assigned)
+    }
+
+    /// A plain cell write reaches the model the delegate draws. This is the
+    /// assumption every other test in this block rests on, so it is pinned
+    /// first: a window that is not re-read after a write is a cell the user
+    /// watches not change.
+    #[test]
+    fn a_cell_write_repaints_the_window_the_delegate_reads() {
+        use crate::core::database::PropertyKind;
+        use crate::testing::ScratchDir;
+
+        let dir = ScratchDir::new("cell-repaint");
+        let state = super::AppState::new(&plain_args(), Some(scratch_repo(&dir)));
+        state.create_page(None);
+        let block = a_database(&state);
+        let note = state
+            .db_add_column(block, "Note", PropertyKind::Text)
+            .expect("a text column");
+        let row = a_row(&state, block);
+        let at = column_of(&state, block, note);
+
+        assert_eq!(drawn(&state, block, 0, at), "", "a new cell is empty");
+        assert!(state.db_set_cell_text(block, row, note, "hello"));
+        assert_eq!(
+            drawn(&state, block, 0, at),
+            "hello",
+            "the committed value is what the delegate draws"
+        );
+        // And a step back moves it too: the cache holds *painted* rows, so every
+        // recorded change — including the ones a Ctrl+Z makes — may move them.
+        state.undo_open_page().expect("the edit is on the stack");
+        assert_eq!(drawn(&state, block, 0, at), "", "an undo repaints the cell");
+        state.redo_open_page().expect("and forward again");
+        assert_eq!(drawn(&state, block, 0, at), "hello");
+    }
+
+    /// The pairing ADR-0088 is about, and the export of it: both configs land in
+    /// **one** batch, so one Ctrl+Z un-declares the two-way relation whole.
+    #[test]
+    fn a_pairing_writes_both_configs_in_one_undo_step() {
+        use crate::testing::ScratchDir;
+
+        let dir = ScratchDir::new("relation-pair");
+        let (state, tasks, people, assignee, assigned) = two_databases(&dir);
+        let people_id = database_of(&state, people);
+        let tasks_id = database_of(&state, tasks);
+
+        assert_eq!(state.db_relation_config(assignee), (-1, -1), "nothing declared yet");
+        state
+            .db_relation_configure(tasks, assignee, people_id, assigned)
+            .expect("the pairing is legal");
+        assert_eq!(
+            state.db_relation_config(assignee),
+            (people_id, assigned),
+            "the forward column learns its target and its other half"
+        );
+        assert_eq!(
+            state.db_relation_config(assigned),
+            (tasks_id, assignee),
+            "and the back-pointer was told where to point in the same gesture"
+        );
+
+        state.undo_open_page().expect("the declaration is on the stack");
+        assert_eq!(
+            state.db_relation_config(assignee),
+            (-1, -1),
+            "half a pair is a back-pointer that never appears, so both go together"
+        );
+        assert_eq!(state.db_relation_config(assigned), (-1, -1));
+    }
+
+    /// The live-title rule (ADR-0088): the cell stores an id and paints what the
+    /// target is called *now*, so a rename moves the cell with no write anywhere
+    /// near the relation column.
+    #[test]
+    fn a_relation_cell_paints_the_targets_live_title() {
+        use crate::testing::ScratchDir;
+
+        let dir = ScratchDir::new("relation-live-title");
+        let (state, tasks, people, assignee, assigned) = two_databases(&dir);
+        state
+            .db_relation_configure(tasks, assignee, database_of(&state, people), assigned)
+            .expect("the pairing is legal");
+
+        let ada = a_row(&state, people);
+        name_a_row(&state, people, ada, "Ada");
+        let task = a_row(&state, tasks);
+        name_a_row(&state, tasks, task, "Ship it");
+        assert!(
+            state.db_pick_relation(tasks, task, assignee, &[ada.to_string()]),
+            "a configured relation takes a pick"
+        );
+
+        let at = column_of(&state, tasks, assignee);
+        assert_eq!(drawn(&state, tasks, 0, at), "Ada");
+
+        // Renaming the target writes `people` and nothing else — no write to the
+        // relation column, no write to `tasks` — and the tasks cell follows,
+        // because a database write hands the page's other database blocks the
+        // chance to re-read (`db_refresh_peers`). That is the whole reason the
+        // stored value is an id.
+        name_a_row(&state, people, ada, "Ada Lovelace");
+        assert_eq!(
+            drawn(&state, tasks, 0, at),
+            "Ada Lovelace",
+            "the id never changed; only what it is called did"
+        );
+    }
+
+    /// One pick, both sides, one undo (ADR-0088). The back-pointer is a real
+    /// cell in the target row's column — not a projection — and it is the same
+    /// `Entry` as the forward cell.
+    #[test]
+    fn one_pick_writes_the_back_pointer_and_one_undo_takes_both_back() {
+        use crate::testing::ScratchDir;
+
+        let dir = ScratchDir::new("relation-two-way");
+        let (state, tasks, people, assignee, assigned) = two_databases(&dir);
+        state
+            .db_relation_configure(tasks, assignee, database_of(&state, people), assigned)
+            .expect("the pairing is legal");
+
+        let ada = a_row(&state, people);
+        name_a_row(&state, people, ada, "Ada");
+        let task = a_row(&state, tasks);
+        name_a_row(&state, tasks, task, "Ship it");
+
+        // Nothing anywhere yet.
+        let assigned_at = column_of(&state, people, assigned);
+        assert_eq!(drawn(&state, people, 0, assigned_at), "");
+
+        assert!(state.db_pick_relation(tasks, task, assignee, &[ada.to_string()]));
+        assert_eq!(
+            drawn(&state, people, 0, assigned_at),
+            "Ship it",
+            "the target row gained the source row in its back-pointer column"
+        );
+
+        // Dropping the target takes the back-pointer out again, in place.
+        assert!(state.db_pick_relation(tasks, task, assignee, &[]));
+        assert_eq!(
+            drawn(&state, people, 0, assigned_at),
+            "",
+            "an empty pick un-points both halves"
+        );
+    }
+
+    /// The refusal that makes a relation cycle unrepresentable (ADR-0088): a
+    /// pairing has to be an involution with no fixed points.
+    #[test]
+    fn a_pairing_that_is_not_an_involution_is_refused_and_changes_nothing() {
+        use crate::core::database::PropertyKind;
+        use crate::testing::ScratchDir;
+
+        let dir = ScratchDir::new("relation-refusals");
+        let (state, tasks, people, assignee, _assigned) = two_databases(&dir);
+        let people_id = database_of(&state, people);
+        let note = state
+            .db_add_column(people, "Note", PropertyKind::Text)
+            .expect("a text column");
+
+        // Itself.
+        assert_eq!(
+            state.db_relation_configure(tasks, assignee, people_id, assignee).unwrap_err(),
+            "a column cannot be its own back-pointer"
+        );
+        // Not a relation.
+        assert_eq!(
+            state.db_relation_configure(tasks, assignee, people_id, note).unwrap_err(),
+            "the back-pointer must be a relation column"
+        );
+        // A relation that points at a third database is a coincidence of ids.
+        let other = a_database(&state);
+        let third = state
+            .db_add_column(other, "Third", PropertyKind::Relation)
+            .expect("a relation column");
+        let _ = state.db_relation_configure(
+            other,
+            third,
+            database_of(&state, people),
+            -1,
+        );
+        assert_eq!(
+            state.db_relation_configure(tasks, assignee, people_id, third).unwrap_err(),
+            "that column does not point back at this database"
+        );
+        // None of it landed.
+        assert_eq!(state.db_relation_config(assignee), (-1, -1));
+        assert_eq!(state.db_relation_config(third), (people_id, -1));
+    }
+
+    /// An unconfigured relation is a column with nothing to point *at*: storing
+    /// an id nothing can name is a fact the database could not show, so the
+    /// write is refused rather than recorded.
+    #[test]
+    fn a_relation_without_a_target_refuses_every_pick() {
+        use crate::testing::ScratchDir;
+
+        let dir = ScratchDir::new("relation-unconfigured");
+        let (state, tasks, people, assignee, _assigned) = two_databases(&dir);
+        let ada = a_row(&state, people);
+        name_a_row(&state, people, ada, "Ada");
+        let task = a_row(&state, tasks);
+
+        assert!(
+            !state.db_pick_relation(tasks, task, assignee, &[ada.to_string()]),
+            "no target, no pick"
+        );
+        let at = column_of(&state, tasks, assignee);
+        assert_eq!(drawn(&state, tasks, 0, at), "", "and the cell stays empty");
+        assert!(
+            state.db_relation_candidates(assignee, "", 10).is_empty(),
+            "the picker has no list to show either"
+        );
+    }
+
+    /// The candidate list a picker fills itself from, capped where the caller
+    /// says: the windowed read's red line is not undone by the back door.
+    #[test]
+    fn a_relation_picker_lists_the_target_rows_and_honours_its_cap() {
+        use crate::testing::ScratchDir;
+
+        let dir = ScratchDir::new("relation-candidates");
+        let (state, tasks, people, assignee, assigned) = two_databases(&dir);
+        state
+            .db_relation_configure(tasks, assignee, database_of(&state, people), assigned)
+            .expect("the pairing is legal");
+
+        for name in ["Ada", "Bob", "Cy"] {
+            let row = a_row(&state, people);
+            name_a_row(&state, people, row, name);
+        }
+        let all = state.db_relation_candidates(assignee, "", 10);
+        assert_eq!(all.len(), 3, "three people in the target database");
+        assert_eq!(all[0].1, "Ada", "the first row's title comes back with its id");
+        assert_eq!(state.db_relation_candidates(assignee, "", 2).len(), 2, "the cap holds");
+        let searched = state.db_relation_candidates(assignee, "cy", 10);
+        assert_eq!(searched.len(), 1, "the needle is a filter, folded case");
+        assert_eq!(searched[0].1, "Cy");
+        assert!(searched[0].0 > 0, "and the row comes back as a record id");
+    }
+
+    /// A deleted target degrades instead of failing (ADR-0051's rule for the
+    /// thing a relation actually points at), and the cell still counts it.
+    #[test]
+    fn a_deleted_target_degrades_to_the_word_and_the_cell_still_counts() {
+        use crate::core::database::PropertyKind;
+        use crate::testing::ScratchDir;
+
+        let dir = ScratchDir::new("relation-dangling");
+        let (state, tasks, people, assignee, assigned) = two_databases(&dir);
+        state
+            .db_relation_configure(tasks, assignee, database_of(&state, people), assigned)
+            .expect("the pairing is legal");
+
+        let ada = a_row(&state, people);
+        name_a_row(&state, people, ada, "Ada");
+        let task = a_row(&state, tasks);
+        name_a_row(&state, tasks, task, "Ship it");
+        assert!(state.db_pick_relation(tasks, task, assignee, &[ada.to_string()]));
+
+        let at = column_of(&state, tasks, assignee);
+        assert_eq!(drawn(&state, tasks, 0, at), "Ada");
+
+        assert!(state.db_delete_record(people, ada), "the target row goes away");
+        // The picker's stored value is untouched — deleting a row is not a
+        // reason to rewrite everybody who mentioned it.
+        assert_eq!(
+            state.db_relation_config(assignee),
+            (database_of(&state, people), assigned),
+            "the relation's own config is not what a dangling target changes"
+        );
+        assert_eq!(
+            drawn(&state, tasks, 0, at),
+            crate::core::database_relation::DELETED_RECORD_LABEL,
+            "the cell still holds the pick and says what it can no longer name"
+        );
+
+        // The rollup over the same relation counts the dangling target: the
+        // stored fact is "the user picked this", and nobody un-picked it.
+        let total = state
+            .db_add_column(tasks, "Assigned count", PropertyKind::Rollup)
+            .expect("a rollup column");
+        state
+            .db_rollup_configure(tasks, total, assignee, -1, 1)
+            .expect("count needs no target column");
+        assert_eq!(drawn(&state, tasks, 0, column_of(&state, tasks, total)), "1");
+    }
+
+    /// The whole of ADR-0089's contract in one place: a rollup reads **one
+    /// column of the records the relation names**, folds it with the aggregate
+    /// its config names, and paints the result — including the two folds that
+    /// read no column at all.
+    #[test]
+    fn a_rollup_folds_its_six_aggregates_over_the_relation_it_names() {
+        use crate::core::database::PropertyKind;
+        use crate::testing::ScratchDir;
+
+        let dir = ScratchDir::new("rollup-six");
+        let (state, tasks, people, assignee, assigned) = two_databases(&dir);
+        let people_id = database_of(&state, people);
+        state
+            .db_relation_configure(tasks, assignee, people_id, assigned)
+            .expect("the pairing is legal");
+        let points = state
+            .db_add_column(people, "Points", PropertyKind::Number)
+            .expect("a number column");
+
+        let mut targets = Vec::new();
+        for (name, points_value) in [("Ada", 4), ("Bob", 6), ("Cy", 2)] {
+            let row = a_row(&state, people);
+            name_a_row(&state, people, row, name);
+            assert!(state.db_set_cell_text(people, row, points, &points_value.to_string()));
+            targets.push(row.to_string());
+        }
+        let task = a_row(&state, tasks);
+        name_a_row(&state, tasks, task, "Ship it");
+        assert!(state.db_pick_relation(tasks, task, assignee, &targets));
+
+        let total = state
+            .db_add_column(tasks, "Total", PropertyKind::Rollup)
+            .expect("a rollup column");
+        let at = column_of(&state, tasks, total);
+
+        // `Aggregate::ALL`'s order, against 4, 6 and 2.
+        for (index, aggregate, expected) in [
+            (0, "none", ""),
+            (1, "count", "3"),
+            (2, "sum", "12"),
+            (3, "average", "4"),
+            (4, "min", "2"),
+            (5, "max", "6"),
+        ] {
+            state
+                .db_rollup_configure(tasks, total, assignee, points, index)
+                .unwrap_or_else(|refusal| panic!("{aggregate}: {refusal}"));
+            assert_eq!(drawn(&state, tasks, 0, at), expected, "the fold of `{aggregate}`");
+        }
+
+        // Clearing the pick empties the four reading folds but leaves `count`
+        // with its one honest answer over nothing.
+        assert!(state.db_pick_relation(tasks, task, assignee, &[]));
+        state
+            .db_rollup_configure(tasks, total, assignee, points, 1)
+            .unwrap();
+        assert_eq!(drawn(&state, tasks, 0, at), "0", "how many related rows: truthfully none");
+        state
+            .db_rollup_configure(tasks, total, assignee, points, 2)
+            .unwrap();
+        assert_eq!(drawn(&state, tasks, 0, at), "", "a sum over nothing is empty, never 0");
+    }
+
+    /// ADR-0089's refusals, including the one that makes a *cross-database*
+    /// dependency cycle unrepresentable: a rollup may not aggregate another
+    /// computed column of the related records.
+    #[test]
+    fn a_rollup_refuses_a_column_of_the_wrong_database_and_one_that_computes() {
+        use crate::core::database::PropertyKind;
+        use crate::testing::ScratchDir;
+
+        let dir = ScratchDir::new("rollup-refusals");
+        let (state, tasks, people, assignee, assigned) = two_databases(&dir);
+        state
+            .db_relation_configure(tasks, assignee, database_of(&state, people), assigned)
+            .expect("the pairing is legal");
+        let points = state
+            .db_add_column(people, "Points", PropertyKind::Number)
+            .expect("a number column");
+        // A computed column *of the related database* — the only shape that
+        // could close a loop.
+        let theirs = state
+            .db_add_column(people, "Their rollup", PropertyKind::Rollup)
+            .expect("a rollup column");
+        let total = state
+            .db_add_column(tasks, "Total", PropertyKind::Rollup)
+            .expect("a rollup column");
+
+        // Not a column of the related database.
+        assert_eq!(
+            state
+                .db_rollup_configure(tasks, total, assignee, title_column(&state, tasks), 2)
+                .unwrap_err(),
+            "that column is not a column of the related database"
+        );
+        // The one that makes a cycle unrepresentable.
+        assert_eq!(
+            state.db_rollup_configure(tasks, total, assignee, theirs, 2).unwrap_err(),
+            "a rollup cannot aggregate another computed column"
+        );
+        // A relation column: every fold of it would be a type error at paint
+        // time, so it is refused while the user is looking.
+        assert_eq!(
+            state.db_rollup_configure(tasks, total, assignee, assigned, 2).unwrap_err(),
+            "a rollup cannot aggregate a relation column"
+        );
+        // A relation with no target has nothing to aggregate.
+        let lonely = state
+            .db_add_column(tasks, "Lonely", PropertyKind::Relation)
+            .expect("a relation column");
+        assert_eq!(
+            state.db_rollup_configure(tasks, total, lonely, points, 2).unwrap_err(),
+            "that relation column has no target database yet"
+        );
+        // None of it wrote a config: the column is still unconfigured.
+        assert_eq!(state.db_rollup_config(total), (-1, -1, 0));
+    }
+
+    /// A fold that cannot fold paints the same word a formula's failure paints,
+    /// rather than refusing the configuration: "sum of a text column" is a
+    /// mistake the user should *see*, and a painted `Error` is a better answer
+    /// than a surprise glued string (ADR-0089).
+    #[test]
+    fn a_fold_that_cannot_fold_paints_the_error_word() {
+        use crate::core::database::PropertyKind;
+        use crate::testing::ScratchDir;
+
+        let dir = ScratchDir::new("rollup-error");
+        let (state, tasks, people, assignee, assigned) = two_databases(&dir);
+        state
+            .db_relation_configure(tasks, assignee, database_of(&state, people), assigned)
+            .expect("the pairing is legal");
+        let note = state
+            .db_add_column(people, "Note", PropertyKind::Text)
+            .expect("a text column");
+
+        let ada = a_row(&state, people);
+        name_a_row(&state, people, ada, "Ada");
+        assert!(state.db_set_cell_text(people, ada, note, "four"));
+        let task = a_row(&state, tasks);
+        name_a_row(&state, tasks, task, "Ship it");
+        assert!(state.db_pick_relation(tasks, task, assignee, &[ada.to_string()]));
+
+        let total = state
+            .db_add_column(tasks, "Total", PropertyKind::Rollup)
+            .expect("a rollup column");
+        state
+            .db_rollup_configure(tasks, total, assignee, note, 2)
+            .expect("the configuration is legal: a text column *can* be named");
+        assert_eq!(
+            drawn(&state, tasks, 0, column_of(&state, tasks, total)),
+            "Error",
+            "summing text is a mistake the user should see, not a glued string"
+        );
+        // …and `min` over the same column is fine: `extreme` folds text.
+        state
+            .db_rollup_configure(tasks, total, assignee, note, 4)
+            .expect("min of one text value is that value");
+        assert_eq!(
+            drawn(&state, tasks, 0, column_of(&state, tasks, total)),
+            "four"
+        );
+    }
+
+    /// The cost contract (ADR-0083/0089): one eval per **(drawn row × visible
+    /// configured rollup column)**, and never a read whose size is the target
+    /// table's. The counter is the only instrument the app has for this, and it
+    /// is the number `REPORT_TRACK3`'s D8 section quotes.
+    #[test]
+    fn a_rollup_costs_one_eval_per_drawn_row_and_not_the_target_tables_size() {
+        use crate::core::database::PropertyKind;
+        use crate::testing::ScratchDir;
+
+        let dir = ScratchDir::new("rollup-cost");
+        let (state, tasks, people, assignee, assigned) = two_databases(&dir);
+        state
+            .db_relation_configure(tasks, assignee, database_of(&state, people), assigned)
+            .expect("the pairing is legal");
+        let points = state
+            .db_add_column(people, "Points", PropertyKind::Number)
+            .expect("a number column");
+
+        // Ten target rows, three source rows pointing at all ten.
+        let mut targets = Vec::new();
+        for index in 0..10 {
+            let row = a_row(&state, people);
+            name_a_row(&state, people, row, &format!("P{index}"));
+            assert!(state.db_set_cell_text(people, row, points, "1"));
+            targets.push(row.to_string());
+        }
+        for index in 0..3 {
+            let row = a_row(&state, tasks);
+            name_a_row(&state, tasks, row, &format!("T{index}"));
+            assert!(state.db_pick_relation(tasks, row, assignee, &targets));
+        }
+        let total = state
+            .db_add_column(tasks, "Total", PropertyKind::Rollup)
+            .expect("a rollup column");
+        state
+            .db_rollup_configure(tasks, total, assignee, points, 2)
+            .expect("the fold is legal");
+
+        // A fresh read of the three-row window: three rows × one rollup column.
+        state.db_windows.borrow_mut().remove(&tasks);
+        state.db_computed_evals.set(0);
+        assert!(state.db_refresh(tasks));
+        assert_eq!(
+            state.db_computed_evals.get(),
+            3,
+            "three drawn rows, one configured rollup column: the ten targets are read \
+             as values, never as rows"
+        );
+        assert_eq!(
+            drawn(&state, tasks, 0, column_of(&state, tasks, total)),
+            "10",
+            "and the fold still saw all ten of them"
+        );
+
+        // A window that does not move is not re-read at all, so it costs
+        // nothing — the same cache contract every other layout's read has.
+        state.db_computed_evals.set(0);
+        assert!(!state.db_refresh(tasks), "an unchanged window is not re-read");
+        assert_eq!(state.db_computed_evals.get(), 0);
+    }
+
+    // ─── M14 · D8: the numbers relation and rollup owe (SPEC §三十九) ───────
+    //
+    // `#[ignore]` printing probes, the convention D0/D1/D4/D8 established (see
+    // `docs/REPORT_TRACK3.md` §D8): they assert nothing about *time* — a dev box
+    // is not a benchmark — and print the samples and one JSON line per probe for
+    // `benchmarks/results/`. What they **do** assert is the *shape* the number
+    // is supposed to have (the window stayed one row, the counter stayed at one
+    // eval per drawn row, the fold still saw every target), because a
+    // measurement of the wrong thing is worse than no measurement.
+
+    /// min / median / max of a sample, in the sample's own unit.
+    fn three(mut samples: Vec<f64>) -> (f64, f64, f64) {
+        samples.sort_by(|a, b| a.partial_cmp(b).expect("no NaN in a duration"));
+        let n = samples.len();
+        (samples[0], samples[n / 2], samples[n - 1])
+    }
+
+    /// The probe fixture: two databases on one page, a two-way relation between
+    /// them, a `Points` number column in the target, and `rows` target records
+    /// seeded **straight into SQL** in 500-row batches.
+    ///
+    /// The schema goes through the app's own write paths (so the page really
+    /// carries the two blocks and the catalog really knows the columns), the
+    /// rows do not: `db_add_record` re-reads a window per row, which is O(n²)
+    /// here and would be timing the seed rather than the pick. Settling the
+    /// write queue first is what keeps the two writers from interleaving.
+    struct RelationBench {
+        state: std::rc::Rc<super::AppState>,
+        tasks: i32,
+        people: i32,
+        assignee: i32,
+        assigned: i32,
+        points: i32,
+        task: i64,
+        targets: Vec<String>,
+    }
+
+    fn relation_bench(name: &str, rows: usize) -> RelationBench {
+        use crate::core::database::{PropertyId, PropertyKind, Record, RecordId};
+        use crate::core::database::CellValue;
+        use crate::core::persistence::Repository;
+        use crate::core::{Change, OrderKey};
+        use crate::testing::ScratchDir;
+
+        let dir = ScratchDir::new(name);
+        let (state, tasks, people, assignee, assigned) = two_databases(&dir);
+        state
+            .db_relation_configure(tasks, assignee, database_of(&state, people), assigned)
+            .expect("the pairing is legal");
+        let points = state
+            .db_add_column(people, "Points", PropertyKind::Number)
+            .expect("a number column");
+        let task = a_row(&state, tasks);
+        name_a_row(&state, tasks, task, "Ship it");
+
+        state.persistence_force_flush();
+        let repo = state.db_repo().cloned().expect("a store");
+        let people_id = state.db_ref_of(people).expect("a database");
+        let title = PropertyId(title_column(&state, people) as u64);
+        let points_id = PropertyId(points as u64);
+        // A base well past the session's own records: this seed is deliberately
+        // outside the app's watermark (ADR-0072), so nothing it does can collide.
+        let base = 1_000_000u64;
+        let mut targets = Vec::with_capacity(rows);
+        const BATCH: usize = 500;
+        for batch in 0..rows.div_ceil(BATCH) {
+            let from = batch * BATCH;
+            let to = ((batch + 1) * BATCH).min(rows);
+            let mut changes = Vec::with_capacity((to - from) * 3);
+            for index in from..to {
+                let record = RecordId(base + index as u64);
+                changes.push(Change::RecordCreated(Record::bare(
+                    record,
+                    people_id,
+                    OrderKey(((index as u64) + 1) << 32),
+                )));
+                changes.push(Change::CellSet {
+                    record,
+                    property: title,
+                    value: CellValue::Text(format!("P{index:05}")),
+                });
+                changes.push(Change::CellSet {
+                    record,
+                    property: points_id,
+                    value: CellValue::Number(index as f64),
+                });
+            }
+            repo.apply(&changes).expect("the seed lands");
+            targets.extend((from..to).map(|index| (base + index as u64).to_string()));
+        }
+        RelationBench {
+            state,
+            tasks,
+            people,
+            assignee,
+            assigned,
+            points,
+            task,
+            targets,
+        }
+    }
+
+    /// SPEC §三十九's relation, D8 (ADR-0088's open item): what a pick costs
+    /// when the target database is **10 000 rows**, what the picker's own query
+    /// costs over the same table, and what the forbidden shape would cost.
+    #[test]
+    #[ignore = "prints a measurement; run with --release --lib -- --ignored --nocapture"]
+    fn a_relation_pick_on_a_ten_thousand_row_target_is_bounded() {
+        use crate::core::database::{PropertyId, Property, RowRequest};
+        use std::time::Instant;
+
+        const ROUNDS: usize = 20;
+        let bench = relation_bench("perf-relation-pick", 10_000);
+        let state = &bench.state;
+
+        // ── the picker: 20 rows out of 10 000, capped by the caller ─────────
+        let mut picker = Vec::with_capacity(ROUNDS);
+        for _ in 0..ROUNDS {
+            let started = Instant::now();
+            let rows = state.db_relation_candidates(bench.assignee, "", 20);
+            picker.push(started.elapsed().as_secs_f64() * 1e6);
+            assert_eq!(rows.len(), 20, "the cap is the caller's, not the table's");
+        }
+        let searched = state.db_relation_candidates(bench.assignee, "p00042", 20);
+        assert_eq!(searched.len(), 1, "the needle finds one row in 10 000");
+        assert_eq!(searched[0].1, "P00042");
+
+        // ── the pick: 200 targets, alternating between two disjoint halves so
+        // every round really writes (re-picking the same list is a no-op by
+        // construction, and timing a no-op would flatter the number) ────────
+        let half = 200;
+        let left: Vec<String> = bench.targets[..half].to_vec();
+        let right: Vec<String> = bench.targets[half..half * 2].to_vec();
+        let mut pick = Vec::with_capacity(ROUNDS);
+        for round in 0..ROUNDS {
+            let set = if round % 2 == 0 { &left } else { &right };
+            let started = Instant::now();
+            assert!(state.db_pick_relation(bench.tasks, bench.task, bench.assignee, set));
+            pick.push(started.elapsed().as_secs_f64() * 1e6);
+        }
+
+        // One last pick of the *first* half, so the assertion below looks at a
+        // row that is actually inside the drawn window (the 20 timed rounds end
+        // on the second half, whose rows are 10 000-row-table rows 200+).
+        assert!(state.db_pick_relation(bench.tasks, bench.task, bench.assignee, &left));
+
+        // The shape the number has to have: one source row on screen, the
+        // mirror written on the *target* rows, and the target window still 31
+        // rows even though the table is 10 000.
+        assert_eq!(drawn_rows(state, bench.tasks), 1);
+        assert_eq!(drawn_rows(state, bench.people), 31, "the window, not the table");
+        let assigned_at = column_of(state, bench.people, bench.assigned);
+        assert_eq!(drawn(state, bench.people, 0, assigned_at), "Ship it");
+        let assignee_at = column_of(state, bench.tasks, bench.assignee);
+        let painted = drawn(state, bench.tasks, 0, assignee_at);
+        assert_eq!(
+            painted.split(", ").count(),
+            200,
+            "every picked target is painted, and no more"
+        );
+        assert!(painted.starts_with("P00000, "), "{painted}");
+
+        // ── the forbidden control: the whole target table, as objects ───────
+        let repo = state.db_repo().cloned().expect("a store");
+        let people_id = state.db_ref_of(bench.people).expect("a database");
+        let properties: Vec<Property> = {
+            let catalog = state.databases.borrow();
+            catalog.properties_of(people_id).cloned().collect()
+        };
+        let request = RowRequest::new(
+            people_id,
+            PropertyId(title_column(state, bench.people) as u64),
+            &properties,
+        );
+        let started = Instant::now();
+        let all = repo.unwindowed_rows(&request).expect("the control read");
+        let control_ms = started.elapsed().as_secs_f64() * 1e3;
+        assert_eq!(all.len(), 10_000);
+
+        let (picker_min, picker_mid, picker_max) = three(picker);
+        let (pick_min, pick_mid, pick_max) = three(pick);
+        println!("relation pick probe: 10 000-row target, 2 databases on one page");
+        println!("  picker (cap 20): {picker_min:.1} / {picker_mid:.1} / {picker_max:.1} µs (min/median/max, {ROUNDS} warm)");
+        println!("  pick 200 targets end to end: {pick_min:.1} / {pick_mid:.1} / {pick_max:.1} µs  (flush + plan + write + window re-read + peer pass)");
+        println!("  control: the whole target table = {control_ms:.1} ms and {} objects", all.len());
+        println!(
+            "  one pick against the control (higher = the pick is cheaper): {:.0}x",
+            control_ms * 1e3 / pick_mid.max(1.0)
+        );
+        println!(
+            "{{\"label\":\"m14-relation-pick\",\"date\":\"2026-09-22\",\
+             \"harness\":\"cargo test --release --lib -- --ignored --nocapture\",\
+             \"target_rows\":10000,\"picked\":200,\"rounds\":{ROUNDS},\
+             \"picker_min_us\":{picker_min:.1},\"picker_median_us\":{picker_mid:.1},\"picker_max_us\":{picker_max:.1},\
+             \"pick_min_us\":{pick_min:.1},\"pick_median_us\":{pick_mid:.1},\"pick_max_us\":{pick_max:.1},\
+             \"control_all_rows_ms\":{control_ms:.1},\"control_rows\":{}}}",
+            all.len()
+        );
+    }
+
+    /// SPEC §三十九's rollup, D8 (ADR-0089): what a **window's** fold costs when
+    /// the folded column is 10 000 rows wide, against folding all of them.
+    #[test]
+    #[ignore = "prints a measurement; run with --release --lib -- --ignored --nocapture"]
+    fn a_rollup_folds_a_window_and_never_the_related_table() {
+        use crate::core::database::{PropertyId, PropertyKind, RecordId};
+        use crate::core::database_formula;
+        use crate::core::database_rollup::{self, Aggregate};
+        use std::time::Instant;
+
+        const ROUNDS: usize = 20;
+        let bench = relation_bench("perf-rollup", 10_000);
+        let state = &bench.state;
+
+        // One source row related to **every** target: the fan-out is the whole
+        // table, which is the worst case a window can have.
+        let all = bench.targets.clone();
+        assert!(state.db_pick_relation(bench.tasks, bench.task, bench.assignee, &all));
+        let total = state
+            .db_add_column(bench.tasks, "Total", PropertyKind::Rollup)
+            .expect("a rollup column");
+        state
+            .db_rollup_configure(bench.tasks, total, bench.assignee, bench.points, 2)
+            .expect("the fold is legal");
+
+        // A fresh read of the one-row source window, round after round.
+        let mut window = Vec::with_capacity(ROUNDS);
+        let mut evals = Vec::with_capacity(ROUNDS);
+        for _ in 0..ROUNDS {
+            state.db_windows.borrow_mut().remove(&bench.tasks);
+            state.db_computed_evals.set(0);
+            let started = Instant::now();
+            assert!(state.db_refresh(bench.tasks));
+            window.push(started.elapsed().as_secs_f64() * 1e6);
+            evals.push(state.db_computed_evals.get() as f64);
+        }
+        let expected: u64 = (0..10_000u64).sum();
+        let painted = drawn(state, bench.tasks, 0, column_of(state, bench.tasks, total));
+        assert_eq!(painted, expected.to_string(), "the fold really saw all 10 000");
+        assert!(
+            evals.iter().all(|n| *n == 1.0),
+            "one drawn row × one configured rollup column, however wide the fan-out"
+        );
+
+        // The control: the same fold over every related record — the batched
+        // read the *whole* relation would need, which is the path the window
+        // does not take.
+        let repo = state.db_repo().cloned().expect("a store");
+        let ids: Vec<RecordId> = bench
+            .targets
+            .iter()
+            .filter_map(|t| t.parse::<u64>().ok())
+            .map(RecordId)
+            .collect();
+        let started = Instant::now();
+        let values = repo
+            .values_of(&ids, PropertyId(bench.points as u64))
+            .expect("one batched read of 10 000 ids");
+        let read_all_us = started.elapsed().as_secs_f64() * 1e6;
+        let started = Instant::now();
+        let folded: Vec<database_formula::Val> = ids
+            .iter()
+            .filter_map(|id| {
+                values
+                    .get(&id.as_u64())
+                    .map(|value| database_formula::val_of(PropertyKind::Number, value))
+            })
+            .collect();
+        let sum = database_rollup::fold(Aggregate::Sum, &folded, folded.len())
+            .expect("a sum of numbers");
+        let fold_all_us = started.elapsed().as_secs_f64() * 1e6;
+        assert_eq!(database_rollup::paint(&sum), expected.to_string());
+        assert_eq!(values.len(), 10_000);
+
+        let (win_min, win_mid, win_max) = three(window);
+        println!("rollup probe: one window row, fan-out 10 000, fold `sum`");
+        println!("  window re-read (count + 1 row + relation + values + fold): {win_min:.1} / {win_mid:.1} / {win_max:.1} µs (min/median/max, {ROUNDS} warm)");
+        println!("  computed cells evaluated per read: {} (1 row × 1 rollup column)", evals[0]);
+        println!("  control (every related record): values read {read_all_us:.1} µs + fold {fold_all_us:.1} µs = {:.1} µs", read_all_us + fold_all_us);
+        let control_us = read_all_us + fold_all_us;
+        println!(
+            "  the window against the control: {win_mid:.0} µs vs {control_us:.0} µs = {:.2}x — and one eval instead of {} folds.              The window is *not* cheaper here: the fan-out is the whole table, and a window pays for the relation's live              titles as well as for the values. The bound the cache promises is the fan-out, not the table size.",
+            win_mid / control_us,
+            ids.len()
+        );
+        println!(
+            "{{\"label\":\"m14-rollup-window\",\"date\":\"2026-09-22\",\
+             \"harness\":\"cargo test --release --lib -- --ignored --nocapture\",\
+             \"target_rows\":10000,\"fan_out\":10000,\"aggregate\":\"sum\",\"rounds\":{ROUNDS},\
+             \"window_read_min_us\":{win_min:.1},\"window_read_median_us\":{win_mid:.1},\"window_read_max_us\":{win_max:.1},\
+             \"evals_per_read\":{},\"control_values_us\":{read_all_us:.1},\"control_fold_us\":{fold_all_us:.1}}}",
+            evals[0]
+        );
+    }
+
+    /// ADR-0090's price, D8: what the content stamp moved. Three numbers — a
+    /// cached refresh, a committed cell end to end, and the peer pass on a page
+    /// of one database (which is every scene D8 measured) against a page of two.
+    #[test]
+    #[ignore = "prints a measurement; run with --release --lib -- --ignored --nocapture"]
+    fn the_content_stamp_costs_one_reread_after_a_change_and_nothing_when_cached() {
+        use crate::core::database::PropertyKind;
+        use crate::testing::ScratchDir;
+        use std::time::Instant;
+
+        const ROUNDS: usize = 50;
+        let dir = ScratchDir::new("perf-stamp");
+        let state = super::AppState::new(&plain_args(), Some(scratch_repo(&dir)));
+        state.create_page(None);
+        let block = a_database(&state);
+        let note = state
+            .db_add_column(block, "Note", PropertyKind::Text)
+            .expect("a text column");
+        let row = a_row(&state, block);
+        for index in 0..40 {
+            let extra = a_row(&state, block);
+            name_a_row(&state, block, extra, &format!("row {index}"));
+        }
+
+        // ── cached: nothing recorded since the last read ────────────────────
+        // (The last write already consumed the stamp, so this first call is the
+        // cached path too — which is the point being measured.)
+        let mut cached = Vec::with_capacity(ROUNDS);
+        for _ in 0..ROUNDS {
+            let started = Instant::now();
+            assert!(!state.db_refresh(block), "an unchanged window is not re-read");
+            cached.push(started.elapsed().as_secs_f64() * 1e6);
+        }
+
+        // ── a committed cell, end to end: the flush, the write, the re-read ──
+        let mut commit = Vec::with_capacity(ROUNDS);
+        for round in 0..ROUNDS {
+            let started = Instant::now();
+            assert!(state.db_set_cell_text(block, row, note, &format!("n{round}")));
+            commit.push(started.elapsed().as_secs_f64() * 1e6);
+        }
+
+        // ── the peer pass: free on the scenes D8 measured, priced on a page
+        // with a second database ────────────────────────────────────────────
+        // A structural edit elsewhere on the page records a change and touches
+        // no database window — exactly the state the peer pass exists for.
+        let mut lone = Vec::with_capacity(ROUNDS);
+        for _ in 0..ROUNDS {
+            let _ = state.exec_on_open_page(crate::core::Command::AppendBlock {
+                kind: crate::core::BlockKind::Paragraph,
+                text: String::new(),
+            });
+            let started = Instant::now();
+            state.db_refresh_page(None);
+            lone.push(started.elapsed().as_secs_f64() * 1e6);
+        }
+        let second = a_database(&state);
+        // Settle both windows so the loop below measures the peer pass alone.
+        let _ = state.db_refresh(block);
+        let _ = state.db_refresh(second);
+        let mut pair = Vec::with_capacity(ROUNDS);
+        for _ in 0..ROUNDS {
+            let _ = state.exec_on_open_page(crate::core::Command::AppendBlock {
+                kind: crate::core::BlockKind::Paragraph,
+                text: String::new(),
+            });
+            let started = Instant::now();
+            state.db_refresh_page(None);
+            pair.push(started.elapsed().as_secs_f64() * 1e6);
+        }
+
+        let (cached_min, cached_mid, cached_max) = three(cached);
+        let (commit_min, commit_mid, commit_max) = three(commit);
+        let (lone_min, lone_mid, lone_max) = three(lone);
+        let (pair_min, pair_mid, pair_max) = three(pair);
+        println!("content stamp probe: 41-row database");
+        println!("  cached refresh (a scroll that changes nothing): {cached_min:.1} / {cached_mid:.1} / {cached_max:.1} µs");
+        println!("  one committed cell end to end (flush + plan + write + re-read + peers): {commit_min:.1} / {commit_mid:.1} / {commit_max:.1} µs");
+        println!("  peer pass, one database on the page (the D8 scenes): {lone_min:.1} / {lone_mid:.1} / {lone_max:.1} µs");
+        println!("  peer pass, two databases on the page, after a write: {pair_min:.1} / {pair_mid:.1} / {pair_max:.1} µs");
+        println!(
+            "{{\"label\":\"m14-content-stamp\",\"date\":\"2026-09-22\",\
+             \"harness\":\"cargo test --release --lib -- --ignored --nocapture\",\
+             \"rows\":41,\"rounds\":{ROUNDS},\
+             \"cached_min_us\":{cached_min:.1},\"cached_median_us\":{cached_mid:.1},\"cached_max_us\":{cached_max:.1},\
+             \"commit_min_us\":{commit_min:.1},\"commit_median_us\":{commit_mid:.1},\"commit_max_us\":{commit_max:.1},\
+             \"peers_lone_median_us\":{lone_mid:.1},\"peers_pair_median_us\":{pair_mid:.1}}}"
+        );
     }
 }
