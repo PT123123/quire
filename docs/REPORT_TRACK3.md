@@ -2463,9 +2463,11 @@ sweep 的对照见 §5 的 d13→d14 行。
 
 ## 7 · 给整合者的注意事项
 
-* 本刀是 `m14-database` 上 D9 之后的**唯一未提交内容**（`git status`：**20 改 + 4 新**——三个
+* 本刀是 `m14-database` 上 D9 之后的**唯一未提交内容**（`git status`：**21 改 + 4 新**——三个
   `.slint` 组件与一行探针的 `benchmarks/results/*.jsonl`），可独立成一个 commit；
   `CURRENT_VERSION` 不动、零新依赖、`Cargo.toml` 没碰。
+  这一行初写时记的是「20 改」，`git add` 之前重数是 21（commit 落地时的 `25 files changed` 与
+  `git status --short` 相符才是准的），数字以重数为准。
 * ADR 号：**0092**（0091 是本会话为版本历史让号腾出来的那条，见 `fb789eb`）。
 * **docs/PERFORMANCE.md** 多了 `## M14 · a search needle is one statement…` 一节，量的是这一刀
   唯一碰存储的那处：needle 让 header 的计数从 `record_count`（~0.18 ms）换成
