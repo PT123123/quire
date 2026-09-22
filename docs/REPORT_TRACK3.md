@@ -2486,5 +2486,9 @@ sweep 的对照见 §5 的 d13→d14 行。
   ——`.scratch` 在每个 worktree 各自 gitignore，同名不是同物。
 * **不要**按 ADR-0084 的字面把 relation 的存法改回去（见 D9 §7），也**不要**把这三枚标记改回
   字形：`✓` 的缺席是量出来的，不是猜的。
-* 推之前扫过了 author/committer 与 `origin/master..m14-database` 全量 diff（40 404 行）：邮箱一律
-  是 GitHub noreply，`Users\<user>` / QQ / 个人邮箱 0 命中。
+* 推之前扫过 `origin/master..m14-database` 的全量 diff（40 404 行）的**内容**：本机用户名、QQ、
+  个人邮箱 0 命中——这半句成立。**当初多写的那半句是错的**：它顺带声称 author/committer「邮箱
+  一律是 GitHub noreply」，而按 `%ae`/`%ce` 扫下来 174 枚里有 **137 枚**带的是同一个个人 QQ
+  邮箱（tag `v0.1.0-rc1` 的 tagger 也是）。内容干净、元数据不干净，差就差在只扫了 diff 没扫
+  identity 字段。同日 ADR-0094 用 `filter-repo --mailmap` 把整条历史洗成 noreply 后
+  force-with-lease 重推。这一行留着，记的是「扫错了字段」这个错，不是把那半句留在纸上。

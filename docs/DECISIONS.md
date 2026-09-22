@@ -46,9 +46,18 @@ Consequences:
   `09ef5aa:crates/data/`, **38 of 45** source files hash byte-identical (after
   normalising the checkout's CRLF) and the remaining **7** hash identical once the
   `quire-core` → `quire-data` rename is reversed — so the only content delta across
-  the whole extraction is the crate's own name. What the scrub does **not** fix is
-  this repository's already-public history, where 137 of 174 commits carry the same
-  address; rewriting published history is a separate decision and has not been made.
+  the whole extraction is the crate's own name.
+- **The same pass then went over this repository, and that is a bigger blast.** The
+  scan found the identical address on **137 of 174** commits here and on the tagger of
+  `v0.1.0-rc1` — on a **public** remote, where it had been since the first push. ADR
+  records and Track 3's handoff had claimed the metadata was clean; what had actually
+  been scanned was the diff, never `%ae`/`%ce`, and `docs/REPORT_TRACK3.md` now says so
+  instead of keeping the wrong sentence. `--mailmap` rewrote the whole range, and the
+  same run took `--replace-text` over the two benchmark rows that spell an absolute
+  `%TEMP%` path with the local username in it — the other 12 `jsonl` files recorded
+  their fixtures through `$env:TEMP`, which is why they never needed fixing. Every
+  SHA quoted anywhere in these documents predates that pass, including the `09ef5aa`
+  above and the pre-split control arm's `0089008`; the commit subjects still find them.
 - `Cargo.lock` is committed **in the extracted repository** as well, which a library
   normally would not: the Android shell will consume it as a git dependency with no
   workspace root above it to inherit a lock from, and `rusqlite` is `bundled` there,

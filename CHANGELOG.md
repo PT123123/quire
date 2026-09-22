@@ -533,7 +533,11 @@ First functional release: a local, single-file-database notes workspace.
   and `github.com/PT123123/quire-core` at a pinned rev is where the model and the store
   live now — 71 commits carried out with `git filter-repo`, of which 46 had a personal
   QQ address as author and committer and were rewritten to the GitHub noreply identity
-  before the first push. The rename is the only content change: 38 of 45 source files
+  before the first push. The same pass then went over **this** repository, where 137 of
+  174 commits and the tagger of `v0.1.0-rc1` carried the same address on a public remote
+  — Track 3's handoff had asserted the metadata was clean because it had scanned the
+  diff and never `%ae`, and that sentence has been corrected in place rather than
+  quietly fixed. Every SHA quoted in these documents predates it. The rename is the only content change: 38 of 45 source files
   still hash byte-identical to the blobs this repository holds at `09ef5aa:crates/data/`,
   and the other 7 hash identical once the name is reversed. Two things follow that are
   worth knowing before quoting a green run. **The suite is no longer reachable from
