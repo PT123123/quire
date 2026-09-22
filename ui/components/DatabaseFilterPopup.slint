@@ -1,0 +1,530 @@
+// The filter panel (D4, SPEC §三十九 「操作」, ADR-0076): the view's filter as
+// a flat rule list the user can edit — match **all** or match **any** over
+// clauses, each clause `not`-invertible, each with its own comparison and
+// value.
+//
+// What the panel edits is a *subset* of the filter the compiler reads: one
+// and/or root over clauses. A document with nested groups (a later build's, or
+// a hand-edited one) still filters the table — the recursive tree is what SQL
+// gets — but the panel refuses to reshape it (the edit is refused in Rust, with
+// a notice), because rewriting a tree into the subset one can draw is how a
+// user's rules get quietly destroyed. 与/或/非 are all here: 与 = the all root,
+// 或 = the any root, 非 = the `¬` toggle on a clause (a `not` around it, which
+// is also how "is not empty" and "does not contain" are built).
+//
+// One popup, four lists: the rule list, the column chooser, the comparison
+// chooser and the option chooser are **states of this one popup**
+// (`db-filter-panel`), because a popup that opens a popup is two windows
+// fighting over one click. Rust pushes the chooser's list when a row's button
+// opens it (`db-filter-op-menu` / `db-filter-option-menu`); the back rows come
+// home with `db-filter-panel-set(0)`.
+//
+// The value text commits on **Enter** (`accepted`), deliberately: a rules write
+// is one `SetDatabaseViewDefinition` change and one undo step, and committing
+// per keystroke would make "type 2026" five undo steps. The discrete controls —
+// comparison, ¬, delete, picks — apply immediately.
+
+import { Theme } from "../Theme.slint";
+import { Colors } from "../Colors.slint";
+import { Typography } from "../Typography.slint";
+import { UIState } from "../Types.slint";
+
+export component DatabaseFilterPopup inherits PopupWindow {
+    width: 348px;
+    // The rules state is header + rows + footer; the choosers are flat lists.
+    // The rules row is two lines (the clause, then its value editor).
+    height: UIState.db-filter-panel == 0
+        ? 40px + UIState.db-filter-rows.length * 76px + 36px + 8px
+        : 34px + (UIState.db-filter-panel == 1
+            ? UIState.db-filter-columns.length
+            : UIState.db-filter-panel == 2
+                ? UIState.db-filter-ops.length
+                : UIState.db-filter-options.length) * 30px + 8px;
+    // outside click / Escape dismiss; UIState syncs via the is-open mirror
+    close-policy: PopupClosePolicy.close-on-click-outside;
+
+    // the panel's own state, read once per expression
+    property <int> block: UIState.db-filter-block;
+
+    Rectangle {
+        x: 2px; y: 3px;
+        width: parent.width - 4px;
+        height: parent.height - 5px;
+        border-radius: Theme.radius-md + 2px;
+        background: Colors.shadow;
+    }
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        border-radius: Theme.radius-md;
+        background: Colors.surface-overlay;
+        border-width: 1px;
+        border-color: Colors.border;
+        clip: true;
+
+        // ── state 0: the rules ─────────────────────────────────────────────
+        if UIState.db-filter-panel == 0 : Rectangle {
+            width: parent.width;
+            height: parent.height;
+            background: transparent;
+
+            // the root's flavour: match ALL of the rules, or ANY of them
+            HorizontalLayout {
+                x: 8px;
+                y: 6px;
+                width: parent.width - 16px;
+                height: 28px;
+                spacing: Theme.spacing-sm;
+                Text {
+                    text: "Match";
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-ui;
+                    color: Colors.text-secondary;
+                    vertical-alignment: center;
+                }
+                match-all := Rectangle {
+                    width: 56px;
+                    height: parent.height - 6px;
+                    y: 3px;
+                    border-radius: Theme.radius-sm;
+                    background: !UIState.db-filter-match-any ? Colors.accent-soft : transparent;
+                    Text {
+                        text: "all";
+                        font-family: Typography.ui-font;
+                        font-size: Typography.size-ui;
+                        color: !UIState.db-filter-match-any ? Colors.accent-text : Colors.text-secondary;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    TouchArea {
+                        width: parent.width;
+                        height: parent.height;
+                        mouse-cursor: MouseCursor.pointer;
+                        clicked => {
+                            UIState.db-filter-match-set(root.block, false);
+                        }
+                    }
+                }
+                match-any := Rectangle {
+                    width: 56px;
+                    height: parent.height - 6px;
+                    y: 3px;
+                    border-radius: Theme.radius-sm;
+                    background: UIState.db-filter-match-any ? Colors.accent-soft : transparent;
+                    Text {
+                        text: "any";
+                        font-family: Typography.ui-font;
+                        font-size: Typography.size-ui;
+                        color: UIState.db-filter-match-any ? Colors.accent-text : Colors.text-secondary;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    TouchArea {
+                        width: parent.width;
+                        height: parent.height;
+                        mouse-cursor: MouseCursor.pointer;
+                        clicked => {
+                            UIState.db-filter-match-set(root.block, true);
+                        }
+                    }
+                }
+            }
+
+            for row[index] in UIState.db-filter-rows : Rectangle {
+                x: 4px;
+                y: 40px + (index * 76px);
+                width: parent.width - 8px;
+                height: 72px;
+                border-radius: Theme.radius-sm;
+                border-width: 1px;
+                border-color: Colors.border;
+                background: transparent;
+
+                // ── the clause: column · comparison · ¬ · delete ──────────
+                HorizontalLayout {
+                    x: 8px;
+                    y: 6px;
+                    width: parent.width - 16px;
+                    height: 26px;
+                    spacing: 4px;
+
+                    Text {
+                        text: row.name;
+                        font-family: Typography.ui-font;
+                        font-size: Typography.size-ui;
+                        font-weight: Typography.weight-semibold;
+                        color: Colors.text-primary;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                        overflow: elide;
+                    }
+                    // the comparison: opens this kind's chooser (state 2)
+                    Rectangle {
+                        width: 92px;
+                        height: parent.height;
+                        border-radius: Theme.radius-sm;
+                        background: op-ta.has-hover ? Colors.surface-hover : Colors.background;
+                        Text {
+                            x: 6px;
+                            width: parent.width - 12px;
+                            height: parent.height;
+                            text: row.op-name;
+                            font-family: Typography.ui-font;
+                            font-size: Typography.size-ui;
+                            color: Colors.text-secondary;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                        op-ta := TouchArea {
+                            width: parent.width;
+                            height: parent.height;
+                            mouse-cursor: MouseCursor.pointer;
+                            clicked => {
+                                UIState.db-filter-op-menu(root.block, index);
+                            }
+                        }
+                    }
+                    // ¬: a `not` around the clause — 非, at clause level
+                    Rectangle {
+                        width: 26px;
+                        height: parent.height;
+                        border-radius: Theme.radius-sm;
+                        background: row.invert ? Colors.accent-soft
+                            : not-ta.has-hover ? Colors.surface-hover : Colors.background;
+                        Text {
+                            text: "¬";
+                            font-family: Typography.ui-font;
+                            font-size: Typography.size-ui;
+                            color: row.invert ? Colors.accent-text : Colors.text-muted;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        not-ta := TouchArea {
+                            width: parent.width;
+                            height: parent.height;
+                            mouse-cursor: MouseCursor.pointer;
+                            clicked => {
+                                UIState.db-filter-not-toggled(root.block, index);
+                            }
+                        }
+                    }
+                    Rectangle {
+                        width: 26px;
+                        height: parent.height;
+                        border-radius: Theme.radius-sm;
+                        background: del-ta.has-hover ? Colors.danger : Colors.background;
+                        opacity: del-ta.has-hover ? 1.0 : 0.6;
+                        Text {
+                            text: "✕";
+                            font-family: Typography.ui-font;
+                            font-size: Typography.size-ui;
+                            color: del-ta.has-hover ? Colors.background : Colors.text-muted;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        del-ta := TouchArea {
+                            width: parent.width;
+                            height: parent.height;
+                            mouse-cursor: MouseCursor.pointer;
+                            clicked => {
+                                UIState.db-filter-row-removed(root.block, index);
+                            }
+                        }
+                    }
+                }
+
+                // ── the value, per kind (the same legend DatabaseCell uses:
+                //    7 checkbox · 3 select · 5 status · 4 multi-select · 11
+                //    files; an is-(not)-empty comparison needs no value) ────
+                if row.kind == 7 : Rectangle {
+                    x: 8px;
+                    y: 38px;
+                    width: 132px;
+                    height: 28px;
+                    border-radius: Theme.radius-sm;
+                    background: flag-ta.has-hover ? Colors.surface-hover : Colors.background;
+                    Text {
+                        x: 8px;
+                        width: parent.width - 16px;
+                        height: parent.height;
+                        text: row.has-value ? (row.value == "checked" ? "Checked" : "Unchecked") : "pick…";
+                        font-family: Typography.ui-font;
+                        font-size: Typography.size-ui;
+                        color: row.has-value ? Colors.text-primary : Colors.text-muted;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    flag-ta := TouchArea {
+                        width: parent.width;
+                        height: parent.height;
+                        mouse-cursor: MouseCursor.pointer;
+                        clicked => {
+                            // the inverse of what the row shows; an unfilled
+                            // rule picks "checked" first
+                            UIState.db-filter-flag-set(root.block, index, row.value != "checked");
+                        }
+                    }
+                }
+                if row.kind == 3 || row.kind == 5 || row.kind == 4 || row.kind == 11 : Rectangle {
+                    x: 8px;
+                    y: 38px;
+                    width: 180px;
+                    height: 28px;
+                    border-radius: Theme.radius-sm;
+                    background: pick-ta.has-hover ? Colors.surface-hover : Colors.background;
+                    Text {
+                        x: 8px;
+                        width: parent.width - 16px;
+                        height: parent.height;
+                        text: row.has-value ? row.value : "pick…";
+                        font-family: Typography.ui-font;
+                        font-size: Typography.size-ui;
+                        color: row.has-value ? Colors.text-primary : Colors.text-muted;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    pick-ta := TouchArea {
+                        width: parent.width;
+                        height: parent.height;
+                        mouse-cursor: MouseCursor.pointer;
+                        clicked => {
+                            UIState.db-filter-option-menu(root.block, index);
+                        }
+                    }
+                }
+                if (row.kind != 3 && row.kind != 5 && row.kind != 4 && row.kind != 11 && row.kind != 7)
+                    && row.op >= 8 : Text {
+                    x: 8px;
+                    y: 38px;
+                    height: 28px;
+                    text: "no value needed";
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-ui;
+                    color: Colors.text-muted;
+                    vertical-alignment: center;
+                }
+                if (row.kind != 3 && row.kind != 5 && row.kind != 4 && row.kind != 11 && row.kind != 7)
+                    && row.op < 8 : TextInput {
+                    x: 8px;
+                    y: 38px;
+                    width: parent.width - 16px;
+                    height: 28px;
+                    text: row.value;
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-ui;
+                    color: Colors.text-primary;
+                    vertical-alignment: center;
+                    // Enter commits: one rules write, one undo step. A value
+                    // the kind refuses (not a number, not a stored date) is
+                    // rejected in Rust and nothing is written — the text stays
+                    // for the user to fix.
+                    accepted => {
+                        UIState.db-filter-text-set(root.block, index, self.text);
+                    }
+                }
+            }
+
+            // the footer: add a rule (column chooser), clear them all
+            HorizontalLayout {
+                x: 8px;
+                y: parent.height - 34px;
+                width: parent.width - 16px;
+                height: 28px;
+                spacing: Theme.spacing-sm;
+                Rectangle {
+                    width: 108px;
+                    height: parent.height;
+                    border-radius: Theme.radius-sm;
+                    background: add-ta.has-hover ? Colors.surface-hover : transparent;
+                    Text {
+                        text: "+ Add a rule";
+                        font-family: Typography.ui-font;
+                        font-size: Typography.size-ui;
+                        color: Colors.text-secondary;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    add-ta := TouchArea {
+                        width: parent.width;
+                        height: parent.height;
+                        mouse-cursor: MouseCursor.pointer;
+                        clicked => {
+                            UIState.db-filter-add-rule(root.block);
+                        }
+                    }
+                }
+                Rectangle {
+                    width: 84px;
+                    height: parent.height;
+                    border-radius: Theme.radius-sm;
+                    background: clear-ta.has-hover ? Colors.surface-hover : transparent;
+                    Text {
+                        text: "Clear all";
+                        font-family: Typography.ui-font;
+                        font-size: Typography.size-ui;
+                        color: Colors.text-secondary;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    clear-ta := TouchArea {
+                        width: parent.width;
+                        height: parent.height;
+                        mouse-cursor: MouseCursor.pointer;
+                        clicked => {
+                            UIState.db-filter-cleared(root.block);
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── states 1–3: the three choosers, one list shape ──────────────────
+        if UIState.db-filter-panel != 0 : Rectangle {
+            width: parent.width;
+            height: parent.height;
+            background: transparent;
+
+            // back: home to the rules without closing the panel
+            Rectangle {
+                x: 4px;
+                y: 4px;
+                width: parent.width - 8px;
+                height: 28px;
+                border-radius: Theme.radius-sm;
+                background: back-ta.has-hover ? Colors.surface-hover : transparent;
+                Text {
+                    x: 8px;
+                    height: parent.height;
+                    text: UIState.db-filter-panel == 1 ? "‹ Choose a column"
+                        : UIState.db-filter-panel == 2 ? "‹ Choose a comparison"
+                        : "‹ Choose a value";
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-ui;
+                    color: Colors.text-secondary;
+                    vertical-alignment: center;
+                }
+                back-ta := TouchArea {
+                    width: parent.width;
+                    height: parent.height;
+                    mouse-cursor: MouseCursor.pointer;
+                    clicked => {
+                        UIState.db-filter-panel-set(0);
+                    }
+                }
+            }
+
+            // state 1: every property of the database — pick one to append an
+            // unfilled clause for it
+            if UIState.db-filter-panel == 1 : VerticalLayout {
+                x: 4px;
+                y: 34px;
+                width: parent.width - 8px;
+                height: parent.height - 42px;
+                spacing: 0px;
+                for item in UIState.db-filter-columns : Rectangle {
+                    height: 30px;
+                    border-radius: Theme.radius-sm;
+                    background: col-ta.has-hover ? Colors.surface-hover : transparent;
+                    HorizontalLayout {
+                        x: 8px;
+                        width: parent.width - 16px;
+                        spacing: Theme.spacing-sm;
+                        Text {
+                            text: item.name;
+                            font-family: Typography.ui-font;
+                            font-size: Typography.size-ui;
+                            color: col-ta.has-hover ? Colors.text-primary : Colors.text-secondary;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: item.kind;
+                            font-family: Typography.ui-font;
+                            font-size: Typography.size-caption;
+                            color: Colors.text-muted;
+                            vertical-alignment: center;
+                        }
+                    }
+                    col-ta := TouchArea {
+                        width: parent.width;
+                        height: parent.height;
+                        mouse-cursor: MouseCursor.pointer;
+                        clicked => {
+                            UIState.db-filter-column-picked(root.block, item.property);
+                        }
+                    }
+                }
+            }
+
+            // state 2: the comparisons the clause's kind has — the same list
+            // the parser accepts, so nothing here can be refused later
+            if UIState.db-filter-panel == 2 : VerticalLayout {
+                x: 4px;
+                y: 34px;
+                width: parent.width - 8px;
+                height: parent.height - 42px;
+                spacing: 0px;
+                for item in UIState.db-filter-ops : Rectangle {
+                    height: 30px;
+                    border-radius: Theme.radius-sm;
+                    background: op-pick-ta.has-hover ? Colors.surface-hover : transparent;
+                    Text {
+                        x: 8px;
+                        height: parent.height;
+                        text: item.name;
+                        font-family: Typography.ui-font;
+                        font-size: Typography.size-ui;
+                        color: op-pick-ta.has-hover ? Colors.text-primary : Colors.text-secondary;
+                        vertical-alignment: center;
+                    }
+                    op-pick-ta := TouchArea {
+                        width: parent.width;
+                        height: parent.height;
+                        mouse-cursor: MouseCursor.pointer;
+                        clicked => {
+                            UIState.db-filter-op-picked(root.block, UIState.db-filter-edit-row, item.op);
+                        }
+                    }
+                }
+            }
+
+            // state 3: a pick column's options (is: choose one) or a list
+            // column's (has any of: the pick toggles membership)
+            if UIState.db-filter-panel == 3 : VerticalLayout {
+                x: 4px;
+                y: 34px;
+                width: parent.width - 8px;
+                height: parent.height - 42px;
+                spacing: 0px;
+                for item in UIState.db-filter-options : Rectangle {
+                    height: 30px;
+                    border-radius: Theme.radius-sm;
+                    background: opt-ta.has-hover ? Colors.surface-hover : transparent;
+                    HorizontalLayout {
+                        x: 8px;
+                        width: parent.width - 16px;
+                        spacing: Theme.spacing-sm;
+                        Text {
+                            text: item.name;
+                            font-family: Typography.ui-font;
+                            font-size: Typography.size-ui;
+                            color: opt-ta.has-hover ? Colors.text-primary : Colors.text-secondary;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            overflow: elide;
+                        }
+                    }
+                    opt-ta := TouchArea {
+                        width: parent.width;
+                        height: parent.height;
+                        mouse-cursor: MouseCursor.pointer;
+                        clicked => {
+                            UIState.db-filter-option-picked(root.block, UIState.db-filter-edit-row, item.id);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,175 @@
+// The backlink panel at the foot of a page (SPEC §四十, ADR-0051).
+//
+// It is a `for` and not a `ListView`, on purpose. A page has exactly one
+// panel, and the rows it draws are already bounded by `BACKLINK_WINDOW` — the
+// folded shape is five rows whatever the page is quoted, which is the whole
+// point of folding it. A nested virtual list inside a document row would buy
+// nothing and cost a second scroll surface inside the first one.
+//
+// Nothing here decides *what* is a reference. The rows are handed over by the
+// projection, which asked `marks` and `blocks.page_ref`; this component only
+// draws them, which is why it holds no state beyond the hover of a row.
+
+import { Theme } from "../Theme.slint";
+import { Colors } from "../Colors.slint";
+import { Typography, PageType } from "../Typography.slint";
+import { Icon } from "../Icons.slint";
+import { UIState } from "../Types.slint";
+
+export component BacklinkPanel inherits Rectangle {
+    in property <length> content-x;
+    in property <length> content-width;
+    // The host's turn: only the page's *last* document row carries the panel,
+    // because that is the row the page's foot belongs to. The host is the only
+    // thing that knows which row that is, so it decides.
+    in property <bool> active: false;
+
+    // The panel is the height of what it draws, and draws nothing — no
+    // hairline, no header — when the page is not referenced. A page nobody
+    // links to must measure exactly as it did before this panel existed.
+    visible: active && (UIState.backlinks.length > 0 || UIState.backlink-total > 0);
+    height: root.visible ? col.preferred-height : 0px;
+
+    property <length> line-h: PageType.size-body * PageType.line-body + 4px;
+    property <length> title-h: Typography.size-caption * 1.6 + 2px;
+
+    col := VerticalLayout {
+        x: root.content-x;
+        y: 0px;
+        width: root.content-width;
+        // start, not stretch: the panel takes its own height and the leftover
+        // space belongs below it, not between the rows
+        alignment: start;
+        spacing: Theme.spacing-sm;
+
+        // Room above the rule, so the last block of the page keeps its
+        // distance from the appendix.
+        Rectangle { height: Theme.spacing-md; }
+
+        // A rule above the panel, so the appendix reads as an appendix and not
+        // as one more block of the page.
+        Rectangle {
+            height: 1px;
+            background: Colors.divider;
+        }
+
+        head := HorizontalLayout {
+            spacing: Theme.spacing-sm;
+            alignment: start;
+
+            Text {
+                text: "Linked from";
+                font-family: Typography.ui-font;
+                font-size: Typography.size-caption;
+                font-weight: Typography.weight-semibold;
+                color: Colors.text-secondary;
+                vertical-alignment: center;
+            }
+            Rectangle { horizontal-stretch: 1; }
+            Text {
+                // "1 reference" / "5 references" — built in Rust, because a
+                // plural is the one thing a format-free language cannot say
+                text: UIState.backlink-count-label;
+                font-family: Typography.ui-font;
+                font-size: Typography.size-caption;
+                color: Colors.text-muted;
+                vertical-alignment: center;
+            }
+        }
+
+        for row in UIState.backlinks : Rectangle {
+            // Two lines for the first row of a group (the page that holds the
+            // reference, then the reference itself) and one for the rest, so
+            // six quotes from one page read as one group rather than six
+            // headings.
+            height: (row.first-on-page ? root.title-h : 0px) + root.line-h;
+
+            row-ta := TouchArea {
+                clicked => {
+                    UIState.backlink-jump(row.block);
+                }
+            }
+            Rectangle {
+                border-radius: Theme.radius-xs;
+                background: row-ta.has-hover ? Colors.hover-fill : transparent;
+            }
+
+            if row.first-on-page : Text {
+                x: 0px;
+                y: 0px;
+                width: parent.width;
+                height: root.title-h;
+                text: row.title;
+                font-family: Typography.ui-font;
+                font-size: Typography.size-caption;
+                font-weight: Typography.weight-semibold;
+                color: Colors.text-secondary;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+
+            // The source block's own text: quoted, never re-read, so what the
+            // panel shows is the block and not a summary of it.
+            quote := HorizontalLayout {
+                x: 0px;
+                y: row.first-on-page ? root.title-h : 0px;
+                width: parent.width;
+                height: root.line-h;
+                spacing: Theme.spacing-xs;
+
+                Icon {
+                    width: 14px;
+                    height: 14px;
+                    size: 14px;
+                    // A block that *is* a page reference (ADR-0026) is marked,
+                    // because "this page names that page" and "this page
+                    // mentions that page" are both references and only one of
+                    // them reads as prose.
+                    name: row.block-level ? "link" : "page";
+                    color: Colors.text-muted;
+                    // a horizontal layout's cross axis is vertical, and the
+                    // icon is 14 px against a line box twice that
+                    cross-axis-self-alignment: center;
+                }
+                Text {
+                    text: row.text != ""
+                        ? row.text
+                        : (row.block-level ? "is a link to this page" : "(empty block)");
+                    font-family: PageType.font-family;
+                    font-size: PageType.size-body;
+                    color: row.text != "" ? Colors.text-primary : Colors.text-muted;
+                    vertical-alignment: center;
+                    // one line, elided: a long paragraph quoted in full is the
+                    // page again, not a reference to it
+                    overflow: elide;
+                }
+            }
+        }
+
+        // The folded line. It is the panel's answer to "how big is this
+        // really" — the rows above are a window, and this is what it is not
+        // drawing (or the way back once it is).
+        if UIState.backlink-fold-label != "" : Rectangle {
+            height: root.line-h;
+            fold-ta := TouchArea {
+                clicked => {
+                    UIState.backlink-toggle();
+                }
+            }
+            Rectangle {
+                border-radius: Theme.radius-xs;
+                background: fold-ta.has-hover ? Colors.hover-fill : transparent;
+            }
+            Text {
+                x: Theme.spacing-sm;
+                width: parent.width - 2 * Theme.spacing-sm;
+                text: UIState.backlink-fold-label;
+                font-family: Typography.ui-font;
+                font-size: Typography.size-caption;
+                color: Colors.accent-text;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+    }
+}

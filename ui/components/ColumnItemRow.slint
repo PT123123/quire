@@ -331,10 +331,16 @@ export component ColumnItemRow inherits Rectangle {
             alignment: start;
             spacing: 0px;
             for run in item.runs : Rectangle {
-                min-width: run-text.preferred-width;
+                // SPEC §四十: a mention / date particle, as in EditorBlock —
+                // the chip has to look the same in all three run delegates
+                property <bool> particle: run.mention >= 0 || run.date;
+                property <length> particle-glyph: particle ? 12px : 0px;
+                property <length> particle-pad: particle ? 4px : 0px;
+                min-width: run-text.preferred-width + particle-glyph + (particle ? 6px : 0px);
                 height: run-text.preferred-height;
                 vertical-stretch: 0;
                 horizontal-stretch: 0;
+                property <bool> follows: run.link || (run.mention >= 0 && !run.mention-deleted);
                 if run.code : Rectangle {
                     border-radius: Theme.radius-xs;
                     background: Colors.code-background;
@@ -348,8 +354,22 @@ export component ColumnItemRow inherits Rectangle {
                     border-width: 1px;
                     border-color: Colors.find-hit-border;
                 }
+                if particle : Rectangle {
+                    border-radius: Theme.radius-xs;
+                    background: run.mention-deleted ? Colors.code-background
+                        : (run.date ? Colors.code-background : Colors.accent-soft);
+                }
+                if particle : Icon {
+                    x: particle-pad;
+                    y: (parent.height - particle-glyph) / 2;
+                    name: run.date ? "clock" : "page";
+                    size: particle-glyph;
+                    color: run.mention-deleted ? Colors.text-muted
+                        : (run.date ? Colors.text-muted : Colors.accent-text);
+                }
                 run-text := Text {
-                    x: 0; y: 0;
+                    x: particle ? particle-pad + particle-glyph + 2px : 0px;
+                    y: 0;
                     wrap: no-wrap;
                     text: run.text;
                     font-family: run.code ? Typography.mono-font
@@ -358,7 +378,11 @@ export component ColumnItemRow inherits Rectangle {
                     font-weight: run.bold ? Typography.weight-bold
                         : (root.is-heading ? Typography.weight-semibold
                             : Typography.weight-regular);
-                    color: run.link ? Colors.accent-text : root.text-color;
+                    color: run.link ? Colors.accent-text
+                        : run.mention-deleted ? Colors.text-muted
+                        : run.date ? Colors.text-secondary
+                        : run.mention >= 0 ? Colors.accent-text
+                        : root.text-color;
                     line-height-factor: root.line-factor;
                 }
                 if run.strike : Rectangle {
@@ -373,7 +397,7 @@ export component ColumnItemRow inherits Rectangle {
                     height: 1px;
                     background: Colors.accent-text;
                 }
-                if run.link : TouchArea {
+                if follows : TouchArea {
                     mouse-cursor: MouseCursor.pointer;
                     clicked => {
                         UIState.open-link(run.url);

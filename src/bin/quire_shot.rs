@@ -160,7 +160,29 @@ fn run() -> Result<(), String> {
     ui.window().set_size(PhysicalSize::new(w, h));
 
     let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0, pictures: 0, marks: 0, code: 0 };
-    let state = AppState::new(&args, None);
+    // The backlink scenes read `marks` and `blocks.page_ref` out of a database,
+    // because the panel *is* a query rather than a fixture — so those scenes
+    // get a library and every other scene keeps the repo-less setup it has
+    // always had. An empty in-memory library still falls back to the demo
+    // session (`AppState::new` keeps the mock pages when nothing was
+    // persisted), so the scenes around the panel are the same ones as before:
+    // switching this on is meant to change the pixels of exactly the new
+    // scenes, and a sweep with a baseline says whether it did.
+    // SPEC §三十九: the database scenes join them for the same reason — the
+    // table draws *records*, and records live in SQL (ADR-0067); a repo-less
+    // session has none, so `database-table` would photograph an empty grid.
+    let needs_db = scene
+        .as_deref()
+        .map(|s| s.contains("backlinks") || s.contains("database"))
+        .unwrap_or(false);
+    let repo = if needs_db {
+        Some(std::sync::Arc::new(
+            quire::storage::SqliteRepository::in_memory().map_err(|e| e.to_string())?,
+        ))
+    } else {
+        None
+    };
+    let state = AppState::new(&args, repo);
     controller::bind(&ui, &state);
     controller::wire(&ui, &state);
     // `renderer_name()` is a compile-time guess about which renderer *feature*

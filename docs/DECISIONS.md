@@ -2478,3 +2478,1836 @@ rusqlite with the bundled SQLite (M3 — persistence has no std answer), rfd
 embed-resource as a *build* dependency only (M8 installer — it runs rc.exe and
 adds nothing to the binary). Anything else waits for a milestone that cannot be
 built without it.
+
+---
+
+## ADR-0050 · mention 与 date 存储形态 & Markdown 往返语法
+
+**状态**：已决定
+**日期**：2026-09-23
+**驱动**：SPEC §四十 M13（引用、提及与反向链接）
+
+---
+
+### 上下文
+
+SPEC §四十 要求在正文中支持两类新的原子标记：
+1. **@page mention**：引用某一页面，渲染为 chip，存储引用的目标 page_id
+2. **@date**：内联日期，渲染为 chip，存储 ISO 日期字符串
+
+现有 `marks` 表结构：
+
+```sql
+CREATE TABLE marks (
+  block  TEXT NOT NULL,
+  start  INTEGER NOT NULL,
+  end    INTEGER NOT NULL,
+  kind   TEXT NOT NULL,
+  url    TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (block, start, kind)
+);
+```
+
+`MarkKind` 现有六种：`Bold | Italic | Strike | Code | Link | Math`。
+`Mark` 结构体字段：`start: u32, end: u32, kind: MarkKind, url: String`。
+
+---
+
+### 决策一：存储形态
+
+**复用 `marks.url` 列，不新增列，不改主键。**
+
+- mention：写入 `url = "quire://page/<page_id>"`
+- date：写入 `url = ""`（空），日期内容存入 `Mark.date: Option<String>`
+
+理由：
+- ADR-0026 已约定 block 级引用存 `blocks.page_ref = "quire://page/<id>"`；inline mention 共用同一 URI 格式是自然的延伸。
+- 主键 `(block, start, kind)` 不变。mention 与 link 在同一位置可以共存——两者 `kind` 不同，PK 允许共存，无需迁移。
+- `MarkKind` 枚举末尾追加 `Mention` 和 `Date` 两个-variant，对应字符串标识符 `"mention"` 和 `"date"`。
+- `Mark` 结构体末尾追加 `date: Option<String>` 字段（`""` 或 null 等价，SQL 层用 NULL 表示 None）。
+
+**存储映射**：
+
+| kind | `url` 字段 | `date` 字段 |
+|------|-----------|-------------|
+| `mention` | `"quire://page/<id>"` | NULL |
+| `date` | `""` | `"2026-09-22"` |
+
+---
+
+### 决策二：Markdown 往返语法
+
+**Mention**：`@[Page Title](quire://page/<id>)`
+- 导出（Rust → Markdown）：输出 `@[Title](quire://page/<id>)`，其中 Title 从 `blocks.title` 或内存中的 page title cache 读取
+- 导入（Markdown → Rust）：正则 `` `@\[\]\((quire://page/[^)]+)\)` `` → 解析出 page_id，构造 `Mark { kind: Mention, url: "quire://page/<id>", date: None }`
+- 渲染：chip 显示 Title，点击导航到目标页
+
+**Date**：`@[2026-09-22]`
+- 导出：输出 `@[YYYY-MM-DD]`
+- 导入：正则 `` `@\[(\d{4}-\d{2}-\d{2})\]` `` → 构造 `Mark { kind: Date, url: "", date: Some("2026-09-22") }`
+- 渲染：chip 显示格式化日期
+
+**共存约束**：同一 `(block, start)` 可同时存在 kind=`mention` 和 kind=`link`（PK 允许）；它们在 Slint 端通过两个独立的 cell/callback 渲染，互不干扰。
+
+---
+
+### 影响
+
+- **DB 迁移**：`MarkKind` 的两个新值**不需要迁移**——`marks.kind` 自 v3 起就是 TEXT，
+  存的是 kind 字符串本身。真正需要迁移的是反向链接的**索引**，那是 ADR-0051 / migration 16。
+- **Rust 类型**：`MarkKind` 末尾加 `Mention, Date`；`Mark` 加 `date: Option<String>`。
+- **repository.rs**：`load_marks` / `store_marks` 需解析新的 kind 值；`import_markdown_run` 需识别两个 regex；`export_markdown_run` 需输出 `@[...]` 格式。
+- **ADR-0051（反向链接索引）**依赖本 ADR：反向链接查询走 `marks` 表的
+  `kind='mention' AND url='quire://page/<id>'`（精确匹配，不是 `LIKE`）加另一条
+  `blocks.page_ref`，两条都靠 migration 16 的索引做 seek，不额外存储、不建派生表。
+
+---
+
+### 未验证边界
+
+- mention chip 的 Title 在离线场景下（目标页已被删除）应显示什么兜底？（待 T2.4 dangling ref 处理）
+- date chip 的显示格式是否需要 locale-aware？（当前约定 ISO 纯展示，待 UI 验证）
+- `@[Title](url)` 中的 Title 与存储的 page_id 是否做一致性校验？（导入时不做，写入时只存 id）
+
+---
+
+## ADR-0051 · 反向链接不做索引表：两条索引 + 每次投影现算
+
+**状态**：已决定（**取代本 ADR 早先的 FTS5 token 草案**）
+**日期**：2026-09-22
+**驱动**：SPEC §四十（反向链接面板）+ SPEC §二十（搜索类索引不许全库扫）+ SPEC §二十二（页面打开 <50 ms）
+
+---
+
+### 上下文
+
+§四十 要求页面底部列出"所有引用本页的块"。这份面板**每次投影一个页面都要算一遍**
+（和 §三十八 的 TOC 一样），所以它站在交互路径上，不是后台任务。
+
+引用在库里**已经存了恰好一次**，而且存的是两处：
+
+| 形态 | 存在哪 | 由哪条 ADR 定 |
+|---|---|---|
+| `@page mention`（正文里的一颗 chip） | `marks.url = "quire://page/<id>"`，`kind='mention'` | ADR-0050 |
+| 块级引用（`Page` / `Link to page` 这类"这一块就是引用"） | `blocks.page_ref = <id>` | ADR-0026 |
+
+`marks` 表自 migration v3 起只有一列载荷 `url`，主键 `(block, start, kind)`。
+
+---
+
+### 决策
+
+**不加表、不加列、不挂 FTS5：加两条索引，每次投影时直接查这两处。**
+
+migration 16（`src/storage/migrations.rs`）：
+
+```sql
+CREATE INDEX IF NOT EXISTS idx_marks_reference ON marks(kind, url);
+CREATE INDEX IF NOT EXISTS idx_blocks_page_ref ON blocks(page_ref);
+```
+
+查询在 `src/storage/backlinks.rs`，一次 UNION 拿两路来源：
+
+```sql
+SELECT b.id, b.page, b.text, 0 AS block_level
+  FROM marks m JOIN blocks b ON b.id = m.block
+ WHERE m.kind = 'mention' AND m.url = ?1
+UNION
+SELECT b.id, b.page, b.text, 1
+  FROM blocks b
+ WHERE b.page_ref = ?2
+ ORDER BY 2, 1
+```
+
+`refresh_backlinks()`（`src/app/state.rs`）每次投影做两次读：先 `count(*)`，**只在计数非零时**
+再取一个窗口（折叠 5 行 / 展开 50 行）。
+
+---
+
+### 为什么不是"派生表/派生列"
+
+这是本 ADR 唯一值得写下来的地方：**反链表是「一份只写一次就没有第二份可漂移」的数据**。
+
+- 引用已经存在两处真实事实里（`marks.url`、`blocks.page_ref`），而这两处正是**编辑器已经
+  在渲染的东西**。再存一份反链，就等于把同一句话抄第二遍，然后需要一条写入路径去维护它、
+  一个 rebuild 步骤去补救它、一次 sweep 去证明它没漂。
+- 索引不是这样：B-tree 由 SQLite 从**已经在磁盘上的行**建出来，没有写入路径、没有 rebuild、
+  没有"忘了同步"的状态。项目里唯一一类从不需要 sweep 的派生数据就是这个形状。
+- 反过来，FTS5 token 方案（本 ADR 的早期草案）恰好踩在这条线上：它要在 `search_blocks.content`
+  里塞 `__backlink:<id>` token，于是**删一条 mention 就得把旧 token 从 content 里摘掉**，
+  否则面板显示幽灵引用；摘的时候又会把用户正文一起重写。草案自己把这一条记成了 bug 待修——
+  那不是待修，那是这条路本身就有的形状：多一份派生数据，就多一条必须维护它的写入路径。
+
+### 为什么不是"每次打开页时扫 `marks`"
+
+这是 §二十 明令禁止的那一条，本 ADR 把它量了出来（`docs/PERFORMANCE.md` "T2 · the backlink
+panel is one index seek"）：1 200 页 / 100 200 条 mark 的库里，同一个折叠读
+**有索引 78 µs、去掉索引 6 068 µs**（78×）。控制臂就是同一进程里把 `idx_marks_reference`
+drop 掉再跑同一条查询——不是发布配置，是这句"不许全库扫"到底在说什么。
+
+`(kind, url)` 的顺序不是随手写的：谓词正好是这两列，而**只用最左列 `kind` 不够**——
+那还是要把同 kind 的每一行扫一遍，而一个一万个加粗 span 的页面一条 mention 都没有。
+
+---
+
+### 后果
+
+- **面板是投影，不是数据。** 它和目录（ADR-0039）同一条规则：每次投影现算，不入库，
+  所以**不可能过期**——没有副本可以过期。
+- **改名自然跟随。** 引用存 id（ADR-0050），行上的页面名是投影时向 workspace 问的，
+  所以改一个页面的名字，chip、面板分组标题、Markdown 导出同时变，且**没有任何一处被重写**。
+  代价的另一面也在这里：目标页被删时不会有谁去改引用，所以**退化必须是投影层自己的职责**——
+  `delete_page` 因此在删掉非当前页之后补一次 `reproject_blocks()`（T2 修的一个真 bug：
+  此前 chip 会一直显示旧标题）。
+- **成本落在打开页面上，且是可加的。** 实测：没有反链的页 +0（只做一次 `count(*)`），
+  200 条反链的页 **+0.06 ms**（折叠）/ **+0.07 ms**（展开），对 §二十二 的 50 ms 预算。
+- **展开的窗口也是窗口。** 折叠 5 行、展开 50 行，超过 50 条时面板给的是"总量"而不是全列表——
+  一句被引 200 次的话是**一个数字**，不是页面底部放得下的列表。它折叠回去而不是假装展开了全部。
+- **未验证边界**：① 面板的窗口没有虚拟化（它是一个文档行里的 `for`），所以 50 是硬上限，
+  没有量过 1000 条展开会怎样——因为那条路不存在；② 打开页面的两个读数取自**单块页面**，
+  因此只隔离了面板本身，对"大页面的投影成本"没有发言权（那个数字归 ADR-0039）；
+  ③ `count(*)` 是不带筛选的单页计数，带筛选的引用查询没有实现也没有量。
+
+## ADR-0060 · A database is its own entity behind a block, and the six view layouts are one kind
+
+Decision: SPEC §三十九's `database` is a **new entity**, not a page flag and
+not a block payload: one row in `databases(id INTEGER PRIMARY KEY, name TEXT NOT
+NULL DEFAULT '')`, reached from a page through one **new block kind**,
+`BlockKind::Database` (`as_str` = `"database"`), pointing at it through a new
+nullable `blocks.db_ref INTEGER` — the shape ADR-0026 gave `blocks.page_ref`,
+and for the same reason. A "full-page database" is not a second entity: it is an
+ordinary page whose first block is a `Database` block, so there is one schema,
+one storage path and one set of lifecycle rules, and a page that holds a
+database is still a page with prose above and below it. SPEC's
+`table → board → list → calendar → gallery → timeline → form → chart` — and the
+six muted `INSERT_ITEMS` rows in `state.rs` (`Table view`, `Board`, `Gallery`,
+`List view`, `Calendar`, `Timeline`, all `id = -1`) — are **layouts of that one
+entity** (`db_views.layout`), not six or eight block kinds: choosing one creates
+a `Database` block whose first view has that layout, which is what lets the
+placeholders be lit one phase at a time (D5) without a new kind each time, and
+what makes `linked database` (D7) a pointer at an existing view rather than a
+ninth kind.
+
+Why not a page: `pages` has no schema, and a boolean "this page is a database"
+would have to be re-read by every path that lists pages (§十七's tree,
+Favorites, Recents, the search index, the sidebar's drag) while still needing
+the property and value tables anyway. It also cannot express D7's "show another
+database's view here", because a page can only ever be itself. Why not a payload
+column on the block: that is ADR-0031's rejected alternative again — a payload
+stops a row from being a page and a cell from carrying inline marks or its own
+undo granularity, and §三十九 says outright that a record may *be* a page, so the
+row has to keep the identity a page has (`pages.id` — the thing §四十's `@page
+mention` points at).
+
+Consequences:
+
+* This ADR fixes the shape; D0 ships **no** kind. Schema stays at v11 through
+  D0, so the six wiring points §三十七 lists (types, kind string, Markdown,
+  Turn into, slash/insert menu, screenshot scenes) land in one phase together
+  with the delegate that draws a view. That is also why the D0 sweep is
+  byte-identical: no menu moved because no kind exists yet.
+* The block is a **leaf**, unlike `table` and `columns`: it owns no child blocks
+  (its rows are records, its cells are values), so the projection has nothing to
+  hide and no row-index consumer has to translate. What it does own is the
+  `databases` row: deleting the block deletes the entity the way deleting a
+  `Page` block deletes its child page, and a dangling `db_ref` (the entity gone,
+  the block back through an undo) renders one muted, non-editable line —
+  "(deleted database)" — exactly as a dangling `page_ref` does.
+* The window is what makes a 10 000-row database safe inside one page, and D0
+  proved the channel exists before any of it was drawn: `core::database::window`
+  realizes **31 rows of 10 000** at the top of a 720 px viewport with 32 px rows
+  (39 mid-scroll, 31 at the bottom), and the realized rows cost **6 806 B** of
+  heap against **2 259 800 B** for the table's own row objects
+  (`benchmarks/results/2026-09-22-track3-probe.jsonl`).
+* Still unverified: nothing draws a view yet, so that number is the projection's
+  and not a frame's; `row_height` 32 px and `overscan` 8 are this slice's
+  assumptions and D3 re-measures both; and until D5 the six `INSERT_ITEMS`
+  placeholders keep promising views that do not exist, which is a visible
+  promise the menu is still not keeping.
+
+## ADR-0061 · The schema is rows (`db_properties`), and only a column's options are JSON
+
+Decision: a database's columns are rows, not a JSON column on `databases`:
+
+```sql
+CREATE TABLE db_properties (
+    id     INTEGER PRIMARY KEY,
+    db     INTEGER NOT NULL REFERENCES databases(id) ON DELETE CASCADE,
+    name   TEXT NOT NULL,
+    kind   TEXT NOT NULL,             -- the property type, a short stable string
+    config TEXT NOT NULL DEFAULT '',  -- that type's own settings, JSON
+    ord    INTEGER NOT NULL,
+    UNIQUE (db, name)
+);
+```
+
+`kind` is a string in the same spirit as `blocks.kind` and `blocks.lang`, but
+with the failure **folded rather than fatal**: an unknown kind loads as `text`
+(the rule ADR-0044 sets with `PageFont::try_from_str`), because a library
+written by a build that knows `relation` must still open in one that does not,
+and the cell draws as text. `config` is JSON *inside the row* and holds exactly
+what SQL never filters on: a select/status option list
+(`{"options":[{"id":7,"name":"Done","color":"green"}]}`), a number's format, a
+date's format, a rollup's target. Options carry their own **ids**, so renaming
+an option is one JSON edit that touches no value — the "store the id, not the
+label" rule ADR-0026 already uses for page references.
+
+Why rows for the schema and not one `databases.props_json` blob: the filter and
+sort compiler emits SQL that names a property *by number*
+(`db_values.property = 7`), so a JSON schema forces every read path through
+`json_extract` to learn an id, a kind and a name — awkward but survivable. What
+is not survivable is the invariant: `UNIQUE (db, name)` is what makes "rename a
+column" well defined, and no JSON blob can enforce it, so a rename racing
+against itself would leave two columns called `Status` that only Rust can
+detect. What rows cost is ordering (`ord` is an app invariant like
+`block_children.ord`, not a constraint) — accepted, because moving a column is
+one UPDATE.
+
+Consequences:
+
+* Every database is created with its `title` property (`kind = 'title'`,
+  `ord = 0`) and one view (`layout = 'table'`) in the same batch as the
+  `databases` row: a database with no title property or no view cannot be drawn,
+  so no path may create one.
+* A property's values are reached through the `property` FK and die with it
+  (`ON DELETE CASCADE` in ADR-0062's tables) — the one cascade this design
+  wants, because the schema is the parent of its values.
+* `person` degrades to `text` (SPEC's 降级处理: with no account model, a local
+  name list would need its own table, its own picker and its own merge rules for
+  zero extra data), and `formula` / `rollup` / `relation` are kinds whose value
+  is **not** stored (ADR-0062, ADR-0039).
+* Still unverified: deleting a property cannot clean the view documents that
+  name it (no foreign key reaches inside ADR-0064's JSON), so the compiler has to
+  ignore unknown ids and D4 pins that with a test; and "exactly one `title` per
+  database" is an app invariant of the insert path, not a constraint, so a
+  repair could break it without SQL noticing.
+
+## ADR-0062 · A value is one row per (record, property), typed by column
+
+Decision: values live in one table with the columns SQLite needs in order to
+compare them in its own type system, plus one child table for the types that
+hold a list:
+
+```sql
+CREATE TABLE db_values (
+    record   INTEGER NOT NULL REFERENCES db_records(id) ON DELETE CASCADE,
+    property INTEGER NOT NULL REFERENCES db_properties(id) ON DELETE CASCADE,
+    text     TEXT NOT NULL DEFAULT '',
+    num      REAL,
+    flag     INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (record, property)
+);
+
+CREATE TABLE db_value_items (
+    record   INTEGER NOT NULL REFERENCES db_records(id) ON DELETE CASCADE,
+    property INTEGER NOT NULL REFERENCES db_properties(id) ON DELETE CASCADE,
+    ord      INTEGER NOT NULL,
+    value    TEXT NOT NULL,
+    PRIMARY KEY (record, property, ord)
+);
+```
+
+`text` carries title / text / url / email / phone / select-option-id /
+status-option-id / date; `num` carries number; `flag` carries checkbox;
+`db_value_items` carries multi-select option ids and `files` attachment ids —
+ADR-0029/0030's store, so a column of files is the same bytes-beside-the-database
+channel and not a second one. A date is stored as its fixed-width ISO-8601 text
+(`YYYY-MM-DD` or `YYYY-MM-DDTHH:MM`, local wall time, no UTC conversion because
+this app has one clock and no accounts), which is why it needs no second column:
+the writer is the only producer of that exact form and the parser rejects
+anything else, so text order *is* time order.
+
+Why typed columns and not one TEXT column: §三十九 puts filter and sort in SQL,
+so the comparison has to happen in SQLite's own type system. One TEXT column
+makes `ORDER BY` lexicographic — `10` lands before `9` — and the fix,
+`CAST(text AS REAL)`, cannot use an index and silently sorts a malformed value
+as 0. `num REAL` is indexable, so a number property's sort is
+`ORDER BY v.num, r.ord` over the one LEFT JOIN the row query already has. Why one
+table and not one per type (`db_values_number`, `db_values_date`, …): a view
+reads every visible property of its window in one query, and per-type tables
+turn that into a join count that varies with the view's shape — string-built SQL
+with fourteen arms — while one row per (record, property) is one join per
+*sorted or filtered* property and the same row for everything else.
+
+Consequences:
+
+* `formula`, `rollup` and `relation` store **nothing**: they are computed at
+  projection time for the window only, which is where §三十九's 禁止每次输入全库
+  重算 will have to be demonstrated (D6, with the recomputed-row count as its
+  number). `created time` and `last edited time` are the two §三十九 types this
+  ADR does **not** place: `created time` needs one real column as its source
+  (nothing in `pages` or `db_records` records a creation instant today) and
+  `last edited time` needs a source only the write path can keep honest —
+  writing either into `db_values` would be the double write ADR-0039 forbids, so
+  D2 lands them with their own ADR and a measured story.
+* "Empty" and "not a number" are the same thing: the row is absent or
+  `num IS NULL`, never `0`. The sort's empty placement is emitted explicitly
+  (`ORDER BY v.num IS NULL, v.num`) because SQLite puts NULLs first and "the
+  blank rows floated to the top" is not what a user means by "sort by number";
+  D4 pins it with a test.
+* A multi-select filter is `EXISTS (SELECT 1 FROM db_value_items WHERE record =
+  r.id AND property = :p AND value = :option)` — an index probe on the PK's
+  prefix — and `files` gets the same `EXISTS` shape for "has an attachment",
+  which is why the list types are rows and not a JSON array hidden in `text`.
+* Still unverified: nothing here measures a 10 000-row × 5-property filter (D4's
+  number), and the one-row-per-(record, property) shape makes a cell write an
+  `INSERT OR REPLACE` whose row count D6 will read as its dependency edge.
+
+## ADR-0063 · A record owns its page, the title has one home, and both deletes are one undo step
+
+Decision:
+
+```sql
+CREATE TABLE db_records (
+    id   INTEGER PRIMARY KEY,
+    db   INTEGER NOT NULL REFERENCES databases(id) ON DELETE CASCADE,
+    page INTEGER REFERENCES pages(id) ON DELETE CASCADE,   -- NULL = a bare record
+    ord  INTEGER NOT NULL,
+    UNIQUE (page)
+);
+```
+
+* **Ownership, in ADR-0026's vocabulary.** A record *owns* its page the way a
+  `Page` block owns its child page; `UNIQUE (page)` makes the reverse true too —
+  a page is the face of at most one record, and two rows can never share one.
+  `linked database` (D7) is the *referencing* case, symmetrical to `Link` vs
+  `Page`.
+* **The title has exactly one home, decided by whether the record has a page.**
+  A page-backed record's title is `pages.title` and nothing else; a bare
+  record's title is the `db_values` row of its `title` property. The view's row
+  query already LEFT JOINs `pages` for the page-backed case, so the title column
+  reads `COALESCE(p.title, v.text)` and there is no second copy to go stale —
+  §三十九's record-is-a-page without ADR-0039's double write.
+* **A record is bare until something needs its page.** Creating a row creates no
+  page. The page arrives with `Open` (or "Turn into page"), as a child of the
+  page that holds the `Database` block, and that one command *moves* the title
+  from `db_values` into `pages.title` in the same batch. Its exact inverse,
+  "Turn into a plain record", moves the title back and clears the pointer, and
+  **leaves the page in the tree** — a page the user made is theirs to delete;
+  this operation is about the pointer.
+* **Delete the row** (the view's row menu): one `Command::DeleteRecord` whose
+  plan is `[DbValueDeleted…, DbRecordDeleted, PageDeleted?]` with the captured
+  rows as its inverse — the record, its values and, when it is page-backed, the
+  page it owns. **Delete the page** (the sidebar, or a parent page's recursive
+  subtree delete): `db_records.page`'s `ON DELETE CASCADE` is the SQL backstop,
+  so a row cannot outlive the page it is the face of even when the deletion
+  arrives from SQL rather than from the command layer. Both paths end in the same
+  state, and that is the property to test: *a database never holds a row whose
+  page is gone, and never loses a page while its row survives.*
+* Why "both go" rather than "the row survives as a bare record": the alternative
+  silently resurrects a row — in a view nobody is looking at, named after a page
+  the user deliberately deleted — and it has to write a title back on a delete
+  path, which is how a delete acquires a failure mode.
+
+Why the relationship is a pointer at all: §三十九's 「record 可以同时是一个 page，
+这是 Notion 的核心而不是装饰」. A row that can be a page has to keep a page's
+identity — `pages.id`, the thing §四十's mentions point at and the thing the tree
+draws — so a record can never be "the page's data"; the pointer is the only
+shape in which both exist without one being derived from the other.
+
+Consequences:
+
+* Undo is one step in both directions because a command plans `apply` and
+  `revert` together (`core::document::Entry`), so "delete the row and its page"
+  is one Ctrl+Z, and so is the convert-and-move-title pair. The one place
+  §三十九's 「删 record 与删页面的行为…都进 undo」 is **not** yet true is the
+  sidebar's own page delete: that path (`AppState::delete_page` →
+  `Change::PageDeleted`) is confirmed by a dialog and has never been on the undo
+  stack, so a row lost through it is lost. The cheapest fix is to route that
+  confirmation through a plan of the same shape; this ADR does not claim the gap
+  is closed.
+* Because a bare record's title lives in `db_values`, `title` is the one column
+  whose filter and sort compile differently per record (a `COALESCE` over a LEFT
+  JOIN). One query shape covers both, and D4 owes the test that sorting by title
+  interleaves bare and page-backed rows in a single order.
+* Lazy page creation is what keeps the tree honest: a 10 000-row database whose
+  rows nobody opened creates 0 pages, and each `Open` costs one page, one title
+  move and one undo step. It also means `db_records.page` is NULL for most rows,
+  so SQLite's tolerance of many NULLs under `UNIQUE (page)` is load-bearing
+  here, not incidental.
+* Still unverified: neither delete path has a test yet (they are D1's), and the
+  sidebar does not mark a page as a database's row, so nothing warns a user
+  before they delete a page that a database still points at it.
+
+## ADR-0064 · A view is a row with a name and a layout, and its rules are one JSON document
+
+Decision: `db_views` stores the parts SQL has to list and the rules in one
+document:
+
+```sql
+CREATE TABLE db_views (
+    id         INTEGER PRIMARY KEY,
+    db         INTEGER NOT NULL REFERENCES databases(id) ON DELETE CASCADE,
+    name       TEXT NOT NULL,
+    layout     TEXT NOT NULL DEFAULT 'table',
+    definition TEXT NOT NULL DEFAULT '',   -- filter + sorts + groups + visible columns
+    ord        INTEGER NOT NULL,
+    UNIQUE (db, name)
+);
+```
+
+`layout` is SPEC's eight-view list as a string (`table` / `board` / `list` /
+`calendar` / `gallery` / `timeline` / `form` / `chart`), with an unknown value
+folding to `table` the way `blocks.lang` folds an unknown fence to `Plain`.
+`definition` is one JSON document — `{"v":1,"filter":…,"sorts":[…],
+"groups":[…],"columns":[…],"widths":{…}}` — whose filter is a recursive node
+(`{"and":[…]}`, `{"or":[…]}`, `{"property":7,"op":"eq","value":…}`), because a
+filter is a tree and its nesting depth is not bounded by anything a user can see.
+
+Why the rules are JSON where ADR-0061's and ADR-0062's data is not — the same
+test, opposite answers: **what does SQL have to filter on?** Properties and
+values are filtered and sorted *by*, so they are rows with typed columns; a
+view's rules are only ever compiled *into* a query and never filtered on, so
+their shape should be whatever the compiler reads best. A filter tree in rows
+needs a parent-pointer table plus recursive assembly, and every query would
+reassemble the tree it had just been handed, for zero SQL benefit. The name and
+the layout stay columns because the view switcher lists them without parsing
+anything, and because a view's name has to be unique per database to be a
+switcher entry at all.
+
+Consequences:
+
+* Property references inside `definition` are ids (ADR-0061) and **the compiler
+  drops ids that no longer exist**: no foreign key reaches inside a JSON
+  document, so a view whose filter names a deleted property loses that clause
+  and shows more rows instead of failing to open. The same rule covers a sort and
+  the visible-column list, and D4 pins all three.
+* A document that does not parse — truncated, hand-edited — degrades to "no
+  rules", so the view opens showing everything: a database that cannot be opened
+  is worse than one that is not filtered. `"v":1` inside the document is what
+  lets a later build add a key without an older build reading it as corruption.
+* A compiled plan (the SQL text and its bind values, for one definition and one
+  property list) is **derived** and never stored (ADR-0039): it is rebuilt at
+  open and cached for the session. `linked database` (D7) stores `(db, view)`
+  and never a copy of the definition, so a linked view cannot drift from its
+  source.
+* Widths are a map keyed by property id rather than an array parallel to
+  `columns`, so deleting a column cannot leave a width pointing at the wrong
+  one; the cost is that an entry for a column no longer visible is dead weight
+  the panel has to clear.
+* Still unverified: nothing parses a definition yet, so forward compatibility is
+  a decision rather than a test; and where a *group* header's own row lands in
+  the window (it is not a record row) is D4's shape to fix, not this ADR's.
+
+## ADR-0065 · A database exports as the table it is showing, and imports as text
+
+Decision: the Markdown channel (§二十六) renders a `Database` block as a
+GitHub-flavoured table of the view it is **currently showing** — the title column
+first, then the visible properties in view order, one line per record in the
+order and membership the view shows, filters and sorts included, because the file
+should say what the user sees rather than what the table holds. Cells render by
+type: text / url / email / phone verbatim; number as the stored number without
+its display format; checkbox as `Yes` / `No`; select and status as the option's
+**name**; multi-select as names joined by `, `; date as its ISO text; files as
+`[name](quire://attachment/<id>)` (ADR-0030's link shape); person as the stored
+name; `relation` as the target records' titles; `formula` / `rollup` as their
+**computed** value, computed on the way out, which is legal precisely because it
+is never stored (ADR-0038/0039). A row whose record is page-backed writes its
+title as `[title](quire://page/<id>)` — ADR-0026's shape for a `Page` block — so
+the file keeps the only durable handle a reader has on that page, while a bare
+record's title stays plain text. The block writes **no marker line**, and the
+export does **not** recurse into record pages: a record's page is an ordinary
+page, exported when someone exports that page.
+
+Import is unchanged, and knowingly asymmetric: `parse_markdown` reads line at a
+time, so a pipe-separated line stays a paragraph — ADR-0031 pinned exactly that
+for the simple grid, with a test, for exactly this reason. A database therefore
+exports to a table that reads in any Markdown renderer and comes back as text:
+schema, property types, record identities and views do not survive the channel,
+and nothing pretends otherwise.
+
+Why a table and not a one-line marker like ADR-0039's `<!-- quire:toc -->`: a
+contents block has no other representation, because its body is derived from the
+page, so a marker is the only thing that could mean it. A database's rows are
+content, and the table is a real representation of them that a human and another
+tool can both use; a marker would be a second and weaker copy of the same fact,
+and one that names an id nothing can resolve on import is a dangling promise of
+the kind ADR-0026 renders as "(deleted page)" rather than as a feature.
+
+Consequences:
+
+* `export_page(blocks: &[Block]) -> String` cannot see records or values, and it
+  must not learn to (ADR-0044's boundary already recorded that the exporter never
+  receives a page object; handing it a repository would give the content channel
+  a second data path). The database's table therefore arrives as **pre-rendered
+  rows**: the caller that already reads the database passes the header and the
+  rows, and the exporter only lays them out — the same division
+  `attachment-size` and the math glyphs already use, where a renderer asks for a
+  value and never fetches it. That is a signature change to `export_page`, and
+  the callers that only have blocks (clipboard, "Copy page as Markdown") pass
+  none.
+* Property values cross the channel as display strings. That is lossy by
+  decision, and the cost is worth one line: a database is the first thing in this
+  app whose export cannot be re-imported even in principle, because its content
+  is not its blocks.
+* Still unverified: no code path renders a database to Markdown yet (D3/D8), so
+  the per-type table above is a specification and not a test; and an exported
+  `formula` column inherits D6's recompute correctness, so a wrong formula is a
+  wrong file.
+
+## ADR-0081 · `bookmark` is closed rather than deferred, and the embed card is what stands in its place
+
+Decision: SPEC §三十七 批次 C's `bookmark` line — 「链接卡片，抓标题与 favicon；
+离线或抓取失败退化为纯链接，且不得阻塞输入」 — is **withdrawn**, not postponed.
+Quire does not fetch a page's title or favicon, and no code is written for it in
+this milestone.
+
+Why: the premise the backlog item rested on ("Quire 至今没有任何网络客户端") is not
+accurate, and the correction is what changes the price. Quire **has** an HTTP
+client: `src/services/lan_client.rs` is a dependency-free HTTP/1.0 client — one
+`TcpStream`, one `GET`, read to EOF — behind `main.rs`'s `--pull <url>` for the
+LAN share feature. So the accurate statement is: **Quire has no TLS and no
+request it was not told to make.** The opt-in is real (server side behind the
+off-by-default `lan.share` setting, client side only for a URL typed on the
+command line), which means the gap is one of *transport security* and of
+*consent*, not of "does this app do networking".
+
+Against that, the three routes and their prices:
+
+1. **Transport.** `http_get` cannot reach an `https` URL at all, so route (a)
+   needs `rustls` (`ring` or `aws-lc-rs`) or `native-tls`/SChannel — a second
+   new dependency tree in the same milestone as the PDF thumbnail's, several MB of code,
+   and a certificate-store story. `http://`-only would be a downgrade no real
+   site's favicon is worth.
+2. **Consent.** SPEC answers the failure half, so the frame would have to be
+   "user pastes a URL or presses Fetch → a worker does the GET → the card
+   repaints or stays a plain link", never a projection, never a paint, never a
+   timer. The question that has to be answered first is whether Quire ever makes
+   a request the user did not just ask for — on import, on page open, to refresh
+   a stale title — and the honest answer for a local-first notes app is no.
+3. **Storage.** A title and a favicon have to be persisted or the card changes
+   shape whenever the machine is offline; that is a disk cap, an eviction rule,
+   and a "same host on ten cards" rule that need numbers, plus one more derived
+   copy of something that lives elsewhere (the argument ADR-0039/0040 already
+   make against derived data with no owner to invalidate it).
+
+With the transport cost, the consent question and the storage rules all landing
+in one milestone whose whole purpose is closing the backlog, and with the card
+shape SPEC actually asks for already delivered by the non-fetching embed card
+(ADR-0040) — a card that names its provider, shows the address it will hand the
+system, and degrades to nothing — the feature is closed. This is a decision and
+not an omission: the SPEC text is rewritten to say so, so the next reader does
+not re-open it as an oversight.
+
+Consequences:
+
+* SPEC §三十七 批次 C loses the `bookmark` promise; the embed card's "边界（不算
+  缺陷）" line loses its cross-reference to it (「那是 bookmark 的活」).
+* `CHANGELOG.md`'s Known-limitations entry for `bookmark` is re-worded from an
+  open item to a closed decision, so the RC's list of what is missing is
+  accurate rather than aspirational.
+* If it is ever wanted, the cheapest honest version is already specified by the
+  routes above: **explicit user action only, `https` only, a fixed timeout, no
+  refresh, and SPEC's existing degradation to a plain link** — with the title
+  frozen at fetch time, because there is no owner to invalidate it.
+* The dependency would be `rustls` (or `native-tls`) and would have to arrive in
+  a milestone of its own; it must not ride along with a renderer change, which
+  is why it is not being taken now.
+
+## ADR-0066 · The bulk replace keeps the database layer, and a record dies with the page the incoming state dropped
+
+Decision: `replace_all` — the checkpoint, the repair, the LAN pull — replaces the
+**document**: pages, blocks, metadata, settings. The database layer is not part
+of `PersistedState`, and it does not become part of it. But `DELETE FROM pages`
+**cascades** through `db_records.page` (ADR-0063's foreign key), so the six
+tables are read into a snapshot inside the same transaction, before the delete,
+and written back after the new state is in. The rule for what comes back:
+
+* a database, its properties and its views always survive untouched — the bulk
+  path never knew about them and may not quietly lose them;
+* a record survives if it is bare or if the state still has the page it is the
+  face of;
+* a record whose page the incoming state dropped is dropped with its values and
+  its list items, which is ADR-0063's invariant ("a database never holds a row
+  whose page is gone") applied to a path that arrives from SQL rather than from
+  a command.
+
+Why not the alternative of adding records, values and items to `PersistedState`:
+that state is what a checkpoint *is* and what the LAN pull puts on the wire
+(`services::lan_server` sends a `PersistedState`). Filling it with records means
+every row and every cell of every database travels through a checkpoint's memory
+and through the wire format — the exact cost ADR-0067 exists to prevent, and one
+that grows with the tables the bulk path is supposed to know nothing about. The
+bulk path's job is to replace prose; the cascade is the only reason it is
+involved with rows at all, so the fix belongs at the cascade and not in the
+state.
+
+Consequences:
+
+* The bulk path now runs two more statements (a snapshot read and a restore
+  write). It is a rare, already-expensive path: a checkpoint walks every block
+  and every page in the library.
+* A record deleted this way is deleted *whole*: its title lived on the page that
+  went, and nothing resurrects it as a bare record with an empty title (that
+  would be ADR-0063's rejected alternative, arriving through a second door).
+* `attachments` and the database layer are now the two things `replace_all`
+  deliberately carries across; the comment in `replace_all` says so beside the
+  attachment one, because the next reader will ask which rows survive.
+* Still unverified: no test drives a **LAN pull** of a library that has records
+  (`services::lan_server` is off by default and its own slice's tests use states
+  without databases), so the rule above is tested against `replace_all` directly
+  and against the pull only by construction; and the snapshot is held in memory
+  for the duration of the transaction, so a library with a million records pays
+  for it — bounded by the same rebuild the bulk path already does, but not
+  measured.
+
+## ADR-0067 · A row exists only inside a window, so the store never loads records
+
+Decision: the layer that reads is the layer that is asked for a window.
+
+* `load_databases` — the startup read — carries databases, properties and views.
+  It deliberately carries **no records and no cells**: those are the two things
+  whose size is a table's and not a schema's.
+* A view reads rows through `window_rows`, which runs the window D0's projection
+  computed (`core::database::window`) as the query's `LIMIT`/`OFFSET`, and the
+  number of rows that come back *is* the window's length. `record_count` (one
+  `COUNT(*)`) is what the window needs first; D4's filters narrow the same pair
+  rather than adding a path.
+* The list-valued columns (`multi-select`, `files`) are read in a second query
+  bounded by the window's own records, because one row per item would otherwise
+  multiply the window by the longest list in it.
+* `unwindowed_rows` exists, is documented as **the control arm of the
+  measurement** and has no reader in the app. ADR-0065's Markdown export is the
+  one future caller that has a viewport-free reason to ask for a whole table, and
+  it should ask for a streaming read instead.
+* A cell read on its own (`cell`) is a debug and test path; a view reads cells
+  with its window.
+
+Why: SPEC §三十九's first red line — 「10 000 行的库不得全量 realize；视图先算可见窗口再取行」.
+D0 proved the projection exists and is bounded by the viewport (31 rows of
+10 000). A projection is only half the claim: if the load path materialized
+records, then ten databases of 10 000 rows would become 100 000 objects at
+startup and the window would be decoration. Making the window the *only* read
+path is what turns "we compute a window" into "the store is asked for a window".
+
+Consequences:
+
+* The write path does not change shape: a cell is one `Change` (`CellSet`), a row
+  is one `Change` (`RecordCreated` / `RecordDeleted`), and the app never holds a
+  row object it has to keep in sync — which is also why D3's commands must
+  capture the rows they delete in order to undo them.
+* Counting is now on the read path: every window read starts with a `COUNT(*)`
+  for the same database. It is an index walk (`idx_db_records_db_ord`), and it is
+  measured (D1's report) rather than assumed.
+* Keeping rows out of `PersistedState` is what makes ADR-0066's snapshot the
+  smallest possible exception rather than a design change.
+* Still unverified: no UI calls any of this yet, so "the only read path" is a
+  statement about the API and not about a frame; the Markdown export has not been
+  written, so nothing yet proves that an export of a 10 000-row database is
+  acceptable; and the count's cost is measured on an unfiltered database only
+  (D4 owns the filtered number).
+## ADR-0068 · A record's two instants are columns of the record, and no cell is ever written for them
+
+Decision: `created time` and `last edited time` — SPEC §三十九's last two kinds —
+are projected from two columns of the row itself, and those columns are the
+**only** source of those cells:
+
+```sql
+ALTER TABLE db_records ADD COLUMN created TEXT NOT NULL DEFAULT '';  -- step 17
+ALTER TABLE db_records ADD COLUMN edited  TEXT NOT NULL DEFAULT '';
+```
+
+The shape is ADR-0062's stored date: `YYYY-MM-DDTHH:MM`, local wall time,
+sixteen bytes of ASCII, `''` for "not known". Fixed width is what makes these two
+kinds sort by the same rule every other date-shaped value does (bytes are
+chronological bytes), and it keeps a calendar out of Rust entirely. **The write
+path stamps them, and it is the only thing that does**: `insert_record` runs
+SQLite's `strftime('%Y-%m-%dT%H:%M','now','localtime')` inside the `INSERT`
+itself, and `set_cell` / a page rename move `edited` with the same expression.
+Nothing takes a time from a caller, and `Record` — the struct a `Change` carries
+— has no field for either instant, so no change can name a birthday it invented.
+
+Refresh timing, which is the whole of the rule:
+
+| write | `created` | `edited` |
+|-------|-----------|----------|
+| a new record (`RecordCreated`) | stamped, once | stamped, the same instant |
+| a cell (`CellSet`), including a write that clears one | untouched | moved to now |
+| the title of the page it owns (`PageTitleSet`) | untouched | moved to now — a page-backed record's title *is* `pages.title` (ADR-0063), which is why `repository::apply_one` calls back into the store for this one |
+| its place in the listing (`RecordOrdSet`) | untouched | untouched |
+| pointing it at a page (`RecordPageSet`) | untouched | untouched |
+| any read | untouched | untouched |
+
+"Content" is the rule behind that table: a record's content is its cells and its
+title; its place in a listing and which page it points at are its *frame*.
+Dragging a row is not editing it, and Notion's own behaviour agrees.
+
+Why not a `db_values` row (which ADR-0039 forbids for derived data, and which
+ADR-0062 predicted would not be where these land): "last edited" cached as a cell
+would have to be *noticed* by the same write path that changes the cells it
+describes, and the first write path that forgot would leave a stamp that lies —
+the classic double write. So the read path never consults `db_values` for these
+two kinds at all: `cell()` and the window query read `db_records`, and a row
+written at a derived column by a caller that ignored the contract is simply not a
+value any read consults. The D2 test writes such a row and watches it be ignored,
+rather than pretending the write is impossible.
+
+Consequences:
+
+* Two `TEXT` columns on `db_records`, and one extra `UPDATE` per cell write: D8's
+  "cost of editing one cell" number carries it.
+* A step of its own (v17) rather than a line added to v14, because a v14 file in
+  the wild must keep meaning what it meant; a v17 file with no stamps shows empty
+  cells rather than 1970, and no upgrade invents a birthday.
+* `SELECT`s and the bulk path carry them: `snapshot_tables` / `restore_tables`
+  keep both columns, so a checkpoint, a repair or a LAN pull that keeps a record
+  keeps its birthday (ADR-0066's rule applied to two more columns).
+* Minute resolution, and a *redo* of a creation stamps a new moment — the row
+  really was made again.
+* Still unverified: no view draws these, so "it moves when a user expects it to"
+  is a statement about statements and tests (every row of the table above is
+  asserted); and the stamps are one machine's local wall time, so a file carried
+  across time zones reads the strings it was written with — ADR-0062's rule for
+  dates, and *not* what Track 2's UTC date *atoms* do (`core::date`). The
+  integrator may want one answer for both.
+
+## ADR-0069 · A cell is typed on the way in and painted on the way out, and the three string kinds are never rewritten
+
+Decision: every one of the fourteen kinds gets its input rule and its paint rule
+written as code (`core::database_property`), and no other module decides what a
+cell means:
+
+* **Empty input is the absence of a value**, for every kind: `parse_one` answers
+  `CellValue::Empty`, which is the absence of a row (ADR-0062). `Text("")` stays
+  reachable for a writer that says so on purpose; the two paint the same.
+* **Text is stored verbatim** — no trim, no length cap, no case folding — because
+  a space can be the content. Every other kind trims before it parses, because
+  `" 2 "` is a number someone typed.
+* **`url` / `email` / `phone` are never rewritten and never refused.** Nothing is
+  normalised (`HTTP://Example.COM` stays), nothing is rejected (`not a url`
+  stays), and `looks_valid` is a *hint* a cell editor may dot a cell with. The
+  alternative — a gate — turns a notebook into a form, and this app has no web
+  runtime to make a link mean anything anyway (ADR-0001).
+* **`number` is parsed or refused by name**: finite decimals, either sign,
+  `e`-notation; `inf`, `NaN`, `2,5` and prose are refused with the text they came
+  from. `f64::from_str` accepts the first three, and a NaN in the `num` column
+  would sort by bit pattern and compare as nothing.
+* **A date's gate is the stored *shape*, not the calendar**: `YYYY-MM-DD` or
+  `YYYY-MM-DDTHH:MM`, zero-padded, month/day/hour/minute in range. `2026-02-30`
+  is stored as typed (this is a notebook, not a scheduler); `2026-9-2` is
+  refused, because a date column whose bytes are not fixed width sorts wrong —
+  the one thing ADR-0062 buys with the ISO form, and the D2 test writes an
+  unpadded date past the parser to watch the order break.
+* **A select/status cell stores an option's id**, never its label (ADR-0061), and
+  a name the column does not list is *refused* rather than invented: an option
+  list is a second change in the same batch, and `PropertyOptions::option_named`
+  is the get-or-add the caller wants. Renaming an option is then one edit of the
+  document that touches no value — the D2 test renames one and shows the stored
+  value untouched.
+* **`files` stores attachment ids** — ADR-0029/ADR-0030's one attachment channel,
+  never a second copy of the bytes — and paints the *name* out of `attachments`.
+* **Two folds, both visible rather than silent**: an option id the column no
+  longer lists paints **itself**, and a file id whose attachment row is gone
+  paints **itself**. A blank cell would say the value was never there.
+* **Settings are read from `config`, and an unknown setting folds to the
+  default**: `NumberFormat` (`plain` / `integer` / `percent`) and `DateFormat`
+  (`date` / `datetime`, whose default depends on the kind — a stamp shows its
+  minute, since two rows written the same day must not look identical). The
+  stored text is the truth either way: a `datetime` cell holding a date prints
+  ten bytes rather than inventing `00:00`.
+
+Consequences:
+
+* `CellValue::display` stays as the *value's* own form, and `paint` falls back to
+  it, so the two can never disagree about a number; a kind with settings goes
+  through the column.
+* A cell's value is checked where it is *written* (the input path), not inside
+  `set_cell`: ADR-0062's typed columns are chosen by the caller's shape, and
+  putting a `SELECT` on the cell-write path is the cost D1 refused and D6 will
+  measure. The store's tests therefore include writing a value of the wrong shape
+  and reading the empty cell that results — the contract is a test and not a hope
+  (D1's ADR-0062, restated here because D2 is where it can bite).
+* Still unverified: no cell editor exists, so these rules have no UI caller yet,
+  and `looks_valid`'s thresholds are the author's — nothing measures how often
+  they disagree with what a user meant.
+
+## ADR-0070 · A sort is an `ORDER BY` in the statement, and the blanks are placed by a term of their own
+
+Decision: §三十九's "filter and sort happen in SQL, not in the UI" is a *shape*
+here and not a discipline: `RowRequest::sort` is a compiled term
+(`SortSpec { property, column, descending }`) that the row query turns into its
+`ORDER BY`, and **nothing in this crate sorts a `Vec` of rows.** This slice
+compiles one term; D4's view document may name several, and that is the slice
+that grows the term into a list.
+
+Which column the comparison runs in is a decision per kind, and the decision is
+the point:
+
+| kind | column | what that buys |
+|------|--------|----------------|
+| `number` | `db_values.num` (`REAL`) | `2` sorts before `10`; a text column sorts `10` first, and the D2 test shows both orders side by side |
+| `date`, `created time`, `last edited time` | `text` / `db_records.created` | bytes are chronological *because* the stored shape is fixed width (ADR-0062) |
+| `title` | ADR-0063's `COALESCE(p.title, t.text)` | a page-backed row's title is the page's, value row or not |
+| `checkbox` | `flag` | `false` before `true` |
+| everything text-shaped | `text` | bytes — the order a user sees in a sorted list of words |
+| `multi-select`, `files`, `formula`, `rollup`, `relation` | — | `SortSpec::of` answers `None`: "sort by a multi-select" is a question about the column's *options*, and no fallback would be honest. Silently ordering by row position would look like it worked |
+
+The blank rows are placed explicitly, always last, in both directions:
+
+```sql
+ORDER BY (v1.num IS NULL) ASC, v1.num ASC, r.ord, r.id
+```
+
+for the nullness kinds, `(v1.text IS NULL OR v1.text = '')` for the text ones (a
+`Text("")` the user blanked is as blank as an absent row), and `r.created = ''`
+for the two stamps. SQLite puts NULLs first, and "the rows with no number floated
+to the top" is not what anyone means by "sort by number" (ADR-0062's rule); the
+nullness term is always ascending, so a descending sort turns the values around
+and leaves the blanks where they were. The last two terms are the tie-break: the
+database's own listing order, ascending, so equal rows always come back in one
+order and a re-read of the same window is the same rows.
+
+A column the view *hides* gets a join of its own (`s0`) rather than being
+unsortable: a view document may sort by one (ADR-0064), and one extra index probe
+per row is the price.
+
+Consequences:
+
+* A window is a **slice of the order**: `LIMIT`/`OFFSET` apply to the sorted
+  result, so the second page of a sorted read is the second page of that order.
+  Slicing in Rust and sorting afterwards would be the wrong rows; the D2 test
+  asserts the slice is the sorted slice.
+* The order costs one temp B-tree per read (no index serves a `LEFT JOIN`'s order
+  for every row), and the plan says so: `EXPLAIN QUERY PLAN` is the evidence, the
+  D2 test asserts the temp B-tree while no `db_values` scan appears, and the D2
+  probe prints the plan beside its timings.
+* A sort by a hidden column also costs a join per row that the visible read did
+  not have — which D4's compiler may weigh when a view offers both, a decision it
+  can make because the term is data.
+* Still unverified: no view compiles a `SortSpec` from ADR-0064's JSON yet, so
+  the multi-term and group-header shapes are unnamed; and nothing yet measures a
+  *filtered* sorted read (D4's number).
+
+## ADR-0071 · `person` is a name in a text cell, and the member list is those values
+
+Decision: SPEC §三十九's 降级 for `person` is taken literally and kept small:
+
+* **There is no member table, no member id, and no account.** A person is a
+  string in the `text` column, exactly as ADR-0061 folded it: `PropertyKind` has
+  no `Person` variant, and `from_stored("person")` answers `Text`, so a library
+  written by a build that knows `person` opens here with the column drawing as
+  text.
+* **The workspace's local member list is derived, not stored**:
+  `SqliteRepository::workspace_people()` reads the distinct non-empty values of
+  the columns whose *stored* kind is `person`, in `NOCASE` order. The predicate
+  is the stored string precisely because the fold happens at load: SQL still sees
+  the word the file was written with, and the Rust side has no variant to hang
+  behaviour on. Nothing is copied, so nothing goes stale, and nothing needs
+  merging when two spellings of one person appear — they are two names, which is
+  what a plain string means.
+* **Renaming a person is editing a string.** There are no ids to reconcile and no
+  cascade to run, which is the whole argument for the degradation: an account
+  model would bring a table, a picker with state of its own, merge rules for
+  duplicates and a permission question, for zero extra data.
+
+Consequences:
+
+* A file this build creates has no `person` column at all (nothing here can write
+  the kind), so `workspace_people()` answers empty for it until a later build
+  grows the variant — and the day it does, the same query answers for its cells.
+  The D2 test writes the column the way such a build would leave it, pinning the
+  fold and the list together.
+* The list is one string per cell, so it reads `db_values` and not
+  `db_value_items`; a multi-person kind would add a `UNION` and nothing else.
+* Still unverified: no picker consumes the list, so its cost (one `DISTINCT` over
+  the file) is unmeasured; and "two spellings are two people" is a decision a UI
+  may soften with a case-insensitive match — a UI decision, not this one.
+
+## ADR-0052 · synced block：源块持有内容，镜像只持有一根指针
+
+**状态**：已决定
+**日期**：2026-09-22
+**驱动**：SPEC §四十 末句「synced block 建在这一层之上：一个块被多处引用，编辑任意一处全部生效」+ SPEC §三十七 批次 C（依赖 §四十）+ SPEC §三十九（环检测在**保存时**做，不在渲染时）
+
+---
+
+### 上下文
+
+§四十 的引用基础设施已经落地，并且验证了同一条纪律的三种写法：
+
+| 引用 | 存的是 | 画的时候才解析的是 | 由谁定 |
+|---|---|---|---|
+| `@page mention` | `marks.url = "quire://page/<id>"` | 目标页的**当前**标题 | ADR-0050 |
+| `Page` / `Link to page` 块 | `blocks.page_ref = <id>` | 同上 | ADR-0026 |
+| 反向链接面板 | **什么都不存** | 谁在指本页 | ADR-0051 |
+
+三者的共同点是：**渲染时解析，不做第二次写入**。synced block 是同一条纪律的第四种形态，
+也是它第一次作用在「块的内容」而不是「块的标题」上：一份内容出现在两个位置。
+
+它动摇的是那个最核心的假设 —— **谁拥有这份内容？**
+
+---
+
+### 决策
+
+**一块内容只有一份。`Synced` 块自己不持有文本，它持有一根指向源块的指针。**
+
+```sql
+blocks.sync_ref  INTEGER NULL   -- NULL = 没有源（刚建还没选源，或源已被删）
+```
+
+一个 `Synced` 块的形状：
+
+```rust
+kind     = BlockKind::Synced     // as_str() == "synced"，UI int 24（23 是 Database，编号跟在它后面）
+sync_ref = Some(source)          // 源块的 BlockId
+text     = ""                    // 恒空：写它就违反本 ADR
+```
+
+**为什么是「引用另一个块」而不是「同一个块出现在两处」**：`blocks.page` 是单值的，一个块
+只能属于一页。「同一个 BlockId 出现在两个位置」在关系模型里没有落脚点，除非再引入一张位置表
+—— 那是把整个编辑器的地址规则重写一遍，只为了省一根指针。前者照 ADR-0026 `page_ref`
+的形状，几乎不新造东西。
+
+**为什么只同步一个块，不同步整块子树**：Notion 的 synced block 可以是一棵子树。子树意味着
+「行是动态的」—— `project_blocks` 要真删/插一段变长子树，§三十七 那两处附加改动（真删子树、
+row→model 换算）全都要跟上。那是另一个量级的一刀。本刀先交单块版本，并且把这条限制**写在这份
+ADR 里**，而不是塞进「已知问题」。
+
+---
+
+### 四个必须先回答的语义
+
+#### 1. 谁拥有内容 —— 源块
+
+镜像的 `text` **恒为空串**，任何写它的人都违反这份 ADR。它的代价也是空的：源块被删之后镜像
+什么都不剩 —— 而这恰恰是想要的结果（见下）。
+
+#### 2. 删除语义
+
+| 删掉谁 | 发生什么 |
+|---|---|
+| **镜像** | 只有这一行消失。源块和它的每一个其它镜像原样 —— **没有外键、没有级联**。`sync_ref` 是一列整数而不是一个关系，级联会让「删掉一个视图」连带毁掉内容，这是本 ADR 最贵的一次拒绝。 |
+| **源块** | 镜像**保留**，可见退化成「（源块已删除）」灰字，并且**变为只读**（解析不到源，编辑绑定就无处可落）。一次 `DeleteBlock` 不惩罚页面上别的任何东西。 |
+| **源块所在的整页** | 同上。孤儿镜像是**可见的** —— 留着还是删掉由用户决定，系统不替他猜。 |
+
+#### 3. undo 语义 —— 一次编辑，一步撤销
+
+「两处同时变」听起来需要一个写两份的实现，于是听起来需要一个合并撤销的机制。**两者都不需要**：
+既然只有源块持有内容，一次编辑**真的只写一处**。第二个位置的更新发生在下一次投影（投影不入库，
+§三十八），所以一次 Ctrl+Z 撤的就是那一次写。
+
+这是「没有第二份东西」买到的最实在的一件东西，也正是它比「双写 + 同步器」便宜的全部理由。
+
+#### 4. 环检测 —— 在**建立链路那一刻**做，不在渲染时
+
+`A → B → A` 是一个手就能改出来的状态。照 §三十九 对 relation 的要求，检测点在**保存**：
+
+- 建立或改这条链路时（`AppState::set_sync_source`）：从候选源沿 `sync_ref` 走最多
+  `SYNC_CHAIN_MAX` 跳，中途碰到自己就**拒绝**（返回 `false`，UI 拿到一个没变的视图）；
+  `source == self` 单独拒绝。
+- 渲染时是**有上界的解析**（最多 `SYNC_RESOLVE_MAX` 跳），所以即使一个**旧备份被手改成环**，
+  最坏情况也只是多走几跳，不会挂住。这条上界必须落在代码里的常量上、带注释 ——
+  「反正环不会出现」是任何样本都证明不了的一句话。
+
+---
+
+### 存储
+
+migration **19**（`src/storage/migrations.rs`）：
+
+```sql
+ALTER TABLE blocks ADD COLUMN sync_ref INTEGER;   -- NULL = 无源
+```
+
+**为什么是 19 而不是 17**：17 和 18 都是 Track 3 的 database 步（记录时间戳、`blocks.db_ref`），
+其中一个已经提交（`d3e4a0a`）。迁移是本项目唯一不可逆的东西，两个打磨不同事情的 step 撞同一个号，
+比临时跳号贵。
+当前在 `track/2-references` 这棵孤立树里 17 是空的 —— 那两棵树合并的一瞬间它就是满的；
+我不替整合者提前占用。
+
+`block_children` 不动：一个同步镜像没有子节点。
+
+---
+
+### 六个接点（SPEC §三十七 的硬性约束，少一处即视为未完成）
+
+| 接点 | 落在哪 |
+|---|---|
+| `core/types.rs` 的 `BlockKind` | `Synced` 变体（**加在枚举末尾**，永不重编号），`ALL` 变 24 项，`as_str() == "synced"` |
+| storage 的 kind 与列 | `kind_to_int` / `kind_from_int` = **24**（23 是 §三十九 的 `Database`，它在枚举里排在前面）；新列 `sync_ref` 由 migration 19 加 |
+| Markdown **导出** | **摊平**：镜像行导出成源块的那一行内容（照 ADR-0032 columns 的先例） |
+| Markdown **导入** | **有意地不认新语法** —— 理由见下 |
+| ⋮⋮ 的 Turn into | `TURN_INTO_ITEMS = SLASH_ITEMS`，那里加一行两者就都有了 |
+| slash 菜单 | `SLASH_ITEMS` 加「镜像块」；`INSERT_ITEMS` 同样加 |
+| 截图场景 | `synced` / `synced-source-gone` / `dark-synced` |
+
+**导入为什么什么都不认**：导出摊平之后，同一份 Markdown 再导回来就是一段普通的文字。
+这不是偷懒，是边界 —— **§二十六 把 Markdown 定成内容通道，不是保真格式**；而 block id
+在库与库之间也毫无意义。给镜像发明一种记号（`<!-- quire:synced -->` 之类）只会多产出一种东西：
+一个导进来立刻失去源、只能画成「（源块已删除）」的块 —— 比一段普通文字更糟。所以
+**同步关系不跨这条边界**，而且这句话要说在 ADR 里，不能藏在实现里。
+
+---
+
+### 「行是动态的」那两处附加改动 —— 本刀用不到，但要写下来
+
+§三十七 规定凡「行数会变」的块都要多改两处。一个同步镜像**没有子节点、占一行、行数恒定**，所以
+① `project_blocks` 不需要删行；② 拿 row index 当 model index 用的地方不需要换算。
+这两条是**在这一刀被判定的**，不是被漏掉的 —— 将来若把它升成「同步整棵子树」，
+第一个要回头的地方就是这里。
+
+---
+
+### 代价
+
+- 只同步一个块，不同步子树（Notion 的同步块可以是一整棵子树）。
+- Markdown 往返丢同步关系。
+- 每次投影为每个镜像行做一次 id 查 —— 一次哈希表查，不走 I/O，但它在**交互路径**上。
+- 源与镜像同时在屏时，两行都会画成「正在编辑」的样子（两者绑的是同一个 id 的同一份编辑态）。
+  这是我们想要的效果（Notion 也是两边一起动），但它的手感 headless 证明不了，见「未验证」。
+
+---
+
+### 未验证
+
+- headless 场景证明不了**真键盘输入**、两个输入框之间的焦点争用、真点一次跳转。
+- 「源被删 → 镜像只读」这条有单元测试钉住投影结果，但**没有**真的用鼠标点上去试。
+- 性能：本刀给每次投影加了「每个镜像行一次查表」。它是 O(1) 查表而不是 O(n) 扫描，所以
+  **没有欠量 RAM 闸的理由**；但**也没有数字**。若后来发现某页上有几十个镜像行，那个数字还欠着。
+
+## ADR-0072 · The six tables' ids are session watermarks, seeded from the store and never re-read
+
+Decision: the drawn layer allocates database ids from four counters in
+`AppState` (`next_db_id` / `next_property_id` / `next_record_id` /
+`next_view_id`), each seeded once at startup from the highest id its table
+holds (`database_store::maximum`) and incremented only when the command that
+was to spend the id was actually planned. `Command::MakeDatabase`,
+`AddDatabaseRecord` and `AddDatabaseProperty` carry their ids **in** — the
+plan layer can allocate block ids and nothing else, which
+`Command::InsertImage` set the precedent for — so the counters are the one
+place the drawn layer's ids come from.
+
+Why not a `MAX(id)` query per creation: the write path is debounced
+(`PersistenceService`), so two creations in the same batch cannot collide
+even though neither row is in the file yet, and the app deliberately never
+holds the rows of a 10 000-row database to find the highest one (ADR-0067) —
+putting that question back on every click of "New row" is the exact cost the
+window exists to avoid. The seed answers the only question that matters
+("which ids are taken *before this session*") in one query per table at
+startup.
+
+Consequences:
+
+* A refused command burns no id: the counters move only after
+  `exec_all_on_open_page` returned changes, so `MakeDatabase`'s refusals (a
+  cell, a container's child, a block that already has an entity) leave the
+  watermark where it was.
+* An id a session allocated and never wrote is forgotten at restart; nothing
+  references it, so no gap is observable. A batch that wrote it is in the
+  file before anything can point at it, because the change list that carries
+  the reference carries the row.
+* The bulk path does not disturb the watermarks: ADR-0066's snapshot carries
+  the rows across, so the highest ids survive it, and the session's next
+  allocation is re-seeded only by a restart.
+* Still unverified: two processes writing one file concurrently is outside
+  the model (a single-process app; the LAN share is read-only), so no test
+  covers the counters against a foreign writer — a hand-edited library can
+  collide, and the failure is the store's UNIQUE constraint, reported, not
+  silent.
+
+## ADR-0073 · Which view a block is showing is session state, not a column
+
+Decision: `db_active_view` is a map in `AppState` (`RefCell<HashMap<i32,
+ViewId>>`), written by `db_pick_view` and read by every projection; nothing
+is persisted, and a restart opens the database's first view.
+
+Why not a column on `db_views` (a `selected` flag): "which view am I looking
+at" is a fact about a **window**, not about the document — two blocks may
+show the same database and each is looking at its own view, so the fact is
+per (block, session), which is exactly the shape a column cannot have. And
+not a document change: making a switch a `Change` would cost an undo step
+and a write for a fact nothing else depends on, and Ctrl+Z would move the
+user's view back to a view they deliberately left. The document holds the
+view *definitions* (ADR-0064); the session holds which one is on screen.
+
+Consequences:
+
+* The choice dies with the session. That is the recorded cost, and it is
+  honest: a view switcher that remembered across restarts needs a place to
+  remember *in*, which is a schema question for the milestone that also
+  brings a second view (D5).
+* Undo and redo never move it — the map is not in the change path, which is
+  also why the in-memory catalog's fold (ADR-0075) has no arm for it.
+* Switching invalidates the block's cached window (`db_windows.remove`): a
+  different view has different columns, and a row set painted against the
+  old ones must not survive the switch.
+* Still unverified: no number for the switch cost — one view per database
+  today, so nothing can be switched *to*; the number is D5's, with the same
+  caveat the shared-tree session drift always carries.
+
+## ADR-0074 · A view's definition is read, edited and written back as text, and the keys this build does not own pass through untouched
+
+Decision: `core::database_view::ViewDefinition` keeps ADR-0064's document as
+the parsed JSON it arrived as and rewrites exactly two keys — `columns` and
+`widths`, the ones D3 owns. Every other key (`filter`, `sorts`, `groups`,
+`v`) is carried through in the position it was found. `db_edit_definition`
+in `AppState` is the only writer, and it is read-edit-write of the **text**:
+the stored document is parsed, one edit function runs, the result is
+serialised, and the whole text is what `SetDatabaseViewDefinition` carries
+as its `from` and `to`.
+
+Why: this build owns two keys and a later build owns the rest. A struct of
+the fields this build knows would silently drop the keys it has no field
+for — "hide a column" would quietly clear a filter — and re-serialising
+only the known keys has the same effect with more code. The document is the
+view's only copy of its rules (ADR-0064 put them there because SQL never
+filters on them), so a writer that eats keys is not a round-off, it is data
+loss.
+
+Consequences:
+
+* A document that does not parse degrades to "no rules" (ADR-0064's fold),
+  and a *newly written* one is always an object with the two keys present —
+  an empty `widths` map is stored as `{}` rather than removed, because "I
+  own this key and it is empty" is a different statement from "I have never
+  heard of it".
+* The undo of a width drag is the previous **text**, so it restores a later
+  build's key edits too — the `Change` carries the bytes, not a delta.
+* A hand-edited width below the floor reads as the floor, and `0` reads as
+  "auto" (an equal share); a drag can store neither, which is why the two
+  cannot be confused.
+* Still unverified: the pass-through is a property of the code's shape
+  (`put` keeps unknown fields) and the fold is pinned by `core` tests; a
+  round-trip test that drives a document with foreign keys through a D3 edit
+  is on the final unified test's plan.
+
+## ADR-0075 · The in-memory catalog learns the schema from change lists, and records never enter it
+
+Decision: `AppState::db_absorb` folds every change batch the session records
+into the `DatabaseCatalog` the read path consults: `DatabaseCreated` /
+`DatabaseRenamed` / `DatabaseDeleted`, `PropertyAdded` / `PropertyRenamed` /
+`PropertyKindSet` / `PropertyOrdSet` / `PropertyDeleted`, `ViewAdded` /
+`ViewRenamed` / `ViewLayoutSet` / `ViewDefinitionSet` / `ViewOrdSet` /
+`ViewDeleted`. The funnel is `record()` — the one place apply, undo and redo
+all arrive — so no write path has to remember to teach the catalog
+itself. Records, values and list items are deliberately absent: they are not
+in the catalog at all (ADR-0067), and a row's life is a window's business.
+
+Why: the catalog is what every projection reads, and until it learned, a
+freshly made database existed in SQL and not in memory — its own block drew
+ADR-0060's "(deleted database)" until the next restart, which is the kind of
+defect that survives every unit test of the layers below it. Undo is the
+reason this is a fold over changes and not code at the call sites: an undo
+has no call site, and its batch must teach the catalog the same way an apply
+does.
+
+Consequences:
+
+* **A change names what happened, not which direction it ran** — the same
+  contract `core::document`'s apply/revert already runs on. `DatabaseCreated`
+  always means "the row exists now", whether the user created it or undid a
+  deletion, so the fold is idempotent (an insert that finds the row already
+  there keeps it) and the catalog cannot disagree with storage about what a
+  batch means.
+* `DatabaseDeleted` cascades in memory exactly as `ON DELETE CASCADE` does in
+  SQL (the entity's columns and views go with it); `PropertyDeleted` does
+  **not** clean view documents, because no foreign key reaches inside
+  ADR-0064's JSON — the compiler drops the ids it does not find (ADR-0074's
+  unknown-key rule, applied to reads).
+* A fresh batch that adds a property sorts the catalog by `(db, ord)` after
+  the insert: `ord` is the schema's order (ADR-0061) and the store returns
+  columns by it, so the in-memory order is what a restart would load.
+* Still unverified: a LAN pull's change list reaches `record()` the same way
+  (the bulk path's database snapshot is ADR-0066's, and is not a change
+  batch), so the fold is exercised by the app's own paths only — a mixed
+  replay test is on the final unified test's plan.
+
+## ADR-0076 · A view's rules compile into the statement, and a filter that cannot be read is dropped with a visible note
+
+Decision: SPEC §三十九's red line — 「filter / sort 在 SQL 侧完成，不在 UI 侧过滤」 — is a
+**module boundary** in this codebase, not a discipline. `RowRequest` carries the view's rules
+themselves: `sorts: &[SortSpec]` (D2's single term grown into the list ADR-0070 said D4 would
+grow) and `filter: Option<&FilterNode>` (ADR-0064's recursive tree, parsed by
+`core::database_view` against the schema). `storage::database_query` is the only module that
+turns rules into SQL text — `WHERE r.db = ? AND (tree)`, one `ORDER BY` term per sort key
+(blank-placement term per key, always ascending, then the value's direction, then
+`r.ord, r.id` as the tie-break after the last key) — and `database_store` is the only module
+that executes it. No function between the document and the window ever holds a row to throw
+one away.
+
+The count obeys the same boundary: a filtered view's window is computed from
+`SELECT count(*)` over the **same** `FROM` and `WHERE` the row read runs
+(`filtered_count`), so filtering a 10 000-row database down to 3 rows realizes 3 rows — the
+count is SQL's and it happens *before* the window, which is the contract the unified test
+must pin (see REPORT_TRACK3 §D4, the 对照 number: filtered window read vs. fetch-10 000-then-
+filter-in-Rust).
+
+A comparison's *column* is the decision `SortSpec` already made per kind (ADR-0070), and the
+filter reuses it: `contains` is `INSTR(LOWER(expr), LOWER(?)) > 0` (no `LIKE`, so the value's
+own `%` means itself; `LOWER` folds ASCII — the boundary every text search here has); a list
+column's `has` is one `EXISTS` probe on `db_value_items`' primary-key prefix, exactly the
+shape ADR-0062 predicted; `is any of` is an `IN` over the bound option **ids**; number
+comparisons bind `REAL` and date comparisons bind the stored fixed-width text, so "before"
+and "after" are byte comparisons because ADR-0062 stores dates fixed-width. `ne` is
+`NOT (eq-form)`, so three-valued logic makes an empty cell match neither `is` nor `is not` —
+"holds a value outside this one". A checkbox's `is unchecked` is `(expr = 0 OR expr IS NULL)`
+— an untouched checkbox *is* unchecked — while `is not checked` is its negation, excluding
+untouched rows. A clause whose value was never filled in (`FilterValue::Missing`, stored as
+JSON `null`) compiles to `1`: an unfinished rule filters nothing, so "add a rule" cannot hide
+rows before the user has said what the rule is.
+
+**Degradation is a decision, not an accident** (ADR-0064 named two of these; D4 states all of
+them):
+
+* the `filter` document does not parse as a tree this build reads (a group whose children are
+  not an array, nesting past depth 8) → **the whole tree is dropped** and the view draws the
+  note — "This view's filter could not be read and was ignored." — where the row count would
+  be, in the danger color. Not silent, not a crash, not a toast that outlives one frame: a
+  filter that is not being applied is a fact about every row on screen.
+* one clause names a deleted property, asks a comparison its kind does not have
+  (`contains` on a number), or carries a value of the wrong shape (`next tuesday` as a date —
+  the stored shapes are the only ones comparable, because fixed width is what makes bytes be
+  time) → **that clause is dropped and counted** ("N filter rule(s) were dropped …"). This is
+  ADR-0064's deleted-property rule applied to the other ways one clause can be unreadable; a
+  `not` around a dropped clause is dropped with it, so a vanished rule cannot come back as
+  its own negation hiding every row.
+* a sort term or a group that cannot compile is dropped **quietly**: an order and a grouping
+  are ways of looking at rows, never ways of hiding them, so the honest failure is visible in
+  the first frame.
+* an explicitly empty group (`{"and":[]}`, the panel's "no rules" state) is no filter at all
+  and produces no note.
+
+Why the panel edits a *flat subset*: one `and`/`or` root over clauses, each optionally
+inverted, is the shape a popup with one rule list can honestly draw. A tree outside the
+subset — a group inside a group — still **filters** (the compiler reads the full recursive
+shape), but the panel **refuses to edit** it rather than reshaping the user's rules into
+something it can represent; the refusal is a notice, and the table keeps filtering. Nested
+groups wait for a panel that can draw them (D5's board editor), which is an honest smaller UI,
+not a smaller compiler.
+
+Consequences:
+
+* D4 now owns three more keys of the definition document (`filter`, `sorts`, `groups`), and
+  `ViewDefinition::set_filter/set_sorts/set_group` replace exactly those keys — ADR-0074's
+  read-edit-write of the text, so a width drag still cannot eat a filter and a filter edit
+  still cannot eat a width. An undo restores the whole document, all five owned keys together.
+* The export follows the view for free: `db_markdown_table` builds the same `RowRequest`
+  (filter + sorts) and runs the control read, which is ADR-0065's 「过滤排序照做」 finally
+  having a rules compiler to mean. The group is *screen* furniture — a file has no viewport,
+  so a grouped view exports its rows in the view's order without headers.
+* `row_query`/`row_binds` (the tests' and the probe's evidence helpers) now return
+  heterogeneous binds (`rusqlite::types::Value`), because a filter's binds are heterogeneous
+  by design: an id, a `REAL`, a string, the window pair.
+* Still unverified: **no test ran** (the slice's iron rule). The unified test owes: the
+  filtered-window contract (filter to 3 rows, realize 3 rows), each op's predicate against
+  hand-built rows (contains case-folding, `any-of` over ids, `ne`'s empty-cell exclusion,
+  number order vs. byte order), the two degradation notes, the pass-through of foreign keys
+  across a filter edit (ADR-0074's round-trip, now with rules on both sides), and the
+  对照 number below. Also unverified: `INSTR`'s cost versus a FTS index for a 10 000-row
+  contains-filter — the D2 note about adding `db_values(property, num)` indexes applies to
+  filters too, and the probe prints the plan so the next slice can see what SQLite chose.
+
+## ADR-0077 · Group by is an entry projection over an option-bounded column, and a header is never a row
+
+Decision: grouping is **one column**, and the column must be one whose distinct values the
+schema already bounds — `checkbox`, `select`, `status` (plus "no value"). ADR-0064 stores
+`groups` as an array so a later build can nest; this build reads its first entry and only
+that. The grouped view's scroll surface is a list of **entries** — per group, one header
+entry, then its rows — and the window D0's `core::database::window` computes over
+`total_entries = Σ(count + 1)` is mapped onto queries by `core::database_view::group_window`:
+the headers that fall inside the window, and one `(group, skip, len)` slice per group that
+overlaps it. Each slice is fetched with its own `LIMIT`/`OFFSET` **inside the group**
+(`row_query_in_group`: the group's predicate joins the `WHERE`, the view's filter and sort
+compile in as always), so a group holding all 10 000 rows realizes the same 31 rows it would
+ungrouped, and a group costs **one entry, never one row per group**.
+
+The group list itself is one `GROUP BY` query over an option-bounded column
+(`group_counts`), normalized in the store into `GroupKey::{Empty, Option(id), Checked,
+Unchecked}` — SQL's `NULL` and `''` are one group, and a checkbox's `0` and its absence are
+one group, because an untouched checkbox is unchecked. The list is **unordered in SQL on
+purpose**: the order a user means is the schema's own option order (ADR-0061), which lives in
+the column's config JSON where SQL cannot see it, so the few headers are ordered in Rust from
+that same config (known options in config order, an id the config forgot in byte order after
+them — ADR-0069's fold applied to a header — a checkbox unchecked-then-checked, "No value"
+last). That is ordering a handful of headers, not the red line bent: the rows are SQL's, each
+slice from its own ordered query.
+
+Why the kinds are restricted: a group header is an entity the view has to place in the scroll
+surface, so the list of headers has to be small enough to compute **in full** — that is what
+makes the header walk O(groups). Grouping by `text` or a date would make the group list as
+long as the table (10 000 headers to realize is exactly what "group by must not become
+10 000 rows" forbids); grouping by a number needs buckets ("what are the buckets" is a
+different question, and guessing it would be inventing a histogram nobody asked for). The
+picker offers only the bounded kinds and refuses the rest by name.
+
+Consequences:
+
+* The delegate's rows model carries both shapes: `DbRow.header` is a group header's label
+  ("" for a data row), so the same window arithmetic, the same `db-row-start` row→model
+  conversion (§三十七) and the same block height serve grouped and ungrouped views. The count
+  text counts entries when grouped — honest, if slightly odd wording at 10 000.
+* A group edit goes through the same `SetDatabaseViewDefinition` batch as every other rule
+  edit: one change, one Ctrl+Z, the catalog learns it through `db_absorb` (ADR-0075), and the
+  window cache invalidates on the definition text.
+* Still unverified: no test ran. The unified test owes: a grouped read of a 10 000-row
+  database realizes headers + one window (the entry count is `Σ(count+1)`, asserted against
+  the group list), scrolling across a group boundary fetches only the groups the window
+  touches, a value whose option was deleted groups under its own id, and the "No value" group
+  contains exactly the rows the `IS NULL OR ''` predicate admits.
+
+## ADR-0078 · Each view layout windows its own unit, and the calendar's fold is the same red line in a grid
+
+Decision: SPEC §三十九's six layouts after the table are **one entity's layouts**, and what a
+layout changes is what the window is computed *on* — one answer per shape, all of them ending
+in "a count from SQL, then exactly the window's objects":
+
+| layout | the window's unit | the count it comes from | what is realized |
+|--------|-------------------|-------------------------|------------------|
+| table | a row (or, grouped, an entry — ADR-0077) | `COUNT(*)` / the group counts | the viewport's rows, 31 of 10 000 |
+| list | a row (44 px: title + two preview cells) | the same | the same |
+| board | a **card slot** — one horizontal band across every column | `max(group counts)` over one `GROUP BY` | per column, its own slice of the band (`board_window`) |
+| gallery | a **card row** (`per_row` cards) | `COUNT(*)` | one slice of `per_row × rows` cards |
+| calendar | a **day cell** (the grid is fixed 6×7) | one `GROUP BY` over the date column for the month (≤ 31 keys) | ≤ `CALENDAR_PEEK` records per day, the rest folded into the cell's count |
+| timeline | a **lane** (one dated record) | `COUNT(*)` with an `is not empty` clause on the date column | the viewport's lanes; one `min`/`max` query for the axis |
+| form | — (the field list is the schema's size) | `COUNT(*)` for the count text | no records at all: it creates one |
+
+Three consequences that are decisions and not implementation details:
+
+1. **Board columns are the group list, not a second read.** A board *is* a grouping seen
+   horizontally, so it reuses D4's `groups` key, its `GROUP BY`, and its header labels; the
+   columns are realized in full (a handful of small rectangles from an option-bounded column)
+   while each column's *cards* are fetched through a slice of the slot window. A column
+   holding 10 000 cards realizes the same handful the ungrouped table would. Board's fallback
+   grouping (the first option-bounded column, when the view has no `groups` key) is **not
+   written back** — a default the user never chose must not become a rule they have to undo.
+2. **The calendar folds by day, and the fold is the virtualization.** A day with 500 records
+   realizes three and says "and 497 more"; both numbers come from one `GROUP BY` over the
+   month, whose key count is bounded by the calendar itself (≤ 31 days, plus each stored shape
+   of a day — a `2026-09-22` and a `2026-09-22T10:00` are two keys and one day, so the counts
+   are folded by *day*, not by key). This is why a **date column may group here** even though
+   D4's picker refuses it: a header per day is 31 objects; a header per text value would be
+   the table. The month's records are read through day-range clauses (`>= the day`, `< the
+   next`) compiled by the same clause compiler the panel drives — bytes-are-time (ADR-0062)
+   doing the date arithmetic in SQL, in one place.
+3. **The timeline's axis is one aggregate, and undated rows never enter the statement.** The
+   lanes are windowed like rows; the axis under them is `min`/`max` over the *same* predicate
+   (one scan, no rows); and 「无日期不显示」 is an `is not empty` clause ANDed with the view's
+   own filter — SQL's row set, not a Rust `retain`. A row with no date is not fetched and then
+   dropped; it is never fetched. The bar's two ends are day numbers computed in Rust from the
+   painted date cells (a painted date always starts with the stored day), so a bar costs no
+   second query per row; a missing or earlier end makes a point («起=止=同一天时画点»).
+
+Where the views' own settings live: **one new document key pair** —
+`date` (which column is the time axis) and `end` (the optional partner) — in the same
+`db_views.definition` JSON ADR-0064 defined. One key serves both the calendar and the
+timeline because they ask the same question ("which column is this view's time axis"), and
+the schema's own first date column is the fallback when the key is absent (never written
+back). No new table, no new column, no new migration step; the gallery's cards-per-row is
+**session state**, because it is a fact about the window's width — the delegate reports it
+(`db-gallery-shaped`) the way it reports the scroll anchor.
+
+Consequences:
+
+* `LayoutSupport` now draws seven of the eight layouts; `chart` stays refused by name until
+  D7, and the switcher's `+` menu lists it as its own muted row rather than hiding it.
+* Every layout's geometry lives in `core::database_view::layout_metrics` (row height + header
+  height) and its surface height is computed once, in Rust (`DbWindow::body`), so the block's
+  height, the delegate's placement and the window arithmetic cannot disagree — the D3
+  row-height-zero bug class is closed by construction for all seven.
+* The window cache key grows two fields (`layout`, `stamp`): the calendar's month and the
+  gallery's per-row change which model the same view, document and total would produce.
+* Still unverified: no test ran. The unified test owes: a board of 10 000 cards realizes
+  `columns × viewport` cards (not cards), a 500-record day realizes three and reports 500, a
+  filtered month's `GROUP BY` counts sum to the count line, a timeline excludes undated rows
+  in SQL (the statement text shows the clause), and the `date`/`end` keys survive an unrelated
+  rule edit (ADR-0074's read-edit-write).
+
+## ADR-0079 · A view is created by one change, a record's page is minted by opening it, and chart is refused by name
+
+Decision: the switcher's `+` adds a row to `db_views` through **one new command**
+(`Command::AddDatabaseView { block, view }` → `[Change::ViewAdded]`, revert `[ViewDeleted]`),
+carrying the whole row because the plan layer can allocate no ids (`MakeDatabase`'s rule
+applied to the one table the app keeps out of memory). The name defaults to the layout's own
+label and the `ord` is past the last view, so a new view lands at the switcher's end; the app
+then **switches to it**, because a view created and not looked at is half a gesture. `chart`
+is **refused with a notice** rather than created: a menu row that made a view this build
+cannot draw would be a promise the switcher has to un-draw on the next frame, and D7 owns that
+layout.
+
+Opening a record — the board card click, the list row click, the gallery card click — is one
+gesture with two halves, and both are ADR-0063's lazy page finally getting its UI trigger:
+a page-backed record navigates; a **bare record mints its page now**, named after the
+record's title, as a child of the page the database sits on, in **one batch**
+(`[PageCreated, RecordPageSet{page}]`) — one Ctrl+Z, and the 「打开」 half of ADR-0063 that D1
+tested at the storage level is now reachable from the UI. The parent is the open page rather
+than the sidebar root because that is where a Notion database's rows live, and the record's
+title is read from the row's own value (a bare record's title has its second home in
+`db_values`, ADR-0063), falling back to "Untitled".
+
+Consequences:
+
+* The insert menu's four remaining database placeholders (`Board` / `Gallery` / `List view` /
+  `Calendar` / `Timeline`) are **still muted**: lighting them means teaching the insert path
+  "a database whose first view is X", and this build's one honest path for that is the
+  switcher's `+`. The placeholders stay a promise the roadmap is readable off, and the report
+  says so rather than pretending otherwise.
+* Chart's row in the `+` menu is visible and inert (its own wording), so the menu never opens
+  a view the delegate would have to draw as "not in this build yet".
+* Still unverified: no test ran. The unified test owes: `AddDatabaseView`'s undo removes the
+  row (and a redo puts it back with the same id and `ord`), a second view of a database does
+  not disturb the first's document, opening a bare record leaves a page whose title is the
+  record's title and whose parent is the database's page, and undoing that open leaves the
+  record bare again.
+
+## ADR-0082 · A formula stores its expression in its own config, computes every value on the way out, and is a pure lexer plus a hand-written interpreter
+
+Decision: the `formula` kind (ADR-0062's first computed kind to get an engine)
+keeps its **expression** in the one JSON document ADR-0061 gives every column
+(`config`, key `"formula"`), written through one new change
+(`PropertyConfigSet { id, config }` — the document **replaced whole**, the
+read-edit-write discipline ADR-0074 applied to a column instead of a view; the
+command layer's `SetDatabaseFormula` carries the whole before/after documents,
+so one expression edit is one change and one Ctrl+Z, and the keys this build
+does not own pass through untouched). The **value is stored nowhere** — SPEC's
+「不存值，投影时现算」 is ADR-0062's own note and ADR-0039's discipline: a
+`db_values` row for a formula cell would be a derived copy, and the only thing
+that can go stale is everything.
+
+The engine (`core::database_formula`) is what SPEC's sentence demands: **纯词法
++ 自写解释器, no JS / WASM runtime, no formula-parsing crate** — a lexer, a
+recursive-descent parser and a tree-walking interpreter in a few hundred lines
+of Rust, with no dependency added. Its shape:
+
+* **Four types plus one absence** (`Val`): number, text, boolean, date (a
+  stored fixed-width ISO text, ADR-0062), and `Empty`, which is contagious —
+  an operand with no value makes the result empty, the same 「空」= 没有行
+  rule ADR-0062 states for storage. The two exceptions are explicit: `if`
+  short-circuits (only the taken branch evaluates), and `text(Empty)` is `""`.
+* **No implicit conversions, in these places**: `"Total: " + [Points]` is a
+  type error, not a concatenation; `length([Points])` is a type error;
+  `min("a", 1)` is a type error. The one **explicit** conversion is
+  `text(x)` (number → its `Display` form, boolean → `Yes` / `No` per
+  ADR-0065, date → its stored ISO text, `Empty` → `""`). A text may be
+  *compared* to a date — both sides are bytes, and ADR-0062's fixed width is
+  what makes bytes chronological; that is the storage shape, not a conversion.
+* **Seven functions**: `if(c,a,b)`, `length`, `round`, `abs`, `min`, `max`,
+  `text`; arithmetic `+ - * /` (where `+` on two texts concatenates), unary
+  minus, comparisons `== != < <= > >=`, `and` / `or` / `not`, literals
+  `true` / `false` / numbers / `"strings"`, and `[Column]` — a reference to a
+  column of **this row**, resolved by exact name at parse time against the
+  schema, so an unknown name is a syntax error and a refused save rather than
+  a blank cell.
+* **Finite evaluation as constants, not as a promise**
+  (SPEC: 「表达式必须有限求值」): `FORMULA_MAX_TOKENS = 2 048`,
+  `FORMULA_MAX_DEPTH = 32`, `FORMULA_MAX_STEPS = 10 000`,
+  `FORMULA_RESULT_MAX = 65 536`. The grammar has no loops and no
+  user-defined functions, and the engine has **no clock and no I/O** —
+  `today()` is deliberately absent, because a formula that read the clock
+  would paint a different value on every frame for the same document.
+* **The cycle check happens at save time** (SPEC: 「relation 环检测在保存时
+  做，不在渲染时做」, applied to the engine this build has): a formula may
+  name another *formula* column, and `would_cycle` walks the dependency graph
+  **before** the change is stored, refusing a chain that comes back to itself
+  while the text that would create it is on screen. The render path's only
+  defence is the depth cap, which paints `Error` instead of hanging — that is
+  for documents that never went through the save door, not a licence.
+* **Two folds, both honest**: a `select` / `status` cell referenced by a
+  formula reads as `Empty` (its stored value is an option *id*, and an id in
+  arithmetic is worse than a blank), and so do `multi-select` / `files`. A
+  cell whose formula cannot evaluate on its row paints `Error` — one word;
+  the *sentence* lives in the editor's preview and error line.
+
+Consequences:
+
+* `sort_column` returns `None` for the computed kinds and `FilterOp::ops_for`
+  is empty for them (D2/D4's placeholders) — now a **decision with a reason**
+  rather than a gap: "sort by a computed value" in SQL means computing it for
+  every row first, which is exactly what ADR-0083's red line forbids. A
+  formula column sorts when someone writes its value into SQL, with an ADR
+  for the materialization that takes.
+* The config key is **removed** for an empty expression (ADR-0062's one
+  representation of "nothing"), and a config that is not a document is
+  replaced by one — there is nothing to preserve and an expression has to
+  live somewhere.
+* Still unverified: no test ran. The unified test owes every function and
+  operator one evaluation test including the refusals, the empty-propagation
+  table, `[Name]` resolution (exact match, unknown = refusal), all four
+  budgets, `would_cycle`'s yes/no set, and the config round-trip
+  (REPORT_TRACK3 §D6).
+
+## ADR-0083 · The recompute unit is the window, the dependency is the row, and the counter is the contract
+
+Decision: SPEC's red line 「formula / rollup 必须可增量重算，禁止每次输入全库
+重算」 lands as three shapes, not as a discipline:
+
+1. **Formulas are evaluated at projection time only, over the realized
+   window.** `db_paint_formulas` (state) runs after `table_rows` on every
+   layout branch through one shared `db_table_rows` — table, list, board
+   cards, calendar peeks, gallery, timeline lanes — so a computed column
+   costs "realized rows × visible formula columns" and nothing else. There is
+   **no path that walks all of `db_records` to evaluate anything**, and the
+   two features that would force one (sort, filter by a formula column) are
+   refused upstream (ADR-0082). An edit of one cell re-reads the window the
+   same way every other column's repaint does; the *evaluation count* after
+   that edit grows with the window (≤ ~39 rows), never with `COUNT(*)`.
+2. **Dependencies are same-row by construction.** The engine's cell callback
+   has no record parameter and the adapter (`FormulaSource`) is built for one
+   record — a formula *cannot* address another row even in principle. Editing
+   cell `(r, q)` can therefore change a formula value only on row `r`, and
+   only in columns whose parsed dependencies, transitively through other
+   formula columns, name `q`: the set `{ (r, P) | q ∈ deps*(P) }`. Every
+   other evaluation in the window returns, byte for byte, what it returned
+   before — determinism is what makes "recompute the window" the same answer
+   as "recompute the dependents", minus the bookkeeping.
+3. **The counter is the number the test measures.** `db_formula_evals`
+   (AppState) bumps once per projected formula evaluation and is read by no
+   logic. The unified test's two numbers: **(a)** the counter's increment
+   after one cell edit — it must equal the window's formula cells (window
+   rows × visible formula columns), identical on a 10 000-row database and a
+   5-row one; **(b)** the set of (row, column) whose *painted value* changed —
+   it must be a subset of `{r} × {P | q ∈ deps*(P)}`. Both together are the
+   red line stated as arithmetic: window-bounded work, dependency-precise
+   effect, and no number in either grows with the table.
+
+Consequences:
+
+* **No cross-refresh value cache.** A cached painted value would skip the
+  redundant re-evaluations, but its invalidation must cover every write path —
+  cell edits, undo, redo, form submits, a LAN pull's bulk replace — and the
+  funnel for those is `record()`, which database changes do not all pass
+  through in every future shape. One missed path paints a *stale* value, which
+  is worse than a redundant deterministic microsecond-scale evaluation. If
+  D8's numbers say the redundancy matters, the clean place for a dirty set is
+  the `record()` funnel (every batch, both directions) — an optimization with
+  its own ADR, not a silent cache.
+* **The Markdown export computes the whole view it renders** (ADR-0065's
+  boundary made concrete): a file has no viewport, so `db_markdown_table`
+  evaluates formulas for every exported row — an explicit artifact's own
+  cost, and not the red line's subject (which is *input* latency). The
+  dependencies come from **one indexed sweep per column**
+  (`SqliteRepository::column_values`) expanded transitively, so the cost is
+  O(rows × formula columns + dep columns × table) rather than one point read
+  per row per dependency.
+* The eval-time depth cap and the save-time cycle check (ADR-0082) are two
+  halves of one sentence: the write path keeps user documents acyclic, the
+  read path keeps documents that arrived any other way finite.
+* Still unverified: no test ran, and no number was measured this knife (the
+  counter exists; the probe that prints it is the unified test's first D6
+  item).
+
+## ADR-0084 · rollup and relation wait for §四十's reference infrastructure — their shape is written down, their code is not written
+
+Decision: **D6 delivers `formula` only.** `relation` and `rollup` are
+deliberately not implemented, per the brief's own rule — 「relation 用 §四十 的
+基础设施（Track 2），不自己写一套 id 表」 — and per the check this knife ran
+first: Track 2's reference layer (`src/core/reference.rs`,
+`src/storage/backlinks.rs`, the `marks`-payload mention storage and migration
+16's two indexes) is **uncommitted work in the shared tree** — untracked files
+and uncommitted hunks, none of it in `HEAD`. Building a relation on top of
+uncommitted infrastructure would either drag their files into this knife's
+commit (forbidden) or fork a second reference mechanism (the exact thing the
+brief forbids). So: nothing here touches references, and the shape below is
+the contract the relation knife will implement against.
+
+The shape, written down so the waiting knife does not have to rediscover it:
+
+* **A relation column stores what the user picked — a *fact*, unlike
+  formula/rollup's derived values — so it needs real storage**, which ADR-0062
+  deliberately did not give it. The candidate that fits the existing shapes is
+  `db_value_items` (one target id per row, the multi-select mechanism, so
+  "is this record related to that one" is the same index probe a filter uses);
+  the decision belongs to the relation knife, with its own ADR, once Track 2's
+  ids are committable. What is fixed *here*: relations store **ids, never
+  titles** (ADR-0051's discipline — a renamed target shows its live name),
+  and a relation points at §四十's reference layer for its chips, its
+  backlinks and its open-link path rather than at any table this track owns.
+* **Two-way relations are one write, not two**: the forward change and the
+  back-pointers land in **one change batch** (one Ctrl+Z), the way
+  `DeleteDatabaseRecord` plans its values, record and page together. A
+  half-written pair is not a state any undo direction can name.
+* **Cycle detection at save time** — the same rule ADR-0082 applied to
+  formulas, and the same reason: a relation cycle has no rendering order that
+  saves it, so the write path refuses it while the user is looking, and the
+  read path's depth cap exists for documents that arrived another way.
+* **A rollup aggregates over the records a relation points at**: the six
+  starting aggregates are `sum` / `count` / `min` / `max` / `average` / `none`
+  over one target column of the related records; its configuration (the
+  relation column and the target column) lives in the rollup column's own
+  `config` document (ADR-0061's one bit of JSON per column, the same home
+  ADR-0082 gave the formula expression); its values are **computed at
+  projection time and stored nowhere** (ADR-0062), and its recompute follows
+  ADR-0083's contract — which is why the contract was written for formulas
+  first: rollup inherits it whole, with "the window" replaced by "the realized
+  rollup cells".
+
+Consequences:
+
+* SPEC §三十九's 「需计算：formula / rollup / relation」 is one third delivered
+  this knife; the report says so in its first section rather than burying it.
+* The formula editor, the `PropertyConfigSet` write path, the projection hook
+  and the counter are all relation/rollup-independent: nothing in this knife's
+  code will need to be reshaped when they land, only added to.
+* Still unverified: nothing to verify — this ADR is a decision and a
+  handover, not a feature.
+
+## ADR-0085 · A linked database is a second block with the same `db_ref`, and no second entity exists to drift
+
+Decision: SPEC §三十九 「操作」's `linked database` — 「引用另一个库的某个视图，不复制数据」 —
+is **not a new block kind and not a new column**. A linked database is an ordinary
+`BlockKind::Database` block whose `blocks.db_ref` names a `databases` row that already exists;
+`Command::LinkDatabase { id, db }` is the whole write (the block's kind and its pointer, in one
+batch, with `BlockDbRefSet` reverted by undo and **no `DatabaseDeleted`** — the source entity
+outlives every link, which is the one sentence that separates this command from
+`Command::MakeDatabase`).
+
+Why the shape is this thin. Every read and every write in this layer already resolves *through
+the block's `db_ref`*: `db_ref_of` → the catalog (columns, views, definitions), the window read
+(`RowRequest.db`), every cell write (`SetDatabaseCell` → `db_ref?`), the view switcher, the
+filter/sort documents. So "it reads the source's data and the source's view definitions, and
+writes land on the source" is not something this feature implements — it is something it
+*cannot avoid*, because there is exactly one `databases` row, one set of `db_properties`, one
+set of `db_views` and one set of records, and both blocks name it. There is no copy anywhere for
+a linked database to drift from.
+
+A new kind (say `BlockKind::LinkedDatabase`) was rejected for ADR-0060's reason: it would
+duplicate all six of §三十七's integration points (kind string, Markdown channel, Turn-into,
+menus, scenes, the delegate) to express a fact that is *the same* for both blocks — and the
+delegate would then have to be kept in step between two kinds forever. A second pointer column
+was rejected because it would be a second spelling of `db_ref` for the same question.
+
+**The view half of SPEC's `(db, view)` sketch is session state** (ADR-0073), not a column: the
+stored reference is the database; "which view" is what the block is showing *now*, defaulting to
+the source's first view when the link is made. Pinning a `view` id in storage would add a second
+dangling case (a view deleted while linked) with no honest rendering that the database's own
+dangling state does not already have, and would fight ADR-0073's "which view is session state"
+on the very blocks that most need to follow it.
+
+Dangling: the source entity can die only one way — **undoing the block that created it**
+(`Change::DatabaseDeleted` has exactly one producer, `MakeDatabase`'s revert; deleting a
+`Database` *block* leaves the entity orphaned, which is today's behaviour for a single block
+too). A linked block whose entity is gone resolves to `db_exists == false` and draws the one
+muted line ADR-0060 already defines — `(deleted database)` — through the untouched existing
+path. Deleting a linked *block* deletes nothing else.
+
+Creation path: the slash / insert menu's `Linked view` row (`LINKED_VIEW_ROW = -2`, the picker
+rows' negative-id convention from `MENTION_DATE_ROW`) switches the popup to a **database
+picker** (`open_slash_links` — every live database by name, with its view count as the hint),
+and the pick runs `db_make_linked`: the line gives up its words, the kind and the pointer land
+in one batch, one Ctrl+Z. `plan` cannot see the catalog, so the *caller* checks the id is live;
+if it died in between, the write still lands and the next projection draws the dangling state —
+visible, not silent.
+
+Consequences:
+
+* Zero migration, zero new `Change` variant, zero new `Block` field: the pointer is v18's
+  `blocks.db_ref`, already there. The linked database's cost is one command, two state helpers,
+  one picker mode and one menu row.
+* `MakeDatabase` already refuses a block with `db_ref.is_some()`, so a linked block cannot be
+  "re-made" into an owner; `SetBlockType` refuses `Database` by design (D3). There is no
+  user-facing "delete this database" action anywhere, so "who owns the entity" never has to be
+  asked — and the ADR records that it is deliberately unrepresentable rather than guessed.
+* Writes from a linked block land on the source: adding a column from a linked block adds it to
+  the source's schema, editing a cell edits the source's record. That is what a linked view
+  means, and it costs no code because it is the only row set that exists.
+* Unverified (no cargo was run this knife): the picker's two-step flow end to end, the dangling
+  rendering of a linked block, and two blocks of the same entity on one page's pixels. The
+  unified test list (REPORT_TRACK3 §D7) names each.
+
+## ADR-0086 · A record template is a copy of stored cells on the `databases` row, applied in the creation batch
+
+Decision: SPEC §三十九 「操作」's 数据库模板 is **one JSON document in a new
+`databases.template` column** (migration v20; `''` = no template), shaped
+
+    {"cells":{"<property id>": <string|number|bool|array of strings>}}
+
+with every value in the **exact shape `CellValue` stores** (ADR-0062's three columns plus the
+items list). That is the discipline the brief states for templates on both tracks —
+「模板是内容的副本、不引入第二套内容格式」 — spelled for a record: the store's own value shape
+*is* the content format, so a template cell is a stored cell written down and applying a
+template is the ordinary `SetDatabaseCell` write, parsed by nothing and converted by nothing.
+
+Where it lives and why: a column on `databases`, not a table and not a per-view document
+(ADR-0064's judgement, applied at the database level): SQL never filters on a template, so a
+second table would be a join nobody runs; and a template is about the records a database
+*creates*, which every layout creates the same way, so per-view would be a second copy of one
+fact. The document is replaced whole by `Change::DatabaseTemplateSet` (the whole-document family
+`db_views.definition` and `db_properties.config` already belong to) and rides the row through
+load, insert, snapshot/restore (a checkpoint that dropped it would un-template every database —
+ADR-0066's class of loss) and `db_absorb`.
+
+Authoring: the row action slot's **T** (beside the row's x) runs `db_template_from_row`, which
+reads that row's cells *as stored* — computed and derived kinds are skipped by kind, because
+they have no stored value (ADR-0062/0068) — and writes the document in one change (one Ctrl+Z).
+Copying an empty row makes the empty template, which is how the affordance clears one: a copy of
+nothing is "prefill nothing", said the same way.
+
+Applying: `db_add_record` and `db_form_submit` append the template's cells as ordinary
+`SetDatabaseCell` commands **in the creation batch**, so a new row arrives complete and one
+Ctrl+Z takes record and prefill back together. In the form, a field the user typed always wins;
+a blank field prefills (an empty draft field is "not typed", not "cleared" — the form has no
+clear gesture). A template cell naming a column the schema has since lost has no command to
+name, which is the filter.
+
+Consequences:
+
+* No second content format, no second write path, no template *record* (Notion's gallery of
+  template rows is a stored flag plus a projection rule this build does not need) and no
+  per-view template — each mentioned here because each is the cheaper-looking shape this ADR
+  refuses.
+* The one thing a template cannot carry: a computed value (a formula's answer is not stored,
+  ADR-0062) and a stamp (created/edited are the record's own columns, ADR-0068). A copied row's
+  formula columns and stamps are whatever the *new* record computes — the honest answer.
+* Version/undo: `DatabaseTemplateSet`'s revert names the previous document, so Ctrl+Z restores
+  the whole template; a re-save of the same row is not an undo step.
+* Seam with Track 1's page templates: **there is no shared shape to arbitrate** — a page
+  template is a copy of a block sequence (their territory, their storage), a record template is
+  a copy of cells (this column). Both follow the same *discipline* (a copy in the existing
+  format) and neither introduces a format, but no type, column or function is shared, so nothing
+  crosses the tracks. If the integrator later wants "a page template can seed a database row",
+  that is a projection-time translation between two existing formats, and it needs its own ADR.
+* Unverified (no cargo was run): the v20 column's convergence on a v19 file, the T affordance's
+  pixels, the form's draft-wins path, and the prefill's undo as one step. Named in REPORT §D7.
+
+## ADR-0087 · The view's search is a predicate in the same statement, not a turn of the global index
+
+Decision: SPEC §三十九 「操作」's 视图内搜索 is compiled into **the window read's own `WHERE`** —
+`RowRequest.search: Option<&str>`, one `INSTR(LOWER(expr), LOWER(?)) > 0` per text-bearing column
+the request carries (the title through its `COALESCE`, plus text / url / email / phone / the
+stored date / the two record stamps), OR'd, sharing one bind. The needle is **session state**
+(`db_search` by block id; the header's count slot opens the box) — not a rule in the view's
+document — so it is not persisted and not an undo step.
+
+The rejected path, and why. §二十's index (ADR-0014) is an FTS5 mirror of **page titles and
+block texts**: nothing indexes `db_values`, and a database's cells are not blocks. Routing view
+search through it would mean either (a) indexing every cell into the mirror — a derived copy
+with a write path on every cell edit, a prune rule on every bulk path (checkpoint, repair, LAN
+pull), and a lag boundary measured in "which writers remembered to index", all to answer a
+question the live predicate answers inside the statement the view was already running; or
+(b) joining `search_blocks`' rowid list back into the row query — which searches *blocks*, not
+cells, respects no view rule (a search must narrow the same membership the count and the group
+headers see), and would make the count and the rows answer two different questions.
+
+What the chosen path costs, said plainly:
+
+* **`INSTR` is a scan, not a seek.** On a 10 000-row database a keystroke re-runs the count and
+  the window read over the predicate — the same class of cost D4's `contains` filter already
+  has, with the same honest remedy if it ever feels slow (a debounce on the callback; not a
+  second row set in Rust).
+* **ASCII-only case folding** (`LOWER`), the boundary every text search in this app has.
+* **What is not searched**: numbers (their text form is the *projection's*, and comparing
+  numbers is the filter panel's job), checkboxes, select/status (the stored text is the option
+  **id** — the name lives in the config JSON, where SQL cannot see it), the two list kinds
+  (their values are `db_value_items` rows) and the computed kinds (they store nothing). A view
+  whose visible columns hold no prose therefore answers `0` rows for any needle — "nothing here
+  can match it" said as an empty result, not as a full table.
+* **No lag**, because there is no copy: a search reads the values the cell writes wrote, in the
+  same transaction the writes flush into. That is the one boundary the FTS path would have
+  introduced and this one does not have.
+
+It rides the same clause as the filter in every statement `database_query` builds — the window
+read, the `count(*)`, the group query and each group's slice, the range query — so a searched
+view's count, its group headers and its rows all answer one predicate, and no path downstream
+can disagree about what the needle found. The Markdown export passes `search: None` on purpose:
+the file is the *view* the user configured, and a search is a question being asked of the
+screen.
+
+Consequences:
+
+* SPEC §二十's index is untouched: the global search panel's semantics (and its CJK
+  segmentation) are unchanged by this knife, and the two searches differ visibly in what they
+  can match — documented here rather than discovered later.
+* The needle is compiled per keystroke but the *rows* are still windowed: a searched 10 000-row
+  database realizes its viewport's rows, never the matches.
+* Unverified (no cargo was run): the per-keystroke cost, the OR-of-INSTR SQL text against
+  `EXPLAIN QUERY PLAN`, and the box's pixels. Named in REPORT §D7.

@@ -1846,7 +1846,7 @@ M11 — Block 扩充（§三十七 批次 C）
 完成：
 
 * code 高亮
-* bookmark
+* bookmark —— 2026-09-22 **撤回**，不做（ADR-0081）；卡片形状由 embed 承接（ADR-0040）
 * embed 卡片
 * math
 * TOC
@@ -2359,7 +2359,17 @@ columns（分栏）—— 2026-09-20 已交付，ADR-0032：
 
 ## 批次 C：引用与嵌入
 
-bookmark：链接卡片，抓标题与 favicon；离线或抓取失败退化为纯链接，且不得阻塞输入
+bookmark：~~链接卡片，抓标题与 favicon；离线或抓取失败退化为纯链接，且不得阻塞输入~~
+—— 2026-09-22 **撤回，不是推迟**（ADR-0081）
+
+* 更正一条依据：Quire **有** HTTP 客户端（`src/services/lan_client.rs`，无依赖的
+  HTTP/1.0 `GET`，给 `main.rs` 的 `--pull <url>` 用），所以准确的说法是
+  **没有 TLS、也没有一次不是用户刚刚要求的请求**——缺的是传输安全与同意，不是
+  「这个应用不联网」
+* 要走这条路就要在同一个里程碑里再进一棵 `rustls`（或 `native-tls`）依赖树，先回答
+  「Quire 会不会自己发请求」（同意），再定标题与 favicon 的落盘、容量与淘汰规则
+* 而 SPEC 真正要的卡片形状——表明链接属于谁、显示将要交出去的地址、离线降级——已由
+  **不抓取的** embed 卡片交付（ADR-0040）。差的那一点正好是需要网络的那一点
 
 embed：YouTube / Figma / Google Maps 一类链接转卡片。本阶段只做占位卡片 + 外部打开，不做内嵌浏览器（§二 与 §三十三 禁 WebView）—— 2026-09-21 已交付，ADR-0040
 
@@ -2369,8 +2379,9 @@ embed：YouTube / Figma / Google Maps 一类链接转卡片。本阶段只做占
 * Markdown 里是一行裸地址（GFM 自动链接）：任何渲染器都把它显示成链接，包尖括号或写注释
   标记只是多一个会被写坏的东西；导入侧只认「整行一个 token 且带 `http(s)://`」，
   句子里的地址仍然是句子
-* 边界（不算缺陷）：不抓标题、不抓 favicon、不预览（那是 bookmark 的活），所以卡片显示的是
-  域名而不是网页标题；识别不了的域名就以域名本身为标签；未填地址时卡片说「No address yet」
+* 边界（不算缺陷）：不抓标题、不抓 favicon、不预览——`bookmark` 已于 2026-09-22
+  撤回（ADR-0081），所以这不是「还没做」，卡片显示的是域名而不是网页标题；识别不了的
+  域名就以域名本身为标签；未填地址时卡片说「No address yet」
 
 code 高亮：—— 2026-09-21 已交付，ADR-0042
 
@@ -2504,11 +2515,11 @@ workspace 模板库：预置若干本地模板，导入导出走 §二十六 的
 
 这是 Quire 与 Notion 差距最大的一层。
 
-Database 不是 §九 块类型清单里的一行，它自带 model / storage / UI 三层，因此独立成阶段，阶段内再切里程碑。
+Database 不是 §九 块类型清单里的一行，它自带 model / storage / UI 三层，因此独立成阶段，阶段内再切里程碑。—— 2026-09-22 Track 3 **D0 只做决策与探针，未交付功能**：实体形状 ADR-0060、列定义 ADR-0061、值 ADR-0062、record 与 page 的关系 ADR-0063、视图定义 ADR-0064、Markdown 通道 ADR-0065。第一条性能红线已用 headless 探针证明通道存在（`core::database::window`：10 000 行 realize **31** 行，窗口 **6 806 B** 对全表 **2 259 800 B**，原始行 `benchmarks/results/2026-09-22-track3-probe.jsonl`），实现自 D1 起。
 
 ## 对象模型
 
-database：一组 record + 一份 schema（列定义、视图定义）
+database：一组 record + 一份 schema（列定义、视图定义）—— 实体形状定于 ADR-0060：自己的 `databases` 行，由一个新的 `Database` 块经 `blocks.db_ref` 指过去（同 ADR-0026 的 `page_ref`）；「整页数据库」就是首块是它的普通页，八个视图是同一个实体的八种 `layout`，不是八个块种类。列定义与视图定义分别见 ADR-0061 / ADR-0064 —— 2026-09-22 **D1 落了这一层的存储**：`databases` / `db_properties` / `db_records` / `db_values` / `db_value_items` / `db_views` 六张表（schema **v12–v15**，一步一语义单位）与 `core::database` 的对象模型；行只活在窗口里（ADR-0067），批量路径不许把这一层弄丢（ADR-0066）。**块仍未点亮**：ADR-0060 的六个接点整批留待画视图的那一刀（D3）。
 
 record：一行，可以同时是一个 page（页面即行，这是 Notion 的核心而不是装饰）
 
@@ -2516,40 +2527,42 @@ view：同一份数据的一个投影（过滤 + 排序 + 分组 + 可见列 + �
 
 property：列，带类型
 
-record 与 page 的关系必须可逆：删 record 与删页面的行为都要有明确定义，且都进 undo。
+record 与 page 的关系必须可逆：删 record 与删页面的行为都要有明确定义，且都进 undo。—— 2026-09-22 契约定于 ADR-0063：record **拥有**它的 page（`db_records.page`，`UNIQUE(page)`，`ON DELETE CASCADE`）；标题只有一个家（有 page 在 `pages.title`，无 page 在 `db_values`，读的时候 `COALESCE`）；record 默认没有 page，第一次打开才建，建页与标题搬家是同一个 `Command` 的一批 change；删 record 是 `[DbValueDeleted…, DbRecordDeleted, PageDeleted?]` 一批（`Entry` 的 `apply`/`revert` 一起算，一次 Ctrl+Z）。**已知缺口**：侧边栏自己的删页从来没进过 undo，那条路上丢的 record 是丢的——ADR-0063 明写，不假装闭环。测试 2026-09-22 落在 D1（`tests/integration/storage_test.rs` 的 `database_layer`：两条删除路径 + record 与 page 的重建 + 批量路径），命令层那个「一次 Ctrl+Z」随 D3 的 `Command`。
 
 ## 属性类型
 
-必做：title / text / number / select / multi-select / status / date / checkbox / url / email / phone / files / created time / last edited time
+必做：title / text / number / select / multi-select / status / date / checkbox / url / email / phone / files / created time / last edited time —— 2026-09-22 存储形状定于 ADR-0061（列定义是 `db_properties` 行表，只有 select 的选项列表是行内 JSON）与 ADR-0062（值是 `db_values` 一行一列，`text`/`num`/`flag` 三列 + `db_value_items` 给列表型）—— 2026-09-22 D1 落了**存储**：每种形状都有往返测试，「空」= 没有行（不是空串、不是 0），select 的选项 config 原样存 JSON。逐类型的渲染与语义（选项名、日期格式、附件显示）仍是 D2。—— 2026-09-22 **D2 交付**（ADR-0068…ADR-0071）：14 种属性的**输入与渲染规则**落在 `core::database_property`（数字/日期/勾选的接受与拒绝逐条成文，url / email / phone **只提示不改写**，选项存 id 不存标签，附件显示名字，未知的选项 id 与已删的文件 id 各自显示自己），`created time` / `last edited time` 由 `db_records.created` / `.edited` 两列投影（v17，写路径盖章，永不写进 `db_values`），排序由 `SortSpec` 编译进 SQL 的 `ORDER BY`（数字按 `num` 排、日期按定宽文本排、空值显式排在最后，`EXPLAIN QUERY PLAN` 为证）。
 
-降级处理：person —— 没有账号体系，退化为工作区内本地成员名单，纯字符串
+降级处理：person —— 没有账号体系，退化为工作区内本地成员名单，纯字符串—— 2026-09-22 落于 ADR-0071：仍然没有成员表、没有成员 id、没有账号（ADR-0061 的折叠不动），名单由 `SqliteRepository::workspace_people()` 从值里现算（存储 kind 为 `person` 的列的去重非空值），改名就是改一个字符串。
 
 需计算：formula / rollup / relation（含双向关系）
 
-公式引擎的限制：纯词法 + 自写解释器，不引入 JS / WASM 运行时；表达式必须有限求值；relation 环检测在保存时做，不在渲染时做。
+公式引擎的限制：纯词法 + 自写解释器，不引入 JS / WASM 运行时；表达式必须有限求值；relation 环检测在保存时做，不在渲染时做。—— 2026-09-22 **D6 交付 formula**（ADR-0082/0083 随刀）：引擎是 `core::database_formula` 的纯词法 + 递归下降 + 树遍历解释器（零新依赖），类型 number / text / boolean / date + Empty（Empty 传染，`text(x)` 是唯一显式转换，无隐式转换），函数七个 `if length round abs min max text`；四个求值预算是常量（tokens 2 048 / depth 32 / steps 10 000 / result 65 536）；表达式存列自己的 `config` JSON（ADR-0082，`PropertyConfigSet` 整文档替换、一步 undo），**值不入库、投影时现算**（ADR-0062/0039 的纪律）；环检测在保存时做（`would_cycle`，渲染时只有深度上限兜旧文档，画 `Error` 不挂）；公式列的排序/过滤被拒绝（要比较就得先算全列，正是红线禁止的事）。**rollup / relation 未交付**（ADR-0084）：Track 2 的引用基础设施（`reference.rs` / `backlinks.rs`）尚未提交，relation 不另造轮子、等 §四十 落地后单独一刀，形态已在 ADR-0084 写死（存 id 不存标题、双向一批写、保存时环检测、rollup 六种聚合）。ADR-0062 记下了一条：formula / rollup / relation **不存值**，投影时现算，`created time` / `last edited time` 的来源（当时 `pages`/`db_records` 都没有时间戳列）留 D2 出 ADR，不写进 `db_values`（否则就是 ADR-0039 禁止的双写）—— 2026-09-22 D2 交付：ADR-0068 给 `db_records` 加 `created` / `edited` 两列（v17，`YYYY-MM-DDTHH:MM` 本地墙钟，由 SQLite 的 `strftime` 在写路径盖章），读路径对这两种 kind 从不查 `db_values`。
 
 ## 视图
 
 table → board → list → calendar → gallery → timeline → form → chart
 
-顺序即实现顺序。chart 放最后，且不得为此引入图表库：先用现有绘制 primitive 做 bar / line / pie 三种。
+顺序即实现顺序。chart 放最后，且不得为此引入图表库：先用现有绘制 primitive 做 bar / line / pie 三种。—— 2026-09-22 形状定于 ADR-0060（八种是同一个 `Database` 块的 `db_views.layout`，不是八个块种类）与 ADR-0064（视图定义持久化）。「+」插入菜单里那六行 muted 占位（`INSERT_ITEMS` 的 `Table view` / `Board` / `Gallery` / `List view` / `Calendar` / `Timeline`，`id = -1`）就是其中六种 layout，点亮它们 = 给这些行真 id，不是加块种类。2026-09-22 D1 落了**视图定义的存储**（`db_views`：名字 / layout / 顺序是列，规则是一份 JSON，ADR-0064），视图本身（渲染与切换器）仍未有，六行仍不可选。 —— 2026-09-22 **D3 交付 table**（ADR-0072…ADR-0075 随刀）：`DatabaseView` / `DatabaseCell` / `DatabaseSwitcher` 三个组件与 `BlockKind::Database` 块（`blocks.db_ref`，v18）点亮，窗口投影真的从 SQL 取行（`core::database::window` 算出 `LIMIT`/`OFFSET`，10 000 行只 realize 视口那一窗，行的 y 由 `db-row-start` 摆回滚动面的原位——「行是动态的」两条规则照 §三十七）；视图切换器是真实的 tab 条（今天每库一个视图，D5 加第二个视图只是加一行）；「+」菜单的 `Table view` 行点亮（真 id），其余五行仍 muted，board 起的七种打开时以自己的 layout 名明说「not in this build yet」。 —— 2026-09-22 **D5 交付 board / list / calendar / gallery / timeline / form 六种**（ADR-0078 / ADR-0079 随刀）：每个布局自己的「窗口单位」（board 的卡片槽位、gallery 的卡片行、calendar 的固定 6×7 格 + 每天至多 3 条折叠计数、timeline 的泳道 + 一次 min/max 定轴、「无日期不显示」是语句里的 is-not-empty 子句、form 不读行只建行），全部照「计数先算、窗口后开」；board 复用 D4 的 `groups` 键与 `GROUP BY`，calendar/timeline 的时间轴是视图文档的新键 `date`/`end`（零迁移），视图切换器「+」点亮（`AddDatabaseView` 一个 change，创建即切换，chart 仍以名字拒绝）；插入菜单其余四行仍 muted（ADR-0079）。
 
 ## 操作
 
-filter / sort / group by / 视图内搜索 / 行内编辑 / 列宽与隐藏列 / 视图切换器；视图与 schema 一起持久化
+filter / sort / group by / 视图内搜索 / 行内编辑 / 列宽与隐藏列 / 视图切换器；视图与 schema 一起持久化 —— 2026-09-22 **D3 交付行内编辑、列宽与隐藏列、视图切换器**（ADR-0072…ADR-0075）：行内编辑接了 title / text / number 的行内输入、checkbox 的整格点击、select / status 的格内选项列表（一个 `TextInput` 纪律照旧，值经列自己的 kind 解析，ADR-0069）；列宽是 permille、存进视图文档（ADR-0074 的原样透传），隐藏列走窗口级 Columns popup（title 列锁定，ADR-0063）；切换是会话态（ADR-0073）。—— 2026-09-22 **D4 交付 filter / sort / group by**（ADR-0076/0077）：过滤树与多键排序编译进窗口读的同一条语句（`storage::database_query` 出文本与绑定、`database_store` 执行，「不在 UI 侧过滤」是模块边界而不是纪律），计数先 `COUNT(*)` 后开窗，过滤 10 000 行剩 3 行就 realize 3 行；分组是**条目投影**——组头是条目不是行（窗口算术跑在 Σ(count+1) 上，组内行各自 LIMIT/OFFSET），组列表只对 option-bounded 的 checkbox / select / status 开放；过滤树整棵读不开时丢弃并在视图上**可见提示**，单条不可读的子句丢弃并计数（ADR-0064 的删列规则）；面板只编辑扁平子集（根 and/or + 子句级非），嵌套树照常过滤但拒绝被面板改写。视图内搜索仍未交付（D7）。视图定义怎么存定于 ADR-0064：视图是 `db_views` 行（名字 / layout / 顺序是列），**规则**（过滤 + 排序 + 分组 + 可见列 + 列宽）是一份 JSON 文档，判据是本 ADR 与 ADR-0061/0062 共用的那一句「SQL 有东西要在它上面过滤吗」——列和值要在，视图规则不用。
 
-linked database：引用另一个库的某个视图，不复制数据
+linked database：引用另一个库的某个视图，不复制数据 —— 未交付（D7）。ADR-0060 / ADR-0064 已定：指向 `(db, view)`，不拷定义，与 ADR-0026 的 Link 块同构。
 
-数据库模板：新建 record 时的预填
+数据库模板：新建 record 时的预填 —— 未交付（D7）。
+
+**Markdown 通道（§二十六 是内容通道）定于 ADR-0065**：database 导出成它**当前显示的那个视图**的 GFM 表格（title 列在最前，一列一个可见属性，一行一条 record，按视图的顺序与成员，即过滤排序照做）；页-backed 的 record 标题写成 `[title](quire://page/<id>)`。**不写标记行**（`<!-- quire:toc -->` 那种先例不适用：目录没有别的表示，表格本身就是真表示）。导入侧不改：管道行回来是段落（ADR-0031 为简单表格定的同一条），所以一次导出/导入丢掉 schema、类型、record 身份——这是决定，不是遗漏。代价：`export_page(blocks)` 拿不到 record，导出时由调用方把渲染好的行传进来，不让导出层学会开数据库。
 
 ## 性能红线
 
 Database 是本规格里唯一会自然长出「大量行 × 大量属性」的功能，§二十二 / §二十三 的规则在这里最容易破：
 
-* 10 000 行的库不得全量 realize；视图先算可见窗口再取行
-* filter / sort 在 SQL 侧完成，不在 UI 侧过滤
-* formula / rollup 必须可增量重算，禁止每次输入全库重算
-* 数字进 docs/PERFORMANCE.md：10 000 行的 RAM、切换视图耗时、打开公式编辑器的耗时
+* 10 000 行的库不得全量 realize；视图先算可见窗口再取行 —— 2026-09-22 **通道已证明存在**（D0，ADR-0060）：`core::database::window` 先算 `[start, end)` 再取行，`RowWindow::fetch()` 就是那次查询的 `LIMIT`/`OFFSET`；10 000 行、32 px 行高、720 px 视口、8 行 overscan 时 realize **31** 行（窗口 0..31；滚到中间 39 行、底部 31 行），窗口那 31 行占 **6 806 B** 堆，全表 10 000 行占 **2 259 800 B**（332×），只要 id 的 `Vec<u64>` 是 80 000 B。可重复：`cargo test --lib database::`（断言）与 `cargo test --release --lib -- --ignored --nocapture a_window_costs`（数字），原始行 `benchmarks/results/2026-09-22-track3-probe.jsonl`。2026-09-22 **D1 补上了 SQL 那一半**：窗口真的作为 `LIMIT`/`OFFSET` 执行（`storage::database_store::window_rows`），10 000 条 record 落库后一次窗口读拿回 31 行（10 000 行的对照也量了，见 `benchmarks/results/2026-09-22-track3-d1-window.jsonl`）。**仍然只证明了投影与查询，没证明帧**：没有 `.slint` 视图，没跑过 `bench.ps1`。
+* filter / sort 在 SQL 侧完成，不在 UI 侧过滤 —— 2026-09-22 **形状已交付**（D4，ADR-0076/0077）：过滤与排序编译进窗口读的语句，计数先 `COUNT(*)` 后开窗（ADR-0062 的形状——`num REAL` 可索引、日期是定宽 ISO 文本——在这里兑现成比较发生在 SQLite 自己的类型系统里）；**耗时对照仍是统一测试的数字**（「10 000 行的库加一个过滤条件的窗口读」对「取回 10 000 行再在内存里过滤」，量法记在 REPORT_TRACK3 §D4）。
+* formula / rollup 必须可增量重算，禁止每次输入全库重算 —— 2026-09-22 **D6 交付 formula 半边**（ADR-0083）：求值只发生在投影窗口（六布局共用的 `db_table_rows` → `db_paint_formulas`），求值集 = realize 行 × 可见公式列，**没有遍历全表的求值路径**；依赖是本行的（引擎回调无 record 参数——公式在结构上引用不到别的行），改一格后值可能变化的格 ⊆ {该行} × 依赖闭包；`db_formula_evals` 计数器钉住量法——统一测试要量「改一格后 evals 增量 = 窗口行数 × 可见公式列数，与 COUNT(*) 无关」与「值实际变化的格 ⊆ 依赖闭包」两个数。没有跨刷新的值缓存：失效要覆盖 undo/redo/批量替换的每条写路径，漏一条就是画陈旧值，比确定性的微秒级重复求值更糟（ADR-0083）。导出是显式全视图产物、按行现算，不属输入红线（同 ADR-0083 的边界）。rollup 等 relation （ADR-0084），落地即继承同一契约。
+* 数字进 docs/PERFORMANCE.md：10 000 行的 RAM、切换视图耗时、打开公式编辑器的耗时 —— 仍欠着（没有 UI 臂就进不了 PERFORMANCE.md 的 §Method）。D1 的建库与窗口读数落在 `benchmarks/results/`，随 D3 / D8 与真窗口读数一起收口。探针的窗口数字落在 `benchmarks/results/2026-09-22-track3-probe.jsonl`（进程 private 2.0 → 5.1 MB，即把 10 000 行真的拿进内存要 ≈3.1 MB，而窗口只要 6.8 KB），三个正式数字随 D3 / D8 进 PERFORMANCE.md。 —— 2026-09-22 **D8 收口**：三个数字进了 `docs/PERFORMANCE.md` 的 `## M14`（原始行 `benchmarks/results/2026-09-22-track3-d8.jsonl`）：① 10 000 行的库开在窗口上只占**几 KB** 行对象（31 行，与 100 行库同价），全量 realize 才要 1.16–2.26 MB（≈330×），是永不发生的那一支；② 切到视图顶部 = 解码 + `COUNT(*)` + 一次窗口读 ≈ **0.35–1.0 ms**，但 `OFFSET` 走到表尾要 **16–25 ms**（cursor 取窗实测 212–356 µs，约 80× 之下，是退役它的现成路子），分组视图的 `GROUP BY` 再 +5–18 ms；③ 打开公式编辑器 = 解析一条嵌套式子 **1.6–3.4 µs**、单格求值 68–129 ns，把 10 000 行全重算是窗口重算的 **108×** 且投影无路径去做（ADR-0083）。仍**未测帧**：Slint 重画 31 个 delegate、日历 42 格、chart 构 path 的墙钟，要真窗口 + `bench.ps1` 的 RAM/像素臂才量得到，headless 探针替不了它（与 D0 同一条界限）。
 
 ## 排期前提
 
@@ -2561,12 +2574,35 @@ Database 是本规格里唯一会自然长出「大量行 × 大量属性」的�
 
 @page mention：§十 的 Inline Model 新增一种 span（存目标 page id，不存标题）。输入 @ 弹页面选择器，复用 §十五 slash 弹窗的第三种模式（ADR-0026 已验证这条弹窗可复用）。
 
+—— 2026-09-22 已交付，ADR-0050（存储形态与 Markdown 往返语法）。span 复用 `marks` 表唯一那列载荷（`url = "quire://page/<id>"`，`kind = "mention"`），**不新增列**。chip 的标题由**投影层**向 workspace 现问（`MentionTitles`），所以改名自然跟随、没有任何字符被重写——代价的另一面是删页时也没人去改引用，退化因此是投影层的职责（见下面「页面别名」）。选择器是 slash 弹窗的**第四种模式**（`slash-pick-mention`）：第一行是日期，其余是 workspace 的页面；应用时发一条 `InsertReference`，因为 `exec_all` 对批内每条命令都按同一份 pre-state 计划，「替换 `@` 之后的过滤文字」与「落一颗 mark」必须是一步（否则后者的按旧文本长度 clamp 会把它切错），顺带也是**一步撤销**。点击 chip 走 M8 就有的 `quire://page/<id>` → `open-link` 路径。悬空（目标页已删）时 chip 读作 `(deleted page)` 并灰化。
+
 @date：落 date 型 inline span。
+
+—— 2026-09-22 已交付，ADR-0050。日期**存自己的 ISO 文本**（同一列载荷 `url`），不存"今天的编号"：格式的唯一定义在 `core/date.rs`（`is_iso_date` / `to_iso` / `today_iso`），导入侧与选择器写盘共用它，所以库里不会出现两种写法。渲染成独立的 `clock` chip，与 mention 在视觉上分开——日期不是指向页面的引用，它没有地址。
 
 反向链接区：页面底部列出所有引用本页的块。派生数据，不双写入库。
 
+—— 2026-09-22 已交付，ADR-0051。**不加表、不加列、不挂 FTS5**：migration 16 只加两条索引（`marks(kind, url)` 与 `blocks(page_ref)`），查询在 `storage/backlinks.rs`，每次投影现算（`refresh_backlinks`，由 `reproject_blocks` 调用）。面板**折叠 5 行 / 展开 50 行**，超出的部分由一行总量交代，所以被引 200 次也不会把正文挤出屏幕；按来源页分组，组头只在每组第一行画。点一行跳到来源块，来源在别的页就先开那一页——和文本里的 `quire://block/` 链接走同一个 `jump_to_block`。
+
 反向链接索引与 §二十 的搜索索引一起增量维护，不得每次打开页面全库扫描。
+
+—— 2026-09-22 达成，但**路线与原文不同**，见 ADR-0051：这条 ADR 撤掉了本 track 早先的"挂进 FTS5 增量路径"草案，改为"两条索引 + 派生投影"。挂进搜索索引意味着多一份派生数据、也就多一条必须维护它的写入路径（删一条 mention 要从 `search_blocks.content` 里摘掉 `__backlink:` token，而摘的动作会把用户正文一起重写），而索引由 SQLite 从磁盘上已有的行建出来，**没有可漂移的副本**。"不得全库扫描"这句**有对照数字**：同一进程、同一个库（1 200 页 / 100 200 条 mark）里把 `idx_marks_reference` drop 掉再跑同一条查询，折叠读从 **78 µs 变成 6 068 µs**（`docs/PERFORMANCE.md` "T2 · the backlink panel is one index seek"），页面打开本身 +0.06 ms（折叠）/ +0.07 ms（展开），对 §二十二 的 50 ms 预算。
 
 页面别名：因为引用存的是 ID，重命名后所有引用自然显示新标题。
 
+—— 2026-09-22 已交付，ADR-0051「后果」小节。**这一条不需要新功能，需要的是证明**，三处各有测试钉住：chip（`a_mention_run_reads_the_live_title_and_degrades_when_the_page_is_gone`）、反向链接面板的分组标题（`the_backlink_panel_groups_by_page_and_names_each_page_as_it_is_called_now`）、Markdown 导出（`an_export_that_knows_the_workspace_names_each_page_as_it_is_called_now`，导出侧走 `export_page_with(..., &|id| ws.title_of(id))`）。「引用存 id」的三种代价也定义并钉住了：目标页**被删** → chip 与块级引用行都读 `(deleted page)`（`deleting_a_page_degrades_the_chip_that_named_it`）；目标 id **指向本库不存在的页**（手改过库 / 旧备份）走的是同一条代码路径——都是"workspace 报不出这个名字"，所以退化是同一句话，不另造一套。顺带修了一个真 bug：`delete_page` 删掉**非当前页**之后没有重投影，屏幕上的 chip 会一直显示旧标题（这正是"可见退化"要挡的那类失败：没有任何东西会去纠正它）。目标页被**移动**到别的父页不属于退化——id 没变，所以引用照旧解析，`renaming_moving_and_losing_the_page_a_reference_points_at` 把改名、移父、id 落空三件事放在一条测试里按顺序走了一遍，并断言那颗 chip 所在的块在三种情况下**逐字节未变**（引用只存 id，改的是一个页面，不是三千个引用它的块）。
+
 synced block 建在这一层之上：一个块被多处引用，编辑任意一处全部生效。
+
+—— 2026-09-22 已交付，ADR-0052。**一块内容只有一份**：`Synced`（kind 24）自己不持有文本，
+`blocks.sync_ref`（migration 19）指向源块，行画的是源块的 text 与 marks，投影时解析、不第二次写
+（`sync_target`）。编辑绑到源块（`content_of` / 行的 `content-id`），所以"两处同时变"真的只写一处，
+一步 Ctrl+Z 撤掉。四个语义都在 ADR 里落了字：删镜像只删这一行（无外键、无级联）、删源让镜像可见退化成
+`(deleted source)` 并变只读、undo 无需合并、**环检测在写入那一刻做不在渲染时做**（`sync_would_cycle`，
+有上界；`sync_target` 也带 `SYNC_RESOLVE_MAX`，旧备份里的环是"画错"而不是"挂住"）。
+只同步**一个块**不同步整棵子树 —— 那会让行数变成动态的，§三十七 那两处附加改动（真删子树、row→model）
+在这一刀被判定为用不到，不是被漏掉。Markdown **导出摊平**（镜像导成源块那一行，照 ADR-0032 columns
+的先例），**导入有意不认新语法** —— §二十六 把 Markdown 定成内容通道不是保真格式，block id 跨库没有意义，
+造个记号只会产出"导进来立刻失去源"的块。六接点：`BlockKind::Synced` / kind 24 / 导出摊平+导入按名字
+回读 / `TURN_INTO_ITEMS = SLASH_ITEMS` / slash 与 "+" 两个菜单 / 场景 `synced`、`synced-source-gone`
+及各自的 `dark-` 臂。**未验证**：真键盘输入、源与镜像同时在屏时两个输入框的焦点争用、真点一次跳转。

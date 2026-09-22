@@ -116,7 +116,8 @@ fn duplicated_nested_list_keeps_parents_in_the_copy() {
         img_percent: 100,
         columns: 0,
         lang: quire::core::Lang::Plain,
-            },
+        db_ref: None,
+        sync_ref: None,            },
             quire::core::Block {
                 id: child,
                 page: quire::core::PageId(page as u32 as u64),
@@ -134,7 +135,8 @@ fn duplicated_nested_list_keeps_parents_in_the_copy() {
         img_percent: 100,
         columns: 0,
         lang: quire::core::Lang::Plain,
-            },
+        db_ref: None,
+        sync_ref: None,            },
         ],
     );
 
@@ -148,7 +150,11 @@ fn duplicated_nested_list_keeps_parents_in_the_copy() {
     assert_ne!(copied_child.parent, Some(root), "stale parent pointer");
     assert_eq!(copied_child.parent, Some(copied_root.id));
     // depth projection agrees (both render, child indented)
-    let rows = quire::app::state::project_blocks(&blocks, &Default::default());
+    let rows = quire::app::state::project_blocks(
+        &blocks,
+        &Default::default(),
+        &quire::app::state::MentionTitles::empty(),
+    );
     assert_eq!(rows[0].depth, 0);
     assert_eq!(rows[1].depth, 1);
 }
@@ -415,7 +421,7 @@ fn duplicate_appends_consistently_when_the_gap_is_exhausted() {
 /// not a subtle corruption — which is why both halves are asserted here.
 #[test]
 fn a_folded_section_shifts_drag_landings_but_not_row_numbers() {
-    use quire::app::state::project_blocks;
+    use quire::app::state::{project_blocks, MentionTitles};
     use quire::core::{Block, BlockId, BlockKind, ColorKind, OrderKey};
 
     let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0, pictures: 0, marks: 0, code: 0 };
@@ -439,7 +445,8 @@ fn a_folded_section_shifts_drag_landings_but_not_row_numbers() {
         img_percent: 100,
         columns: 0,
         lang: quire::core::Lang::Plain,
-    };
+        db_ref: None,
+        sync_ref: None,    };
     state.doc.borrow_mut().set_page_blocks(
         pid,
         vec![
@@ -450,7 +457,11 @@ fn a_folded_section_shifts_drag_landings_but_not_row_numbers() {
         ],
     );
 
-    let rows = project_blocks(state.doc.borrow().page_blocks(pid), &Default::default());
+    let rows = project_blocks(
+        state.doc.borrow().page_blocks(pid),
+        &Default::default(),
+        &MentionTitles::empty(),
+    );
     assert_eq!(
         rows.iter().map(|r| r.id).collect::<Vec<i32>>(),
         vec![1, 3, 4],

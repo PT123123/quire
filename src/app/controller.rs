@@ -96,6 +96,7 @@ pub fn bind(ui: &AppWindow, state: &Rc<AppState>) {
     state.set_ui(ui.global::<UIState>().as_weak());
     g.set_sidebar_rows(state.sidebar_model());
     g.set_blocks(state.blocks_model());
+    g.set_backlinks(state.backlinks_model());
     g.set_commands(state.commands_model());
     g.set_search_rows(state.search_model());
     g.set_menu_rows(state.menu_model());
@@ -1200,15 +1201,28 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                 s.note_locked();
                 return;
             }
+            // SPEC §四十 / ADR-0052: clicking a mirror puts the caret *in the
+            // source*, which is the whole of "edit either copy and both change".
+            // The row's own delegate then lights up too, because it asks
+            // `editing-id == content-id` — one block being edited, two rows in
+            // agreement about whose words they are showing.
+            //
+            // An unresolvable mirror (`content_of` returning `-1`) falls
+            // through to itself, and `set_editing_id(-1)` there is a no-op that
+            // leaves the placeholder untouched: there is nothing to type into.
+            let target = s.content_of(id);
+            if target <= 0 {
+                return;
+            }
             let (text, len) = {
                 let d = s.doc.borrow();
-                d.block(BlockId(id as u64))
+                d.block(BlockId(target as u64))
                     .map(|b| (b.text.clone(), b.text.len()))
                     .unwrap_or_default()
             };
             g.set_editing_text(text.into());
             g.set_pending_caret(len as i32);
-            g.set_editing_id(id);
+            g.set_editing_id(target);
         });
     }
 
@@ -1234,6 +1248,32 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
             // -1 first: recreate the delegate so the input takes over
             g.set_editing_id(-1);
             focus_block(&g, &s, id, len);
+        });
+    }
+
+    // backlink panel (SPEC §四十): a row names the block that mentioned this
+    // page, and the row's click is the same jump a `quire://block/` link in
+    // the text makes — including when the reference lives on *another* page,
+    // which is the common case and the reason the panel cannot just move the
+    // caret where it stands.
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_backlink_jump(move |id| {
+            let g = gw.upgrade().unwrap();
+            if id <= 0 {
+                return;
+            }
+            jump_to_block(&g, &s, id as u64);
+        });
+    }
+
+    {
+        let s = state.clone();
+        ui.global::<UIState>().on_backlink_toggle(move || {
+            // the window is chosen from the flag, so the fold *is* the read:
+            // nothing else has to be re-derived for the panel to change size
+            s.toggle_backlinks();
         });
     }
 
@@ -1409,34 +1449,53 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                     // editing block. The "+"-handle insert menu filters on
                     // the whole line instead and keeps its original anchor;
                     // the page picker (Link to page) filters the same way.
+                    // "@" opens the mention picker wherever it is typed (SPEC
+                    // §四十) — mid-line included, which is why it is checked by
+                    // scanning the text rather than by looking at the head.
                     let pick_mode = g.get_slash_pick_page() && g.get_slash_open();
+                    let linkdb_mode = g.get_slash_pick_linkdb() && g.get_slash_open();
                     let insert_mode = g.get_slash_insert() && g.get_slash_open();
-                    if pick_mode {
+                    let mention_mode = g.get_slash_pick_mention() && g.get_slash_open();
+                    let mention_at = crate::core::trigger_at(&text);
+                    if mention_mode && mention_at.is_some() {
+                        // still typing the filter: refilter, keep the anchor
+                        let at = mention_at.unwrap();
+                        s.open_slash_mention(&text[at + 1..]);
+                        g.set_slash_filter(text[at + 1..].into());
+                        g.set_slash_focus(0);
+                    } else if pick_mode {
                         s.open_slash_pick(&text);
+                        g.set_slash_filter(text.into());
+                        g.set_slash_focus(0);
+                    } else if linkdb_mode {
+                        // D7 (ADR-0085): still picking a database to link —
+                        // refilter the picker's rows, keep the anchor
+                        s.open_slash_links(&text);
                         g.set_slash_filter(text.into());
                         g.set_slash_focus(0);
                     } else if insert_mode {
                         s.open_slash_insert(&text);
                         g.set_slash_filter(text.into());
                         g.set_slash_focus(0);
+                    } else if let Some(at) = mention_at {
+                        // the menu opens where the text column starts, so it
+                        // never runs off the left edge on a narrow window
+                        s.open_slash_mention(&text[at + 1..]);
+                        g.set_slash_filter(text[at + 1..].into());
+                        g.set_slash_focus(0);
+                        open_slash_at(&g, row_y, row_h, content_x);
+                        g.set_slash_pick_mention(true);
+                        g.set_slash_insert(false);
+                        g.set_slash_pick_page(false);
                     } else if let Some(filter) = text.strip_prefix('/') {
                         s.open_slash(filter);
                         g.set_slash_filter(filter.into());
                         g.set_slash_focus(0);
-                        let scroll = g.get_editor_scroll_y();
-                        let edge = if g.get_sidebar_open() { 260.0 } else { 0.0 };
-                        // the same fit-the-window rule the "+" menu uses: the
-                        // list is as tall as its rows, so a hardcoded reserve
-                        // would push the last entries off the bottom as soon
-                        // as the menu grew another kind
-                        let menu_h = g.get_slash_items().row_count() as f32 * 32.0 + 8.0;
-                        let y = (40.0 + (row_y as f32) - scroll + (row_h as f32) + 4.0)
-                            .clamp(48.0, (g.get_window_h() - menu_h - 8.0).max(48.0));
-                        g.set_slash_x(edge + (content_x as f32));
-                        g.set_slash_y(y);
-                        g.set_slash_open(true);
+                        open_slash_at(&g, row_y as f32, row_h as f32, content_x as f32);
+                        g.set_slash_pick_mention(false);
                     } else {
                         g.set_slash_open(false);
+                        g.set_slash_pick_mention(false);
                     }
                 }
                 debounce_arm(t, &gw, &s);
@@ -1568,6 +1627,695 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         });
     }
 
+    // ---- database views (SPEC §三十九) ----
+    //
+    // A database is the one block whose rows are not blocks, so none of these
+    // callbacks goes through `editing-id`: a cell is named by
+    // (block, record, property) and the write paths (`AppState::db_*`) parse,
+    // plan and re-read the window. Two rules hold across the whole section:
+    //
+    // * **the "one live TextInput" discipline still holds** — a cell's editor
+    //   exists only while `editing-id < 0`, and opening a cell closes the
+    //   block editor (and the other way round, in `focus_block`'s caller),
+    //   so a page can never have two inputs whatever order the two were set;
+    // * **a structural change re-fills that one row.** A window read mutates
+    //   the rows model in place (that is why scrolling a 10 000-row table is
+    //   one query), but the *shape* the delegate lays out — row count, window
+    //   start, columns, tabs — rides on the `BlockRow`, which only
+    //   `db_fill_row` rebuilds. `db_refill_row` is the one-row version of the
+    //   page projection, and it is what keeps the block as tall as the table.
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>()
+            .on_db_cell_activated(move |block, record, property| {
+                let g = gw.upgrade().unwrap();
+                // a block editor's pending keystrokes land first: closing it
+                // below would otherwise drop everything typed in the last
+                // debounce window
+                flush_pending_edit(&g, &s);
+                // the *stored* value, not the painted one: a number with a
+                // format paints (`50%`) differently from what an editor must
+                // accept (`0.5`)
+                let text = s
+                    .db_cell_text(block, record as i64, property)
+                    .unwrap_or_default();
+                g.set_editing_id(-1);
+                g.set_editing_text(text.into());
+                g.set_db_editing_block(block);
+                g.set_db_editing_record(record);
+                g.set_db_editing_property(property);
+                // a click is also the way out of an open option list
+                g.set_db_picking_record(-1);
+                g.set_db_picking_property(-1);
+            });
+    }
+    {
+        // the debounced commit while typing: the same 300 ms timer the prose
+        // rows use, with the database's own ids read back instead of
+        // `editing-id`.
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_cell_changed(move || {
+            db_debounce_arm(t, &gw, &s);
+        });
+    }
+    {
+        // the live cell is going away (Enter / Escape / Tab): commit **now**.
+        // Leaving it to the debounce would lose the text typed in the last
+        // 300 ms, because closing resets the two ids that commit reads back.
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_cell_closed(move || {
+            let g = gw.upgrade().unwrap();
+            db_commit_cell(&g, &s);
+            g.set_db_editing_block(-1);
+            g.set_db_editing_record(-1);
+            g.set_db_editing_property(-1);
+            // the next editor is created with the focus and gets its text from
+            // Rust; an empty mirror here is what keeps a stale value from
+            // flashing up first
+            g.set_editing_text("".into());
+            g.set_db_picking_record(-1);
+            g.set_db_picking_property(-1);
+        });
+    }
+    {
+        let s = state.clone();
+        ui.global::<UIState>()
+            .on_db_cell_toggled(move |block, record, property, checked| {
+                // the inverse of what the cell shows, which is the stored flag
+                // (the painted word is ADR-0065's `Yes`/`No`); the rows model is
+                // re-read in place, so no `db_refill_row` is needed — a toggle
+                // changes no row's existence
+                s.db_toggle_checkbox(block, record as i64, property, checked);
+            });
+    }
+    {
+        let s = state.clone();
+        ui.global::<UIState>()
+            .on_db_option_picked(move |block, record, property, option, current| {
+                // `option` is the stored id (ADR-0061 stores ids, not labels);
+                // picking the one a cell already holds clears it
+                s.db_pick_option(block, record as i64, property, &option, &current);
+            });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_row_added(move |block| {
+            let g = gw.upgrade().unwrap();
+            flush_pending_edit(&g, &s);
+            // the key is asked of the store (a `MAX(ord)` on an index): the app
+            // deliberately does not hold the rows to find the last one (ADR-0067)
+            let ord = s.db_next_row_ord(block);
+            if s.db_add_record(block, ord).is_some() {
+                db_refill_row(&s, block);
+            }
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_row_removed(move |block, record| {
+            let g = gw.upgrade().unwrap();
+            flush_pending_edit(&g, &s);
+            if s.db_delete_record(block, record as i64) {
+                // the row menu's delete is ADR-0063's plan ([values, record,
+                // page?]) and one Ctrl+Z, so nothing here touches the history
+                db_refill_row(&s, block);
+            }
+        });
+    }
+    {
+        let s = state.clone();
+        ui.global::<UIState>()
+            .on_db_column_resized(move |block, property, permille| {
+                // applied on release, never per move: the write is one
+                // view-document edit and one undo step (ADR-0064's `widths`)
+                if s.db_set_column_width(block, property, permille) {
+                    db_refill_row(&s, block);
+                }
+            });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>()
+            .on_db_columns_opened(move |block, x, y| {
+                let g = gw.upgrade().unwrap();
+                db_push_columns(&g, &s, block);
+                // `absolute-position` is window-relative, so the anchor needs
+                // no conversion — only a clamp: a database near the bottom of
+                // the window must not open its popup off screen.
+                let rows = g.get_db_columns_rows().row_count() as f32;
+                let popup_h = rows * 30.0 + 8.0;
+                let y = y.clamp(48.0, (g.get_window_h() - popup_h - 8.0).max(48.0));
+                let x = x.clamp(8.0, (g.get_window_w() - 232.0).max(8.0));
+                g.set_db_columns_x(x);
+                g.set_db_columns_y(y);
+                g.set_db_columns_block(block);
+                g.set_db_columns_open(true);
+            });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_column_toggled(move |block, property| {
+            let g = gw.upgrade().unwrap();
+            if s.db_toggle_column(block, property) {
+                // the view shows different columns now: the row is re-filled
+                // (header and cells) and the popup's own rows are rebuilt in
+                // place, because it stays open across the click
+                db_refill_row(&s, block);
+                db_push_columns(&g, &s, block);
+            }
+        });
+    }
+    {
+        let gw = gw.clone();
+        ui.global::<UIState>().on_db_columns_closed(move || {
+            let g = gw.upgrade().unwrap();
+            g.set_db_columns_open(false);
+        });
+    }
+    {
+        let s = state.clone();
+        ui.global::<UIState>().on_db_view_picked(move |block, view| {
+            // session state, not a column (ADR-0073): a different view has
+            // different columns, so the row is re-read and re-filled
+            if s.db_pick_view(block, view) {
+                db_refill_row(&s, block);
+            }
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_viewport(move |block, top_in_view| {
+            let g = gw.upgrade().unwrap();
+            // the editor's height is the viewport every database on the page is
+            // windowed against; the delegate reports it once per resize
+            s.editor_viewport_h.set(g.get_editor_viewport_h());
+            // a scroll costs the arithmetic and, only when the window moved past
+            // its overscan, one query (`db_watch` is that gate). The rows model
+            // is mutated in place; the block row is re-filled only when the
+            // window really moved, because that is when `db-row-start` changed.
+            if s.db_watch(block, top_in_view) {
+                db_refill_row(&s, block);
+            }
+        });
+    }
+
+    // ---- database rules (SPEC §三十九 「操作」, D4) ----
+    //
+    // The same two rules the cell callbacks carry, with one addition: the
+    // panel stays open across its own edits, so every accepted edit re-pushes
+    // the panel's rows (`db_push_filter`) the way the columns popup re-pushes
+    // its toggles. An edit that Rust refuses (a value of the wrong shape, a
+    // tree the panel cannot represent) writes nothing, and the panel shows
+    // the rules that are still in force.
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_filter_opened(move |block, x, y| {
+            let g = gw.upgrade().unwrap();
+            // the panel's value boxes are inputs: the block editor must not
+            // also be up
+            flush_pending_edit(&g, &s);
+            g.set_editing_id(-1);
+            db_push_filter(&g, &s, block);
+            g.set_db_filter_panel(0);
+            g.set_db_filter_block(block);
+            // anchored under the button (window coordinates, the columns
+            // popup's convention) and clamped to the rules state's height —
+            // the tallest the panel gets
+            let rows = s.db_filter_panel(block).1.len() as f32;
+            let popup_h = 40.0 + rows * 76.0 + 36.0 + 8.0;
+            let y = y.clamp(48.0, (g.get_window_h() - popup_h - 8.0).max(48.0));
+            let x = x.clamp(8.0, (g.get_window_w() - 348.0 - 8.0).max(8.0));
+            g.set_db_filter_x(x);
+            g.set_db_filter_y(y);
+            g.set_db_filter_open(true);
+        });
+    }
+    {
+        let gw = gw.clone();
+        ui.global::<UIState>().on_db_filter_closed(move || {
+            let g = gw.upgrade().unwrap();
+            g.set_db_filter_open(false);
+        });
+    }
+    {
+        let gw = gw.clone();
+        ui.global::<UIState>().on_db_filter_panel_set(move |panel| {
+            let g = gw.upgrade().unwrap();
+            g.set_db_filter_panel(panel);
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_filter_match_set(move |block, any| {
+            let g = gw.upgrade().unwrap();
+            if s.db_filter_set_match(block, any) {
+                db_refill_row(&s, block);
+                db_push_filter(&g, &s, block);
+            }
+        });
+    }
+    {
+        let gw = gw.clone();
+        ui.global::<UIState>().on_db_filter_add_rule(move |_block| {
+            let g = gw.upgrade().unwrap();
+            // the chooser's list is already pushed; the panel just turns a page
+            g.set_db_filter_panel(1);
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_filter_column_picked(move |block, property| {
+            let g = gw.upgrade().unwrap();
+            if s.db_filter_add_clause(block, property) {
+                db_refill_row(&s, block);
+                db_push_filter(&g, &s, block);
+                g.set_db_filter_panel(0);
+            }
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_filter_row_removed(move |block, index| {
+            let g = gw.upgrade().unwrap();
+            if s.db_filter_remove_clause(block, index as usize) {
+                db_refill_row(&s, block);
+                db_push_filter(&g, &s, block);
+            }
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_filter_op_menu(move |block, index| {
+            let g = gw.upgrade().unwrap();
+            db_push_filter_ops(&g, &s, block, index as usize);
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_filter_op_picked(move |block, index, op| {
+            let g = gw.upgrade().unwrap();
+            // switching the comparison resets the value (the old shape is not
+            // the new one's), so the row comes back unfilled
+            if s.db_filter_set_op(block, index as usize, op as usize) {
+                db_refill_row(&s, block);
+                db_push_filter(&g, &s, block);
+                g.set_db_filter_panel(0);
+            }
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_filter_text_set(move |block, index, text| {
+            let g = gw.upgrade().unwrap();
+            // a refused value (not a number, not a stored date) writes nothing
+            // and the panel keeps the text for the user to fix
+            if s.db_filter_set_text(block, index as usize, &text) {
+                db_refill_row(&s, block);
+                db_push_filter(&g, &s, block);
+            }
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_filter_flag_set(move |block, index, checked| {
+            let g = gw.upgrade().unwrap();
+            if s.db_filter_set_flag(block, index as usize, checked) {
+                db_refill_row(&s, block);
+                db_push_filter(&g, &s, block);
+            }
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_filter_option_menu(move |block, index| {
+            let g = gw.upgrade().unwrap();
+            db_push_filter_options(&g, &s, block, index as usize);
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_filter_option_picked(move |block, index, option| {
+            let g = gw.upgrade().unwrap();
+            // `is`: picking the held option clears the rule; `any of`: the
+            // pick toggles membership — either way the panel goes home
+            if s.db_filter_toggle_option(block, index as usize, &option) {
+                db_refill_row(&s, block);
+                db_push_filter(&g, &s, block);
+                g.set_db_filter_panel(0);
+            }
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_filter_not_toggled(move |block, index| {
+            let g = gw.upgrade().unwrap();
+            if s.db_filter_toggle_not(block, index as usize) {
+                db_refill_row(&s, block);
+                db_push_filter(&g, &s, block);
+            }
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_filter_cleared(move |block| {
+            let g = gw.upgrade().unwrap();
+            if s.db_filter_clear(block) {
+                db_refill_row(&s, block);
+                db_push_filter(&g, &s, block);
+            }
+        });
+    }
+    {
+        let s = state.clone();
+        ui.global::<UIState>().on_db_sort_cycled(move |block, property| {
+            // the header cycles none → asc → desc → none; a kind with no
+            // order refuses in Rust and the header stays as it was
+            if s.db_sort_cycle(block, property) {
+                db_refill_row(&s, block);
+            }
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_group_opened(move |block, x, y| {
+            let g = gw.upgrade().unwrap();
+            flush_pending_edit(&g, &s);
+            db_push_group(&g, &s, block);
+            g.set_db_group_block(block);
+            let rows = s.db_group_choices(block).len() as f32 + 1.0;
+            let popup_h = rows * 30.0 + 8.0;
+            let y = y.clamp(48.0, (g.get_window_h() - popup_h - 8.0).max(48.0));
+            let x = x.clamp(8.0, (g.get_window_w() - 224.0 - 8.0).max(8.0));
+            g.set_db_group_x(x);
+            g.set_db_group_y(y);
+            g.set_db_group_open(true);
+        });
+    }
+    {
+        let gw = gw.clone();
+        ui.global::<UIState>().on_db_group_closed(move || {
+            let g = gw.upgrade().unwrap();
+            g.set_db_group_open(false);
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_group_picked(move |block, property| {
+            let g = gw.upgrade().unwrap();
+            if s.db_group_pick(block, property) {
+                db_refill_row(&s, block);
+            }
+            // the pick is the whole interaction: the picker closes whether it
+            // changed anything or not (a refusal said its own word)
+            g.set_db_group_open(false);
+        });
+    }
+
+    // ---- database view family (SPEC §三十九 「视图」, D5) ----
+    //
+    // The switcher's `+` (one callback per picked layout, `ViewLayout::ALL`'s
+    // order), the card click (open the record's page, minting it when the
+    // record is bare — ADR-0063's lazy page finally getting its trigger), the
+    // calendar's ‹ ›, the gallery's reported shape, and the form's three
+    // callbacks. The same two rules the D4 bindings carry: every accepted edit
+    // re-fills the one block row (the layout's own payload rides on it), and a
+    // write Rust refused changed nothing on screen.
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_view_added(move |block, layout| {
+            let g = gw.upgrade().unwrap();
+            flush_pending_edit(&g, &s);
+            // `db_add_view` also switches to the new view — creating and not
+            // looking would be half a gesture — so one refill carries the
+            // switch's own re-read
+            if s.db_add_view(block, layout) {
+                db_refill_row(&s, block);
+            }
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_open_record(move |block, record| {
+            let g = gw.upgrade().unwrap();
+            flush_pending_edit(&g, &s);
+            if let Some(page) = s.db_open_record(block, record as i64) {
+                // the record may have just gained its page: the block row's
+                // own shape (board cards' Open targets) follows on the refill,
+                // and the navigation below is the sidebar's usual dance
+                db_refill_row(&s, block);
+                open(&g, &s, page);
+            }
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_cal_month(move |block, delta| {
+            let g = gw.upgrade().unwrap();
+            flush_pending_edit(&g, &s);
+            if s.db_cal_shift(block, delta) {
+                db_refill_row(&s, block);
+            }
+        });
+    }
+    {
+        let s = state.clone();
+        ui.global::<UIState>().on_db_gallery_shaped(move |block, per_row| {
+            // the grid was resized: the card slice is rows × per_row, so a new
+            // shape is a re-read (and a no-op when the clamp keeps the number)
+            if s.db_gallery_set_per_row(block, per_row) {
+                db_refill_row(&s, block);
+            }
+        });
+    }
+    {
+        let s = state.clone();
+        ui.global::<UIState>().on_db_form_text(move |block, property, text| {
+            // the draft only: no refill (the live input must not be rebuilt
+            // under the keystroke), no SQL (nothing exists until Submit)
+            s.db_form_set_text(block, property, &text);
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_form_submitted(move |block| {
+            let g = gw.upgrade().unwrap();
+            flush_pending_edit(&g, &s);
+            // a refused submit said its own word (`db-notice`); a successful
+            // one cleared the draft, and the refill is what blanks the fields
+            if s.db_form_submit(block) {
+                db_refill_row(&s, block);
+            }
+        });
+    }
+    {
+        let s = state.clone();
+        ui.global::<UIState>().on_db_form_cleared(move |block| {
+            s.db_form_clear(block);
+            db_refill_row(&s, block);
+        });
+    }
+    // ─── D6 (SPEC §三十九 「需计算」): the formula editor ──────────────────────
+    // A formula cell's click lands here (DatabaseCell's `is-formula` arm): the
+    // editor opens pre-filled with the *stored* expression, and the preview
+    // evaluates the draft on the row the user clicked. One accepted save is one
+    // `SetDatabaseFormula` change and one Ctrl+Z; a refused save says why in the
+    // notice line and keeps the old expression.
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>()
+            .on_db_formula_opened(move |block, record, property| {
+                let g = gw.upgrade().unwrap();
+                // a cell editor's pending keystrokes land first: the same rule
+                // `db-cell-activated` follows, for the same reason
+                flush_pending_edit(&g, &s);
+                let text = s.db_formula_current(property);
+                let (preview, error) = s.db_formula_preview(record as i64, property, &text);
+                g.set_db_formula_block(block);
+                g.set_db_formula_property(property);
+                g.set_db_formula_record(record);
+                g.set_db_formula_name(
+                    s.db_column_toggles(block)
+                        .into_iter()
+                        .find(|t| t.property == property)
+                        .map(|t| t.name.into())
+                        .unwrap_or_default(),
+                );
+                g.set_db_formula_text(text.into());
+                g.set_db_formula_preview(preview.into());
+                g.set_db_formula_error(error.into());
+                g.set_db_formula_open(true);
+            });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>()
+            .on_db_formula_text_changed(move |text| {
+                let g = gw.upgrade().unwrap();
+                // the ids are read back from the mirror: the popup is the one
+                // editor open, and it opened them
+                let property = g.get_db_formula_property();
+                let record = g.get_db_formula_record();
+                let (preview, error) = s.db_formula_preview(record as i64, property, &text);
+                g.set_db_formula_preview(preview.into());
+                g.set_db_formula_error(error.into());
+            });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_formula_accepted(move || {
+            let g = gw.upgrade().unwrap();
+            let block = g.get_db_formula_block();
+            let property = g.get_db_formula_property();
+            let text = g.get_db_formula_text().to_string();
+            // close first, then commit: the same order `db-cell-closed` uses, so
+            // a refused save's notice is on screen rather than behind a popup
+            g.set_db_formula_open(false);
+            g.set_db_formula_block(-1);
+            g.set_db_formula_property(-1);
+            g.set_db_formula_record(-1);
+            if s.db_formula_accept(block, property, &text) {
+                // the column's every cell may now paint differently
+                db_refill_row(&s, block);
+            }
+        });
+    }
+    {
+        let gw = gw.clone();
+        ui.global::<UIState>().on_db_formula_closed(move || {
+            let g = gw.upgrade().unwrap();
+            g.set_db_formula_block(-1);
+            g.set_db_formula_property(-1);
+            g.set_db_formula_record(-1);
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_formula_added(move |block| {
+            let g = gw.upgrade().unwrap();
+            flush_pending_edit(&g, &s);
+            // the Columns popup is the door this came from: close it, because a
+            // popup that opens a popup is two windows fighting over one click
+            g.set_db_columns_open(false);
+            if let Some(property) = s.db_formula_column_add(block) {
+                let (preview, error) = s.db_formula_preview(-1, property, "");
+                let name = s
+                    .db_column_toggles(block)
+                    .into_iter()
+                    .find(|t| t.property == property)
+                    .map(|t| t.name)
+                    .unwrap_or_default();
+                g.set_db_formula_block(block);
+                g.set_db_formula_property(property);
+                g.set_db_formula_record(-1);
+                g.set_db_formula_name(name.into());
+                g.set_db_formula_text("".into());
+                g.set_db_formula_preview(preview.into());
+                g.set_db_formula_error(error.into());
+                g.set_db_formula_open(true);
+            }
+        });
+    }
+
+    // ---- database advanced features (SPEC §三十九 「操作」, D7) ----
+    //
+    // The search box, the chart's shape buttons and the row's save-as-template
+    // affordance. The shape of every block here is the one the rules callbacks
+    // established in D4: Rust validates and writes (one change, one undo step
+    // where a write happens), the rows model is re-read, and the block row is
+    // re-filled because a search changes the count the header shows.
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_search_opened(move |block| {
+            let g = gw.upgrade().unwrap();
+            flush_pending_edit(&g, &s);
+            g.set_editing_id(-1);
+            // the box opens with the needle it is still filtering by — a
+            // search that was never closed by the caller re-opens as itself
+            g.set_db_search_block(block);
+            g.set_db_search_text(s.db_search_needle(block).into());
+            g.set_db_search_open(true);
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_search_text_set(move |block, text| {
+            let g = gw.upgrade().unwrap();
+            // the needle is a read's input, not a document write: no change,
+            // no undo step — but the count in the header moves with it, so
+            // the row is re-filled whenever the request changed
+            g.set_db_search_text(text.clone().into());
+            if s.db_view_search_set(block, &text) {
+                db_refill_row(&s, block);
+            }
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_search_closed(move |block| {
+            let g = gw.upgrade().unwrap();
+            g.set_db_search_open(false);
+            g.set_db_search_text("".into());
+            // closing the box clears the search: an invisible predicate on a
+            // visible table is exactly the kind of state the header's count
+            // could not explain
+            if s.db_view_search_set(block, "") {
+                db_refill_row(&s, block);
+            }
+        });
+    }
+    {
+        let s = state.clone();
+        ui.global::<UIState>().on_db_chart_kind(move |block, kind| {
+            if s.db_chart_kind_set(block, kind) {
+                db_refill_row(&s, block);
+            }
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_template_saved(move |block, record| {
+            let g = gw.upgrade().unwrap();
+            flush_pending_edit(&g, &s);
+            if s.db_template_from_row(block, record as i64) {
+                db_refill_row(&s, block);
+            }
+        });
+    }
+
     {
         let gw = gw.clone();
         let s = state.clone();
@@ -1688,6 +2436,66 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         ui.global::<UIState>().on_slash_apply_selected(move || {
             let g = gw.upgrade().unwrap();
             let focus = g.get_slash_focus();
+            // mention mode: the focused row is the date item or a page, and the
+            // atom replaces the "@filter" the writer typed (SPEC §四十). The
+            // trigger is recomputed from the live text rather than remembered:
+            // the caret can be moved mid-line while the menu is open, and the
+            // offset that matters is the one on screen at the moment of the
+            // pick.
+            if g.get_slash_pick_mention() {
+                let id = g.get_editing_id();
+                // the pending keystrokes land first: the atom replaces the
+                // text the *document* holds, and a cell's own commit is still
+                // on the debounce timer when the pointer reaches the menu
+                flush_pending_edit(&g, &s);
+                let text = g.get_editing_text().to_string();
+                if id > 0 {
+                    if let (Some(at), Some((row, label))) = (
+                        crate::core::trigger_at(&text),
+                        s.slash_selected_mention(focus),
+                    ) {
+                        let page = (row != crate::app::state::MENTION_DATE_ROW).then_some(row);
+                        s.apply_mention(id, at, page, &label);
+                    }
+                }
+                g.set_slash_open(false);
+                g.set_slash_pick_mention(false);
+                refresh_focused_text(&g, &s);
+                return;
+            }
+            // synced-picker mode (SPEC §四十, ADR-0052): the focused row is a
+            // **block** anywhere in the library, and the line has already been
+            // turned into a mirror, so this pick writes one thing — the pointer.
+            // Nothing here touches the row's text: a mirror holding words would
+            // have two owners of one sentence, and `set_sync_source` is the only
+            // place allowed to say so.
+            if g.get_slash_pick_synced() {
+                let id = g.get_editing_id();
+                if id > 0 {
+                    if let Some(source) = s.slash_selected_block(focus) {
+                        s.set_sync_source(id, Some(source));
+                    }
+                }
+                g.set_slash_open(false);
+                g.set_slash_pick_synced(false);
+                return;
+            }
+            // the database picker (D7, ADR-0085): the focused row IS a
+            // database — convert the empty line into a linked database that
+            // draws it. `db_make_linked` refuses a dead id, so a picker row
+            // whose entity died while the menu was open costs nothing.
+            if g.get_slash_pick_linkdb() {
+                let id = g.get_editing_id();
+                if id > 0 {
+                    if let Some(db) = s.slash_selected_link(focus) {
+                        s.db_make_linked(id, db);
+                    }
+                }
+                g.set_slash_open(false);
+                g.set_slash_pick_linkdb(false);
+                g.set_editing_id(-1);
+                return;
+            }
             // page-picker mode: the focused row IS a page — convert the empty
             // line into a Link-to-page block pointing at it
             if g.get_slash_pick_page() {
@@ -1743,6 +2551,27 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                 }
                 return;
             }
+            // D7 (ADR-0085): the "Linked view" row is not a kind — its id is
+            // the picker's (`LINKED_VIEW_ROW`), so it is handled before any
+            // kind mapping would drop it. The line gives up its words now and
+            // the popup switches to the database picker; the pick that follows
+            // does the converting, exactly the Link row's two-step shape.
+            if s.slash_selected_link(focus) == Some(crate::app::state::LINKED_VIEW_ROW) {
+                let id = g.get_editing_id();
+                if id > 0 {
+                    let _ = s.exec_on_open_page(Command::ReplaceText {
+                        id: BlockId(id as u64),
+                        text: String::new(),
+                    });
+                    g.set_editing_text("".into());
+                    g.set_pending_caret(0);
+                    s.open_slash_links("");
+                    g.set_slash_filter("".into());
+                    g.set_slash_focus(0);
+                    g.set_slash_pick_linkdb(true);
+                }
+                return;
+            }
             let kind = match s.slash_selected_kind(focus) {
                 Some(k) => k,
                 None => return,
@@ -1795,6 +2624,31 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                 g.set_slash_insert(false);
                 return;
             }
+            // "Synced block" switches the popup to the block picker (SPEC §四十,
+            // ADR-0052). The line gives up its words and takes the mirror's kind
+            // in **one** batch — two calls would leave two Ctrl+Z the writer
+            // never asked for — and the pick that follows decides which block
+            // this row is a second view of. Walking away is allowed: it leaves
+            // the documented placeholder rather than a half-made mirror.
+            if kind == crate::core::BlockKind::Synced {
+                s.exec_all_on_open_page(vec![
+                    Command::ReplaceText {
+                        id: BlockId(id as u64),
+                        text: String::new(),
+                    },
+                    Command::SetBlockType {
+                        id: BlockId(id as u64),
+                        kind,
+                    },
+                ]);
+                g.set_editing_text("".into());
+                g.set_pending_caret(0);
+                s.open_slash_block("");
+                g.set_slash_filter("".into());
+                g.set_slash_focus(0);
+                g.set_slash_pick_synced(true);
+                return;
+            }
             // Link to page switches the popup to the page picker: the typed
             // filter is discarded, the anchor stays, and the next pick
             // converts the line
@@ -1809,6 +2663,20 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                 g.set_slash_filter("".into());
                 g.set_slash_focus(0);
                 g.set_slash_pick_page(true);
+                return;
+            }
+            // SPEC §三十九: "Table view" turns the line into a database — the
+            // block, the entity, its title column and its first view in one
+            // batch (`make_database`; the line's own words go with the same
+            // undo). `SetBlockType` refuses a Database kind by design: the
+            // entity is not the plan layer's to allocate. A database draws no
+            // line input of its own, so the caret leaves the row entirely.
+            if kind == crate::core::BlockKind::Database {
+                s.make_database(id);
+                g.set_slash_open(false);
+                g.set_slash_insert(false);
+                g.set_editing_text("".into());
+                g.set_editing_id(-1);
                 return;
             }
             let _ = s.exec_on_open_page(Command::ReplaceText {
@@ -1849,7 +2717,47 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         ui.global::<UIState>().on_slash_close(move || {
             let g = gw.upgrade().unwrap();
             g.set_slash_open(false);
+            // every mode flag goes with it: a space or an Escape is the writer
+            // saying "that was the character", so the next "/" or "@" has to
+            // open its own menu rather than reopen the one just dismissed
+            g.set_slash_pick_mention(false);
+            g.set_slash_pick_page(false);
+            g.set_slash_pick_synced(false);
+            g.set_slash_pick_linkdb(false);
         });
+    }
+
+    // SPEC §四十: a table cell's edited-text report. The cell fires
+    // `cell-changed` (the debounced commit) and nothing else, because a grid
+    // is not a line of prose — but "@" has to reach a cell all the same, so
+    // the cell passes its geometry and the trigger is noticed here.
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>()
+            .on_mention_typed(move |text, row_y, row_h, content_x| {
+                let g = gw.upgrade().unwrap();
+                if g.get_slash_pick_mention() && g.get_slash_open() {
+                    return; // already open on this cell; its own edits refilter
+                }
+                let id = g.get_editing_id();
+                let Some(at) = crate::core::trigger_at(&text) else {
+                    return;
+                };
+                if id <= 0 || s.block_kind(id).is_none() {
+                    return;
+                }
+                let filter = &text[at + 1..];
+                s.open_slash_mention(filter);
+                g.set_slash_filter(filter.into());
+                g.set_slash_focus(0);
+                // the grid's own row is the anchor; the row-height argument is
+                // the cell's, so the popup clears the cell it was typed in
+                open_slash_at(&g, row_y, row_h, content_x);
+                g.set_slash_pick_mention(true);
+                g.set_slash_insert(false);
+                g.set_slash_pick_page(false);
+            });
     }
 
     // ---- block handle menu (+/⋮⋮) and clipboard ----
@@ -1884,33 +2792,56 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
             if id <= 0 {
                 return;
             }
-            // submenu navigation swaps the rows and keeps the popup open
+            // A submenu keeps the popup open but swaps its rows, and the swap
+            // can be far taller than the one the anchor was computed for: the
+            // root menu is nine rows and Move-to is one row per page, so in a
+            // workspace of any size the list ran off the window bottom. The
+            // open path above already clamps; this is the same clamp applied
+            // to the *new* row count, with the current y as the base so a list
+            // that still fits does not move at all. The page menu's submenu
+            // branch has done exactly this since 2026-09-20 (the A4 sweep's
+            // D3 fix) — the block menu was the one that was missed, and it is
+            // the one the Known-limitations entry was reporting.
+            let reanchor = || {
+                let menu_h = g.get_block_menu_rows().row_count() as f32 * 28.0 + 16.0;
+                let y = g
+                    .get_block_menu_y()
+                    .clamp(48.0, (g.get_window_h() - menu_h - 8.0).max(48.0));
+                g.set_block_menu_y(y);
+            };
             if action == 7 {
                 s.fill_block_menu_turn_into(id);
+                reanchor();
                 return;
             }
             if action == 8 {
                 s.fill_block_menu(id);
+                reanchor();
                 return;
             }
             if action == 10 {
                 s.fill_block_menu_move_to();
+                reanchor();
                 return;
             }
             if action == 11 {
                 s.fill_block_menu_colors(id, false);
+                reanchor();
                 return;
             }
             if action == 12 {
                 s.fill_block_menu_colors(id, true);
+                reanchor();
                 return;
             }
             if action == 13 {
                 s.fill_block_menu_image_width(id);
+                reanchor();
                 return;
             }
             if action == 14 {
                 s.fill_block_menu_code_lang(id);
+                reanchor();
                 return;
             }
             // color picks stay open (Notion-style live preview); everything
@@ -2017,6 +2948,49 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                     // Page's child page survives in the tree, unowned
                     let old_kind = s.block_kind_of(id);
                     let new_kind = kind_from_int(a - 100);
+                    // A mirror is not a style either (SPEC §四十, ADR-0052):
+                    // the line gives up its words in the same batch that makes
+                    // it a mirror — one Ctrl+Z for one decision — because a
+                    // mirror still holding words would have two owners of one
+                    // sentence. Then it hands itself to the block picker,
+                    // anchored where the menu already was.
+                    if new_kind == crate::core::BlockKind::Synced {
+                        let _ = s.exec_all_on_open_page(vec![
+                            Command::ReplaceText {
+                                id: BlockId(id as u64),
+                                text: String::new(),
+                            },
+                            Command::SetBlockType {
+                                id: BlockId(id as u64),
+                                kind: new_kind,
+                            },
+                        ]);
+                        s.open_slash_block("");
+                        g.set_slash_x(g.get_block_menu_x());
+                        g.set_slash_y(g.get_block_menu_y());
+                        g.set_slash_filter("".into());
+                        g.set_slash_focus(0);
+                        g.set_slash_pick_synced(true);
+                        g.set_slash_open(true);
+                        // the picker's "apply" reads `editing-id`, exactly as
+                        // it does when the "/" path opened the same list
+                        g.set_editing_id(id);
+                        return;
+                    }
+                    // SPEC §三十九: Turn-into reaches the same one-batch path
+                    // the "/" and "+" menus do. `SetBlockType` refuses a
+                    // Database kind — the entity, its title column and its
+                    // first view are not the plan layer's to allocate — so
+                    // `make_database` is the only door, and the line's words
+                    // leave with it (one Ctrl+Z restores the line whole).
+                    if new_kind == crate::core::BlockKind::Database {
+                        s.make_database(id);
+                        if g.get_editing_id() == id {
+                            g.set_editing_text("".into());
+                            g.set_editing_id(-1);
+                        }
+                        return;
+                    }
                     // A picture is not a style: it takes a file first, and the
                     // block only converts once the user has chosen one.
                     if matches!(
@@ -2109,6 +3083,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                         end: end.max(start).max(0) as usize,
                         kind,
                         url: String::new(),
+                        date: None,
                     });
                 }
             });
@@ -2128,19 +3103,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
             // the page. Unknown quire URLs are swallowed, not shelled out.
             if let Some(rest) = url.strip_prefix("quire://block/") {
                 if let Ok(bid) = rest.parse::<u64>() {
-                    let (bpage, text_len) = {
-                        let d = s.doc.borrow();
-                        d.block(BlockId(bid))
-                            .map(|b| (b.page.0 as i32, b.text.len() as i32))
-                            .unwrap_or((0, 0))
-                    };
-                    if bpage > 0 && s.workspace.borrow().contains(bpage) {
-                        flush_pending_edit(&g, &s);
-                        open(&g, &s, bpage);
-                        // -1 first: recreate the delegate so the input takes over
-                        g.set_editing_id(-1);
-                        focus_block(&g, &s, bid as u32 as i32, text_len);
-                    }
+                    jump_to_block(&g, &s, bid);
                 }
                 return;
             }
@@ -2375,6 +3338,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                 end: g.get_link_end().max(0) as usize,
                 kind: crate::core::MarkKind::Link,
                 url,
+                date: None,
             });
             refresh_focused_text(&g, &s);
         });
@@ -2397,6 +3361,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                 end: g.get_link_end().max(0) as usize,
                 kind: crate::core::MarkKind::Link,
                 url: String::new(),
+                date: None,
             });
             refresh_focused_text(&g, &s);
         });
@@ -2478,6 +3443,196 @@ fn debounce_arm(
     );
 }
 
+/// The database cell's debounced commit (SPEC §三十九). The same 300 ms rhythm
+/// the prose rows use, but the ids it reads back are the cell's —
+/// (block, record, property), never `editing-id`, which is `-1` while a cell
+/// is live by the one-input discipline. A parse the column's kind refuses
+/// (`db_set_cell_text` returns `false`) keeps the editor open with the typed
+/// text: the cell's stored value is untouched, and closing the editor is what
+/// repaints it. A commit that lands re-reads the window in place.
+fn db_debounce_arm(
+    t: &'static slint::Timer,
+    gw: &slint::Weak<UIState<'static>>,
+    s: &Rc<AppState>,
+) {
+    let gw = gw.clone();
+    let s = s.clone();
+    t.start(
+        slint::TimerMode::SingleShot,
+        std::time::Duration::from_millis(300),
+        move || {
+            if let Some(g) = gw.upgrade() {
+                let record = g.get_db_editing_record();
+                let property = g.get_db_editing_property();
+                // not a live cell, or the block editor took the keyboard back:
+                // neither state belongs to this commit
+                if record < 0 || property < 0 || g.get_editing_id() >= 0 {
+                    return;
+                }
+                let block = g.get_db_editing_block();
+                if block < 0 {
+                    return;
+                }
+                let text = g.get_editing_text().to_string();
+                let _ = s.db_set_cell_text(block, record as i64, property, &text);
+            }
+        },
+    );
+}
+
+/// Commit the live database cell synchronously — the `db-cell-closed` path
+/// (Enter / Escape / Tab). The debounce cannot be trusted here: closing resets
+/// `db-editing-record`/`-property`, and the debounced commit reads those back,
+/// so a text typed in the last 300 ms would be silently dropped. A refused
+/// parse closes anyway: the editor going away is what repaints the stored
+/// value, which is the honest answer to "that did not take".
+fn db_commit_cell(g: &UIState<'_>, state: &Rc<AppState>) {
+    let record = g.get_db_editing_record();
+    let property = g.get_db_editing_property();
+    if record < 0 || property < 0 || g.get_db_editing_block() < 0 {
+        return;
+    }
+    let block = g.get_db_editing_block();
+    let text = g.get_editing_text().to_string();
+    let _ = state.db_set_cell_text(block, record as i64, property, &text);
+}
+
+/// Re-fill one projected block row's §三十九 fields in place — the one-row
+/// version of the page projection's `db_fill_row` pass. A window read mutates
+/// the rows model in place, but the *shape* the delegate lays out (row count,
+/// window start, columns, tabs) rides on the `BlockRow`, and every structural
+/// database change (row added or removed, column toggled or resized, view
+/// picked) moves that shape. Walking the model here keeps the cost one row
+/// instead of one page — the same reasoning the projection's targeted patch
+/// (`set_row_data` on the todo toggle) already follows.
+fn db_refill_row(state: &Rc<AppState>, block: i32) {
+    let mut i = 0;
+    while let Some(mut row) = state.blocks.row_data(i) {
+        if row.id == block {
+            state.db_fill_row(&mut row);
+            state.blocks.set_row_data(i, row);
+            return;
+        }
+        i += 1;
+    }
+}
+
+/// (Re)build the columns popup's rows from the view's own document. Two
+/// callers, one truth: opening the popup, and the moment after a toggle — the
+/// popup stays open across the click, so its rows are stale the instant the
+/// toggle lands, and the same builder is what un-stales them.
+fn db_push_columns(g: &UIState<'_>, state: &Rc<AppState>, block: i32) {
+    let rows: Vec<crate::DbColumnToggle> = state
+        .db_column_toggles(block)
+        .into_iter()
+        .map(|t| crate::DbColumnToggle {
+            property: t.property,
+            name: t.name.into(),
+            kind: t.kind.into(),
+            visible: t.visible,
+            locked: t.locked,
+        })
+        .collect();
+    g.set_db_columns_rows(Rc::new(slint::VecModel::from(rows)).into());
+}
+
+/// Push the filter panel's whole state (D4): the rule rows, the root's
+/// flavour, and the column chooser's list. Called on open and after every
+/// accepted edit, so the panel a user is looking at is always the document's
+/// current rules — the model is derived, never a second copy of the filter.
+fn db_push_filter(g: &UIState<'_>, state: &Rc<AppState>, block: i32) {
+    let (any, rows) = state.db_filter_panel(block);
+    g.set_db_filter_match_any(any);
+    let rows: Vec<crate::DbFilterRow> = rows
+        .into_iter()
+        .map(|r| crate::DbFilterRow {
+            property: r.property,
+            name: r.name.into(),
+            kind: r.kind,
+            op: r.op,
+            op_name: r.op_name.into(),
+            value: r.value.into(),
+            has_value: r.has_value,
+            invert: r.invert,
+        })
+        .collect();
+    g.set_db_filter_rows(Rc::new(slint::VecModel::from(rows)).into());
+    // The chooser lists every property of the database (the columns popup's
+    // own model shape, so a name and a type word are already what it draws).
+    let choices: Vec<crate::DbColumnToggle> = state
+        .db_column_toggles(block)
+        .into_iter()
+        .map(|t| crate::DbColumnToggle {
+            property: t.property,
+            name: t.name.into(),
+            kind: t.kind.into(),
+            visible: t.visible,
+            locked: t.locked,
+        })
+        .collect();
+    g.set_db_filter_columns(Rc::new(slint::VecModel::from(choices)).into());
+}
+
+/// Push the comparison chooser for one clause: the comparisons its column's
+/// kind has — the same list the parser accepts, so nothing the menu offers can
+/// be refused later. The panel switches to state 2.
+fn db_push_filter_ops(g: &UIState<'_>, state: &Rc<AppState>, block: i32, index: usize) {
+    let rows = state.db_filter_panel(block).1;
+    let Some(row) = rows.get(index) else {
+        return;
+    };
+    let ops: Vec<crate::DbFilterOp> = state
+        .db_ops_for_kind(row.kind)
+        .into_iter()
+        .map(|(op, name)| crate::DbFilterOp {
+            op,
+            name: name.into(),
+        })
+        .collect();
+    g.set_db_filter_ops(Rc::new(slint::VecModel::from(ops)).into());
+    g.set_db_filter_edit_row(index as i32);
+    g.set_db_filter_panel(2);
+}
+
+/// Push the value chooser for one clause: the column's options (an id and the
+/// name the config gives it). The panel switches to state 3.
+fn db_push_filter_options(g: &UIState<'_>, state: &Rc<AppState>, block: i32, index: usize) {
+    let rows = state.db_filter_panel(block).1;
+    let Some(row) = rows.get(index) else {
+        return;
+    };
+    let options: Vec<crate::DbOption> = state
+        .db_property_options(row.property)
+        .into_iter()
+        .map(|(id, name, color)| crate::DbOption {
+            id: id.into(),
+            name: name.into(),
+            color: color.into(),
+        })
+        .collect();
+    g.set_db_filter_options(Rc::new(slint::VecModel::from(options)).into());
+    g.set_db_filter_edit_row(index as i32);
+    g.set_db_filter_panel(3);
+}
+
+/// Push the group picker's rows (D4): the option-bounded columns, plus the
+/// active one so a row can mark itself.
+fn db_push_group(g: &UIState<'_>, state: &Rc<AppState>, block: i32) {
+    let rows: Vec<crate::DbColumnToggle> = state
+        .db_group_choices(block)
+        .into_iter()
+        .map(|t| crate::DbColumnToggle {
+            property: t.property,
+            name: t.name.into(),
+            kind: t.kind.into(),
+            visible: t.visible,
+            locked: t.locked,
+        })
+        .collect();
+    g.set_db_group_rows(Rc::new(slint::VecModel::from(rows)).into());
+    g.set_db_group_current(state.db_group_current(block));
+}
+
 /// Where the caret belongs after a row or column delete: `at` was the focused
 /// cell's row-major slot, so the same slot of the smaller grid is the cell
 /// nearest to it. `None` means the caret was never in this grid — the delete
@@ -2535,6 +3690,55 @@ fn flush_pending_edit(g: &UIState<'_>, state: &Rc<AppState>) {
             i += 1;
         }
     }
+}
+
+/// Anchor and open the slash popup under the row being edited, clamped to the
+/// window. It lives in one place because two callers now open it (the "/" and
+/// the "@" triggers) and the fit-the-window rule is the one that was learned
+/// the hard way: the list is as tall as its rows, so the reserve is read from
+/// the *current* model — a hardcoded reserve is what pushed the last entries
+/// off the bottom once before (ADR-0032's fix), and the mention picker's row
+/// count changes with every keystroke of its filter.
+fn open_slash_at(g: &UIState<'_>, row_y: f32, row_h: f32, content_x: f32) {
+    let menu_h = g.get_slash_items().row_count() as f32 * 32.0 + 8.0;
+    let scroll = g.get_editor_scroll_y();
+    let edge = if g.get_sidebar_open() { 260.0 } else { 0.0 };
+    let y = (40.0 + row_y - scroll + row_h + 4.0)
+        .clamp(48.0, (g.get_window_h() - menu_h - 8.0).max(48.0));
+    g.set_slash_x(edge + content_x);
+    g.set_slash_y(y);
+    g.set_slash_open(true);
+}
+
+/// Jump to a block anywhere in the library: open the page it lives on, then
+/// put the caret in it.
+///
+/// One rule for every internal anchor, because they are the same jump. A
+/// `quire://block/` link in the text, a line of a `Toc` block, and a row of the
+/// backlink panel all name a block id and nothing else — SPEC §四十 says the
+/// panel reuses M8's anchor path, and the way not to have two of them is to
+/// have the one. A block whose page is not in the workspace (deleted under a
+/// reference, a library edited by hand) is a no-op, not a crash.
+///
+/// **Known limit, shared with every anchor in the app:** this moves the caret
+/// and the selection, but it does not scroll the viewport to the row. Slint
+/// 1.18's plain `ListView` has no `bring-into-view`, so a block outside the
+/// window is focused out of sight — see `docs/REPORT_TRACK2.md`.
+fn jump_to_block(g: &UIState<'_>, state: &Rc<AppState>, id: u64) {
+    let (page, text_len) = {
+        let d = state.doc.borrow();
+        d.block(BlockId(id))
+            .map(|b| (b.page.0 as i32, b.text.len() as i32))
+            .unwrap_or((0, 0))
+    };
+    if page <= 0 || !state.workspace.borrow().contains(page) {
+        return;
+    }
+    flush_pending_edit(g, state);
+    open(g, state, page);
+    // -1 first: recreate the delegate so the input takes over
+    g.set_editing_id(-1);
+    focus_block(g, state, id as u32 as i32, text_len);
 }
 
 /// Move the live editor onto another block with the caret at `caret` bytes.
@@ -2748,7 +3952,23 @@ fn copy_current_page_markdown(g: &UIState<'_>, s: &Rc<AppState>) {
     let page = s.open_page.get();
     let md = {
         let d = s.doc.borrow();
-        crate::services::export_service::export_page(d.page_blocks(core_page_id(page)))
+        // the live titles go with it: a mention chip shows the target page's
+        // *current* name, and the file the writer copies has to agree with the
+        // screen or a rename would be silently undone in the export
+        let ws = s.workspace.borrow();
+        crate::services::export_service::export_page_full(
+            d.page_blocks(core_page_id(page)),
+            &|id| ws.title_of(id.as_u64() as i32).map(str::to_string),
+            // ADR-0065: the caller that can read the database pre-renders the
+            // table (current view → GFM); a clipboard copy is that caller.
+            &|id| s.db_markdown_table(id.as_u64() as i32),
+            // §四十 / ADR-0052 §7: a mirror leaves as the sentence it was a
+            // second view of. `sync_target` is the same walk the row uses, so
+            // the file agrees with the screen instead of flattening to a blank.
+            &|id| {
+                crate::app::state::sync_target_for_export(&d, id)
+            },
+        )
     };
     let notice = if md.trim().is_empty() {
         "This page has nothing to copy yet.".to_string()
@@ -2765,7 +3985,12 @@ fn copy_current_page_markdown(g: &UIState<'_>, s: &Rc<AppState>) {
 /// is the top of the popup, so a list that outgrows the space below the ⋯
 /// button has to move up or its last rows are unreachable.
 fn reanchor_page_menu(g: &UIState<'_>) {
-    let menu_h = g.get_menu_rows().row_count() as f32 * 28.0 + 16.0;
+    // 30 px rows + 8 px padding is what `ContextMenu` itself draws and clamps
+    // against; this used to say 28 + 16, which under-estimates by
+    // `2 * rows - 8` — 40 px on a 24-row Move-to list, so the popup was told it
+    // had more room than it has and had to shrink and scroll for no reason.
+    // The two numbers are now the same number.
+    let menu_h = g.get_menu_rows().row_count() as f32 * 30.0 + 8.0;
     let y = g
         .get_menu_y()
         .clamp(48.0, (g.get_window_h() - menu_h - 8.0).max(48.0));
@@ -2868,7 +4093,17 @@ fn export_current_page(g: &UIState<'_>, state: &Rc<AppState>) {
         .to_string();
     let md = {
         let d = state.doc.borrow();
-        crate::services::export_service::export_page(d.page_blocks(core_page_id(page)))
+        let ws = state.workspace.borrow();
+        crate::services::export_service::export_page_full(
+            d.page_blocks(core_page_id(page)),
+            &|id| ws.title_of(id.as_u64() as i32).map(str::to_string),
+            // ADR-0065: the caller that can read the database pre-renders the
+            // table (current view → GFM); the .md export is that caller.
+            &|id| state.db_markdown_table(id.as_u64() as i32),
+            &|id| {
+                crate::app::state::sync_target_for_export(&d, id)
+            },
+        )
     };
     if let Some(path) = rfd::FileDialog::new()
         .add_filter("Markdown", &["md"])
@@ -2943,6 +4178,426 @@ fn find_inserted_id(changes: &[Change]) -> Option<i32> {
         Change::BlockInserted(b) => Some(b.id.0 as i32),
         _ => None,
     })
+}
+
+/// Insert a fresh paragraph right after the open page's first line of prose.
+///
+/// The top of the page is where a chip has to be to appear in an 800 px shot of
+/// it: `AppendBlock` would put it under the fold of every demo page long enough
+/// to be worth photographing, and a scene whose subject is off-screen is a
+/// scene that reviews clean and proves nothing.
+fn insert_near_top(state: &Rc<AppState>, text: &str) -> Option<i32> {
+    use crate::core::BlockKind;
+
+    let after = {
+        let d = state.doc.borrow();
+        d.page_blocks(core_page_id(state.open_page.get()))
+            .iter()
+            .find(|b| b.kind == BlockKind::Paragraph && !b.text.is_empty())
+            .map(|b| b.id.0 as i32)
+    }?;
+    state
+        .exec_on_open_page(Command::InsertBlockAfter {
+            id: BlockId(after as u64),
+            kind: BlockKind::Paragraph,
+            text: text.to_string(),
+        })
+        .as_deref()
+        .and_then(find_inserted_id)
+}
+
+/// Seed a page holding a mirror of a block **on another page**, and open it —
+/// the synced-block scenes (SPEC §四十, ADR-0052).
+///
+/// Two pages, on purpose: a mirror of a block on the same page would not show
+/// the thing these shots are for, which is that the words come from somewhere
+/// else. The source is a real block that really holds the sentence; the mirror
+/// is a real `Synced` block whose pointer went through `set_sync_source`, so
+/// the cycle check ran before anything was drawn.
+///
+/// `drop_source` then deletes that source, which is the second thing a reader of
+/// these shots needs to see: the row **degrades** rather than disappearing, and
+/// the page still opens.
+fn seed_synced_page(state: &Rc<AppState>, drop_source: bool) -> Option<i32> {
+    let source_page = state.create_page(None);
+    state.rename_page(source_page, "Source page");
+    let source = state
+        .exec_on_open_page(Command::AppendBlock {
+            kind: crate::core::BlockKind::Paragraph,
+            text: "The words live here, and nowhere else.".to_string(),
+        })
+        .as_deref()
+        .and_then(find_inserted_id)?;
+
+    let home = state.create_page(None);
+    state.rename_page(home, "Mirror page");
+    let mirror = state
+        .exec_on_open_page(Command::AppendBlock {
+            kind: crate::core::BlockKind::Paragraph,
+            text: String::new(),
+        })
+        .as_deref()
+        .and_then(find_inserted_id)?;
+    // the two steps the "/" path takes, in one batch each: the line becomes a
+    // mirror, then the pick writes the pointer
+    state.exec_on_open_page(Command::SetBlockType {
+        id: BlockId(mirror as u64),
+        kind: crate::core::BlockKind::Synced,
+    })?;
+    if !state.set_sync_source(mirror, Some(source)) {
+        return None;
+    }
+
+    if drop_source {
+        // the source is on another page, and `exec_on_open_page` plans against
+        // the one that is showing — so the delete has to happen there
+        state.open_page(source_page);
+        state.exec_on_open_page(Command::DeleteBlock {
+            id: BlockId(source as u64),
+        })?;
+    }
+    state.open_page(home);
+    Some(home)
+}
+
+/// Seed a page that other pages point at, and open it — the backlink panel's
+/// scenes (SPEC §四十).
+///
+/// **The rows the panel draws come from the same query the app runs**, not from
+/// a fixture: a mention's address in `marks` and a block-level reference in
+/// `blocks.page_ref`, both served by migration 16's indexes. What a shot of
+/// this scene shows is therefore what the reference layer answered.
+///
+/// The three pages are ones the demo session already has, and the opening goes
+/// through the real `open()` — so the shot is a page with its own content and a
+/// panel under it, not a page grown for the camera. `refs` is how many
+/// references to make across two source pages: above `BACKLINK_WINDOW` is what
+/// makes the folded line say something.
+fn seed_referenced_page(g: &UIState<'_>, state: &Rc<AppState>, refs: usize) -> Option<i32> {
+    use crate::core::BlockKind;
+
+    let find = |title: &str| -> i32 {
+        let ws = state.workspace.borrow();
+        ws.dfs_order()
+            .into_iter()
+            .find(|id| ws.title_of(*id) == Some(title))
+            // A scene that cannot find its pages must not render a plausible
+            // shot of the wrong thing: a panic here leaves no BMP behind and
+            // the sweep reports RENDER-FAIL, which is the failure it is.
+            .unwrap_or_else(|| panic!("the demo session has no page called {title:?}"))
+    };
+    let target = find("Project Atlas");
+    let sources = [find("Meeting Notes"), find("Reading List")];
+
+    for (source, share) in sources
+        .iter()
+        .zip([refs.div_ceil(2), refs / 2])
+    {
+        open(g, state, *source);
+        for i in 0..share {
+            let text = format!("See @ for detail {i}");
+            let id = state
+                .exec_on_open_page(Command::AppendBlock {
+                    kind: BlockKind::Paragraph,
+                    text,
+                })
+                .as_deref()
+                .and_then(find_inserted_id)?;
+            // The same two steps the `@` picker takes: the trigger's `@` sits
+            // at byte 4, and the atom replaces it and everything after it.
+            if !state.apply_mention(id, 4, Some(target), "Project Atlas") {
+                return None;
+            }
+        }
+    }
+
+    // The panel is a *read*, and a read sees what has been written — this is
+    // the debounce being stepped over, which is the same step any scene that
+    // opens a page out of the database has to take.
+    state.persistence_force_flush();
+    open(g, state, target);
+    Some(target)
+}
+
+/// Seed the database-table scene (SPEC §三十九): one table on the demo page
+/// with its title column and three more kinds the inline editors carry —
+/// number, checkbox, date — and five rows of fixed values, because a shot has
+/// to look the same tomorrow (the date is a literal, exactly as the `@date`
+/// scene's is). Every step goes through the write paths the UI uses
+/// (`make_database` → `db_add_column` → `db_add_record` → `db_set_cell_text`),
+/// so the scene is a fixture of the *pipeline* and not of the model: if the
+/// command layer cannot build a database, the scene must not pretend one.
+///
+/// A select/status column is deliberately absent: D3 has no option editor
+/// (D5's), so a fresh select column has an empty option list and the shot
+/// would be about "No options yet" rather than about the table.
+fn seed_database_table(state: &Rc<AppState>) -> Option<i32> {
+    use crate::core::database::{CellValue, PropertyKind};
+    use crate::core::BlockKind;
+
+    // the line the database grows from: an empty paragraph after the first
+    // line of prose (the same anchor every near-top seed uses)
+    let after = {
+        let d = state.doc.borrow();
+        d.page_blocks(core_page_id(state.open_page.get()))
+            .iter()
+            .find(|b| b.kind == BlockKind::Paragraph && !b.text.is_empty())
+            .map(|b| b.id.0 as i32)
+    }?;
+    let id = state
+        .exec_on_open_page(Command::InsertBlockAfter {
+            id: BlockId(after as u64),
+            kind: BlockKind::Paragraph,
+            text: String::new(),
+        })
+        .as_deref()
+        .and_then(find_inserted_id)?;
+    if !state.make_database(id) {
+        return None;
+    }
+    let points = state.db_add_column(id, "Points", PropertyKind::Number);
+    let done = state.db_add_column(id, "Done", PropertyKind::Checkbox);
+    let due = state.db_add_column(id, "Due", PropertyKind::Date);
+    let (Some(points), Some(done), Some(due)) = (points, done, due) else {
+        return None;
+    };
+    // The title column's id: the one `MakeDatabase` created first and locked
+    // (ADR-0061), which the popup lists as non-toggleable.
+    let Some(title) = state.db_column_toggles(id).iter().find(|t| t.locked).map(|t| t.property)
+    else {
+        return None;
+    };
+    // (name, points, done, due) — the values are literals, not `now()`/`today()`:
+    // a sweep that runs tomorrow must photograph the same table.
+    let rows: [(&str, &str, bool, &str); 5] = [
+        ("Spec the window", "31", true, "2026-09-22"),
+        ("Sort in SQL", "10", false, "2026-09-23"),
+        ("Write the switcher", "7", true, "2026-09-25"),
+        ("Measure a scroll", "39", false, "2026-10-01"),
+        ("Light the menus", "3", true, "2026-10-04"),
+    ];
+    for (name, pts, checked, day) in rows {
+        let Some(record) = state.db_add_record(id, state.db_next_row_ord(id)) else {
+            continue;
+        };
+        state.db_set_cell_text(id, record, title, name);
+        state.db_set_cell_text(id, record, points, pts);
+        state.db_set_cell_text(id, record, due, day);
+        // the box carries a typed value, not a parse: the cell's own toggle
+        // path is `Flag(!shown)`, and the scene uses the same door
+        state.db_set_cell_value(id, record, done, CellValue::Flag(checked));
+    }
+    // the last write's window is current, but the block row's *shape* (row
+    // count) is only rebuilt by `db_fill_row` — the same call every structural
+    // change in the wire section follows its write with
+    db_refill_row(state, id);
+    Some(id)
+}
+
+/// Seed the database-filter scene (SPEC §三十九 「操作」, D4): the table seed plus
+/// one number rule — Points > 5 — written through the **same helpers the filter
+/// panel drives**, so the shot shows the real write path's result, not a
+/// hand-built fixture: 3 of the 5 rows, the header chip reading "Filter 1",
+/// and the rules persisted in the view's document (`{"and":[{…,"op":"gt",
+/// "value":5}]}`). The values are literals: a sweep that runs tomorrow must
+/// photograph the same table.
+fn seed_database_filter(state: &Rc<AppState>) -> Option<i32> {
+    let id = seed_database_table(state)?;
+    let points = state
+        .db_column_toggles(id)
+        .into_iter()
+        .find(|t| t.name == "Points")
+        .map(|t| t.property)?;
+    if !state.db_filter_add_clause(id, points) {
+        return None;
+    }
+    // `gt` is FILTER_OPS[3] (contains, eq, ne, gt, …), and the value goes
+    // through the kind's own validation — the same door a user's keystroke
+    // would.
+    if !state.db_filter_set_op(id, 0, 3) || !state.db_filter_set_text(id, 0, "5") {
+        return None;
+    }
+    db_refill_row(state, id);
+    Some(id)
+}
+
+/// Seed the database-formula scene (SPEC §三十九 「需计算」, D6): the table seed
+/// plus two computed columns, created and defined **through the same write
+/// paths the UI drives** — `db_add_column` for the column and
+/// `db_formula_accept` for the expression, which is the formula editor's own
+/// door *including its save-time checks* (the parse, the column names, the
+/// dependency cycle). Nothing here hand-builds a formula the editor could not
+/// have accepted.
+///
+/// The two expressions cover the two shapes a formula column most often has,
+/// and their values are literals over the seed's literal cells (a sweep
+/// tomorrow photographs the same table):
+///
+/// * `Double` = `[Points] * 2` — arithmetic over a number column: 62, 20, 14,
+///   78, 6.
+/// * `Label` = `if([Done], "done", "open")` — a boolean column's value through
+///   `if`, a number-free shape that shows the condition arm: done, open, done,
+///   open, done.
+///
+/// `db_refill_row` follows, because a new column changes every row's cells and
+/// the block's own shape (the same call `db_add_column` makes and every
+/// structural seed ends with).
+fn seed_database_formula(state: &Rc<AppState>) -> Option<i32> {
+    use crate::core::database::PropertyKind;
+
+    let id = seed_database_table(state)?;
+    let double = state.db_add_column(id, "Double", PropertyKind::Formula)?;
+    if !state.db_formula_accept(id, double, "[Points] * 2") {
+        return None;
+    }
+    let label = state.db_add_column(id, "Label", PropertyKind::Formula)?;
+    if !state.db_formula_accept(id, label, "if([Done], \"done\", \"open\")") {
+        return None;
+    }
+    db_refill_row(state, id);
+    Some(id)
+}
+
+/// Seed one of D5's view-family scenes: the table seed plus a second view of
+/// the layout the scene names, added **through the same path the switcher's
+/// `+` drives** (`db_add_view`, which also switches to the new view), plus the
+/// layout's own rule through the same helpers the UI drives:
+///
+/// * board — groups by the seed's `Done` checkbox (D4's `db_group_pick`, the
+///   same key the Group picker writes). A checkbox rather than a select: an
+///   option editor is still D5's undone half, so a seeded select column would
+///   have an empty option list and the shot would be about that.
+/// * calendar — the month is **pinned** (`db_calendar_month_set`, 2026-09), not
+///   defaulted to now: a sweep that runs tomorrow must photograph the same
+///   grid. The records carry literal dates (`2026-09-22` …), so the month's
+///   counts and the day peeks answer to the same query the view runs.
+/// * timeline / gallery / list / form — the layout itself, no extra rule: the
+///   date column resolves by the schema's own order (`Due` is the seed's only
+///   date), the gallery reports its own shape on first layout, and the form is
+///   its field list.
+///
+/// The values are literals throughout: a sweep that runs tomorrow must
+/// photograph the same view.
+fn seed_database_view(state: &Rc<AppState>, layout: crate::core::database::ViewLayout) -> Option<i32> {
+    let id = seed_database_table(state)?;
+    let index = crate::core::database::ViewLayout::ALL
+        .iter()
+        .position(|l| *l == layout)? as i32;
+    if !state.db_add_view(id, index) {
+        return None;
+    }
+    // board **and** chart: both layouts read the view's group rule, and the
+    // seed's `Done` checkbox is the one option-bounded column (an option
+    // editor is still D5's undone half, so a seeded select would show an
+    // empty option list). The chart's plot is the same `GROUP BY` the board's
+    // columns are — two unchecked, three checked.
+    if matches!(
+        layout,
+        crate::core::database::ViewLayout::Board | crate::core::database::ViewLayout::Chart
+    ) {
+        let done = state
+            .db_column_toggles(id)
+            .into_iter()
+            .find(|t| t.name == "Done")
+            .map(|t| t.property)?;
+        if !state.db_group_pick(id, done) {
+            return None;
+        }
+    }
+    if layout == crate::core::database::ViewLayout::Calendar {
+        state.db_calendar_month_set(id, 2026, 9);
+    }
+    db_refill_row(state, id);
+    Some(id)
+}
+
+/// Seed the database-search scene (SPEC §三十九 「操作」, D7, ADR-0087): the
+/// table seed with a live search over the view — needle `the`, which two of
+/// the five titles match ("Spec the window", "Write the switcher"), written
+/// through `db_view_search_set`, the same helper the header's search box
+/// drives. The scene arm opens the box itself (the open state is session
+/// state in the UI), so the shot pins both halves: the narrowed rows and the
+/// needle that narrowed them.
+fn seed_database_search(state: &Rc<AppState>) -> Option<i32> {
+    let id = seed_database_table(state)?;
+    if !state.db_view_search_set(id, "the") {
+        return None;
+    }
+    db_refill_row(state, id);
+    Some(id)
+}
+
+/// Seed the database-linked scene (SPEC §三十九 「操作」, D7, ADR-0085): the
+/// table seed, then a second block that **links** it — a paragraph converted
+/// through `db_make_linked`, the same door the database picker drives. The
+/// link draws the source's data and its views (nothing is copied); the shot
+/// shows two views of one entity stacked on one page.
+fn seed_database_linked(state: &Rc<AppState>) -> Option<i32> {
+    use crate::core::BlockKind;
+
+    let id = seed_database_table(state)?;
+    let db = state.db_ref_of(id)?;
+    let after = {
+        let d = state.doc.borrow();
+        d.page_blocks(core_page_id(state.open_page.get()))
+            .iter()
+            .find(|b| b.kind == BlockKind::Paragraph && !b.text.is_empty())
+            .map(|b| b.id.0 as i32)
+    }?;
+    let block = state
+        .exec_on_open_page(Command::InsertBlockAfter {
+            id: BlockId(after as u64),
+            kind: BlockKind::Paragraph,
+            text: String::new(),
+        })
+        .as_deref()
+        .and_then(find_inserted_id)?;
+    if !state.db_make_linked(block, db.as_u64() as i32) {
+        return None;
+    }
+    db_refill_row(state, block);
+    Some(id)
+}
+
+/// Seed the database-template scene (SPEC §三十九 「操作」, D7, ADR-0086): the
+/// table seed, then — all through the real write paths — one row filled and
+/// saved as the template (`db_template_from_row`, the row affordance's own
+/// door), then one `db_add_record` whose prefill comes from the template in
+/// the creation batch. The shot shows three facts at once: the source row
+/// ("Template row"), the new row it prefilled (same title, 50, checked), and
+/// the five rows the template never touched.
+fn seed_database_template(state: &Rc<AppState>) -> Option<i32> {
+    use crate::core::database::CellValue;
+
+    let id = seed_database_table(state)?;
+    let points = state
+        .db_column_toggles(id)
+        .iter()
+        .find(|t| t.name == "Points")
+        .map(|t| t.property)?;
+    let done = state
+        .db_column_toggles(id)
+        .iter()
+        .find(|t| t.name == "Done")
+        .map(|t| t.property)?;
+    let Some(title) = state.db_column_toggles(id).iter().find(|t| t.locked).map(|t| t.property)
+    else {
+        return None;
+    };
+    let Some(source) = state.db_add_record(id, state.db_next_row_ord(id)) else {
+        return None;
+    };
+    state.db_set_cell_text(id, source, title, "Template row");
+    state.db_set_cell_text(id, source, points, "50");
+    state.db_set_cell_value(id, source, done, CellValue::Flag(true));
+    if !state.db_template_from_row(id, source) {
+        return None;
+    }
+    if state.db_add_record(id, state.db_next_row_ord(id)).is_none() {
+        return None;
+    }
+    db_refill_row(state, id);
+    Some(id)
 }
 
 /// The first cell a grid-building command created — the cell a table's caret
@@ -3199,9 +4854,89 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             g.set_dark(true);
             apply_scene(ui, state, "block-colors");
         }
+        "dark-synced" => {
+            g.set_dark(true);
+            apply_scene(ui, state, "synced");
+        }
+        "dark-synced-source-gone" => {
+            g.set_dark(true);
+            apply_scene(ui, state, "synced-source-gone");
+        }
+        "dark-move-to-tall" => {
+            g.set_dark(true);
+            apply_scene_overlay(ui, state, "move-to-tall");
+        }
         "dark-title-edit" => {
             g.set_dark(true);
             apply_scene(ui, state, "title-edit");
+        }
+        "dark-mention" => {
+            g.set_dark(true);
+            apply_scene(ui, state, "mention");
+        }
+        "dark-date" => {
+            g.set_dark(true);
+            apply_scene(ui, state, "date");
+        }
+        "dark-backlinks" => {
+            g.set_dark(true);
+            apply_scene(ui, state, "backlinks");
+        }
+        "dark-dangling" => {
+            g.set_dark(true);
+            apply_scene(ui, state, "dangling");
+        }
+        "dark-database-table" => {
+            g.set_dark(true);
+            apply_scene(ui, state, "database-table");
+        }
+        "dark-database-filter" => {
+            g.set_dark(true);
+            apply_scene(ui, state, "database-filter");
+        }
+        "dark-database-formula" => {
+            g.set_dark(true);
+            apply_scene(ui, state, "database-formula");
+        }
+        "dark-database-board" => {
+            g.set_dark(true);
+            apply_scene(ui, state, "database-board");
+        }
+        "dark-database-list" => {
+            g.set_dark(true);
+            apply_scene(ui, state, "database-list");
+        }
+        "dark-database-calendar" => {
+            g.set_dark(true);
+            apply_scene(ui, state, "database-calendar");
+        }
+        "dark-database-gallery" => {
+            g.set_dark(true);
+            apply_scene(ui, state, "database-gallery");
+        }
+        "dark-database-timeline" => {
+            g.set_dark(true);
+            apply_scene(ui, state, "database-timeline");
+        }
+        "dark-database-form" => {
+            g.set_dark(true);
+            apply_scene(ui, state, "database-form");
+        }
+        "dark-database-chart" => {
+            g.set_dark(true);
+            apply_scene(ui, state, "database-chart");
+        }
+        "dark-database-search" => {
+            g.set_dark(true);
+            apply_scene(ui, state, "database-search");
+        }
+        "dark-database-linked" => {
+            g.set_dark(true);
+            apply_scene(ui, state, "database-linked");
+        }
+        "dark-database-template" => {
+            g.set_dark(true);
+            apply_scene(ui, state, "database-template");
         }
         "title-edit" => {
             g.set_page_title("Renaming in place…".into());
@@ -3269,6 +5004,162 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
 
         "rename" => {
             g.set_renaming_id(108);
+        }
+
+        // SPEC §四十: the two inline atoms, on a line of the demo page so the
+        // chip is shown among real prose. A mention stores the page's *id* —
+        // the chip reads the workspace, which is why a rename follows with
+        // nothing rewritten — and a date stores its own ISO text, because a
+        // date has no page to be renamed. The date is a literal and not
+        // `today_iso()`: a shot has to look the same tomorrow.
+        "mention" | "date" => {
+            let home = state.open_page.get();
+            let target = state.create_page(None);
+            state.rename_page(target, "Project Atlas");
+            state.open_page(home);
+            let is_mention = scene == "mention";
+            // byte 4 is the `@` in both lines — the picker's own trigger
+            let line = insert_near_top(
+                state,
+                if is_mention {
+                    "See @ for the numbers"
+                } else {
+                    "Due @ in the calendar"
+                },
+            );
+            if let Some(id) = line {
+                if is_mention {
+                    state.apply_mention(id, 4, Some(target), "Project Atlas");
+                } else {
+                    state.apply_mention(id, 4, None, "2026-09-22");
+                }
+            }
+        }
+
+        // SPEC §四十: a reference whose target is gone. Deleting the page does
+        // *not* rewrite the mention — that is the whole consequence of storing
+        // an id — so the chip has to say so itself rather than go blank or
+        // keep naming a page that is not there.
+        "dangling" => {
+            let home = state.open_page.get();
+            let target = state.create_page(None);
+            state.rename_page(target, "Doomed page");
+            state.open_page(home);
+            if let Some(id) = insert_near_top(state, "See @ while it lasted") {
+                state.apply_mention(id, 4, Some(target), "Doomed page");
+                state.delete_page(target);
+            }
+        }
+
+        // SPEC §四十: the panel. Three shapes, because the panel's whole
+        // design is about how much of the answer it draws: fewer references
+        // than the window (no fold control at all), more (a folded window and
+        // a count), and the same page unfolded.
+        "backlinks" | "backlinks-open" => {
+            if seed_referenced_page(&g, state, 12).is_some() && scene == "backlinks-open" {
+                state.toggle_backlinks();
+            }
+        }
+        "backlinks-small" => {
+            seed_referenced_page(&g, state, 3);
+        }
+
+        // SPEC §三十九: the table view. A real database through the real write
+        // paths — nothing here hand-builds a fixture the UI could not make.
+        "database-table" => {
+            seed_database_table(state);
+        }
+
+        // SPEC §三十九 「操作」(D4): the same table with one rule compiled into
+        // SQL — Points > 5 keeps 3 of the 5 rows. The shot shows the red
+        // line's visible half: the count and the rows answer to the rules,
+        // the chip says "Filter 1", and nothing filtered happens anywhere but
+        // in the statement.
+        "database-filter" => {
+            seed_database_filter(state);
+        }
+
+        // SPEC §三十九 「需计算」(D6): the same table with two computed columns,
+        // added and defined through the real write paths (`db_add_column` →
+        // `db_formula_accept`, the editor's own door — save-time checks
+        // included). The formulas are literals over literal cells, so a sweep
+        // tomorrow photographs the same values: `Double` is `[Points] * 2`
+        // (arithmetic), `Label` is an `if` over the checkbox with text branches
+        // (booleans, concatenation-adjacent), and both cover the two most
+        // common shapes a formula column has. The *editor* itself is not in
+        // this shot — the scene pins the table with its computed values.
+        "database-formula" => {
+            seed_database_formula(state);
+        }
+
+        // SPEC §三十九 「视图」(D5): the family. Each scene is the table seed
+        // plus a second view of the named layout, added and switched to through
+        // the switcher's own write path — so every shot is the real read
+        // pipeline's answer (group counts, month counts, per-day peeks, card
+        // slices), never a hand-built fixture.
+        "database-board" => {
+            seed_database_view(state, crate::core::database::ViewLayout::Board);
+        }
+        "database-list" => {
+            seed_database_view(state, crate::core::database::ViewLayout::List);
+        }
+        "database-calendar" => {
+            seed_database_view(state, crate::core::database::ViewLayout::Calendar);
+        }
+        "database-gallery" => {
+            seed_database_view(state, crate::core::database::ViewLayout::Gallery);
+        }
+        "database-timeline" => {
+            seed_database_view(state, crate::core::database::ViewLayout::Timeline);
+        }
+        "database-form" => {
+            seed_database_view(state, crate::core::database::ViewLayout::Form);
+        }
+
+        // SPEC §三十九 (D7): the eighth layout. The plot is the group list —
+        // the same `GROUP BY` the board's columns are — so the seed is the
+        // board's: the table seed plus a chart view grouped by `Done` (two
+        // unchecked, three checked), drawn in the default bar shape.
+        "database-chart" => {
+            seed_database_view(state, crate::core::database::ViewLayout::Chart);
+        }
+
+        // SPEC §三十九 「操作」 (D7, ADR-0087): the view's live search. The
+        // needle is set through the state helper the box drives; the box
+        // itself is opened here because its open state is session state in
+        // the UI — the shot pins the narrowed rows, the count that says so,
+        // and the needle that narrowed them.
+        "database-search" => {
+            if let Some(id) = seed_database_search(state) {
+                g.set_db_search_block(id);
+                g.set_db_search_text("the".into());
+                g.set_db_search_open(true);
+            }
+        }
+
+        // SPEC §三十九 「操作」 (D7, ADR-0085): a linked database. The second
+        // block draws the first block's entity through `db_ref` — nothing is
+        // copied — so the shot is two views of one database on one page.
+        "database-linked" => {
+            seed_database_linked(state);
+        }
+
+        // SPEC §三十九 「操作」 (D7, ADR-0086): the record template. The
+        // source row was saved as the template through the row affordance's
+        // own write path, and the last row is a `db_add_record` whose prefill
+        // came from the template in the creation batch.
+        "database-template" => {
+            seed_database_template(state);
+        }
+
+        // SPEC §四十 / ADR-0052: a mirror, and a mirror whose source is gone.
+        // Both are the *projection* of a stored pointer, not a fixture: what
+        // the shot shows is what `sync_target` answered for those bytes.
+        "synced" => {
+            seed_synced_page(state, false);
+        }
+        "synced-source-gone" => {
+            seed_synced_page(state, true);
         }
 
         "empty" => open(&g, state, 113),
@@ -3423,6 +5314,7 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
                     end: text.find("the team").expect("needle present") + "the team".len(),
                     kind: crate::core::MarkKind::Bold,
                     url: String::new(),
+                    date: None,
                 }];
                 state.doc.borrow_mut().apply(&[crate::core::Change::BlockMarksSet {
                     id: cell,
@@ -3517,6 +5409,7 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
                     end: text.find("has to break").expect("needle present") + "has to break".len(),
                     kind: crate::core::MarkKind::Bold,
                     url: String::new(),
+                    date: None,
                 }];
                 state.doc.borrow_mut().apply(&[crate::core::Change::BlockMarksSet {
                     id,
@@ -3572,6 +5465,7 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
                     end: start + source.len(),
                     kind: crate::core::MarkKind::Math,
                     url: String::new(),
+                    date: None,
                 }];
                 state
                     .doc
@@ -3954,6 +5848,7 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
                     } else {
                         String::new()
                     },
+                    date: None,
                 };
                 let marks = vec![
                     span("home", crate::core::MarkKind::Bold),
@@ -3995,6 +5890,7 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
                     } else {
                         String::new()
                     },
+                    date: None,
                 };
                 let marks = vec![
                     span("and not a promise", crate::core::MarkKind::Bold),
@@ -4221,6 +6117,35 @@ pub fn apply_scene_overlay(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
                 g.set_block_menu_y(120.0);
                 g.set_block_menu_open_id(id);
             }
+        }
+        // the ⋮⋮ menu's Move-to submenu in a workspace big enough that the
+        // list is taller than the space below its anchor: the shot is taken
+        // after the action callback re-anchors (the `reanchor` closure in
+        // `on_block_menu_action`), so the popup's bottom edge must sit on the
+        // window — that edge is the defect this scene exists to prove. Pages
+        // are added until the rows clear 22 (≈ 632 px of menu against 200 px
+        // of room below a y = 600 anchor), so the reading does not depend on
+        // how many pages the base document happens to carry.
+        "move-to-tall" => {
+            let target = {
+                let d = state.doc.borrow();
+                d.page_blocks(core_page_id(state.open_page.get()))
+                    .get(4)
+                    .map(|b| b.id.0 as i32)
+            };
+            let Some(id) = target else { return };
+            loop {
+                state.fill_block_menu_move_to();
+                if g.get_block_menu_rows().row_count() >= 22 {
+                    break;
+                }
+                state.create_page(None);
+            }
+            state.fill_block_menu(id);
+            g.set_block_menu_x(320.0);
+            g.set_block_menu_y(600.0);
+            g.set_block_menu_open_id(id);
+            g.invoke_block_menu_action(10);
         }
         "text-color" => {
             let target = {

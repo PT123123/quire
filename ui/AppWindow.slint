@@ -15,6 +15,14 @@ import { IconPicker } from "components/IconPicker.slint";
 import { ConfirmDialog } from "components/Dialog.slint";
 import { SettingsDialog } from "components/SettingsDialog.slint";
 import { VersionPanel } from "components/VersionPanel.slint";
+// D4 (SPEC §三十九 「操作」): the view rules' two popups — the filter panel and
+// the group-by picker — as separate components, the way DatabaseView and its
+// siblings are. They mount at the window root like every popup here.
+import { DatabaseFilterPopup } from "components/DatabaseFilterPopup.slint";
+import { DatabaseGroupPopup } from "components/DatabaseGroupPopup.slint";
+// D6 (SPEC §三十九 「需计算」): the formula column's editor — the one write a
+// computed column has is its expression (the value is computed, ADR-0062).
+import { DatabaseFormulaPopup } from "components/DatabaseFormulaPopup.slint";
 
 // Row menus (slash + block handle): one window-level popup each, positioned
 // by the controller from the delegate's reported geometry. Declared before
@@ -179,6 +187,125 @@ component SlashMenuPopup inherits PopupWindow {
     }
 }
 
+// The database columns popup (SPEC §三十九 「操作」): hide/show a column of
+// the active view. A window-level popup like the block menu — one popup for
+// the whole app, not one per realized row — and its rows are pushed by Rust
+// (`db_column_toggles`), because "what the view shows" is the view
+// document's answer, not the delegate's. The title column is listed and
+// locked: it is what a row is named by (ADR-0063), so it has no switch
+// rather than a switch the table would refuse.
+component DatabaseColumnsPopup inherits PopupWindow {
+    width: 224px;
+    // the schema's rows, plus D6's one creation row: a formula column is the
+    // one kind this build can create (the kind picker is still D7's), and the
+    // Columns popup is where the schema is already listed
+    height: UIState.db-columns-rows.length * 30px + 38px;
+    // outside click / Escape dismiss; UIState syncs via the is-open mirror
+    close-policy: PopupClosePolicy.close-on-click-outside;
+
+    Rectangle {
+        x: 2px; y: 3px;
+        width: parent.width - 4px;
+        height: parent.height - 5px;
+        border-radius: Theme.radius-md + 2px;
+        background: Colors.shadow;
+    }
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        border-radius: Theme.radius-md;
+        background: Colors.surface-overlay;
+        border-width: 1px;
+        border-color: Colors.border;
+
+        for item[index] in UIState.db-columns-rows : Rectangle {
+            x: 4px;
+            y: 4px + (index * 30px);
+            width: parent.width - 8px;
+            height: 30px;
+            border-radius: Theme.radius-sm;
+            background: !item.locked && dc-ta.has-hover ? Colors.surface-hover : transparent;
+            animate background { duration: Theme.duration-instant; }
+
+            HorizontalLayout {
+                x: 8px;
+                width: parent.width - 16px;
+                spacing: Theme.spacing-sm;
+                Text {
+                    text: item.name;
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-ui;
+                    color: item.locked ? Colors.text-muted
+                        : (dc-ta.has-hover ? Colors.text-primary : Colors.text-secondary);
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+                // the column's type, as the kind's own word — a caption, not a
+                // second name; the popup is about visibility
+                Text {
+                    text: item.kind;
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-caption;
+                    color: Colors.text-muted;
+                    vertical-alignment: center;
+                }
+                if item.visible : Icon {
+                    vertical-stretch: 0;
+                    cross-axis-self-alignment: center;
+                    width: 13px;
+                    height: 13px;
+                    size: 13px;
+                    name: "todo-check";
+                    stroke-width: 2.6px;
+                    color: item.locked ? Colors.text-muted : Colors.accent;
+                }
+            }
+            dc-ta := TouchArea {
+                // the title column is listed so the popup is the one place the
+                // whole schema is visible; it does not pretend to be toggleable
+                enabled: !item.locked;
+                mouse-cursor: item.locked ? MouseCursor.default : MouseCursor.pointer;
+                clicked => {
+                    UIState.db-column-toggled(UIState.db-columns-block, item.property);
+                }
+            }
+        }
+
+        // D6: the one column this build can create — a formula column, born
+        // empty and opened straight into its editor (an editor without a way to
+        // reach a column is a door to nowhere, and a kind picker is still D7's).
+        // The controller closes this popup and opens the formula editor.
+        Rectangle {
+            x: 4px;
+            y: 8px + UIState.db-columns-rows.length * 30px;
+            width: parent.width - 8px;
+            height: 30px;
+            border-radius: Theme.radius-sm;
+            background: formula-add.has-hover ? Colors.surface-hover : transparent;
+
+            Text {
+                x: 8px;
+                width: parent.width - 16px;
+                height: parent.height;
+                vertical-alignment: center;
+                text: "+ New formula column";
+                font-family: Typography.ui-font;
+                font-size: Typography.size-ui;
+                color: formula-add.has-hover ? Colors.text-primary : Colors.text-secondary;
+            }
+            formula-add := TouchArea {
+                width: parent.width;
+                height: parent.height;
+                mouse-cursor: MouseCursor.pointer;
+                clicked => {
+                    UIState.db-formula-added(UIState.db-columns-block);
+                }
+            }
+        }
+    }
+}
+
 component LinkDialog inherits PopupWindow {
     width: 380px;
     // preferred-height already carries the layout's own padding; adding
@@ -300,6 +427,10 @@ export component AppWindow inherits Window {
     in-out property <bool> menu-open <=> UIState.menu-open;
     in-out property <bool> slash-open <=> UIState.slash-open;
     in-out property <int> block-menu-open-id <=> UIState.block-menu-open-id;
+    in-out property <bool> db-columns-open <=> UIState.db-columns-open;
+    in-out property <bool> db-filter-open <=> UIState.db-filter-open;
+    in-out property <bool> db-group-open <=> UIState.db-group-open;
+    in-out property <bool> db-formula-open <=> UIState.db-formula-open;
     in-out property <bool> link-open <=> UIState.link-open;
     in-out property <bool> dialog-open <=> UIState.dialog-open;
     in-out property <bool> settings-open <=> UIState.settings-open;
@@ -356,6 +487,8 @@ export component AppWindow inherits Window {
             // so a stale one can't hijack the next "/" menu
             UIState.slash-insert = false;
             UIState.slash-pick-page = false;
+            UIState.slash-pick-linkdb = false;
+            UIState.slash-pick-mention = false;
         }
     }
 
@@ -366,6 +499,62 @@ export component AppWindow inherits Window {
             blockMenu.show();
         } else {
             blockMenu.close();
+        }
+    }
+
+    changed db-columns-open => {
+        if (db-columns-open) {
+            dbColumns.show();
+        } else {
+            dbColumns.close();
+        }
+    }
+
+    // D4: the two rules popups, same three-piece pattern as the columns one —
+    // the open bit mirrored, the changed handler showing/closing, the is-open
+    // mirror clearing the bit when the user clicks outside.
+    changed db-filter-open => {
+        if (db-filter-open) {
+            dbFilter.show();
+        } else {
+            dbFilter.close();
+        }
+    }
+    property <bool> db-filter-shown: dbFilter.is-open;
+    changed db-filter-shown => {
+        if (!db-filter-shown && UIState.db-filter-open) {
+            UIState.db-filter-open = false;
+        }
+    }
+
+    changed db-group-open => {
+        if (db-group-open) {
+            dbGroup.show();
+        } else {
+            dbGroup.close();
+        }
+    }
+    property <bool> db-group-shown: dbGroup.is-open;
+    changed db-group-shown => {
+        if (!db-group-shown && UIState.db-group-open) {
+            UIState.db-group-open = false;
+        }
+    }
+
+    // D6: the formula editor, the same three-piece pattern as the two rules
+    // popups — the open bit mirrored, the changed handler showing/closing, the
+    // is-open mirror clearing the bit when the user clicks outside.
+    changed db-formula-open => {
+        if (db-formula-open) {
+            dbFormula.show();
+        } else {
+            dbFormula.close();
+        }
+    }
+    property <bool> db-formula-shown: dbFormula.is-open;
+    changed db-formula-shown => {
+        if (!db-formula-shown && UIState.db-formula-open) {
+            UIState.db-formula-open = false;
         }
     }
 
@@ -436,6 +625,12 @@ export component AppWindow inherits Window {
     changed block-menu-shown => {
         if (!block-menu-shown && UIState.block-menu-open-id >= 0) {
             UIState.block-menu-open-id = -1;
+        }
+    }
+    property <bool> db-columns-shown: dbColumns.is-open;
+    changed db-columns-shown => {
+        if (!db-columns-shown && UIState.db-columns-open) {
+            UIState.db-columns-open = false;
         }
     }
     property <bool> palette-shown: palette.is-open;
@@ -586,6 +781,29 @@ export component AppWindow inherits Window {
         y: UIState.block-menu-y;
     }
 
+    dbColumns := DatabaseColumnsPopup {
+        x: UIState.db-columns-x;
+        y: UIState.db-columns-y;
+    }
+
+    dbFilter := DatabaseFilterPopup {
+        x: UIState.db-filter-x;
+        y: UIState.db-filter-y;
+    }
+
+    dbGroup := DatabaseGroupPopup {
+        x: UIState.db-group-x;
+        y: UIState.db-group-y;
+    }
+
+    // The formula editor is a sheet, not a menu: it is centered rather than
+    // anchored, because it edits a *column* (a fact about the schema) and the
+    // cell it was opened from may scroll away while it is open.
+    dbFormula := DatabaseFormulaPopup {
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+    }
+
     linkDialog := LinkDialog {
         x: (root.width - self.width) / 2;
         y: (root.height - self.height) / 2;
@@ -646,3 +864,4 @@ export component AppWindow inherits Window {
         }
     }
 }
+

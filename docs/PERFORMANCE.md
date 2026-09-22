@@ -1678,3 +1678,158 @@ the app. Four new scenes (`page-templates`, `page-template-pick`, `slash-templat
 `dark-page-templates`) carry the feature's own pixels; nothing in the slice has a
 raster to argue about, so the gate's resolution floor stays ≈1 MB and everything
 this costs is bytes.
+## T2 · the backlink panel is one index seek, and the control that says so (2026-09-22, ADR-0051)
+
+SPEC §四十 asks the panel for "all the blocks that reference this page" and
+**forbids answering it with a scan**. The panel runs on every projection of a
+page, so the honest question is not "how fast is the query" but "does opening a
+page cost more because the library is bigger" — and the second half of that
+question can only be answered against the counterfactual, which is the read with
+migration 16's index taken away.
+
+One database, one sitting, release: 1 200 pages, 1 200 blocks, **100 200 marks**,
+of which exactly **200 are references** to the opened page and the other 100 000
+are bold spans on unrelated pages. Seeding took 1.88 s and is not part of any
+number below.
+
+`app::state::tests::cost_of_the_backlink_panel_on_a_page_open` (`#[ignore]`,
+prints, release):
+
+```
+cargo test --release --lib cost_of_the_backlink_panel -- --ignored --nocapture
+```
+
+**The reference read** — the pair `refresh_backlinks` makes (the count, then the
+window), µs per read over 20 rounds:
+
+| arm | read | µs |
+|-----|------|---:|
+| A | nothing points at the page (`count(*)` → 0, plus a window that the app skips) | 28.3 |
+| B | 200 references, folded window (5 rows) | 78.2 |
+| D | 200 references, unfolded window (50 rows) | 113.9 |
+| **C** | **B with `idx_marks_reference` dropped — not a shipped configuration** | **6 067.9** |
+
+**C is 78× B**, on a table that holds 1 200 rows more than the reference count
+needs, and a single count on the same unindexed table is **2 567 µs** against a
+whole folded read's 78. That is the "no full scan" sentence turned into a
+measurement: the cost of this read follows the *index*, and the 100 200 marks
+that are not references are invisible to it. Arm A always calls both queries
+where the app calls one (it skips the window when the count is zero), so 28.3 µs
+is an upper bound on what a page nobody quotes pays.
+
+**The open** — the same call the UI makes, ms per open over 20 rounds:
+
+| arm | page opened | ms/open |
+|-----|-------------|--------:|
+| A | nothing points at it | 0.35 |
+| B | 200 references, folded | 0.41 |
+| D | 200 references, unfolded | 0.43 |
+
+The panel's own share is **+0.06 ms folded, +0.07 ms unfolded** — against the
+SPEC §二十二 budget of 50 ms for a page open, and against the ≈38 ms a
+10 000-row projection of the same page costs (M11 · ADR-0039), which is where
+this slice's time would go if it had one to spend. The window is what keeps it
+there: 200 references cost 5 rows of drawing, not 200.
+
+**What this does not measure**, stated rather than implied: the open arms are on
+a one-block page, so they isolate the panel and say nothing about a large page's
+projection (that number belongs to ADR-0039 and is quoted, not re-measured); the
+`count(*)` in every arm is the *unfiltered* count for one page, and nothing here
+covers a filter over references. The pixel evidence for the drawing itself is the
+T2 sweep (`backlinks`, `backlinks-open`, `backlinks-small`, `dangling` and their
+`dark-` arms): **67 of 67 pre-existing scenes byte-identical**, 10 new.
+
+## M14 · a database view costs its window, not its table — the three numbers §三十九 owed (2026-09-22, Track 3 D8, ADR-0060…0087)
+
+SPEC §三十九 closes with 「数字进 docs/PERFORMANCE.md：10 000 行的 RAM、切换
+视图耗时、打开公式编辑器的耗时」, and D0 left that line open with an honest
+caveat: the projection and the SQL were proven, but 「没有 UI 臂就进不了
+PERFORMANCE.md」. D8 does not add a mechanism — it measures the shapes D1–D7
+already shipped, at the store and core layer, where the size-dependent cost
+lives. Three `#[ignore]`, prints, release probes; the two new ones are
+`storage::database_store::probe::a_view_switch_...` and
+`core::database_formula::perf::a_formula_...`. Raw rows in
+`benchmarks/results/2026-09-22-track3-d8.jsonl` (plus D1's and D4's files for
+the window/sort arms). Every number below is a **warm** range over repeated runs
+of one sitting; the first (seeding) run of each is excluded, per this file's own
+method note.
+
+The harness for all of them:
+
+```
+cargo test --release --lib -- --ignored --nocapture
+```
+
+**Number 1 — 10 000 行的 RAM.** The window is the only thing that holds row
+objects, and it is bounded by the viewport, not the table. The counting allocator
+(D0's, `core::database::probe`) is deterministic across runs:
+
+| shape (10 000 records) | realized rows | heap held |
+|---|---:|---:|
+| window at the top, 3 text cols | 31 | 6 806 B |
+| window, 5 typed cols (D1) | 31 | 5 576 B |
+| window, 2 cols sorted (D4) | 31 | 3 782 B |
+| **materialise the whole table** (control, never done) | 10 000 | 1.16 – 2.26 MB |
+
+The margin is **≈330×**, and it does not move with the table: the same
+geometry gives the same `0..31` window at 100 rows and at 1 000 000. Process
+readings (working set / private, the same `K32GetProcessMemoryInfo` ADR-0025
+uses) are **not load-bearing here** — they ran 4–14 MB private across runs and
+are scheduler- and allocator-cache-dominated; the heap ratio is the number that
+repeats. So the answer to 「10 000 行的库占多少内存」 is: **a few kilobytes of
+row objects, the same as a 100-row library's**, and only the forbidden
+whole-table fetch costs megabytes.
+
+**Number 2 — 切换视图耗时.** A switch at the store is: decode the view's JSON
+document, `COUNT(*)` over the filtered set, then fetch the window. Warm, over
+10 000 rows:
+
+| term | µs / ms |
+|---|---:|
+| definition decode (`ViewDefinition::parse`) | 2.6 – 7.6 µs |
+| row-shaped switch (decode + count + 31-row window fetch) | 0.35 – 1.0 ms |
+| grouped switch adds the `GROUP BY` tallies (board / calendar / chart) | +5.5 – 18.1 ms |
+| control — a switch that fetched all 10 000 rows | 14.3 – 35.9 ms |
+
+The honest wrinkle D8 put a number on is the same one D4 §4.1 named
+qualitatively: **`OFFSET` walks the rows it skips**, so a window read is not one
+constant cost. Reading the *bottom* `0..31` of 10 000 rows by offset costs
+**16 – 25 ms** (D1), and a *sorted* bottom window **18 – 52 ms** (D4), because
+both are dominated by the skip, not the slice. The probe isolates it: the same
+bottom window as a bare index walk (no joins) is **30 – 44 µs**, and the same
+window asked for by **cursor** (one key, then a range scan) is **212 – 356 µs**
+— ~80× under the offset read. A switch to the *top* of a view (what opening one
+actually does) is the sub-millisecond row above; only a jump-scroll to the far
+end pays the offset walk, and the keyset fetch is the measured way to retire it.
+
+**Number 3 — 打开公式编辑器耗时.** Opening the editor parses the stored
+expression once and evaluates it on the sample row once — pure `core::database_formula`,
+no I/O:
+
+| term | ns / µs |
+|---|---:|
+| parse a representative nested formula (`if([Done], [Points]*2, [Points]+length("pending"))-1`) | 1.6 – 3.4 µs |
+| one evaluation (one painted cell) | 68 – 129 ns |
+| recompute a visible formula column across the whole window (31 rows) | 2.1 – 4.0 µs |
+| three visible formula columns, whole window | 6.3 – 12.0 µs |
+| **forbidden shape** — recompute 10 000 rows | 0.68 – 1.29 ms |
+
+So 「打开公式编辑器」 is **single-digit microseconds, dominated by the parse**, and
+「输入一个单元格后重算多少行」 is answered by the arithmetic the probe prints:
+the whole 10 000-row recompute is **108× the window's** recompute, and the
+projection has no path that walks it (ADR-0083). The eval-time depth and step
+budgets (ADR-0082) are what keep even the forbidden number finite.
+
+**What this does not measure**, stated rather than implied: these are the
+*data* costs of a switch and an open, not the frame. Slint's repaint of 31
+delegates, the calendar's 42 cells, the chart's path build are not sampled —
+that needs the real window and `bench.ps1`'s RAM/pixel arms, which no headless
+probe here can stand in for (the same limit D0 recorded). The `cell_write`
+figure D4 prints (**9 – 18 ms** for one cell in its own transaction, **17 – 33
+µs** for the same write batched into a 500-change transaction) is the commit
+durability floor, not a query cost, and the app batches every user edit into one
+transaction (one Ctrl+Z), so it is the batched number the user waits on. The
+grouped-switch `GROUP BY` over 10 000 rows (5 – 18 ms) is real and grows with the
+table — it is the one per-refresh term here that is *not* window-bounded, and it
+is the input to whichever view the user is switching to, not to scrolling.
+

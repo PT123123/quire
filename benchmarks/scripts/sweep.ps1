@@ -35,8 +35,10 @@ $all = @(
     "toc",
     "embed", "embed-empty",
     "code-hl",
+    "mention", "date", "backlinks", "backlinks-open", "backlinks-small", "dangling",
+    "synced", "synced-source-gone",
     "columns", "columns-3", "columns-marks",
-    "slash", "plus", "block-menu", "move-to", "page-move-to", "page-style", "text-color",
+    "slash", "plus", "block-menu", "move-to", "move-to-tall", "page-move-to", "page-style", "text-color",
     "bg-color", "link", "menu", "palette", "palette-nav", "search", "search-notes",
     "dialog", "settings",
     "style-serif", "style-mono", "style-small", "style-full", "style-tight",
@@ -48,7 +50,9 @@ $all = @(
     "dark", "dark-slash", "dark-find", "dark-marks", "dark-link", "dark-code-hl",
     "dark-block-menu", "dark-block-colors", "dark-title-edit", "dark-style-serif",
     "dark-page-icon", "dark-page-cover", "dark-page-cover-white", "dark-page-lock",
-    "dark-page-templates", "dark-page-versions"
+    "dark-page-templates", "dark-page-versions", "dark-mention", "dark-date",
+    "dark-backlinks", "dark-dangling", "dark-synced", "dark-synced-source-gone",
+    "dark-move-to-tall"
 )
 $targets = if ($Scenes -eq "") { $all } else { $Scenes -split ',' }
 

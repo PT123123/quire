@@ -2627,3 +2627,451 @@ emoji、模板对话框之上）。二、版本只含**正文**：标题、icon�
 条"看过的版本才能恢复"已经限制了误触。五、LAN 分享不带版本（对岸没有表达它的形状，同模板那三条门）。六、
 Track 3 的草案**也不需要** `versions` 表：一条数据库行若要历史，还是这两行 meta 与同一个目录。
 
+## M13 · 引用、提及与反向链接（Track 2）— ✅ T2.1–T2.5 完成
+分支：`track/2-references`（提交 `19201c3` 四刀 + 合并提交收口 T2.5，逐刀报告在
+`docs/REPORT_TRACK2.md`）
+
+- **ADR-0050**（mention/date 复用 `marks.url`）与 **ADR-0051**（反向链接 =
+  两条索引 + 派生投影，取代 brief 的 FTS5 token 草案）：已落，随 `19201c3`。
+- **T2.1 `@page mention`** ✅ —— chip 存目标页 id、画时问标题；slash 第四模式
+  `slash-pick-mention`；`InsertReference` 一条命令一个 undo 步；改名/移父/删页
+  一条测试钉死。
+- **T2.2 `@date`** ✅ —— 同一枚 chip 的第二种载荷，ISO 格式只有 `core::date`
+  一个定义。
+- **T2.3 反向链接区** ✅ —— migration 16 两条索引；折叠 5 行 / 展开 50 行 /
+  "and N more"；78 µs 折叠读（去索引反事实 6 068 µs），数字进
+  `docs/PERFORMANCE.md`。
+- **T2.4 页面别名与悬空** ✅ —— 改名/移父/id 落空三件事一条测试覆盖。
+- **T2.5 synced block** ✅（2026-09-22 上午收口）—— **ADR-0052**：源块持有内容，
+  镜像只持一根指针（`blocks.sync_ref`，migration 19；`BlockKind::Synced`，
+  kind 字符串 `"synced"`，UI int 24）。删除 = 镜像退化 `(deleted source)` 只读；
+  undo 不需要合并（只有一份内容）；环检测在写入时（`sync_would_cycle`，
+  上界 32）；Markdown 导出按段落摊平、导入有意不认新语法；六接点全部点亮
+  （slash 的第五种 picker `slash-pick-synced`、Turn into、场景
+  `synced` / `synced-source-gone` 含 dark 臂）。lib 测试两条：
+  画源+退化、自指/环/非 Synced 拒绝。
+- **验证**：check 干净 / 按 target 全绿（lib 314+13ig、storage 39+2ig、
+  markdown 69 ……）/ release 零警告；sweep 的 synced 场景数字留给整合者
+  （共享工作树出不了干净对照）。
+- **未验证边界**：真键盘输入、双焦点争用、真点跳转（headless 证明不了，
+  见报告 §7.2）；镜像每行一次 O(1) 查表的成本没有单独数字。
+
+## Track 3 · D0 决策与探针（2026-09-22，on `track/3-database`，ADR-0060…ADR-0065）
+
+Database 这条 track 的**第一条纪律是先证明通道存在**：SPEC §三十九 性能红线的第一句是「10 000 行的库
+不得全量 realize；视图先算可见窗口再取行」。所以 D0 不写功能，先把这句话在**选定的形状**下变成数字，
+再把形状写成六个 ADR（D0 的问题 → ADR 的对应见报告 `docs/REPORT_TRACK3.md`）。
+
+**通道**：新模块 `src/core/database.rs`（外加 `src/core/mod.rs` 一行）是一个纯投影——没有 SQL、没有
+Slint、没有时钟。`window(total, ViewGeometry, scroll_y) -> RowWindow` 先算 `[start, end)`，
+`RowWindow::fetch()` 就是那次取行的 `LIMIT`/`OFFSET`，而 `RealizedRows::scroll_to` 是唯一构造器、
+只接受这个窗口，所以「先算窗口再取行」不是纪律而是类型；偏移先按内容夹紧（Slint 就是这么夹的），
+所以一张比视口还短的表不会因为一个陈旧的偏移把顶部几行丢掉。
+
+**数字**（10 000 行 / 32 px 行高 / 720 px 视口 / 8 行 overscan，release）：realize **31 行**（窗口
+0..31；滚到中间 `scroll_y = 4000` 是 39 行；滚到底 31 行），而 100 行、1 000 行、1 000 000 行在同样
+几何下算出的窗口是**同一个 0..31**——界住它的是视口不是表。内存用一个**只在测量线程计数**的全局分配器量
+（`thread_local` + `const` 初始化，分配器里不再分配；别的测试线程并行跑但没 arm，互不污染）：窗口那
+31 行的行对象 **6 806 B**，同一张表 10 000 行全 realize **2 259 800 B**（**332×**），只取 id 的
+`Vec<u64>` 是 80 000 B；构造耗时 6.317 ms / 0.061 ms / **0.0174 ms**。进程读数（测试内手写
+`K32GetProcessMemoryInfo` 声明，与 `bench.ps1` 报的两个数同源）private 2.0 → 5.1 MB、working set
+11.0 → 14.0 MB：把 10 000 行真拿进内存约 **3.1 MB 私有**，窗口是 **6.8 KB**。两次运行堆数字逐字节相同。
+原始行：`benchmarks/results/2026-09-22-track3-probe.jsonl`；断言在 `cargo test --lib database::`。
+
+**它证明/没证明什么**：证明的是**投影**（窗口由视口界定、取行计划由窗口给出、行对象只存在于窗口里），
+没证明**帧**——D0 没有任何 `.slint` 视图，所以没跑 `bench.ps1`（它要一个窗口才采得到样），SQL 侧的
+`LIMIT` 也只在计划里、一次都没执行过（表在 D1）。
+
+**六个 ADR**：1) database 是什么 → **ADR-0060**（自己的 `databases` 行 + 新的 `Database` 块经
+`blocks.db_ref` 指过去；整页数据库就是首块是它的普通页；八个视图是八种 `db_views.layout`，「+」菜单
+那六行 muted 占位由此点亮，不是八个块种类）。2) schema 存哪 → **ADR-0061**（`db_properties` 行表，
+`UNIQUE(db,name)` 是行表才有的不变量；只有 select 的选项列表是行内 JSON，选项带自己的 id）。
+3) 值怎么存 → **ADR-0062**（`db_values` 一行一 (record, property)，`text`/`num`/`flag` 三列 +
+`db_value_items` 给 multi-select / files；判据是「比较必须发生在 SQLite 自己的类型系统里」）。
+4) record 与 page → **ADR-0063**（record 拥有它的 page，`UNIQUE(page)` + `ON DELETE CASCADE`；
+标题只有一个家，有页在 `pages.title`、无页在 `db_values`、读时 `COALESCE`；record 懒建页；两个删除
+方向各一批 change、一次 Ctrl+Z）。5) 视图定义 → **ADR-0064**（`db_views` 行：名字/layout/顺序是列，
+规则是一份 JSON 文档，过滤是递归树）。6) Markdown 通道 → **ADR-0065**（导出当前视图的 GFM 表格，
+页-backed 的标题写成 `[title](quire://page/<id>)`；不写标记行；导入侧不改，管道行回来仍是段落）。
+
+**验证**：`cargo check --all-targets` 干净（0 warning，强制重编后复测）；`cargo test --all-targets`
+全绿 —— 10 个 target 合计 **394 passed / 0 failed / 13 ignored**（lib 247/10、backup 13/1、
+find 9、markdown 62、persistence 5、search 17、storage 27/2、workspace 14，main 与 quire_typing 各 0）；
+`cargo build --release` 零警告。视觉：这一刀**不碰 UI**（新模块没有被任何 UI 引用），
+`sweep.ps1 -OutDir .scratch/track3-sweep -Baseline .scratch/sweep33` 得 **changed 0 / identical 67**。
+（没有用 `-OutDir .scratch/sweep34`：开工时那个目录正被另一条 track 的 sweep 占着。）
+
+**未验证 / 已知边界**：一、没有 `.slint` 视图，所以窗口数字是投影的不是帧的，`row_height` 32 px 与
+`overscan` 8 是本刀的假设，行 payload 也是代表性的（title + 5 个文本 cell），D2 的类型化 cell 会换掉它
+（窗口算术不随之变）。二、SQL 侧一次都没跑：`fetch()` 的 `LIMIT`/`OFFSET` 只是计划，`COUNT(*)` 还没有。
+三、进程读数来自测试进程内部的 FFI，与 `bench.ps1` 的 `ram_private_mb` 同源但不同二进制，**不能**与
+既有 jsonl 行直接相除。四、ADR-0063 的两条删除路径测试未写（D1）；侧边栏删页不进 undo 是既有缺口，
+本刀只把它写在明面上，没改。五、ADR-0061/0062/0064/0065 的表一行 SQL 都还没建，`CURRENT_VERSION`
+仍是 **11**，D1 的迁移号在提交那一刻取 `CURRENT_VERSION + 1`（串行接缝）。
+
+**下一步**：D1 —— `databases` / `db_properties` / `db_views` / `db_records` / `db_values` /
+`db_value_items` 的迁移、repository 读写与 core 对象模型；record 与 page 的所有权契约（含两条删除
+路径的测试）在这里落地。
+
+## Track 3 · D1 数据层（2026-09-22，on `track/3-database`，schema v12–v15，ADR-0066…ADR-0067）
+
+D0 证明了通道（投影先算窗口），D1 让通道**真的从 SQL 里取行**，并把 SPEC §三十九 的四层对象落成表。
+一刀之内交付：六张表 + 四步迁移、`core` 对象模型、`storage` 的读写与窗口查询、record↔page 的生命周期
+契约与测试、重建（关掉再打开逐字段一致），以及本刀欠的性能数字。
+
+**表与迁移**（`src/storage/migrations.rs`，动手前读到的 `CURRENT_VERSION` 是 **11**，采用 **v12–v15**）：
+一次迁移 = 一个可独立回滚的语义单位，所以 v12 = `databases`、v13 = `db_properties`、v14 = `db_records` +
+`db_values` + `db_value_items`（record 与它的值不可能各自存在，是一个单位）、v15 = `db_views`。
+每步都用 `CREATE TABLE IF NOT EXISTS`（`add_page_columns()` 那种「缺哪列补哪列」的收敛范式在 `CREATE`
+上的对应写法），并配「vN-1 库升上来读回原值」的测试：v12/V13/V14/V15 各一条，fixture 走**应用自己的
+写路径**（这样 `ord` 的编码也真的是存储的编码），然后降版本、迁移、断言旧行逐字段没变 + 新表真的可用。
+
+**对象模型与写路径**：`core::database`（D0 的投影旁边）加了 `Database` / `Property` / `PropertyKind` /
+`View` / `ViewLayout` / `Record` / `CellValue` / `DatabaseCatalog` / `RowRequest`。`Change` 在**末尾追加**
+十九个变体（`DatabaseCreated` … `ViewDeleted`），`storage::database_store` 放 SQL，`repository::apply_one`
+的 match 保持 exhaustive（新变体是编译错误，不是悄悄丢的写入）。「空」有唯一表示：没有行——不是空串，
+不是 0；`person` 折成 `text`、未知 kind 折成 `text`、未知 layout 折成 `table`（ADR-0061/0064 的 fold）。
+
+**窗口真的执行了**：`window_rows` 拿 D0 的 `RowWindow::fetch()` 当 `LIMIT`/`OFFSET`，
+`realized_rows` 把 `COUNT(*)` → `core::database::window` → 一次 SQL 串起来；SELECT 里**每个可见属性一个
+`LEFT JOIN`**、标题走 ADR-0063 的 `COALESCE(pages.title, db_values.text)`，列表型（multi-select / files）
+另用一次「只限本窗口 record」的查询，否则一行的三个选项会把窗口乘三。`EXPLAIN QUERY PLAN` 显示计划是
+`SEARCH r USING INDEX idx_db_records_db_ord (db=?)` + 每个值一个 `sqlite_autoindex_db_values_1` 探测。
+
+**数字**（10 000 条 record × 5 列 = 60 000 个 change，release，`benchmarks/results/2026-09-22-track3-d1-window.jsonl`）：
+
+| 读数 | 值（三次运行） |
+|------|----------------|
+| 落库 10 000 行（每行 5 格） | 848 ms → **84.8 µs/行**（另两次 635.8 / 939.8 ms） |
+| 窗口读（顶，`LIMIT 31 OFFSET 0`） | **463.5 µs**（另两次 247.2 / 658.7） |
+| 窗口读（中间，`LIMIT 39 OFFSET 4992`） | 7.5 ms（另两次 5.1 / 8.8） |
+| 窗口读（底，`LIMIT 31 OFFSET 9969`） | 12.9 ms（另两次 8.5 / 13.3） |
+| 对照：一次取回全部 10 000 行 | 56.0 ms、堆 **1 842 780 B**（另两次 46.8 / 69.9 ms，堆逐字节相同） |
+| 窗口那 31 行占堆 | **5 576 B**（与全表 **330×**，三次都是 330–332×） |
+
+**这一刀量出来的真问题**：窗口界住的是**行与字节**（红线那句），不是**工作量**。裸索引走 9 969 行只要
+55.3 µs，所以贵不在 `OFFSET` 的走位，而在 `LEFT JOIN` **在跳过的行上照样执行**：同一个窗口改用游标
+（`(r.ord, r.id) > (?, ?)`，一行一个 key）只要 **251 µs**，比 `OFFSET` 版本的 12.9 ms 快 **51×**。
+读契约（`fetch() -> (limit, offset)` 是 D0 定的）因此欠一笔：D3/D4 拿着真帧的数字把它换成游标。
+
+**record 与 page 的契约**（ADR-0063 落地）：`UNIQUE (page)` 让所有权互相唯一、`ON DELETE CASCADE`
+是 SQL 的兜底、标题只有一个家（有页在 `pages.title`，无页在 `db_values`，读时 `COALESCE`）、新 record
+默认没有页（懒建页，`db_records.page` 大量 NULL 是设计而不是巧合）。两条删除路径的测试都在
+`tests/integration/storage_test.rs` 的 `database_layer` 模块：删 record（一批 `[RecordDeleted,
+PageDeleted]`）与删页面（只有 `PageDeleted`，靠 CASCADE）end in the same state；批量路径
+（`replace_all`）不许把这一层弄丢——ADR-0066 的规则 + 测试，包括「状态里没有的页，它的 record 一起走」。
+
+**验证**：`cargo check --all-targets` 干净（0 warning）；`cargo test --all-targets` 按 target 分开报（见
+报告）；视觉 **changed 0**（纯数据层，没有 `.slint` 被碰）；`cargo build --release` 零警告。
+
+**未验证**（诚实清单）：没有 UI 臂——没有帧、没有 `bench.ps1`、`LIMIT`/`OFFSET` 之外没有别的读路径被
+任何绘制代码调用；`OFFSET` 的时间只在本机、与本刀自己的对照比过；LAN pull 没端到端跑过；改 kind 不迁移
+已存的值（D2 的逐类型转换）；`config` 只被原样存取、没有解析器（D2）；ADR-0065 的 Markdown 导出仍是规格
+（没有代码路径）。
+
+**下一步**：D2 的 property 系统（14 种类型 + 每型往返 + date/number 的数值序），之后 D3 的 table view
+把窗口接到真帧上，并回答上面那个游标问题。
+
+## Track 3 · D2 属性系统（2026-09-22，on `track/3-database`，schema v17，ADR-0068…ADR-0071）
+
+D1 让**通道**从 SQL 里取行，D2 让窗口里的每一格**有意义**：SPEC §三十九 的 14 种属性类型各自的输入
+与渲染规则、两个派生时间列、以及「排序必须在 SQL 侧」这条红线。仍然**没有 UI**（没有 `.slint`，六行
+插入菜单占位仍不可选，D3 才点亮）。
+
+**属性的语义搬进 `core::database_property`（新文件）**：这是这一刀的主体。`PropertyOptions` 读/写
+select / status / multi-select 的 `config`（选项带自己的 id，改名是一处文档编辑、零个值被碰）、
+`NumberFormat` / `DateFormat` 从 config 读（未知设置折回默认），`parse_one` / `parse_many` 是**写入口**
+（每种类型的容忍度逐条成文：数字要有限、日期的**形状**是门而日历不是、`url`/`email`/`phone` **从不改写
+也从不拒绝**、空输入 = 无值、select 不接受列表里没有的名字——选项列表是同一批里的第二个 change），
+`paint` 是**读出口**（选项 id 变名字、数字过格式、文件过附件名、多选拼名字）。core 里还放了**全仓库
+唯一的 JSON 阅读器**（ADR-0061 的选项列表今天用，ADR-0064 的视图文档 D4 用），带深度上限——没有 serde，
+ADR-0001 的「一个进程一个运行时」比省这百来行重要。两种 fold 都写明是**可见的**而不是静默的：未知的
+选项 id 显示它自己，已被删的附件 id 也显示它自己。
+
+**两个派生时间列**（ADR-0068，`db_records.created` / `.edited`，v17）：`YYYY-MM-DDTHH:MM` 本地墙钟、
+定宽、`''` = 未知，**由写路径盖章**（`insert_record` / `set_cell` / 页标题改名里跑 SQLite 自己的
+`strftime`），**永不写进 `db_values`**——读路径对这两种 kind 一眼都不看值表（测试写一行进去，然后看它
+被忽略）。刷新时机是明写的规则：内容是格子与标题，位置（`ord`）与指向哪页是「相框」，拖动一行不算编辑。
+`Record` 结构体**没有**这两个字段：`Change` 里的 record 不能给自己编一个生日。
+
+**排序是语句里的 `ORDER BY`**（ADR-0070）：`RowRequest::sort` 是一个编译好的 `SortSpec`
+（property + 列 + 方向），store 把它写成 SQL —— 全仓库**没有任何地方给 `Vec` 排序**。比哪一列是每类型的
+决定：`number` 比 `db_values.num`（`2` 在 `10` 前）、日期型比定宽文本（字节序就是时间序）、`checkbox`
+比 `flag`、title 走 ADR-0063 的 `COALESCE`、隐藏列自己加一个 join，而 multi-select / files / 计算列
+**没有 `SortSpec`**（「按多选排」是关于选项顺序的问题，不能假装答应）。空值显式排在最后（`ORDER BY
+(v1.num IS NULL) ASC, v1.num ASC, r.ord, r.id`），**升降序都在最后**，末两项是稳定的 tie-break。
+
+**`person` 的降级**（ADR-0071）：没有成员表、没有成员 id、没有账号，值就是 `text` 列里的一个字符串
+（ADR-0061 的折叠原样不动），而**本地成员名单是现算的**：`workspace_people()` 读「存储 kind 为
+`person`」的列的去重非空值。改名就是改一个字符串——这正是降级省下的东西。
+
+**数字**（10 000 条 record × 2 列，release，`benchmarks/results/2026-09-22-track3-d2-sort.jsonl`，三次）：
+
+| 读数 | 值（三次运行） |
+|------|----------------|
+| SQL 排序窗口（顶，`LIMIT 31 OFFSET 0`） | **6.4 / 6.4 / 6.2 ms** |
+| SQL 排序窗口（底，`LIMIT 31 OFFSET 9969`） | 13.1 / 13.2 / 13.1 ms |
+| 同一个底部窗口**不排序**（D1 的读法） | 5.9 / 4.9 / 4.5 ms —— 排序给一次滚动加 **~8 ms** |
+| 排序但不加窗口（全部 10 000 行） | 21.6 / 19.1 / 18.9 ms —— 顺序本身的价钱（临时 B 树） |
+| 对照：取回全部再在内存里排 | 14.0 / 13.3 / 15.5 ms、堆 **1 220 000 B（1.16 MB）** |
+| 排序窗口的堆 | **3 782 B**（全表的 **323×**，三次逐字节相同） |
+| 一次单元格写入（自己一个事务 / 批量） | 2.8–7.4 ms / **10.6–14.9 µs** —— 差值就是 commit |
+| `EXPLAIN QUERY PLAN` | 五次 `SEARCH … USING INDEX` + **`USE TEMP B-TREE FOR ORDER BY`** |
+
+**这一刀量出来的真问题（诚实的一面）**：排序在 SQL 侧赢得**内存**（323×）与**红线**（顺序是数据库的，
+不是副本的），但**时间上只赢 2×**（6.4 ms vs 14.0 ms）——因为 `db_values.num` 上没有索引，SQL 要为
+10 000 行建临时 B 树；Rust 排 10 000 个 f64 只要 0.36 ms，贵的是**取回那 10 000 行**（13 ms）。
+记录在案，D4 的编译器可以据此决定「隐藏列排序要不要加索引」，但窗口与排序的**形状**不能变。
+
+**验证**：`cargo check --all-targets` 干净（0 warning）；`cargo test --all-targets` 全绿（312 + 13 + 53 +
+39 + 14 …，见报告，按 target 分开）；视觉 **changed 0**（67 个既有场景逐字节相同；新出现的 10 个
+`mention` / `date` / `backlinks` / `dangling` 场景是 Track 2 的，不是本刀的）；`cargo build --release`
+零警告。新测试 **33 条 + 1 条打印型探针**（`core::database_property` 20、`core::database` 1、
+`storage::database_store::tests` 10、集成 2）。
+
+**未验证**（诚实清单）：没有 UI 臂——没有任何格子被画出来，`looks_valid` 的阈值没有用户量过；视图文档
+还没被编译成 `SortSpec`（D4），多列排序与分组头的形状未命名；没有过滤的数字（D4）；`workspace_people()`
+的开销没量；**改 kind 不迁移值**仍是 D1 的状态；选项列表的「加一个选项」还没有 `Change` 臂（跟着 D3 的
+选项编辑器一起加）。
+
+**下一步**：D3 的第一个视图（table view）——把窗口接到真帧上，点亮六行占位，回答 D1 留下的游标问题，
+并把单元格编辑器接到 `parse_one` / `paint` 上。
+
+## Track 3 · D3 table view（2026-09-22，on `track/3-database`，schema v18，ADR-0072…ADR-0075）
+
+**缘起**：D0 证明通道（窗口有界），D1 让通道真的从 SQL 取行，D2 让窗口里的每一格有意义——D3 把
+它们画出来，并把 ADR-0060 的六个接点整批点亮：块种类（`BlockKind::Database`，kind 字符串
+`database`）、`blocks.db_ref`（迁移 **v18**，`add_db_ref_column`，一步一语义单位）、`/` 与「+」菜单
+（`Table view` 行真 id，其余五行仍 muted）、Turn into（三个入口都走 `Command::MakeDatabase`，
+`SetBlockType { kind: Database }` 被显式拒绝）、Markdown 导出（ADR-0065）、截图场景
+（`database-table` / `dark-database-table`）。
+
+**通道形状（一次说清）**：页面滚动（Slint）→ `db-viewport`（块的 body 顶相对视口的 px）→
+`core::database::window`（由视口与行高算窗口）→ `database_store::window_rows`（`LIMIT`/`OFFSET`）
+→ `core::database_view`（列、已绘制的格、row→y 算术）→ `ModelRc<DbRow>` → 委托只画。四个接缝各有
+一条纪律：窗口只由 `core::database::window` 算；只有窗口越过 overscan 才重新取行；行模型就地替换
+（不重建页面的行列表）；块高 = 表高（页面的滚动就是视图的滚动，没有第二个滚动区）。
+
+**「行是动态的」两条规则**：projection 真的**删掉**不可见的行（`db-windows` 里的模型只装窗口，不是
+`visible: false` 的全表）；模型下标与行下标差一个 `db-row-start`，由 Rust 算出、写进行数据，委托只做
+`(db-row-start + index) * db-row-height` 的摆放（§三十七 对「行动态」块的两条附加规则）。
+
+**交付物**：`src/core/database_view.rs`（视图文档读写 + 列/行投影 + 15 种 kind 的格形状）；
+`ui/components/DatabaseView.slint` / `DatabaseCell.slint` / `DatabaseSwitcher.slint`；
+`ui/AppWindow.slint` 的 `DatabaseColumnsPopup`（窗口级隐藏列 popup，title 列锁定）；
+`EditorBlock.slint` 的 kind 23 臂（`db-height` 与 `database` 正文）；`controller.rs` 的 12 个
+`UIState.db-*` callback（激活/提交/取消/勾选/选选项/加行/删行/列宽/开合列 popup/切视图/视口报告）；
+`state.rs` 的 `make_database` / `db_add_record` / `db_set_cell_text` / `db_toggle_checkbox` /
+`db_pick_option` / `db_delete_record` / `db_set_column_width` / `db_toggle_column` / `db_pick_view`
+/ `db_watch` / `db_markdown_table` 与 `db_absorb`（ADR-0075）。
+
+**行内编辑的覆盖（D3 的诚实边界）**：title / text / number 是行内 `TextInput`，checkbox 是整格点击，
+select / status 是格内选项列表；其余九种（multi-select / date / url / email / phone / files /
+created time / last edited time / formula / rollup / relation）今天**只画不编**——`editable` 为
+false 的格是惰性的，日期与列表的输入控件是 D5/D6 的。
+
+**验证**（见报告 D3 一节的完整读数）：`cargo check --all-targets` / `cargo test --all-targets` /
+`cargo build --release` 三条门槛，加上提交树单独跑一遍；视觉用 sweep 对照 D1/D2 的基线
+（`database-table` 与 `dark-database-table` 是新增场景，其余场景应当不动）；性能收口 SPEC §三十九 的
+三个数字里 D3 能给的（切换视图耗时、行内编辑到重绘的路径成本）。
+
+**未验证**（诚实清单，详见报告）：没有真键盘输入与鼠标的端到端测试（headless 只能证明投影）；
+`absolute-position` 的窗口坐标语义只在文档层面确认（统一测试要看 popup 是否落在按钮正下方）；
+10 000 行滚动时的读延迟仍受 D1 量出的 `OFFSET` + `LEFT JOIN` 影响（D4 的游标读）；
+`formula` / `rollup` 列在导出里的计算值是 D6 的正确性。
+
+## Track 3 · D4 filter / sort / group（2026-09-22，on track/3-database，ADR-0076/ADR-0077）
+
+**一行 cargo 都没跑**（本刀的铁律：只写代码；编译、测试、视觉、性能统一留给全部代码生成完之后的总测试）。
+
+### 缘起：把红线做成模块边界
+
+SPEC §三十九 的红线第二条（「filter / sort 在 SQL 侧完成，不在 UI 侧过滤」）是最容易违反的一条，因为
+「取回再过滤」写起来最短。本刀把它变成结构而不是纪律：`RowRequest` 带着**规则本身**
+（`sorts: &[SortSpec]` + `filter: Option<&FilterNode>`），`storage::database_query` 是唯一把规则变成 SQL
+的模块（`WHERE` / 多键 `ORDER BY` / 组谓词），`database_store` 是唯一执行它的模块，而
+`core::database::window` 仍然先开窗——只是过滤后的窗口开在**过滤后的计数**上（`SELECT count(*)` 跑在
+与行读同样的 `FROM`/`WHERE` 上）。没有任何一层拿得到行去丢。
+
+### 交付物
+
+* **过滤**：ADR-0064 的递归树（`and` / `or` / `not` / 子句）在 `core::database_view` 里按 schema 解析成
+  `FilterNode`，在 `storage::database_query` 里编译成 `WHERE`：text 是
+  `INSTR(LOWER(expr), LOWER(?)) > 0`；list 是 `db_value_items` 上的一次 `EXISTS` 探针（ADR-0062 预言过的形状）；
+  `any-of` 是选项 id 的 `IN`；number 绑 `REAL`（`2` 在 `10` 前）；date 绑定宽文本（字节序即时间序）；
+  `ne` 是 `NOT (eq 形)`（三值逻辑让空值两边都不匹配 =「有一个值且不是这个」）；checkbox 的「未勾选」含 `NULL`
+  （没碰过的勾选框就是没勾）。**降级都在 ADR-0076 里定死**：树整棵读不开 → 丢掉 + 在视图上可见提示；
+  单条子句不可读（列没了 / 比较符不适用于该 kind / 值不是该列存的形状）→ 丢那一条 + 计数提示；
+  排序项与分组编不出来 → 静默丢弃（顺序与分组只改变看法，不藏行，第一帧就看得出来）；空 `{"and":[]}`
+  （面板删空规则留下的状态）不是过滤、也不提示。
+* **排序**：多键——文档里每个 `sorts` 项各成 `ORDER BY` 的一段，每段自带空值置后项（永远升序），
+  最后统一 `r.ord, r.id` 作稳定 tie-break；列头点击循环 无→升→降→无，编辑的是第一项（决定顺序的头部）。
+* **分组**：**条目投影**——组头是条目不是行。`group_window(counts, window)` 把条目窗口映射成
+  「窗口内的组头 + 每组的 `(skip, len)` 切片」，每片用**组内自己的** `LIMIT`/`OFFSET` 取，所以一组装
+  10 000 行也只 realize 31 行、每个组只多一个条目；条目总数 Σ(count+1) 由 `GROUP BY` 的计数算出，
+  窗口照常先开。组列表只对 option-bounded 的 checkbox / select / status 开放（`COUNT(*) GROUP BY`
+  是一小把行）；组头顺序按 schema 自己的选项顺序在 Rust 里排（选项表在 config JSON 里，SQL 看不见）。
+* **UI**：`Filter` 按钮 + 面板（一个 popup 四个状态：规则 / 选列 / 选比较符 / 选值；根 all | any，
+  子句级 ¬，值按 kind 分别是文本输入 / 勾选 / 选项列表，值在 Enter 提交）；`Group` 按钮 + picker
+  （含 No group）；列头点击排序 + 箭头；组头行（同一个窗口算术与 `db-row-start` 摆放）。
+  规则全部写回 `db_views.definition`——`filter` / `sorts` / `groups` 三把键归 D4，ADR-0074 的文本读改写不变。
+* **场景**：`database-filter` / `dark-database-filter`（5 行里 `Points > 5` 留 3 行，走的是面板同一套写路径）。
+* **没有新迁移**：规则本来就在 `db_views.definition` 这份 JSON 文档里（ADR-0064），本刀一个字节都没有加列。
+
+### 验证（留给总测试）
+
+三条门槛（`cargo check --all-targets` / `cargo test --all-targets` / `cargo build --release`，零警告）＋
+视觉 sweep（既有 67 场景应逐字节相同，`database-filter` / `dark-database-filter` 为 new）＋ SPEC 要的
+**对照数字**：10 000 行的库加一个过滤条件的窗口读耗时 vs 取回 10 000 行再在内存里过滤的耗时
+（量法写在 REPORT_TRACK3 §D4 的测试计划里）。
+
+### 未验证（诚实清单）
+
+本刀一行 cargo 都没跑，所以编译、测试、视觉、性能全部未验证，静态自查的清单在报告里。
+已知约束：共享文件只加自己的部分（controller / state / Types / AppWindow）；ADR 号 0076/0077 接在
+0075 后；迁移号不动（工作树仍是 19，本刀提交树仍是 18）。
+
+## Track 3 · D5 视图族（2026-09-22，on track/3-database，ADR-0078/ADR-0079）
+
+SPEC §三十九「视图」的最后六种布局（chart 留 D7）一次落齐：**board / list / calendar /
+gallery / timeline / form 全部交付**，每个都有虚拟化、规则持久化、切换器入口与场景臂
+（`database-board` … `database-form` 及其 `dark-` 对）。核心是把 D0/D4 的「计数先算、窗口后
+开」按布局各自的意思落了一遍：board 的窗口开在**卡片槽位**上（列=组列表，每列取自己的切
+片）、gallery 开在**卡片行**上（一次取 `per_row × 行` 的切片）、calendar 的窗口开在**天**
+里（整月一次 `GROUP BY` ≤ 31 键 + 每天至多 3 条、其余折叠计数）、timeline 的窗口开在**泳
+道**上（「无日期不显示」编译成 is-not-empty 子句进语句，轴是一次 min/max）、form **不读
+行**（字段表 = schema 的大小，提交才建行）。持久化零新表零新列：board 复用 `groups`，
+calendar/timeline 用文档新键 `date`/`end`，gallery 的每行卡数是会话态（delegate 报告）。
+切换器「+」点亮（`AddDatabaseView` 一个 change，创建即切换，chart 以名字拒绝）；board 卡片
+/list 行/gallery 卡片的点击接 `db-open-record`——懒建页（ADR-0063）的 UI 触发，一批两个
+change。顺手闭合 D4 的两个提交缺口：`DatabaseView.slint`（D4 的 filter/group 按钮当时未入
+提交）与 `state.rs` 的 `record()` 漏斗 `db_absorb` 接线。
+
+### 未验证（诚实清单）
+
+本刀一行 cargo 都没跑：编译、测试、视觉、性能全部未验证（静态自查清单在
+REPORT_TRACK3 §D5）。已知边界：插入菜单四行 database 占位仍 muted（ADR-0079 写明理由）；
+gallery 封面是首字母占位（附件缩略图是 Track 4/D8 的地盘）；timeline 只有单日期列 +
+可选 end 列，没有 Notion 的双属性吸排序；迁移号不动（工作树 19，本刀提交树仍是 18）。
+
+## Track 3 · D6 计算属性 formula（2026-09-22，on track/3-database，ADR-0082…ADR-0084）
+
+SPEC §三十九「需计算」三件套（formula / rollup / relation）里的**第一件落地**：`formula`
+列有了引擎、编辑器、投影求值与导出通路。硬约束全部照 SPEC 原文：
+
+* **纯词法 + 自写解释器**（不引入 JS / WASM 运行时、不引公式解析库、零新依赖）：词法器 +
+  递归下降解析器 + 树遍历解释器都在 `src/core/database_formula.rs`，类型四类
+  （number / text / boolean / date）+ Empty（传染，`text(x)` 是唯一显式转换），函数七个
+  （`if length round abs min max text`），外加算术四则、比较、`and/or/not`、`[Column]`
+  本行引用。
+* **有限求值**：四个常量钉死（tokens 2 048 / depth 32 / steps 10 000 / result 65 536），
+  文法无循环无自定义函数，引擎无时钟无 I/O（`today()` 刻意缺席）。
+* **表达式存 `db_properties.config`（ADR-0061 的一列一文档），值不入库**——投影时现算
+  （ADR-0062/0039 的纪律）；写入经新 change `PropertyConfigSet`（整文档替换）+ 新命令
+  `SetDatabaseFormula`，一次编辑一步 undo，ADR-0074 的读改写纪律用于列。
+* **可增量重算**（ADR-0083）：求值只在投影窗口（六布局共用的 `db_table_rows` →
+  `db_paint_formulas`），**没有全表求值路径**；排序/过滤对公式列拒绝（要比较就得先算全列）；
+  依赖是本行的（引擎回调无 record 参数——跨行是 rollup/relation 的事，ADR-0084）；
+  `db_formula_evals` 计数器把契约变成可量的两个数（窗口有界、依赖精确）。
+* **环检测在保存时做**（SPEC 原文）：`would_cycle` 在 `db_formula_accept` 里跑，会自指的
+  表达式当场被拒并说明；渲染时只有深度上限兜旧文档（画 `Error` 不挂）。
+* UI：公式编辑器（多行输入 + 每键现算预览 + 错误行，单元格点击打开；Columns popup 有
+  「+ New formula column」一行创建入口）；公式列单元格只读展示（`editable=false` 不变，
+  点击开编辑器）。场景 `database-formula` / `dark-database-formula`，种子走真写路径
+  （`db_add_column` → `db_formula_accept` 含保存时检查）。
+
+**rollup / relation 本轮未做，原因是 Track 2 的引用基础设施未落地**（工作树的
+`src/core/reference.rs` / `src/storage/backlinks.rs` 是未跟踪文件，mention 的 `marks` 载荷
+与迁移 16 也都没提交）：brief 明说 relation 用 §四十 的基础设施、不另造轮子，所以这两件
+**留一刀等 Track 2**，形态（relation 存 id 不存标题、双向一批写、保存时环检测；rollup 对
+relation 目标的六个聚合、配置存 config、值投影时现算）已在 ADR-0084 写死。
+
+### 未验证（诚实清单）
+
+本刀**一行 cargo 都没跑**（铁律）：编译、测试、视觉、性能全部未验证——静态自查做了括号
+平衡（词法器处理 lifetime 后全部归零）、回调三件套 grep 核对、`Change` 全部 match 点的臂。
+已知边界（全在 REPORT_TRACK3 §D6）：公式不能引用 list/pick 列的值（id 对算术无意义，
+读作 Empty）、没有日期运算函数、没有跨刷新值缓存（理由见 ADR-0083）、导出按行现算整个
+视图（显式产物的成本，不是输入红线）。迁移号不动（工作树 19 / 提交树 18，本轮零迁移）。
+
+## Track 3 · D7 高级特性（2026-09-22，on track/3-database，ADR-0085…0087 借号）
+
+D0 通道、D1 存储、D2 属性、D3 table、D4 规则、D5 视图族、D6 formula 之后，D7 收掉 SPEC §三十九
+「视图」「操作」剩下的四件：**chart（第八种视图）**、**linked database**、**数据库模板**、
+**视图内搜索**。铁律照旧：**只写代码，一行 cargo 都没跑**——编译、测试、视觉、性能全部留给
+总测试（D8）。
+
+### 缘起与形状
+
+* **chart**（ADR-0078 的窗口单位契约落地，不另出 ADR）：plot 画的是**聚合不是行**——一次
+  `GROUP BY`（复用 D4 的 `group_counts`，与 board 的列是同一查询）给出 (键, 计数)，10 000 行
+  realize **0** 行；bar / line / pie 三种全用现有 primitive（bar 是等宽 Rectangle、line 是
+  viewbox 缩放多段线、pie 是 Rust 端 κ 近似三次曲线的逐片 Path），**零图表库零新依赖**；形状
+  存视图文档的 `chart` 键（ADR-0074），切换器「+」第八行点亮、`db_add_view` 的拒绝撤下。
+* **linked database**（ADR-0085）：同一个 Database 块 + 同一根 `db_ref`——不是新 kind、不是
+  第二列、零迁移零新 Change；`Command::LinkDatabase` 一批落地，读写全部经既有 `db_ref` 解析
+  落源库，源死走 ADR-0060 既有的 `(deleted database)`；入口 = slash/插入菜单 `Linked view` 行
+  （`LINKED_VIEW_ROW = -2`）→ 数据库 picker → `db_make_linked`。
+* **数据库模板**（ADR-0086）：`databases.template` 一列 JSON（**v20**），值是 `CellValue`
+  存储形状的原样副本（「不引入第二套内容格式」）；行槽 T 存模板、`db_add_record` /
+  `db_form_submit` 在**建行同批**预填；与 Track 1 页面模板**没有需要仲裁的共享形状**（一边是
+  块序列的副本、一边是格值的副本，类型/列/函数零共享，报告已说明）。
+* **视图内搜索**（ADR-0087）：选**数据库自己的 SQL 谓词**（`INSTR(LOWER,LOWER)` 的 OR，编译进
+  同一 `WHERE`），不挂 §二十 的 FTS5——`db_values` 不在镜像里，挂进去 = 每格写入一条维护路径
+  + 每条批量路径一条清理规则 + 索引滞后边界；`INSTR` 全扫（D4 contains 同价）但零副本零滞后；
+  needle 是会话态，导出 `search: None`。
+
+### 验证
+
+未验证（诚实清单）：**全部**。一行 cargo 都没跑（铁律），静态自查做了括号平衡（剥注释/字符串
+的检查器，全部文件与 HEAD delta 归零）、回调三件套 grep（5 个新回调 + 1 个会话 flag：声明 /
+使用 / 绑定逐个核对）、新 `Change` 变体的全部 match 点（document / settings_store /
+attachment_ids_in 的 `_` 兜底 + repository 穷尽 match 已加臂）、`RowRequest` 全部 9 处字面量
+补 `search`、`Database` 字面量仅 store 的 load 一处（已带 template 列）。四个新场景
+（database-chart / -search / -linked / -template + 各自 dark-）从未渲染。性能：INSTR 全扫的
+每键成本、pie 几何的构造成本均未量——量法记在 REPORT_TRACK3 §D7 的测试计划。
+
+### 迁移号（串行接缝）
+
+动手前读 `src/storage/migrations.rs`：工作树 `CURRENT_VERSION = 19`（T4 的 sync_ref 未提交）。
+本刀取 **v20**（`databases.template`，「缺哪列补哪列」的收敛范式）。**提交 blob 里
+`CURRENT_VERSION = 20`、数组缺 19**（HEAD = 18 + 本刀 v20）——runner 按序应用「version > 文件
+当前版本」的步，跳号安全（v17 落地已证明）；合并后 12…20 连续。
+
+### 决策号（借号，请整合者确认）
+
+号段 0060…0079 早已用尽，D6 借了 0082–0084，本刀**继续借 0085 / 0086 / 0087**（linked
+database / 模板 / 视图内搜索）。工作树里 Track 4 的 0080/0081、Track 2 的 0050–0052 各归其主；
+若整合时要重编号，请以内容为准搬迁（正文交叉引用按内容书写）。
+
+## Track 3 · D8 性能收口（2026-09-22，on `track/3-database`，无新 ADR：测量刀，不新增机制）
+
+**这一刀只做两件事：把合并后的树跑到门槛上，再把 SPEC §三十九 欠的三个数字量出来。**
+
+1. **收口债务**。D6/D7 的约 2 300 行「一行 cargo 都没跑」，在 `fa467a0` 合并树上有 13 条编译
+   warning。逐个清掉，全部落在本 track 的 territory：`controller.rs` 六处只 clone/upgrade 却不用的
+   `gw`/`g`/`s`/`block`（行内回调里 Slint 镜像已接管状态，那几行是纯守卫、删之无副作用）、
+   `state.rs` 三个写了从不读的 `db_formula_block/property/record` Cell（公式弹窗的 id 实际存在
+   UIState 镜像里，这三个 AppState 字段是 D6 设计改道后的残骸，连同它的说明注释一起删）、
+   从不被调的 `db_definition`/`db_columns` 两个私有方法、`database_formula::Parser::end_at`（且实现
+   是坏的：取的是最后一个 token 的位置不是「输入末尾」）、`db_refresh` 里 `body/total/wanted` 三个
+   从不被读的初值（改成无初值的定值赋值，顺带 `mut` 也不 needed 了）、以及 `command.rs` 一处 Track 1
+   遗留的未用 `PageFont` import。清完 `cargo check --all-targets` **0 warning**、
+   `cargo test --all-targets` **476 passed / 0 failed**（与本 track 合并时同数，删的都是死码）。
+2. **三个数字**（详见 `docs/PERFORMANCE.md` 的 `## M14`）：① 10 000 行的库开在窗口上只占**几 KB**
+   行对象，全量 realize 才 1.16–2.26 MB（≈330×，counting allocator，逐次相同）；② 切到视图顶部
+   ≈ **0.35–1.0 ms**（解码 + `COUNT(*)` + 一次窗口读），但 `OFFSET` 走到表尾 16–25 ms（cursor 实测
+   212–356 µs 是退役它的现成路子），分组 `GROUP BY` 再 +5–18 ms；③ 打开公式编辑器 = 解析式子
+   **1.6–3.4 µs**、单格求值 68–129 ns，全表重算是窗口重算的 **108×** 且投影无路径去做（ADR-0083）。
+   新探针两个：`storage::database_store::probe::a_view_switch_...` 与
+   `core::database_formula::perf::a_formula_...`（都 `#[ignore]` 打印型，复用 D0 的窗口几何与 D1 的
+   建库夹具）。原始行 `benchmarks/results/2026-09-22-track3-d8.jsonl`。
+
+**明确未做（诚实）**：**帧没测**——Slint 重画 31 个 delegate / 日历 42 格 / chart 构 path 的墙钟，
+需要真窗口 + `bench.ps1` 的 RAM/像素臂，headless 探针替不了（与 D0 §2.3 同一条界限，SPEC 那句
+「没有 UI 臂就进不了 §Method」正是说它）。要在真窗口上补这三个墙钟，得人手开一次 GUI 采一轮；
+本环境不脚本点桌面 UI，故未做，写在此处不含糊过去。
+
+**rollup / relation 仍欠**（ADR-0084）：Track 2 的引用层已随合并落地，relation 的依赖不再阻塞，
+但它是一整刀新语义（存 id 不存标题、双向一批写、保存时环检测、rollup 六种聚合），形态已写死在
+ADR-0084，不属 D8 的「测量与收口」范围。

@@ -1,0 +1,172 @@
+// The view switcher (SPEC §三十九 「视图」, ADR-0060/0064): the tabs above a
+// database, one per `db_views` row.
+//
+// D3 has exactly one view per database, and this component is *still* a tab
+// strip — that is the point. ADR-0060 says the eight SPEC layouts are
+// `db_views.layout` rather than eight block kinds precisely so that adding one
+// is a row and not a rewrite: a switcher built for one view would have to be
+// rewritten by the second (D5), and every later view would rewrite it again.
+// What D3 fixes here is the shape — a row of named tabs with the active one
+// marked, a `+` that says what it does not do yet, and a place for the layout
+// label of a view this build cannot draw.
+//
+// The `+` is present and muted rather than absent: the same reasoning the six
+// `INSERT_ITEMS` placeholders follow (it is a promise the roadmap can be read
+// off), and the same the six rows' lighting follows — D3 keeps one more promise
+// than D0–D2 did, and this line keeps the next one visible.
+
+import { Theme } from "../Theme.slint";
+import { Colors } from "../Colors.slint";
+import { Typography } from "../Typography.slint";
+import { UIState, DbViewTab } from "../Types.slint";
+
+export component DatabaseSwitcher inherits Rectangle {
+    in property <[DbViewTab]> tabs;
+    in property <int> block;
+
+    // the `+`'s layout menu, open or not. Local to the switcher on purpose: it
+    // is one block's gesture, and no other component reads it.
+    property <bool> menu-open: false;
+
+    height: 26px;
+    background: transparent;
+
+    HorizontalLayout {
+        spacing: Theme.spacing-xs;
+
+        for tab[index] in root.tabs : Rectangle {
+            width: tab-text.width + 2 * Theme.spacing-sm;
+            height: 24px;
+            border-radius: Theme.radius-sm;
+            background: tab.active ? Colors.surface-selected
+                : (tab-ta.has-hover ? Colors.surface-hover : transparent);
+            animate background { duration: Theme.duration-instant; }
+
+            tab-text := Text {
+                x: Theme.spacing-sm;
+                y: 0px;
+                height: parent.height;
+                vertical-alignment: center;
+                text: tab.name;
+                font-family: Typography.ui-font;
+                font-size: Typography.size-caption;
+                font-weight: tab.active ? Typography.weight-medium : Typography.weight-regular;
+                color: tab.active ? Colors.text-primary : Colors.text-secondary;
+            }
+
+            tab-ta := TouchArea {
+                width: parent.width;
+                height: parent.height;
+                mouse-cursor: MouseCursor.pointer;
+                clicked => {
+                    UIState.db-view-picked(root.block, tab.view);
+                }
+            }
+        }
+
+        // "+": a new view. D5 lights it: the menu lists every layout (SPEC's
+        // order is `ViewLayout::ALL`'s — the index IS the layout), the seven
+        // this build draws create a view and switch to it, and the one it does
+        // not (chart) keeps its row visible and says so, the way the insert
+        // menu's muted rows always have.
+        add := Rectangle {
+            width: 22px;
+            height: 24px;
+            border-radius: Theme.radius-sm;
+            background: add-ta.has-hover || root.menu-open ? Colors.surface-hover : transparent;
+
+            Text {
+                x: 0px;
+                y: 0px;
+                width: parent.width;
+                height: parent.height;
+                text: "+";
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                font-size: Typography.size-ui;
+                color: root.menu-open ? Colors.text-primary : Colors.text-muted;
+            }
+
+            add-ta := TouchArea {
+                width: parent.width;
+                height: parent.height;
+                mouse-cursor: MouseCursor.pointer;
+                clicked => {
+                    root.menu-open = !root.menu-open;
+                }
+            }
+        }
+
+        // what a database has that this build cannot draw yet: a view whose
+        // layout is D7's opens as its own name rather than as a wrong table
+        // (ADR-0060's fold, said out loud on screen)
+        if root.tabs.length == 0 : Text {
+            height: parent.height;
+            vertical-alignment: center;
+            text: "View";
+            font-family: Typography.ui-font;
+            font-size: Typography.size-caption;
+            color: Colors.text-muted;
+        }
+    }
+
+    // the layout menu: one row per layout, in SPEC's order (the index is the
+    // layout). Anchored under the tab strip's left edge and drawn *over* what
+    // is below it — a menu that is a list, not a popup per row, the same
+    // reasoning the cell option lists follow.
+    if root.menu-open : Rectangle {
+        x: 0px;
+        y: 26px;
+        width: 168px;
+        height: 8 * 26px + 8px;
+        background: Colors.surface;
+        border-radius: Theme.radius-sm;
+        border-width: 1px;
+        border-color: Colors.border-strong;
+        // the menu must draw over the rows below the header: the delegate is
+        // deliberately unclipped (D3's decision), and a menu is the shape that
+        // relies on it
+        drop-shadow-blur: 8px;
+        drop-shadow-color: Colors.border;
+
+        VerticalLayout {
+            padding: 4px;
+            spacing: 0px;
+
+            // the layouts, in SPEC's order — the row's index IS the
+            // `ViewLayout::ALL` index Rust's `db_add_view` reads. All eight
+            // are drawn now (D7 lit the eighth, `chart`, whose plot is the
+            // group list the board's columns come from); the `drawn` fold
+            // stays for a ninth a later build might name.
+            for layout[index] in ["Table", "Board", "List", "Calendar", "Gallery", "Timeline", "Form", "Chart"] : Rectangle {
+                property <bool> drawn: index < 8;
+                height: 26px;
+                border-radius: Theme.radius-xs;
+                background: layout-ta.has-hover && drawn ? Colors.surface-hover : transparent;
+
+                Text {
+                    x: Theme.spacing-sm;
+                    y: 0px;
+                    width: parent.width - 2 * Theme.spacing-sm;
+                    height: parent.height;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    text: drawn ? layout : layout + " - not in this build yet";
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-caption;
+                    color: drawn ? Colors.text-primary : Colors.text-muted;
+                }
+                layout-ta := TouchArea {
+                    width: parent.width;
+                    height: parent.height;
+                    mouse-cursor: drawn ? MouseCursor.pointer : MouseCursor.default;
+                    clicked => {
+                        // a drawn layout creates the view and switches to it
+                        root.menu-open = false;
+                        UIState.db-view-added(root.block, index);
+                    }
+                }
+            }
+        }
+    }
+}
