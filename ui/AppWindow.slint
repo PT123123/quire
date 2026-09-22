@@ -14,6 +14,7 @@ import { ContextMenu } from "components/ContextMenu.slint";
 import { IconPicker } from "components/IconPicker.slint";
 import { ConfirmDialog } from "components/Dialog.slint";
 import { SettingsDialog } from "components/SettingsDialog.slint";
+import { VersionPanel } from "components/VersionPanel.slint";
 
 // Row menus (slash + block handle): one window-level popup each, positioned
 // by the controller from the delegate's reported geometry. Declared before
@@ -275,7 +276,7 @@ component LinkDialog inherits PopupWindow {
 }
 
 // Rust-facing names must be re-exported from the entry file (1.18 codegen rule).
-export { UIState, SidebarNode, BlockRow, TextRun, CommandRow, SearchRow, MenuRow, SlashRow } from "Types.slint";
+export { UIState, SidebarNode, BlockRow, TextRun, CommandRow, SearchRow, MenuRow, SlashRow, VersionRow, DiffRow } from "Types.slint";
 
 export component AppWindow inherits Window {
     title: "Quire";
@@ -303,6 +304,7 @@ export component AppWindow inherits Window {
     in-out property <bool> dialog-open <=> UIState.dialog-open;
     in-out property <bool> settings-open <=> UIState.settings-open;
     in-out property <bool> icon-picker-open <=> UIState.icon-picker-open;
+    in-out property <bool> versions-open <=> UIState.versions-open;
 
     changed palette-open => {
         if (palette-open) {
@@ -396,6 +398,18 @@ export component AppWindow inherits Window {
             iconPicker.show();
         } else {
             iconPicker.close();
+        }
+    }
+
+    // The version panel closes through the controller (Done / Escape / a page
+    // switch), which writes UIState — so the only job here is the show/close
+    // pair. Nothing is cleared on close on purpose: the panel is a window onto
+    // a page's versions, and a stale selection is not visible from the list.
+    changed versions-open => {
+        if (versions-open) {
+            versions.show();
+        } else {
+            versions.close();
         }
     }
 
@@ -583,6 +597,11 @@ export component AppWindow inherits Window {
     }
 
     settings := SettingsDialog {
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+    }
+
+    versions := VersionPanel {
         x: (root.width - self.width) / 2;
         y: (root.height - self.height) / 2;
     }

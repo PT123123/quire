@@ -100,13 +100,14 @@ table-marks, columns, columns-3, columns-marks, math, math-inline, toc, embed,
 embed-empty, code-hl, style-serif, style-mono, style-small, style-full,
 style-tight, page-icon, icon-picker, page-cover, page-cover-white, page-cover-icon,
 page-lock, page-lock-menu, page-lock-block-menu,
-page-templates, page-template-pick, slash-template
+page-templates, page-template-pick, slash-template,
+page-versions, page-versions-diff
 plus dark combos (dark-slash, dark-find, dark-marks, dark-link, dark-code-hl,
 dark-block-menu, dark-block-colors, dark-title-edit, dark-style-serif,
 dark-page-icon, dark-page-cover, dark-page-cover-white, dark-page-lock,
-dark-page-templates).
-`benchmarks/scripts/sweep.ps1` holds the authoritative list — 80 scenes as of
-ADR-0049 — and this prose is the summary, so when the two disagree trust the
+dark-page-templates, dark-page-versions).
+`benchmarks/scripts/sweep.ps1` holds the authoritative list — 83 scenes as of
+ADR-0050 — and this prose is the summary, so when the two disagree trust the
 script. Every visual change ships with re-shot
 scenes; the judge-reviewed set is the regression baseline. `toggle` and
 `toggle-fold` are a pair on purpose: the same section open and closed, so a
@@ -185,6 +186,22 @@ the representation, and `default.png` already proves those rows draw. The librar
 these scenes paint is seeded by hand (`seed_template_library` in the controller),
 because `seed_builtin_templates` refuses a session with no database — and the
 headless capture is exactly that.
+The three version scenes are ADR-0050's, and they are the panel's two views plus
+the dark arm: `page-versions` is the list (five rows, each a name over an age, a
+trash glyph per row, the caption saying the cap out loud, and the name field with
+its Save button under the list), `page-versions-diff` is what a row click opens
+(the version named in the heading, `−`/`+` cells against a kind label, and the
+Restore button that exists in **this** view and nowhere else — the panel's whole
+shape is the claim that nothing restores a version you have not looked at), and
+`dark-page-versions` is the list in the other theme. Two things make these scenes
+stronger evidence than the earlier popups are. They are drawn by the runtime's own
+projection: `seed_versions` fills the model through `version_rows` /
+`versions_note`, and the diff scene builds a real `before` out of the fixture's own
+blocks and runs it through `core::diff::compare`, so the panel's sentences and the
+comparison's rows are produced by the code a click produces, not copied into the
+scene. And the ages are relative (`26 min ago`, `3 h ago`, `1 d ago`, `21 d ago`)
+through `diff::age_text`, the same function the heading uses, so the app still has
+no timezone and no calendar arithmetic anywhere in its pixels.
 `image` and `image-half` are the same pair for the width tier — one picture
 block at 100 % and at 50 %, so a width setting that only moves the label and
 not the raster is caught by the row geometry. `file` is the picture scene's
@@ -422,7 +439,21 @@ and the slash tail 2 332 px in x 340..618 / y 260..298 — one row, at the caret
 scene parked it at. No scene shows an insert: a template's copy lands as ordinary
 rows on an ordinary page, which is the whole point of the representation, and
 `default.png` already proves those rows draw.
-The baseline is `.scratch/sweep38` (80 scenes). Note that `.scratch/` is
+`sweep38` → `sweep39` (version history, ADR-0050) moved **78 of 80 byte-identical**
+and added 3. The two movers are the page ⋯ menu at its two anchors again, because
+that popup grew a fourteenth row: `menu.png` at 5 sampled px in the single column
+x 414 at y 672..680 (its scrollbar thumb, in a popup `min(rows*30+8,
+window-h - menu-y - 20)` had already clamped), and `page-lock-menu.png` at 575 px
+across x 240..422 / y 558..670, where all fourteen rows draw and everything below
+the new one shifts. The three new scenes are each measured against `default.png`,
+and the number that matters is where they *stop*: `page-versions` at 7 689 px and
+`page-versions-diff` at 8 726 px, both inside **x 410..868 / y 162..638** — the
+panel's own 460 px box, with the page behind it untouched. `dark-page-versions`
+repaints the whole frame (255 505 px) the way every `dark-*` scene does. The two
+light scenes differ from each other by what a row click does: the list's five
+names-and-ages become four `−`/`+` cells, the caption becomes the version's own
+name and age, and the Save button becomes Back / Delete version / Restore.
+The baseline is `.scratch/sweep39` (83 scenes). Note that `.scratch/` is
 gitignored *per worktree*, so a `sweepNN` in one checkout is not the same bytes as
 the same number in another; the name is a convention, not an address.
 The set before it, `.scratch/sweep36`

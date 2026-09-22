@@ -1537,6 +1537,94 @@ drawing path — a row that re-reads the workspace, a token written per frame �
 71 would not have been 71. And unlike the cover, this slice has no raster to argue
 about at all: the gate's resolution floor is ≈1 MB and everything above is bytes.
 
+## M12 · a version is a file, so the cap is written in bytes and seconds (2026-09-22, ADR-0050)
+
+**This slice owes §三十八 two numbers — 保留策略必须给出磁盘与 RAM 数字，不接受无限
+增长 — and they are different kinds of number.** Disk is measured, because a version
+is a file and files can be weighed. RAM is bounded by construction, because a version
+is only ever in memory one at a time. Neither is a bench scene: the panel is a popup,
+its rows are filled on open, and nothing in this slice runs per block, per row or per
+frame.
+
+**Command:** `cargo test --release --test backup version_cost -- --ignored --nocapture`
+(an `#[ignore]`d probe in `tests/integration/backup_test.rs`, kept because the cap is
+a number someone will have to re-check when the fixture changes). Fixture: 201 pages,
+17 000 blocks, **9 888 480 bytes on disk** for the library — main file plus `-wal`
+plus `-shm`, since `VACUUM INTO` reads through the connection and sees rows the main
+file has not taken yet.
+
+| what | bytes | % of library | one save |
+| --- | --- | --- | --- |
+| a 60-line page's version | 122 880 | 1% | 1 031 ms |
+| a 5 000-line page's version | 790 528 | 7% | 469 ms |
+| twenty versions of the long page (the cap's worst case) | 15 810 560 in 20 files | **159%** | 12 862 ms total, 643 ms each |
+
+Release arm; the same probe in Debug printed 614 ms / 469 ms / 577 ms each. **The
+bytes are identical across profiles and the milliseconds are not comparable** — 577
+debug beat 643 release — which is the same finding §二十五's backup line already
+made (23–64 ms, "consistent but noisy"): this work is file I/O and b-tree rebuilding,
+not arithmetic, so the optimiser has nothing to say about it.
+
+**The 120 KB floor is the schema, not the text, and that is why the cap is per page
+rather than global.** 122 880 bytes is exactly 30 pages of 4096, of which `blocks`
+holds 12 288 (the 60 rows) and `sqlite_schema` 12 288 (27 rows) — the rest is one
+root page per table and index, which every Quire database carries whether it holds a
+page or a novel. So a version of a one-line page costs the same 120 KB as a version
+of a 60-line page, twenty of them cost ≈2.4 MB, and a *global* cap would let one busy
+page starve every quiet one for the same money.
+
+**The 1.4 MB that a `DELETE` left behind — the finding this slice nearly shipped.**
+The first version emptied the two FTS tables and the tests agreed: 0 rows in
+`search_blocks`, 0 in `search_pages`. The file still weighed **1 560 576 bytes** for
+the 60-line page, because FTS5 keeps its term dictionary in a `search_blocks_data`
+b-tree — 368 rows, 1 441 792 bytes — that a plain delete walks and leaves standing:
+the words of every page the version was not allowed to contain. `clear_index` now
+runs the `DELETE` and then FTS5's `rebuild` command (see ADR-0050 for why the shorter
+`delete-all` is refused here). Before → after, same fixture:
+
+| | before | after |
+| --- | --- | --- |
+| a 60-line page's version | 1 560 576 (15%) | 122 880 (1%) |
+| a 5 000-line page's version | 2 228 224 (22%) | 790 528 (7%) |
+| twenty versions of the long page | 44 564 480 (450%) | 15 810 560 (159%) |
+
+The row counts a reader would query were exactly the thing that lied, so the
+assertion moved onto `_data`: `a_version_is_the_library_narrowed_to_one_page` now
+fails if either FTS table's `_data` holds more than four rows.
+
+**Per click, not per frame.** A save is a deliberate action and it costs about half a
+second on a page the size of a long one, of which the copy is one third:
+`persistence_force_flush` → `VACUUM INTO` → delete-and-rebuild → `VACUUM` to hand the
+freed pages back. §二十五's snapshot of a 2.3 MB workspace measured 23–64 ms for the
+copy alone, and a version is that statement plus two rewrites of a smaller file. The
+burst limit falls out of the same design: `save_page_version` retries the timestamp
+four times when a same-second collision happens, so five saves a second is the point
+where it answers "a version taken this second already exists" instead of overwriting
+one the user named.
+
+**RAM: two allocations, both bounded, neither of them resident.** (1) Reading or
+writing a version opens a transient `Database` on that file — one connection, closed
+when the function returns — and Quire sets no `cache_size`, so SQLite's documented
+default (−2000 KiB ≈ 2 MB of page cache per connection) is the ceiling with at most
+one such connection alive. (2) A comparison holds the version's rows plus the page's:
+`size_of::<Block>()` is **136 bytes**, so the 5 000-line page is **680 000 bytes** of
+rows per side while the panel is open, and the LCS table is capped at `ALIGN_CELLS =
+1 << 18` `u32` cells = **1 MiB**, past which the middle is reported rather than
+aligned (`core::diff.rs:61`). A restore then costs what any delete costs — the undo
+stack keeps a copy of what it replaced — and keeping twenty versions costs 0 bytes of
+RAM, because they are files. Worst case for the panel, therefore: ≈2 MB + 1.4 MB +
+the rows the editor already had open.
+
+**Substitute evidence: `sweep38` → `sweep39` moved 2 of the 80 scenes already on
+file and added 3.** The two movers are the page ⋯ menu at its two anchors
+(`menu.png`, `page-lock-menu.png`), because it grew a fourteenth row, Version
+history; the other 78 were byte-identical, which is what turns "this slice touches no
+drawing path" from a claim into a check. The three new scenes (`page-versions`,
+`page-versions-diff`, `dark-page-versions`) are the panel's two views in both themes,
+and their pixels come out of the same four projection functions the click handlers call
+(ADR-0050), so a drift between the panel and the library shows up as a hash change
+rather than as a stale screenshot of a copy.
+
 ## M12 · a template costs one bool per page, and its library is 48 rows you pay for once (2026-09-22, ADR-0049)
 
 **No RAM bench owed, and this time there is a number to point at instead of only

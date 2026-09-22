@@ -101,6 +101,8 @@ pub fn bind(ui: &AppWindow, state: &Rc<AppState>) {
     g.set_menu_rows(state.menu_model());
     g.set_slash_items(state.slash_model());
     g.set_block_menu_rows(state.block_menu_model());
+    g.set_version_rows(state.versions_model());
+    g.set_version_diff_rows(state.version_diff_model());
     let (title, crumb) = state.open_page_info(state.open_page.get());
     g.set_page_title(title.into());
     g.set_page_breadcrumb(crumb.into());
@@ -530,6 +532,11 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                         s.set_page_locked(id, now);
                     }
                 }
+                crate::app::state::MENU_PAGE_VERSIONS => {
+                    if id > 0 {
+                        open_version_panel(&g, &s, id);
+                    }
+                }
                 crate::app::state::MENU_TEMPLATE_SAVE => {
                     if id > 0 {
                         // The name is the page's title, so the notice is what
@@ -635,6 +642,144 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
             if id > 0 {
                 s.set_page_icon(id, glyph.as_str());
             }
+        });
+    }
+
+    // ---- version history (SPEC §三十八, ADR-0050) ----
+    //
+    // Six callbacks for one panel, and the panel never closes on its own: a
+    // save, a delete or a restore all leave the user looking at the list they
+    // are working through, because the work is "find the version I want" and
+    // throwing the panel away at each step would make them reopen it and
+    // re-find it. The notice bar carries what happened instead.
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_version_save(move || {
+            let g = gw.upgrade().unwrap();
+            let page = g.get_versions_page();
+            let label = g.get_version_name();
+            match s.save_page_version(page, label.as_str()) {
+                Ok(name) => {
+                    // The field empties either way: the name is spent on the
+                    // version now, and a copy left in it would be saved twice.
+                    g.set_version_name("".into());
+                    g.set_versions_showing_diff(false);
+                    g.set_versions_selected(-1);
+                    s.fill_versions(page);
+                    g.set_db_notice(
+                        format!("Saved \"{name}\" — now compare it or restore it from here.").into(),
+                    );
+                }
+                Err(e) => g.set_db_notice(format!("The version was not saved: {e}").into()),
+            }
+        });
+    }
+
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_version_view(move |row| {
+            let g = gw.upgrade().unwrap();
+            let page = g.get_versions_page();
+            let Some((created, label)) = s.version_at(page, row) else {
+                return;
+            };
+            let lines = match s.version_diff(page, created) {
+                Ok(lines) => lines,
+                Err(e) => {
+                    g.set_db_notice(format!("That version could not be read: {e}").into());
+                    return;
+                }
+            };
+            s.fill_version_diff(
+                &lines,
+                &crate::app::state::version_heading(&label, created),
+                &crate::app::state::version_diff_note(&lines),
+            );
+            g.set_versions_selected(row);
+            g.set_versions_showing_diff(true);
+        });
+    }
+
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_version_restore(move |row| {
+            let g = gw.upgrade().unwrap();
+            let page = g.get_versions_page();
+            let Some((created, _label)) = s.version_at(page, row) else {
+                return;
+            };
+            match s.restore_version(page, created) {
+                Ok(count) => {
+                    // Back to the list, whose rows the restore just made
+                    // truthful: the comparison the user was looking at is now
+                    // of the page with itself.
+                    g.set_versions_showing_diff(false);
+                    g.set_versions_selected(-1);
+                    s.fill_versions(page);
+                    g.set_db_notice(format!(
+                        "Restored {count} lines from that version — Ctrl+Z brings back what it replaced."
+                    ).into());
+                }
+                // A locked page put its own line up inside the refusal, and a
+                // vaguer one here would overwrite the only wording that says
+                // what to do about it (ADR-0048).
+                Err(e) if !s.page_locked() => {
+                    g.set_db_notice(format!("The version was not restored: {e}").into())
+                }
+                Err(_) => {}
+            }
+        });
+    }
+
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_version_delete(move |row| {
+            let g = gw.upgrade().unwrap();
+            let page = g.get_versions_page();
+            let Some((created, label)) = s.version_at(page, row) else {
+                return;
+            };
+            if let Err(e) = s.delete_version(page, created) {
+                g.set_db_notice(format!("The version was not deleted: {e}").into());
+                return;
+            }
+            // No confirm dialog, for the reason the template delete has: this is
+            // the second deliberate click on a row the user named themselves,
+            // drawn in the danger colour to say what it does. What it must not
+            // be is silent, so the line names the version that is gone — and a
+            // comparison of the row just deleted has nothing left to compare.
+            g.set_versions_showing_diff(false);
+            g.set_versions_selected(-1);
+            s.fill_versions(page);
+            g.set_db_notice(format!("Deleted the version “{label}”. The page itself is unchanged.").into());
+        });
+    }
+
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_version_back(move || {
+            let g = gw.upgrade().unwrap();
+            let page = g.get_versions_page();
+            g.set_versions_showing_diff(false);
+            g.set_versions_selected(-1);
+            s.fill_versions(page);
+        });
+    }
+
+    {
+        let gw = gw.clone();
+        ui.global::<UIState>().on_versions_close(move || {
+            let g = gw.upgrade().unwrap();
+            g.set_versions_open(false);
+            g.set_versions_page(-1);
+            g.set_versions_selected(-1);
+            g.set_versions_showing_diff(false);
+            g.set_version_name("".into());
         });
     }
 
@@ -2627,6 +2772,31 @@ fn reanchor_page_menu(g: &UIState<'_>) {
     g.set_menu_y(y);
 }
 
+/// ⋯ → Version history, and the same three lines a sweep scene needs to reach
+/// the panel's list view.
+///
+/// The panel is centred rather than anchored where the menu was: it is 460px
+/// wide and holds an input, and the page menu opens from the top-right ⋯ as
+/// often as from a tree row, so an anchored panel would sit half off the window
+/// for one of the two. The page it belongs to travels on `versions-page`,
+/// because the panel outlives the menu that opened it and a restore has to know
+/// which page to replace.
+fn open_version_panel(g: &UIState<'_>, state: &Rc<AppState>, page: i32) {
+    state.fill_versions(page);
+    g.set_versions_page(page);
+    let title = state
+        .workspace
+        .borrow()
+        .title_of(page)
+        .unwrap_or("Untitled")
+        .to_string();
+    g.set_versions_title(title.into());
+    g.set_versions_showing_diff(false);
+    g.set_versions_selected(-1);
+    g.set_version_name("".into());
+    g.set_versions_open(true);
+}
+
 /// Write a template out through §二十六's channel: the same `export_page` the
 /// page export calls, on the template's block sequence. `g` is only here so the
 /// failure is something the user sees rather than a line in a console nobody
@@ -2932,6 +3102,49 @@ fn seed_template_library(state: &Rc<AppState>) {
     for preset in crate::core::template::PRESETS {
         state.import_template(preset.name, preset.markdown);
     }
+}
+
+/// The version panel's list, drawn from rows that do not exist on disk. A
+/// version *is* a database file and a headless session has no database, so a
+/// sweep scene cannot show a real one; what it shows is the same projection of
+/// the same row shape — `version_rows` and `versions_note`, the two functions
+/// `fill_versions` itself calls — over a list chosen to exercise the panel: a
+/// name, an auto-label, a name long enough to be elided, and ages spanning
+/// minutes to weeks so `age_text` is read at both ends. That the files exist
+/// behind such rows is what the storage tests prove. Returns the list so the
+/// comparison scene can name the same version the same way.
+fn seed_versions(state: &Rc<AppState>, g: &UIState<'_>, page: i32) -> Vec<(i64, String)> {
+    let now = crate::app::state::now_secs();
+    let minute = 60;
+    let versions = vec![
+        (now - 26 * minute, "Shipped the recap".to_string()),
+        (now - 3 * 60 * minute, "Version 2".to_string()),
+        (
+            now - 28 * 60 * minute,
+            "Before the restructure, when this was still one long section".to_string(),
+        ),
+        (now - 5 * 24 * 60 * minute, "Weekly review".to_string()),
+        (now - 21 * 24 * 60 * minute, "First draft".to_string()),
+    ];
+    let rows = crate::app::state::version_rows(&versions);
+    let note = crate::app::state::versions_note(rows.len());
+    state.versions.set_vec(rows);
+    g.set_versions_page(page);
+    g.set_versions_title(
+        state
+            .workspace
+            .borrow()
+            .title_of(page)
+            .unwrap_or("Untitled")
+            .to_string()
+            .into(),
+    );
+    g.set_versions_note(note.into());
+    g.set_versions_showing_diff(false);
+    g.set_versions_selected(-1);
+    g.set_version_name("".into());
+    g.set_versions_open(true);
+    versions
 }
 
 pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
@@ -3656,6 +3869,64 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
         "dark-page-templates" => {
             g.set_dark(true);
             apply_scene(ui, state, "page-templates");
+        }
+        // Version history (SPEC §三十八, ADR-0050): the list, then one of its
+        // rows opened into a comparison.
+        "page-versions" => {
+            seed_versions(state, &g, state.open_page.get());
+        }
+        "page-versions-diff" => {
+            let page = state.open_page.get();
+            let versions = seed_versions(state, &g, page);
+            let (created, label) = &versions[1];
+            let lines = {
+                let doc = state.doc.borrow();
+                let after = doc.page_blocks(core_page_id(page));
+                // The same page as it stood three hours ago: one line reworded
+                // in place, one line written since the snapshot (so it is in
+                // `after` only), one line the page has since lost (in `before`
+                // only). Built from the fixture's own blocks rather than
+                // invented text so the panel's widest rows carry what this app
+                // really draws, and put through the real comparator.
+                let mut before: Vec<crate::core::Block> = after.to_vec();
+                if let Some(edited) = before.iter_mut().find(|b| {
+                    b.kind == crate::core::BlockKind::Paragraph
+                        && b.parent.is_none()
+                        && !b.text.is_empty()
+                }) {
+                    edited.text =
+                        "Shipped the recap, and split the long section under it in two.".into();
+                }
+                if let Some(i) = before.iter().position(|b| {
+                    b.kind == crate::core::BlockKind::Todo && b.parent.is_none()
+                }) {
+                    before.remove(i);
+                }
+                let lost = before
+                    .iter()
+                    .find(|b| b.kind == crate::core::BlockKind::Quote && b.parent.is_none())
+                    .cloned()
+                    .map(|mut b| {
+                        b.id = crate::core::BlockId(9_999_997);
+                        b.text = "Nothing else to add.".into();
+                        b
+                    });
+                if let Some(lost) = lost {
+                    before.insert(before.len() / 2, lost);
+                }
+                crate::core::diff::compare(&before, after)
+            };
+            g.set_versions_selected(1);
+            g.set_versions_showing_diff(true);
+            state.fill_version_diff(
+                &lines,
+                &crate::app::state::version_heading(label, *created),
+                &crate::app::state::version_diff_note(&lines),
+            );
+        }
+        "dark-page-versions" => {
+            g.set_dark(true);
+            apply_scene(ui, state, "page-versions");
         }
         "marks" => {
             // seed inline marks on the first paragraph (visual test only,

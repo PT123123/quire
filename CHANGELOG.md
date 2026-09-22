@@ -271,6 +271,24 @@ First functional release: a local, single-file-database notes workspace.
   survive its own round trip. An empty block now writes its marker bare (`-`,
   `1.`, `>`, `#`) and comes back as the same empty block, which also fixes
   ordinary pages whose drafts include an unfilled bullet (ADR-0049)
+- Page version history (top bar ⋯ → Version history): one popup, two views — the
+  versions this page has had, and what changed between one of them and what is on
+  screen now. The three actions live on three surfaces: naming is the field at the
+  bottom (always there, because "now" is worth a version), comparing is a row click,
+  and restoring is a button that only exists *after* a comparison, because a restore
+  replaces the page. A version is §二十五's snapshot mechanism pointed at one page:
+  a `VACUUM INTO` copy in a `versions/` folder beside the database, narrowed to that
+  page — so reading one back goes through the same loader the app opens the library
+  with, and there is no second content format for marks, colours, code languages,
+  tables or page references to fall out of. Which versions exist is two metadata
+  rows each: the name the user typed, and the attachment files its rows point at,
+  which is what stops the reclaim from freeing a picture a version still needs.
+  Twenty per page, oldest going, the panel says the number out loud, and deleting a
+  page forgets the versions it had. A restore is **one** Ctrl+Z step and rolls back a
+  page's *content* only — the title, icon, cover and style the user chose since stay.
+  The comparison is line-level and identifies a line by its block, so a moved or
+  edited line reads as the pair it is; a stretch too large to align is reported as a
+  rewrite rather than computed (ADR-0050)
 - Slash menu ("/") for block types; command palette (Ctrl+K) with page
   jumping, plus Go Back / Go Forward (Alt+← / Alt+→) along the pages
   visited this session — a page deleted since drops out of the history
@@ -288,6 +306,11 @@ First functional release: a local, single-file-database notes workspace.
 - Debounced batched writes; Ctrl+S forces a save; close saves too
 - Rotating snapshots on every open (5 generations), restore-at-open when
   the main file is damaged, damaged file quarantined (`.corrupt`)
+- Named page versions (ADR-0050) share that mechanism and not its lifecycle:
+  one self-contained SQLite file per version in a `versions/` folder beside the
+  database, twenty newest per page, pruned by hand or by the cap and never by age.
+  A file the index no longer names is swept on the next save, so a save that died
+  halfway leaves nothing invisible behind
 - Startup integrity checks; schema migrations (v1–v14). The steps that only add a
   column share one helper and each guard on its own column's absence, so a
   half-migrated file — one somebody edited by hand, or restored to the middle of a
@@ -300,7 +323,8 @@ First functional release: a local, single-file-database notes workspace.
   more: the rows go first (`Change::AttachmentDeleted`, which no command plan
   emits), then the files beside them, and the notice bar reports how many and
   how many bytes. "Nothing points at" counts every page's blocks, every step
-  still on any page's undo *or* redo stack, and the copied block — so the
+  still on any page's undo *or* redo stack, the copied block, and the pictures
+  any stored version points at, so the
   100-step undo cap is how long a picture is protected, and the sweep reads
   only the rows this session loaded, never the folder. It runs on the UI
   thread and costs about half a second per thousand attachments

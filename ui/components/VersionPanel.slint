@@ -1,0 +1,388 @@
+// Version history for one page (SPEC §三十八 "version history", ADR-0050).
+//
+// One popup window with two views, because the second one only exists to serve
+// the first: the list of what this page used to say, and the comparison of one
+// of those with what it says now. The height is fixed rather than derived from
+// the content so that clicking a row — the one thing the list asks of you —
+// does not move the panel out from under the pointer, and so the two views
+// differ only in what the list holds.
+//
+// The three actions SPEC §三十八 names map onto three surfaces, and that split
+// is the design: naming is the field at the bottom (always available, because
+// "now" is worth a version at any moment), comparing is a row click, and
+// restoring is a button that only exists *after* a comparison. Nothing restores
+// a version you have not looked at, because a restore replaces the page.
+//
+// The rows are filled by Rust (`UIState.version-rows` / `version-diff-rows`)
+// and speak through `UIState`'s version callbacks, like every other popup here.
+// The page they belong to travels on `UIState.versions-page`: the panel outlives
+// the ⋯ menu that opened it.
+
+import { Theme } from "../Theme.slint";
+import { Colors } from "../Colors.slint";
+import { Typography } from "../Typography.slint";
+import { Icon } from "../Icons.slint";
+import { Button } from "./Button.slint";
+import { ListView } from "std-widgets.slint";
+import { UIState } from "../Types.slint";
+
+export component VersionPanel inherits PopupWindow {
+    width: 460px;
+    // 40 header + 32 caption + 264 list + 32 name field + 30 buttons, four
+    // 12px gaps, and 16px of padding top and bottom. Nothing in here stretches,
+    // so the total has to be the sum — a layout with leftover slack and no
+    // stretched child is where a dialog starts drifting (A4 sweep D8).
+    height: 40px + 32px + 264px + 32px + 30px + 4 * Theme.spacing-md + 2 * Theme.spacing-lg;
+    // No auto-close: the panel holds an input, and losing a typed name to a
+    // stray click outside is a worse trade than a popup that takes one more
+    // click to leave. Escape and the Done button are the two doors.
+    close-policy: PopupClosePolicy.no-auto-close;
+
+    property <bool> opened: UIState.versions-open;
+    changed opened => {
+        if (UIState.versions-open) {
+            name-input.focus();
+        }
+    }
+
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+
+        Rectangle {
+            x: 2px; y: 3px;
+            width: parent.width - 4px;
+            height: parent.height - 5px;
+            border-radius: Theme.radius-lg + 2px;
+            background: Colors.shadow;
+        }
+        Rectangle {
+            width: parent.width;
+            height: parent.height;
+            border-radius: Theme.radius-lg;
+            background: Colors.surface-overlay;
+            border-width: 1px;
+            border-color: Colors.border;
+        }
+
+        col := VerticalLayout {
+            padding: Theme.spacing-lg;
+            spacing: Theme.spacing-md;
+            width: parent.width;
+            height: parent.height;
+
+            // ---- header: where you are, and the way out ----
+            Rectangle {
+                height: 40px;
+                HorizontalLayout {
+                    width: parent.width;
+                    height: parent.height;
+                    spacing: Theme.spacing-sm;
+                    Icon {
+                        width: 16px;
+                        height: 16px;
+                        size: 16px;
+                        name: "clock";
+                        color: Colors.text-muted;
+                    }
+                    // the stretch belongs to the title, so a long page name
+                    // elides instead of shoving "Done" off the panel
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        alignment: center;
+                        spacing: 0px;
+                        Text {
+                            text: "Version history"
+                            + (UIState.versions-showing-diff ? "" : " — " + UIState.versions-title);
+                            font-family: Typography.ui-font;
+                            font-size: Typography.size-h3;
+                            font-weight: Typography.weight-semibold;
+                            color: Colors.text-primary;
+                            overflow: elide;
+                        }
+                    }
+                    Button {
+                        text: "Done";
+                        clicked => {
+                            UIState.versions-close();
+                        }
+                    }
+                }
+            }
+
+            // ---- caption: what the list below is, and the rule behind it ----
+            Rectangle {
+                height: 32px;
+                VerticalLayout {
+                    width: parent.width;
+                    height: parent.height;
+                    spacing: 1px;
+                    Text {
+                        text: UIState.versions-heading;
+                        font-family: Typography.ui-font;
+                        font-size: Typography.size-ui;
+                        font-weight: Typography.weight-medium;
+                        color: Colors.text-secondary;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: UIState.versions-note;
+                        font-family: Typography.ui-font;
+                        font-size: Typography.size-caption;
+                        color: Colors.text-muted;
+                        wrap: word-wrap;
+                        overflow: clip;
+                    }
+                }
+            }
+
+            // ---- the list, or the comparison ----
+            Rectangle {
+                height: 264px;
+                clip: true;
+                border-radius: Theme.radius-sm;
+                border-width: 1px;
+                border-color: Colors.border;
+                background: Colors.surface;
+
+                if UIState.versions-showing-diff : Rectangle {
+                    width: parent.width;
+                    height: parent.height;
+
+                    diff-list := ListView {
+                        x: 1px; y: 1px;
+                        width: parent.width - 2px;
+                        height: parent.height - 2px;
+                        content-width: self.width;
+
+                        for row in UIState.version-diff-rows : Rectangle {
+                            width: diff-list.content-width;
+                            height: 22px;
+                            HorizontalLayout {
+                                spacing: Theme.spacing-xs;
+                                padding-left: Theme.spacing-sm;
+                                padding-right: Theme.spacing-sm;
+                                Text {
+                                    width: 10px;
+                                    text: row.added ? "+" : "-";
+                                    font-family: Typography.mono-font;
+                                    font-size: Typography.size-ui;
+                                    font-weight: Typography.weight-semibold;
+                                    color: row.added ? Colors.success : Colors.danger;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    width: 84px;
+                                    text: row.kind;
+                                    font-family: Typography.ui-font;
+                                    font-size: Typography.size-caption;
+                                    color: Colors.text-muted;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+                                Text {
+                                    horizontal-stretch: 1;
+                                    text: row.text == "" ? "—" : row.text;
+                                    font-family: Typography.ui-font;
+                                    font-size: Typography.size-ui;
+                                    color: Colors.text-primary;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+                            }
+                        }
+                    }
+
+                    // a version that reads exactly like the page is a real
+                    // answer, and an empty box would read as the panel failing
+                    if UIState.version-diff-rows.length == 0 : Text {
+                        x: Theme.spacing-md;
+                        width: parent.width - 2 * Theme.spacing-md;
+                        height: parent.height;
+                        vertical-alignment: center;
+                        text: "Nothing differs. This version is the page.";
+                        font-family: Typography.ui-font;
+                        font-size: Typography.size-ui;
+                        color: Colors.text-muted;
+                    }
+                }
+
+                if !UIState.versions-showing-diff : Rectangle {
+                    width: parent.width;
+                    height: parent.height;
+
+                    row-list := ListView {
+                        x: 1px; y: 1px;
+                        width: parent.width - 2px;
+                        height: parent.height - 2px;
+                        content-width: self.width;
+
+                        for row[idx] in UIState.version-rows : Rectangle {
+                            width: row-list.content-width;
+                            height: 34px;
+                            border-radius: Theme.radius-xs;
+                            background: idx == UIState.versions-selected
+                                ? Colors.surface-selected
+                                : (row-ta.has-hover ? Colors.surface-hover : transparent);
+                            animate background { duration: Theme.duration-instant; }
+
+                            HorizontalLayout {
+                                spacing: Theme.spacing-sm;
+                                padding-left: Theme.spacing-sm;
+                                padding-right: Theme.spacing-xs;
+                                VerticalLayout {
+                                    alignment: center;
+                                    spacing: 0px;
+                                    horizontal-stretch: 1;
+                                    Text {
+                                        text: row.label;
+                                        font-family: Typography.ui-font;
+                                        font-size: Typography.size-ui;
+                                        color: Colors.text-primary;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                    }
+                                    Text {
+                                        text: row.when;
+                                        font-family: Typography.ui-font;
+                                        font-size: Typography.size-caption;
+                                        color: Colors.text-muted;
+                                    }
+                                }
+                                // the one icon that deletes something in this
+                                // panel, so it is only loud on hover — and it is
+                                // a per-row affordance rather than a button
+                                // because a list of 20 cannot carry 20 buttons
+                                trash-host := Rectangle {
+                                    width: 24px;
+                                    height: 24px;
+                                    vertical-stretch: 0;
+                                    cross-axis-self-alignment: center;
+                                    Icon {
+                                        x: 5px; y: 5px;
+                                        width: 14px;
+                                        height: 14px;
+                                        size: 14px;
+                                        name: "trash";
+                                        color: trash-ta.has-hover ? Colors.danger : Colors.text-muted;
+                                    }
+                                    trash-ta := TouchArea {
+                                        mouse-cursor: MouseCursor.pointer;
+                                        clicked => {
+                                            UIState.version-delete(row.index);
+                                        }
+                                    }
+                                }
+                            }
+
+                            row-ta := TouchArea {
+                                mouse-cursor: MouseCursor.pointer;
+                                clicked => {
+                                    UIState.version-view(row.index);
+                                }
+                            }
+                        }
+                    }
+
+                    if UIState.version-rows.length == 0 : Text {
+                        x: Theme.spacing-md;
+                        y: 0px;
+                        height: parent.height;
+                        vertical-alignment: center;
+                        text: "No versions of this page yet.\nName the way it reads now, and it stops being gone.";
+                        font-family: Typography.ui-font;
+                        font-size: Typography.size-ui;
+                        color: Colors.text-muted;
+                    }
+                }
+            }
+
+            // ---- the name field: the panel's front door ----
+            name-field := Rectangle {
+                height: 32px;
+                border-radius: Theme.radius-sm;
+                background: Colors.background;
+                border-width: 1px;
+                border-color: Colors.border;
+                clip: true;
+
+                name-input := TextInput {
+                    x: Theme.spacing-sm;
+                    width: parent.width - 2 * Theme.spacing-sm;
+                    y: (parent.height - self.preferred-height) / 2;
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-ui;
+                    color: Colors.text-primary;
+                    selection-foreground-color: Colors.text-primary;
+                    selection-background-color: Colors.selection;
+                    single-line: true;
+                    text <=> UIState.version-name;
+                    accepted => {
+                        UIState.version-save();
+                    }
+                    key-pressed(event) => {
+                        if (event.text == Key.Escape) {
+                            UIState.versions-close();
+                            accept
+                        } else {
+                            reject
+                        }
+                    }
+                }
+                Text {
+                    visible: UIState.version-name == "";
+                    x: Theme.spacing-sm;
+                    width: parent.width - 2 * Theme.spacing-sm;
+                    y: (parent.height - self.height) / 2;
+                    height: self.preferred-height;
+                    vertical-alignment: center;
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-ui;
+                    color: Colors.text-muted;
+                    text: "Name this version…";
+                }
+            }
+
+            // ---- actions ----
+            Rectangle {
+                height: 30px;
+                HorizontalLayout {
+                    spacing: Theme.spacing-sm;
+                    width: parent.width;
+                    height: parent.height;
+
+                    if UIState.versions-showing-diff : Button {
+                        text: "Back";
+                        icon-name: "chevron-left";
+                        clicked => {
+                            UIState.version-back();
+                        }
+                    }
+                    if UIState.versions-showing-diff : Button {
+                        text: "Delete version";
+                        icon-name: "trash";
+                        danger: true;
+                        clicked => {
+                            UIState.version-delete(UIState.versions-selected);
+                        }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    if !UIState.versions-showing-diff : Button {
+                        text: "Save version";
+                        primary: true;
+                        clicked => {
+                            UIState.version-save();
+                        }
+                    }
+                    if UIState.versions-showing-diff : Button {
+                        text: "Restore";
+                        primary: true;
+                        clicked => {
+                            UIState.version-restore(UIState.versions-selected);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

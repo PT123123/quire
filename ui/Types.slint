@@ -138,6 +138,34 @@ export struct MenuRow {
     check: bool,     // renders the "current pick" check at the row's right
 }
 
+// One row of the version-history panel (SPEC §三十八, ADR-0050).
+//
+// `index` is the row's position in the panel, not the moment the version was
+// taken: a unix second needs 32 bits and Slint's `int` is exactly 32 bits, so
+// an id picked that way would break in 2038 — and break by silently naming the
+// wrong row. Rust keeps the real `(page, created)` list and resolves an index
+// against it, which is the same trick the template picker uses for its rows.
+//
+// `when` is an age ("4 h ago") worked out in Rust, because the app stores no
+// timezone and no calendar: a clock time rendered from a UTC instant would be
+// wrong for the reader, and a conversion has nothing here to convert with.
+export struct VersionRow {
+    index: int,
+    label: string,
+    when: string,
+}
+
+// One line of a version comparison. `added` is "here now, not in the version";
+// false is the other way round. A line the version has and the page has
+// differently arrives as a pair of these, which is the shape people already
+// know how to read. `kind` names the row's own shape ("Heading 1", "To-do")
+// because a paragraph that became a heading is two lines of identical text.
+export struct DiffRow {
+    added: bool,
+    kind: string,
+    text: string,
+}
+
 // The one place transient UI state lives. Components read/write it directly;
 // Rust reaches it through the generated global accessor.
 export global UIState {
@@ -266,6 +294,36 @@ export global UIState {
     in-out property <length> icon-picker-x: 240px;
     in-out property <length> icon-picker-y: 100px;
     in-out property <[string]> icon-picker-items;
+
+    // version history (SPEC §三十八, ADR-0050): the panel ⋯ → Version history
+    // opens, for one page named by `versions-page` — the panel outlives the menu
+    // that opened it, so the page has to travel with it. The two views share one
+    // window: `versions-showing-diff` says whether the rows below are the page's
+    // versions or the comparison of one of them with what is on screen, and the
+    // height stays fixed so clicking a row does not move the panel.
+    in-out property <bool> versions-open: false;
+    in-out property <int> versions-page: -1;
+    in-out property <string> versions-title: "";
+    in-out property <[VersionRow]> version-rows;
+    in-out property <[DiffRow]> version-diff-rows;
+    in-out property <bool> versions-showing-diff: false;
+    // the heading over the comparison ("Before the rewrite - 4 h ago") and one
+    // line under the list that states the retention rule out loud
+    in-out property <string> versions-heading: "";
+    in-out property <string> versions-note: "";
+    // the name field, which is also the panel's "nothing typed yet" state
+    in-out property <string> version-name: "";
+    // which row's version the comparison is showing; -1 = the list
+    in-out property <int> versions-selected: -1;
+
+    callback version-save();
+    callback version-view(int);
+    callback version-restore(int);
+    callback version-delete(int);
+    // leave the comparison for the list; the row keeps its own back because
+    // `versions-close` means the whole panel
+    callback version-back();
+    callback versions-close();
 
     // dialogs
     in-out property <bool> dialog-open: false;

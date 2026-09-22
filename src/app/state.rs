@@ -17,10 +17,11 @@ use crate::services::persistence::PersistenceService;
 use crate::services::search_service::SearchService;
 use crate::storage::search_index::SearchRequest;
 use crate::storage::SqliteRepository;
-use crate::{BlockRow, ColumnBox, ColumnItem, TableCell, CommandRow, MenuRow, SearchRow, SidebarNode, SlashRow, TextRun, TocEntry};
+use crate::storage::versions;
+use crate::{BlockRow, ColumnBox, ColumnItem, DiffRow, TableCell, CommandRow, MenuRow, SearchRow, SidebarNode, SlashRow, TextRun, TocEntry, VersionRow};
 use slint::{Model, ModelRc, VecModel};
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -33,6 +34,13 @@ pub struct AppState {
     pub menu: Rc<VecModel<MenuRow>>,
     pub slash: Rc<VecModel<SlashRow>>,
     pub block_menu: Rc<VecModel<MenuRow>>,
+    /// The version panel's two views (SPEC §三十八, ADR-0050): the page's list
+    /// of named versions, and the comparison of one of them with the page. Both
+    /// are models rather than a `Vec` handed over on open because the panel
+    /// stays on screen while a save, a delete or a restore changes what it
+    /// shows — and a projection pushed into a live model redraws it in place.
+    pub versions: Rc<VecModel<VersionRow>>,
+    pub version_diff: Rc<VecModel<DiffRow>>,
     /// Full command list before query filtering.
     pub all_commands: Vec<CommandRow>,
     /// The editing truth for every page's blocks (M4).
@@ -105,6 +113,19 @@ pub struct AppState {
     /// `MENU_TEMPLATE_*` action ids; `fill_template_pick` writes it and the
     /// row click reads it. Nothing else uses it, so it never needs clearing.
     template_pick: Cell<i32>,
+    /// Named versions this library holds, by page, newest first (SPEC §三十八
+    /// "version history", ADR-0050). Mirrored from the `version/<page>/<when>`
+    /// metadata rows at load rather than queried, so the panel fills without a
+    /// read of its own and a session with no database — which can have no
+    /// versions, since a version *is* a file — shows an empty list instead of
+    /// an error.
+    version_index: RefCell<BTreeMap<i32, Vec<(i64, String)>>>,
+    /// The attachment ids each version's rows point at, from the matching
+    /// `version-files/…` row. A version file is a pointer the §三十七 reclaim
+    /// scan cannot otherwise see, and a picture the reclaim frees would make
+    /// the version restore as a missing image with nothing to explain it —
+    /// ADR-0047's objection to a cover, arriving from the other direction.
+    version_pins: RefCell<BTreeMap<(i64, i64), BTreeSet<i64>>>,
 }
 
 /// One decoded picture plus what it costs to keep it decoded.
@@ -236,6 +257,130 @@ fn assign_page_orders(workspace: &Workspace) -> HashMap<i32, OrderKey> {
     let mut map = HashMap::new();
     walk(workspace, None, &mut map);
     map
+}
+
+/// The instant a version is stamped with, in unix seconds. `SystemClock`'s
+/// `now_ms` is *this session's* elapsed clock, which is exactly wrong here: a
+/// version file outlives the session, and its name has to mean something to the
+/// next one. Only seconds, because the file name and the metadata key are the
+/// same number and a version taken twice in one second is one version.
+pub fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// The label a save stores: trimmed to one line and cut at a character
+/// boundary, because a panel row that splits an emoji in half renders as a box.
+/// Empty is not a name, so it gets one that says which version of this page it
+/// is — and a label is metadata, never a file name, which is why a name with a
+/// slash, a quote or both works.
+fn version_label(label: &str, taken: usize) -> String {
+    let one_line: String = label
+        .trim()
+        .chars()
+        .filter(|c| *c != '\n' && *c != '\r')
+        .take(60)
+        .collect();
+    if one_line.is_empty() {
+        return format!("Version {}", taken + 1);
+    }
+    one_line
+}
+
+/// The panel's list rows, newest first: the projection `fill_versions` pushes
+/// and a benchmark scene draws. Its own function because a headless session has
+/// no database file, and a version *is* a database file — the scene supplies
+/// rows that were never written, and this is the one place that says what a row
+/// looks like, so the pixels still come from the real projection. Whether the
+/// files behind those rows exist is what the storage tests answer.
+pub fn version_rows(versions: &[(i64, String)]) -> Vec<VersionRow> {
+    let now = now_secs();
+    versions
+        .iter()
+        .enumerate()
+        .map(|(index, (created, label))| VersionRow {
+            index: index as i32,
+            label: label.as_str().into(),
+            when: crate::core::diff::age_text(now - *created).as_str().into(),
+        })
+        .collect()
+}
+
+/// The sentence under the panel's title. The only place the retention cap is
+/// stated in prose, which is why it reads off `MAX_PER_PAGE` rather than a
+/// number someone might stop updating.
+pub fn versions_note(count: usize) -> String {
+    format!(
+        "{} of this page. Quire keeps the {} newest and lets the oldest go.",
+        if count == 1 {
+            "1 version".into()
+        } else {
+            format!("{count} versions")
+        },
+        crate::storage::versions::MAX_PER_PAGE,
+    )
+}
+
+/// The comparison view's heading: which version is on screen and how long ago
+/// it was taken, in the same words the list row uses for the same number.
+pub fn version_heading(label: &str, created: i64) -> String {
+    format!(
+        "“{label}” · {}",
+        crate::core::diff::age_text(now_secs() - created)
+    )
+}
+
+/// And the line under it, which is the restore button's terms stated before
+/// the button is pressed.
+pub fn version_diff_note(lines: &[crate::core::diff::DiffLine]) -> String {
+    let added = lines
+        .iter()
+        .filter(|l| l.mark == crate::core::diff::DiffMark::Added)
+        .count();
+    let removed = lines.len() - added;
+    format!("{added} lines arrived, {removed} went. Restoring puts every one of them back.")
+}
+
+/// Mirror the library's version index out of the metadata rows it persisted
+/// (SPEC §三十八, ADR-0050). Both halves come from the same scan: which
+/// versions a page has, and which pictures each one is holding alive. A row
+/// that parses as neither is skipped, so a half-written version reads as absent
+/// rather than as a page zero.
+fn restore_versions(
+    persisted: &Option<crate::core::PersistedState>,
+) -> (
+    BTreeMap<i32, Vec<(i64, String)>>,
+    BTreeMap<(i64, i64), BTreeSet<i64>>,
+) {
+    let mut index: BTreeMap<i32, Vec<(i64, String)>> = BTreeMap::new();
+    let mut pins: BTreeMap<(i64, i64), BTreeSet<i64>> = BTreeMap::new();
+    let Some(state) = persisted else {
+        return (index, pins);
+    };
+    for (key, value) in &state.meta {
+        if let Some((page, created)) = crate::storage::versions::parse_key(key) {
+            index.entry(page as i32).or_default().push((created, value.clone()));
+        } else if let Some(rest) = key.strip_prefix(crate::storage::versions::KEY_FILES) {
+            if let Some((page, created)) = rest.split_once('/').filter(|(p, c)| {
+                p.parse::<i64>().is_ok() && c.parse::<i64>().is_ok()
+            }) {
+                let (p, c) = (
+                    page.parse::<i64>().unwrap_or_default(),
+                    created.parse::<i64>().unwrap_or_default(),
+                );
+                pins.insert(
+                    (p, c),
+                    crate::storage::versions::parse_ids(value),
+                );
+            }
+        }
+    }
+    for versions in index.values_mut() {
+        versions.sort_by(|a, b| b.0.cmp(&a.0));
+    }
+    (index, pins)
 }
 
 fn workspace_from_persisted(
@@ -458,6 +603,11 @@ impl AppState {
         let all_commands = mock_commands(&workspace);
         let blocks = Rc::new(VecModel::from(Vec::new()));
         let commands = Rc::new(VecModel::from(all_commands.clone()));
+        // The named versions this library already carries (SPEC §三十八). Read
+        // off the same metadata map the recents come from, because the rows are
+        // the index: a file in `versions/` that no row names is invisible until
+        // the next save sweeps it away.
+        let (version_index, version_pins) = restore_versions(&persisted);
         let state = AppState {
             workspace: RefCell::new(workspace),
             sidebar: Rc::new(VecModel::from(Vec::new())),
@@ -467,6 +617,8 @@ impl AppState {
             menu: Rc::new(VecModel::from(Vec::new())),
             slash: Rc::new(VecModel::from(slash_items(""))),
             block_menu: Rc::new(VecModel::from(Vec::new())),
+            versions: Rc::new(VecModel::from(Vec::new())),
+            version_diff: Rc::new(VecModel::from(Vec::new())),
             clipboard: RefCell::new(None),
             settings: RefCell::new(restored_settings),
             recents_restored: Cell::new(restored_recents),
@@ -499,6 +651,8 @@ impl AppState {
             pending_delete: Cell::new(None),
             last_scroll_y: Cell::new(0.0),
             template_pick: Cell::new(0),
+            version_index: RefCell::new(version_index),
+            version_pins: RefCell::new(version_pins),
         };
         // restore persisted recents before the first open marks its page
         let state = Rc::new(state);
@@ -538,6 +692,12 @@ impl AppState {
     }
     pub fn block_menu_model(&self) -> ModelRc<MenuRow> {
         ModelRc::from(self.block_menu.clone())
+    }
+    pub fn versions_model(&self) -> ModelRc<VersionRow> {
+        ModelRc::from(self.versions.clone())
+    }
+    pub fn version_diff_model(&self) -> ModelRc<DiffRow> {
+        ModelRc::from(self.version_diff.clone())
     }
 
     // ---- projections ----
@@ -2193,6 +2353,12 @@ impl AppState {
         // a sweep that frees bytes another page still draws would be a data
         // loss disguised as housekeeping.
         live.extend(self.workspace.borrow().cover_ids());
+        // And the same for a version's rows (SPEC §三十八, ADR-0050): a version
+        // file is a database this scan never opens, so its pointers are mirrored
+        // into the live library when the version is saved, and this is where the
+        // mirror is read back. Freeing a picture a version points at would turn
+        // that version into a restore of a missing image.
+        live.extend(self.version_pinned_attachments());
         if let Some(id) = self.clipboard.borrow().as_ref().and_then(|b| b.attachment) {
             live.insert(id.as_u64() as i64);
         }
@@ -2890,9 +3056,16 @@ impl AppState {
                 doc.drop_page(core_page_id(*r));
             }
         }
-        self.record(vec![Change::PageDeleted {
+        let mut changes = vec![Change::PageDeleted {
             id: PageId(id as u32 as u64),
-        }]);
+        }];
+        // A page that is gone has no version worth keeping — and a picture one
+        // of them pointed at has to stop being held alive by it, or the §三十七
+        // reclaim would keep bytes nothing can ever reach again (ADR-0047).
+        for removed_page in &removed {
+            changes.extend(self.forget_versions(*removed_page));
+        }
+        self.record(changes);
         if had_open {
             // stale until the controller opens a fallback page
             self.open_page.set(0);
@@ -3591,6 +3764,19 @@ impl AppState {
             rows.len() - 2,
             row(MENU_PAGE_TEMPLATES, "Templates", "page", false, -1, false),
         );
+        // Version history beside it (SPEC §三十八): the other row on this menu
+        // about what the page *says*, rather than what it looks like or where it
+        // sits. Found by id instead of by another `rows.len() - 2`, because the
+        // five inserts above each re-decide what second-to-last means, and this
+        // row's place is relative to a row, not to the end.
+        let at = rows
+            .iter()
+            .position(|r| r.id == MENU_PAGE_TEMPLATES)
+            .unwrap_or_else(|| rows.len() - 1);
+        rows.insert(
+            at,
+            row(MENU_PAGE_VERSIONS, "Version history", "clock", false, -1, false),
+        );
         self.menu.set_vec(rows);
     }
 
@@ -3754,6 +3940,302 @@ impl AppState {
         self.template_pick.get()
     }
 
+    // ---- version history (SPEC §三十八, ADR-0050) ----
+
+    /// The library file a version would be copied from, or `None` for a session
+    /// with no database at all. That `None` is not an error to report so much as
+    /// the reason the panel has an empty state: a version *is* a file, so a
+    /// session that writes no file can keep no version.
+    fn version_db(&self) -> Option<std::path::PathBuf> {
+        self.repo.as_ref()?.path().map(|p| p.to_path_buf())
+    }
+
+    /// One page's named versions, newest first, as `(created, label)`. Read from
+    /// the mirror built at load and kept in step by every save and delete below,
+    /// so filling the panel costs no read of its own.
+    pub fn page_versions(&self, page: i32) -> Vec<(i64, String)> {
+        self.version_index
+            .borrow()
+            .get(&page)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// The version a panel row names, as `(created, label)`. `row` is the row's
+    /// index rather than a timestamp because Slint's `int` is 32 bits and a unix
+    /// second is not; an index out of range is nothing, which is what a row that
+    /// a delete removed between the click and here must resolve to.
+    pub fn version_at(&self, page: i32, row: i32) -> Option<(i64, String)> {
+        self.page_versions(page)
+            .into_iter()
+            .nth(row.max(0) as usize)
+    }
+
+    /// Name the way the page reads now, and keep it.
+    ///
+    /// The order of this is the feature. **Flush first**: `VACUUM INTO` reads the
+    /// file, not this session's memory, so a version taken over a queue of
+    /// unwritten edits would be a picture of the page as of the last flush — a
+    /// version whose name promises "this" and delivers "ten seconds ago". Then
+    /// the copy, then the two metadata rows that make it findable, then the
+    /// retention cut, then the sweep of anything a crashed save left behind.
+    ///
+    /// A name that collides with a version taken in the same second moves
+    /// forward a second rather than overwriting the older one: two versions with
+    /// one timestamp is a lost version, and the user typed the label, so the
+    /// label is the thing worth keeping.
+    pub fn save_page_version(&self, page: i32, label: &str) -> Result<String, String> {
+        let (Some(db_file), Some(repo)) = (self.version_db(), self.repo.clone()) else {
+            return Err("this session has no database file, so a version has nowhere to live".into());
+        };
+        if page <= 0 {
+            return Err("no page is open".into());
+        }
+        let label = version_label(label, self.page_versions(page).len());
+        self.persistence_force_flush();
+
+        let mut attempt = 0;
+        let (created, ids) = loop {
+            let created = now_secs() + attempt;
+            match versions::save(&repo, page as i64, created) {
+                Ok(Some(ids)) => break (created, ids),
+                // the file name and the metadata key are both this second, so
+                // four tries covers four saves in a row faster than a clock tick
+                Ok(None) if attempt < 4 => attempt += 1,
+                Ok(None) => return Err("a version taken this second already exists".into()),
+                Err(e) => return Err(e.to_string()),
+            }
+        };
+
+        // Past the cap the oldest go — the newest never, and never silently.
+        let mut pruned: Vec<i64> = Vec::new();
+        {
+            let mut index = self.version_index.borrow_mut();
+            let list = index.entry(page).or_default();
+            list.push((created, label.clone()));
+            list.sort_by(|a, b| b.0.cmp(&a.0));
+            while list.len() > crate::storage::versions::MAX_PER_PAGE {
+                match list.pop() {
+                    Some((old, _)) => pruned.push(old),
+                    None => break,
+                }
+            }
+        }
+        self.version_pins
+            .borrow_mut()
+            .insert((page as i64, created), ids.iter().copied().collect());
+
+        let mut changes = vec![
+            Change::MetaSet {
+                key: versions::label_key(page as i64, created),
+                value: label.clone(),
+            },
+            Change::MetaSet {
+                key: versions::files_key(page as i64, created),
+                value: ids
+                    .iter()
+                    .map(|i| i.to_string())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            },
+        ];
+        for old in pruned {
+            // The file goes before its rows are deleted: the other order leaves
+            // a row naming a file that is gone, which the panel would offer and
+            // `read` would refuse. A file left by this call failing instead is
+            // what the sweep below is for.
+            if let Err(e) = versions::remove(&db_file, page as i64, old) {
+                eprintln!("quire: {e}");
+            }
+            self.version_pins.borrow_mut().remove(&(page as i64, old));
+            changes.push(Change::MetaDelete {
+                key: versions::label_key(page as i64, old),
+            });
+            changes.push(Change::MetaDelete {
+                key: versions::files_key(page as i64, old),
+            });
+        }
+        self.record(changes);
+        self.sweep_version_files();
+        Ok(label)
+    }
+
+    /// Forget every version file the index no longer names. A save that died
+    /// between the copy and its metadata row is the case this exists for: with
+    /// nothing left to list it, that file would be invisible to the panel and to
+    /// the §三十七 disk numbers both.
+    fn sweep_version_files(&self) {
+        let Some(db_file) = self.version_db() else { return };
+        let keep: BTreeSet<(i64, i64)> = self
+            .version_index
+            .borrow()
+            .iter()
+            .flat_map(|(page, list)| {
+                list.iter()
+                    .map(move |(created, _)| (*page as i64, *created))
+            })
+            .collect();
+        if let Err(e) = versions::sweep_orphans(&db_file, &keep) {
+            eprintln!("quire: {e}");
+        }
+    }
+
+    /// The comparison rows between one version and what is on screen now
+    /// (SPEC §三十八 "与当前版本对比"). The version's blocks come back through
+    /// `Repository::load` — the loader the app opens the library with — so a
+    /// version cannot be a format this code has to keep up with.
+    pub fn version_diff(
+        &self,
+        page: i32,
+        created: i64,
+    ) -> Result<Vec<crate::core::diff::DiffLine>, String> {
+        let db_file = self.version_db().ok_or("no database file")?;
+        let (_version_page, blocks) =
+            versions::read(&db_file, page as i64, created).map_err(|e| e.to_string())?;
+        let current = {
+            let doc = self.doc.borrow();
+            doc.page_blocks(core_page_id(page)).to_vec()
+        };
+        Ok(crate::core::diff::compare(&blocks, &current))
+    }
+
+    /// Land a version's blocks in place of the page's current ones, as ONE undo
+    /// step (SPEC §三十八 "恢复").
+    ///
+    /// This goes through the command system rather than swapping files, and that
+    /// choice is the feature: the restored rows get fresh ids and re-derived
+    /// order keys, so they behave like anything typed since, Ctrl+Z brings back
+    /// exactly what this replaced, and the change feed puts them in the database
+    /// the way every other edit arrives. Deleting only the page's *roots* is
+    /// enough because a delete takes its subtree with it — which is also how a
+    /// table's cells and a columns layout's boxes go.
+    ///
+    /// The page keeps its title, icon, cover and style on purpose. A version is
+    /// of a page's *content*, and rolling back a name the user chose after the
+    /// version was taken is not what "restore this version" reads as.
+    pub fn restore_version(&self, page: i32, created: i64) -> Result<usize, String> {
+        if page != self.open_page.get() {
+            // The command system addresses the page on screen, and the panel
+            // only ever shows the open page's versions, so reaching here for
+            // another one means a row went stale under a page switch.
+            return Err("open that page before restoring its version".into());
+        }
+        if self.locked_refusal() {
+            return Err("this page is locked".into());
+        }
+        let db_file = self.version_db().ok_or("no database file")?;
+        let (_version_page, blocks) =
+            versions::read(&db_file, page as i64, created).map_err(|e| e.to_string())?;
+        let roots: Vec<Command> = {
+            let doc = self.doc.borrow();
+            doc.page_blocks(core_page_id(page))
+                .iter()
+                .filter(|b| b.parent.is_none())
+                .map(|b| Command::DeleteBlock { id: b.id })
+                .collect()
+        };
+        let count = blocks.len();
+        let mut cmds = vec![Command::InsertForest {
+            anchor: None,
+            blocks,
+        }];
+        // `exec_all` plans every command against the state before the batch, so
+        // the insert lands after the rows the deletes are about to remove and
+        // neither step has to know about the other.
+        cmds.extend(roots);
+        if self.exec_all_on_open_page(cmds).is_none() {
+            return Err("there was nothing to restore".into());
+        }
+        Ok(count)
+    }
+
+    /// Drop a version: its file, its two metadata rows, and its entry in the
+    /// mirror. The file goes first, for the same reason the retention cut does.
+    pub fn delete_version(&self, page: i32, created: i64) -> Result<(), String> {
+        let db_file = self.version_db().ok_or("no database file")?;
+        versions::remove(&db_file, page as i64, created).map_err(|e| e.to_string())?;
+        if let Some(list) = self.version_index.borrow_mut().get_mut(&page) {
+            list.retain(|(at, _)| *at != created);
+        }
+        self.version_pins.borrow_mut().remove(&(page as i64, created));
+        self.record(vec![
+            Change::MetaDelete {
+                key: versions::label_key(page as i64, created),
+            },
+            Change::MetaDelete {
+                key: versions::files_key(page as i64, created),
+            },
+        ]);
+        Ok(())
+    }
+
+    /// The attachment ids stored versions still point at, for §三十七's reclaim.
+    /// A version file is a database the reclaim scan never opens, so its
+    /// pointers are mirrored into the live library at save time — and a picture
+    /// the reclaim freed would make that version restore as a missing image with
+    /// nothing left to explain it (ADR-0047's objection, arriving from the other
+    /// direction).
+    pub fn version_pinned_attachments(&self) -> Vec<i64> {
+        self.version_pins
+            .borrow()
+            .values()
+            .flat_map(|set| set.iter().copied())
+            .collect()
+    }
+
+    /// A page that is gone has no version worth keeping: the metadata rows, the
+    /// files, and the pins that were holding its pictures alive.
+    /// `delete_page` calls this for the page and each descendant it removes.
+    fn forget_versions(&self, page: i32) -> Vec<Change> {
+        let gone = self.version_index.borrow_mut().remove(&page).unwrap_or_default();
+        let mut changes = Vec::with_capacity(gone.len() * 2);
+        for (created, _) in gone {
+            self.version_pins.borrow_mut().remove(&(page as i64, created));
+            if let Some(db_file) = self.version_db() {
+                if let Err(e) = versions::remove(&db_file, page as i64, created) {
+                    eprintln!("quire: {e}");
+                }
+            }
+            changes.push(Change::MetaDelete {
+                key: versions::label_key(page as i64, created),
+            });
+            changes.push(Change::MetaDelete {
+                key: versions::files_key(page as i64, created),
+            });
+        }
+        changes
+    }
+
+    /// Push the panel's list view for one page. Called on open and after every
+    /// save, delete and restore, so the rows the user sees are the rows the
+    /// library has.
+    pub fn fill_versions(&self, page: i32) {
+        let rows = version_rows(&self.page_versions(page));
+        let note = versions_note(rows.len());
+        self.versions.set_vec(rows);
+        if let Some(g) = self.ui.borrow().clone().and_then(|u| u.upgrade()) {
+            g.set_versions_note(note.into());
+        }
+    }
+
+    /// Push the panel's comparison view. `heading` names the version, `note`
+    /// says what pressing the primary button would do.
+    pub fn fill_version_diff(&self, lines: &[crate::core::diff::DiffLine], heading: &str, note: &str) {
+        let rows: Vec<DiffRow> = lines
+            .iter()
+            .map(|l| DiffRow {
+                added: l.mark == crate::core::diff::DiffMark::Added,
+                kind: crate::core::diff::kind_label(l.kind).into(),
+                text: l.text.as_str().into(),
+            })
+            .collect();
+        self.version_diff.set_vec(rows);
+        if let Some(g) = self.ui.borrow().clone().and_then(|u| u.upgrade()) {
+            g.set_versions_heading(heading.into());
+            g.set_versions_note(note.into());
+        }
+    }
+
     /// Benchmark scene F: the controller reads/writes the editor viewport-y
     /// property and uses this cell to detect "hit the bottom" (position
     /// stopped changing) so the scroll can wrap.
@@ -3811,6 +4293,13 @@ pub const MENU_TEMPLATE_DELETE: i32 = 23;
 /// Back out of the template picker. Not `MENU_BACK`, which means "the page
 /// menu" and would drop two levels at once.
 pub const MENU_TEMPLATE_PICK_BACK: i32 = 24;
+/// ⋯ → Version history, the one row the page menu gains for the whole feature
+/// (SPEC §三十八, ADR-0050). One row and not three, because the page menu is
+/// already thirteen deep and every popup in this app shares one 184px
+/// `ContextMenu` whose rows elide rather than wrap: "Compare versions" and
+/// "Restore version" would both arrive as "…". The panel this row opens holds
+/// the list, the comparison and the restore, and says which version each is.
+pub const MENU_PAGE_VERSIONS: i32 = 25;
 /// The picker's rows: index into `template_list()`, oldest template first.
 pub const TEMPLATE_PICK_BASE: i32 = 800_000;
 /// The "+" / slash menu's template rows, in the same index space. A separate
@@ -7542,5 +8031,541 @@ mod tests {
             2,
             "and the library still has what it had"
         );
+    }
+
+    // --- version history (SPEC §三十八, ADR-0050) ---
+
+    /// A session on a real library file, with one page holding `lines` as its
+    /// paragraphs. A version *is* a file, so every test below needs the database
+    /// a version can be copied out of — the mock session other tests use has no
+    /// file at all, which is its own test further down.
+    fn version_session(
+        dir: &crate::testing::ScratchDir,
+        lines: &[&str],
+    ) -> (
+        std::rc::Rc<super::AppState>,
+        std::sync::Arc<crate::storage::SqliteRepository>,
+        i32,
+        std::path::PathBuf,
+    ) {
+        use crate::core::{BlockKind, Command};
+        let path = dir.path().join("library.db");
+        let repo = scratch_repo(dir);
+        let state = super::AppState::new(&plain_args(), Some(repo.clone()));
+        let page = state.create_page(None);
+        for line in lines {
+            state.exec_on_open_page(Command::AppendBlock {
+                kind: BlockKind::Paragraph,
+                text: (*line).into(),
+            });
+        }
+        (state, repo, page, path)
+    }
+
+    /// The page's paragraphs, top to bottom, as the editor shows them.
+    fn lines_of(state: &super::AppState) -> Vec<String> {
+        state
+            .doc
+            .borrow()
+            .page_blocks(super::core_page_id(state.open_page.get()))
+            .iter()
+            .map(|b| b.text.clone())
+            .collect()
+    }
+
+    fn version_of(state: &super::AppState, page: i32, row: usize) -> (i64, String) {
+        state
+            .version_at(page, row as i32)
+            .unwrap_or_else(|| panic!("row {row} of {:?}", state.page_versions(page)))
+    }
+
+    #[test]
+    fn a_version_names_the_page_as_the_click_saw_it_not_as_the_last_flush_saw_it() {
+        // The order inside `save_page_version` is the whole promise: `VACUUM
+        // INTO` reads the file, so a version taken over a queue of unwritten
+        // edits would be a picture of the page as of ten seconds ago.
+        use crate::core::persistence::Repository as _;
+        use crate::testing::ScratchDir;
+        let dir = ScratchDir::new("version-flush-first");
+        let (state, _repo, page, path) = version_session(&dir, &["first line"]);
+        let created = {
+            let label = state.save_page_version(page, "empty").unwrap();
+            assert_eq!(label, "empty");
+            let (created, _) = version_of(&state, page, 0);
+            created
+        };
+        assert_eq!(
+            crate::storage::versions::read(&path, page as i64, created)
+                .unwrap()
+                .1
+                .len(),
+            1,
+            "control: the version holds the one line the file had"
+        );
+
+        // an edit the debounced writer has not been given a moment to reach
+        state
+            .exec_on_open_page(crate::core::Command::AppendBlock {
+                kind: crate::core::BlockKind::Paragraph,
+                text: "second line".into(),
+            })
+            .expect("a paragraph appends");
+        assert_eq!(
+            _repo
+                .load()
+                .unwrap()
+                .blocks
+                .iter()
+                .filter(|b| b.page.0 as i64 == page as i64)
+                .count(),
+            1,
+            "control: the edit really is still in memory"
+        );
+
+        let created = {
+            state.save_page_version(page, "both").unwrap();
+            version_of(&state, page, 0).0
+        };
+        let (_page_row, blocks) =
+            crate::storage::versions::read(&path, page as i64, created).unwrap();
+        assert_eq!(
+            blocks.iter().map(|b| b.text.as_str()).collect::<Vec<_>>(),
+            vec!["first line", "second line"],
+            "the save flushed before it copied"
+        );
+    }
+
+    #[test]
+    fn a_version_with_no_name_is_called_by_which_one_it_is() {
+        use crate::testing::ScratchDir;
+        let dir = ScratchDir::new("version-label");
+        let (state, _repo, page, _path) = version_session(&dir, &["one"]);
+        assert_eq!(state.save_page_version(page, "").unwrap(), "Version 1");
+        assert_eq!(state.save_page_version(page, "   ").unwrap(), "Version 2");
+        // one line, trimmed, and cut where a person can still read it
+        assert_eq!(
+            state.save_page_version(page, "  spaced\nout  ").unwrap(),
+            "spacedout"
+        );
+        let long = "x".repeat(90);
+        assert_eq!(state.save_page_version(page, &long).unwrap().len(), 60);
+        assert_eq!(state.page_versions(page).len(), 4);
+        // and the newest is the first row the panel draws
+        assert_eq!(version_of(&state, page, 0).1, "x".repeat(60));
+    }
+
+    #[test]
+    fn the_oldest_versions_are_the_ones_that_go() {
+        use crate::core::persistence::Repository;
+        use crate::storage::versions::{self, MAX_PER_PAGE};
+        use crate::testing::ScratchDir;
+
+        let dir = ScratchDir::new("version-retention");
+        let (state, repo, page, path) = version_session(&dir, &["one"]);
+        state.persistence_force_flush();
+        // Twenty versions already on file, so the next save is the one that has
+        // to free room. Written through the database rather than the app
+        // because the point is the *count*, and taking twenty in one session
+        // would mean waiting out the clock.
+        let first = versions::save(&repo, page as i64, 1_001).unwrap().unwrap();
+        assert!(first.is_empty());
+        let mut stale = Vec::new();
+        for created in 1_001..1_001 + MAX_PER_PAGE as i64 {
+            if created > 1_001 {
+                std::fs::copy(
+                    versions::path_for(&path, page as i64, 1_001),
+                    versions::path_for(&path, page as i64, created),
+                )
+                .unwrap();
+            }
+            stale.push(created);
+        }
+        repo.apply(
+            &stale
+                .iter()
+                .flat_map(|created| {
+                    [
+                        crate::core::Change::MetaSet {
+                            key: versions::label_key(page as i64, *created),
+                            value: format!("Version {created}"),
+                        },
+                        crate::core::Change::MetaSet {
+                            key: versions::files_key(page as i64, *created),
+                            value: String::new(),
+                        },
+                    ]
+                })
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        drop(state);
+
+        // a session that loads that library mirrors all twenty
+        let state = super::AppState::new(&plain_args(), Some(repo.clone()));
+        assert_eq!(state.page_versions(page).len(), MAX_PER_PAGE);
+        state.save_page_version(page, "the new one").unwrap();
+
+        let list = state.page_versions(page);
+        assert_eq!(list.len(), MAX_PER_PAGE, "the cap holds, not one over");
+        assert_eq!(list[0].1, "the new one", "and the newest is never the one that goes");
+        assert!(
+            !versions::path_for(&path, page as i64, 1_001).exists(),
+            "the oldest version's file went with it"
+        );
+        assert!(versions::path_for(&path, page as i64, 1_002).exists());
+        state.persistence_force_flush();
+        let meta = repo.load().unwrap().meta;
+        assert!(
+            !meta.contains_key(&versions::label_key(page as i64, 1_001)),
+            "its index row went too, or the panel would offer a missing file"
+        );
+        assert!(!meta.contains_key(&versions::files_key(page as i64, 1_001)));
+    }
+
+    #[test]
+    fn a_version_outlives_the_session_that_took_it() {
+        use crate::storage::versions;
+        use crate::testing::ScratchDir;
+
+        let dir = ScratchDir::new("version-restart");
+        let (state, _repo, page, path) = version_session(&dir, &["written once"]);
+        state.save_page_version(page, "before the rewrite").unwrap();
+        let (created, label) = version_of(&state, page, 0);
+        state.persistence_force_flush();
+        drop(state);
+
+        let repo = scratch_repo(&dir);
+        let state = super::AppState::new(&plain_args(), Some(repo));
+        assert_eq!(
+            state.page_versions(page),
+            vec![(created, label.clone())],
+            "the index came back out of the database's own rows"
+        );
+        let blocks = versions::read(&path, page as i64, created).unwrap().1;
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].text, "written once");
+        // and the panel's row is the same row: an index of one is row 0
+        assert_eq!(state.version_at(page, 0).unwrap().1, label);
+        assert_eq!(state.version_at(page, 1), None, "a stale row resolves to nothing");
+        assert_eq!(state.version_at(page, -1).unwrap().0, created);
+    }
+
+    #[test]
+    fn comparing_a_version_says_what_changed_since_it_and_says_so_when_nothing_did() {
+        use crate::core::diff::DiffMark;
+        use crate::core::{BlockKind, Command};
+        use crate::testing::ScratchDir;
+
+        let dir = ScratchDir::new("version-diff");
+        let (state, _repo, page, _path) = version_session(&dir, &["keep me", "change me"]);
+        state.save_page_version(page, "before").unwrap();
+        let (created, _) = version_of(&state, page, 0);
+        assert_eq!(
+            state.version_diff(page, created).unwrap().len(),
+            0,
+            "a version of what is on screen differs from nothing"
+        );
+
+        let second = {
+            let doc = state.doc.borrow();
+            doc.page_blocks(super::core_page_id(page))[1].id
+        };
+        state
+            .exec_on_open_page(Command::ReplaceText {
+                id: second,
+                text: "changed".into(),
+            })
+            .unwrap();
+        state
+            .exec_on_open_page(Command::AppendBlock {
+                kind: BlockKind::Paragraph,
+                text: "new line".into(),
+            })
+            .unwrap();
+
+        let lines = state.version_diff(page, created).unwrap();
+        assert_eq!(
+            lines
+                .iter()
+                .map(|l| (l.mark, l.text.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (DiffMark::Removed, "change me"),
+                (DiffMark::Added, "changed"),
+                (DiffMark::Added, "new line"),
+            ],
+            "the edited line is one pair, and the untouched head costs no row"
+        );
+        assert_eq!(
+            super::version_diff_note(&lines),
+            "2 lines arrived, 1 went. Restoring puts every one of them back."
+        );
+        assert!(
+            state.version_diff(page, 999_999).is_err(),
+            "a row that names no file says so instead of showing an empty page"
+        );
+    }
+
+    #[test]
+    fn restoring_a_version_is_one_undo_step_and_leaves_the_pages_name_alone() {
+        use crate::core::{BlockKind, Command};
+        use crate::testing::ScratchDir;
+
+        let dir = ScratchDir::new("version-restore");
+        let (state, _repo, page, _path) = version_session(&dir, &["as it was"]);
+        state.save_page_version(page, "then").unwrap();
+        let (created, _) = version_of(&state, page, 0);
+
+        // what the restore has to replace: two rewritten lines and a subtree
+        let first = state.doc.borrow().page_blocks(super::core_page_id(page))[0].id;
+        state
+            .exec_on_open_page(Command::ReplaceText { id: first, text: "rewritten".into() })
+            .unwrap();
+        let anchor = state
+            .exec_on_open_page(Command::AppendBlock {
+                kind: BlockKind::Heading1,
+                text: "a heading".into(),
+            })
+            .unwrap();
+        let heading = match &anchor[0] {
+            crate::core::Change::BlockInserted(b) => b.id,
+            other => panic!("expected the inserted heading, got {other:?}"),
+        };
+        state
+            .exec_on_open_page(Command::InsertBlockAfter {
+                id: heading,
+                kind: BlockKind::Bullet,
+                text: "its child".into(),
+            })
+            .unwrap();
+        state.rename_page(page, "Renamed since");
+        assert_eq!(
+            lines_of(&state).len(),
+            3,
+            "control: two roots and the bullet that hangs off one of them"
+        );
+
+        let count = state.restore_version(page, created).unwrap();
+        assert_eq!(count, 1, "one line came back");
+        assert_eq!(lines_of(&state), vec!["as it was"]);
+        assert_eq!(
+            state.workspace.borrow().title_of(page).unwrap(),
+            "Renamed since",
+            "a version is of a page's content, not of its name"
+        );
+
+        // the whole replacement was ONE step: one Ctrl+Z, and the four rows the
+        // restore swept away are back
+        state.undo_open_page().expect("the restore is undoable");
+        assert_eq!(
+            lines_of(&state),
+            vec!["rewritten", "a heading", "its child"],
+            "undo puts back what the restore took, subtree included"
+        );
+    }
+
+    #[test]
+    fn a_locked_page_refuses_the_restore_it_was_asked_to_do() {
+        use crate::testing::ScratchDir;
+
+        let dir = ScratchDir::new("version-restore-locked");
+        let (state, _repo, page, _path) = version_session(&dir, &["as it was"]);
+        state.save_page_version(page, "then").unwrap();
+        let (created, _) = version_of(&state, page, 0);
+        let first = state.doc.borrow().page_blocks(super::core_page_id(page))[0].id;
+        state
+            .exec_on_open_page(crate::core::Command::ReplaceText {
+                id: first,
+                text: "edited while unlocked".into(),
+            })
+            .unwrap();
+
+        state.set_page_locked(page, true);
+        assert_eq!(
+            state.restore_version(page, created),
+            Err("this page is locked".into())
+        );
+        assert_eq!(
+            lines_of(&state),
+            vec!["edited while unlocked"],
+            "and the page is exactly as it was before the refusal"
+        );
+        // ADR-0048: the lock line is the one that says what to do about it, so
+        // the refusal has to leave it standing.
+        state.set_page_locked(page, false);
+        assert_eq!(state.restore_version(page, created).unwrap(), 1);
+    }
+
+    #[test]
+    fn a_version_is_restored_only_into_the_page_it_was_taken_from() {
+        use crate::testing::ScratchDir;
+
+        let dir = ScratchDir::new("version-restore-other-page");
+        let (state, _repo, first, _path) = version_session(&dir, &["page one"]);
+        state.save_page_version(first, "of page one").unwrap();
+        let (created, _) = version_of(&state, first, 0);
+        let second = state.create_page(None);
+        assert_eq!(state.open_page.get(), second, "creating navigates");
+
+        assert_eq!(
+            state.restore_version(first, created),
+            Err("open that page before restoring its version".into()),
+            "a row that went stale under a page switch restores nothing"
+        );
+        assert!(lines_of(&state).is_empty(), "and the open page is untouched");
+    }
+
+    #[test]
+    fn deleting_a_page_forgets_the_versions_it_had() {
+        use crate::core::persistence::Repository as _;
+        use crate::storage::versions;
+        use crate::testing::ScratchDir;
+
+        let dir = ScratchDir::new("version-page-delete");
+        let (state, repo, first, path) = version_session(&dir, &["page one"]);
+        let second = state.create_page(None);
+        state.exec_on_open_page(crate::core::Command::AppendBlock {
+            kind: crate::core::BlockKind::Paragraph,
+            text: "page two's own line".into(),
+        });
+        state.save_page_version(first, "of page one").unwrap();
+        state.save_page_version(second, "of page two").unwrap();
+        state.persistence_force_flush();
+        let (kept, gone) = (
+            version_of(&state, first, 0).0,
+            version_of(&state, second, 0).0,
+        );
+        assert!(versions::path_for(&path, second as i64, gone).exists());
+
+        assert!(state.delete_page(second), "the page goes");
+        assert!(
+            !versions::path_for(&path, second as i64, gone).exists(),
+            "and its version file with it — a page nobody can open has no reason to keep its past"
+        );
+        assert!(state.page_versions(second).is_empty());
+        assert_eq!(state.page_versions(first).len(), 1, "another page's history stays");
+        assert!(versions::path_for(&path, first as i64, kept).exists());
+
+        state.persistence_force_flush();
+        let meta = repo.load().unwrap().meta;
+        assert!(!meta.contains_key(&versions::label_key(second as i64, gone)));
+        assert!(!meta.contains_key(&versions::files_key(second as i64, gone)));
+        assert!(meta.contains_key(&versions::label_key(first as i64, kept)));
+    }
+
+    #[test]
+    fn a_version_pins_the_picture_its_page_no_longer_shows() {
+        use crate::core::{BlockId, Command};
+        use crate::storage::versions;
+        use crate::testing::ScratchDir;
+
+        let dir = ScratchDir::new("version-reclaim");
+        let path = dir.path().join("library.db");
+        let (state, _repo, page, pics) = session_with_pictures(&dir, 1);
+        state.save_page_version(page, "with the picture").unwrap();
+        let created = version_of(&state, page, 0).0;
+        let file = dir.path().join("attachments").join(&pics[0].1);
+        state
+            .exec_on_open_page(Command::DeleteBlock { id: BlockId(pics[0].2 as u64) })
+            .expect("the picture's row goes");
+        state.persistence_force_flush();
+        drop(state);
+
+        // A fresh session, so the undo stack is empty and the only pointer left
+        // is the one the version mirrored. Without the restart this would be
+        // proving §三十七's history pin instead of this one.
+        let repo = scratch_repo(&dir);
+        let state = super::AppState::new(&plain_args(), Some(repo));
+        assert!(
+            state.history.borrow().referenced_attachments().is_empty(),
+            "control: nothing on this session's stack points at the picture"
+        );
+        assert_eq!(
+            state.page_versions(page).len(),
+            1,
+            "control: and the version is still listed"
+        );
+
+        assert_eq!(
+            state.reclaim_attachments().unwrap(),
+            "no unused attachments to remove",
+            "the version holds the pointer, so the bytes are not unused"
+        );
+        assert!(file.is_file(), "and nothing was deleted");
+
+        state.delete_version(page, created).unwrap();
+        assert!(!versions::path_for(&path, page as i64, created).exists());
+        let notice = state.reclaim_attachments().unwrap();
+        assert!(
+            notice.starts_with("1 unused attachment removed ("),
+            "with the version gone the picture is finally orphaned: {notice}"
+        );
+        assert!(!file.exists(), "and its bytes went with it");
+    }
+
+    #[test]
+    fn a_session_with_no_database_file_has_nowhere_to_put_a_version() {
+        // SPEC §三十八's one honest limit: a version is a file, so a session
+        // that writes no file keeps no versions. The panel's empty state is the
+        // user's answer to this; the error strings are the controller's.
+        let state = super::AppState::new(&plain_args(), None);
+        let page = state.open_page.get();
+        assert!(page > 0, "the mock session has a page open");
+        assert_eq!(
+            state.save_page_version(page, "x").unwrap_err(),
+            "this session has no database file, so a version has nowhere to live"
+        );
+        assert!(state.page_versions(page).is_empty());
+        assert!(state.version_diff(page, 1).is_err());
+        assert!(state.delete_version(page, 1).is_err());
+        assert!(state
+            .restore_version(page, 1)
+            .unwrap_err()
+            .contains("no database file"));
+    }
+
+    #[test]
+    fn the_panels_rows_and_sentences_read_off_the_same_numbers() {
+        use super::{version_heading, version_rows, versions_note};
+        use crate::core::diff::{DiffLine, DiffMark};
+        use crate::core::BlockKind;
+        use slint::Model;
+
+        let now = super::now_secs();
+        let rows = version_rows(&[
+            (now - 2 * 3_600, "Two hours".into()),
+            (now - 40 * 60, "Forty minutes".into()),
+        ]);
+        assert_eq!(rows[0].index, 0, "a row is addressed by its place, not its time");
+        assert_eq!(rows[0].label, "Two hours");
+        assert_eq!(rows[0].when, "2 h ago");
+        assert_eq!(rows[1].when, "40 min ago");
+        assert_eq!(version_rows(&[]).len(), 0);
+
+        assert_eq!(
+            versions_note(1),
+            format!("1 version of this page. Quire keeps the {} newest and lets the oldest go.", crate::storage::versions::MAX_PER_PAGE)
+        );
+        assert!(versions_note(3).starts_with("3 versions"));
+        assert!(versions_note(0).starts_with("0 versions"));
+        assert_eq!(version_heading("Draft", now - 90), "“Draft” · 1 min ago");
+
+        // `fill_versions` is that projection pushed: a session with no window
+        // attached still gets the model right, which is what the panel draws.
+        let dir = crate::testing::ScratchDir::new("version-rows-model");
+        let (state, _repo, page, _path) = version_session(&dir, &["one"]);
+        state.save_page_version(page, "named").unwrap();
+        state.fill_versions(page);
+        assert_eq!(state.versions.row_count(), 1);
+        assert_eq!(state.versions.row_data(0).unwrap().label, "named");
+        state.fill_version_diff(
+            &[DiffLine { mark: DiffMark::Added, kind: BlockKind::Todo, text: "x".into() }],
+            "heading",
+            "note",
+        );
+        assert_eq!(state.version_diff.row_count(), 1);
+        let row = state.version_diff.row_data(0).unwrap();
+        assert!(row.added);
+        assert_eq!(row.kind, "To-do");
     }
 }

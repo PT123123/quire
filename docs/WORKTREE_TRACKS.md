@@ -155,7 +155,7 @@ worktree 里提交是干净的（只有一个 HEAD、只有你的改动）。**p
   commit → 还原备份」这一套；还原后别人的未提交内容原样还在。
 - ADR 号：四条 track 一律**追加在 `docs/DECISIONS.md` 末尾**（§2.4），只有整合者把收
   过来的 ADR 归位到文件头部。事实核对（2026-09-22）：这个文件是**降序**的（ADR-0001 在
-  末尾），而 Track 1 的 0044–0048 五刀都直接落在头部第 5 行——`origin/master` 上的 0047
+  末尾），而 Track 1 的 0044–0050 六刀都直接落在头部第 5 行——`origin/master` 上的 0047
   就在那儿。两种做法都不出错，只要号不撞；新切片接着头部往下写最省事，也和文件现状一致。
 
 ## 7 · 现在的登记
@@ -163,7 +163,7 @@ worktree 里提交是干净的（只有一个 HEAD、只有你的改动）。**p
 | 位置 | 分支 | 归谁 | 状态 |
 |------|------|------|------|
 | 主工作树（仓库根本身） | `track/3-database`（HEAD） | 共享，四个 agent 都往里写 | 脏：挂着 T2/T3 的未提交改动 |
-| `.scratch/wt/t1` | `track/1-page-appearance` | Track 1（版式 → icon → cover → lock → templates 五刀在这里收口） | templates 一刀在此收口：`target/` **13 G**，sweep 到 **80 张**（基线 `sweep38`，只存在于这个 worktree 的 `.scratch/` 里），像素闸与 `contrast_probe.ps1` 都在这条上跑通 |
+| `.scratch/wt/t1` | `track/1-page-appearance` | Track 1（版式 → icon → cover → lock → templates → version history 六刀在这里收口，§三十八 / M12 已交完） | version history 一刀在此收口：`target/` **13 G**，sweep 到 **83 张**（基线 `sweep39`，只存在于这个 worktree 的 `.scratch/` 里），像素闸与 `contrast_probe.ps1` 都在这条上跑通 |
 | （尚无） | — | Track 2 / 4 | 建议按 §2 各开一个，别在主工作树里建目录；**先读 §4 最后那段**，全量 worktree 开不起两个 |
 
 master 与 `origin/master` 在 `78ddf35`（本节写下时的值；Track 1 的 cover 一刀随后把 master

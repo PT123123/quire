@@ -2,6 +2,174 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0050 · A version is a database file with one page left in it, and the cap is twenty
+
+Decision: SPEC §三十八's version history stores a named version as **a whole
+SQLite file** — `versions/p<page>-<created>.db` beside the library — produced by
+the same `VACUUM INTO` statement §二十五's `backup::snapshot` runs, then narrowed
+to the one page. There is no `versions` table, no `page_versions` table, no blob
+column and **no migration**: `PRAGMA user_version` stays at 14, and the five
+M12 slices before this one were each a column (v10 … v14, ADR-0044 through
+ADR-0049) while this one is nothing. What
+a version adds over a `.bak<N>` is a name, a page, and the fact that §二十五's
+rotation must not eat it. The visible contract is three actions — 命名 / 对比 /
+恢复 — and one number: `versions::MAX_PER_PAGE = 20` per page, oldest going.
+
+Why "reuse §二十五's snapshot, do not build a second store" is read literally: the
+sentence 复用 §二十五 的 snapshot 机制，不另造一套存储 names a mechanism, and the
+mechanism is one statement plus a durability bargain plus a validator. So a
+version copies with `synchronous=OFF` for that one write (restored to `FULL`
+immediately after, because every real write still runs at `FULL`), then deletes
+every page but its own — one statement, because `blocks.page … ON DELETE CASCADE`
+takes the block rows and `block_children` / `marks` take theirs — then `VACUUM`s
+so the file is the size of what is left rather than the size of what was deleted.
+The copy is validated by `Database::open`, which migrates and integrity-checks
+it: the same door a recovered `.bak` comes through.
+
+The payoff is the part that is usually paid for twice. A version **is** the
+format, so it cannot drift from the format: `versions::read` opens the file with
+`SqliteRepository` and calls `Repository::load`, the loader the app opens the
+library with, and gets back a page with its marks, its colours, its `lang`, its
+table grid, its attachment ids and its `Page` references. A second reader — a
+JSON body, a serialised `Block` list, a per-version table with its own column
+list — is a thing this repo has to keep in step with `Block` forever. There is no
+such thing here, which is also how §三十八's other hard line ("不得引入第二套内容
+格式", argued the same way for templates in ADR-0049) gets obeyed without a rule.
+
+Why the index is two `metadata` rows and not a table: which versions exist, and
+what the user called them, has to survive a restart, so `version/<page>/<created>`
+holds the label and `version-files/<page>/<created>` holds the attachment ids the
+version's rows point at. The second row is not a convenience — §三十七's reclaim
+scan answers "does anything still point at this file?" out of the **live**
+database, and a version file is a database it never opens. Without the mirror, a
+version whose page later dropped its picture would restore as a missing image
+with nothing left to explain it, which is ADR-0047's objection arriving from the
+other direction. `AppState::reclaim_attachments` grows one term for it
+(`version_pinned_attachments`), so §三十七's scan counts a version's pictures as
+referencers. Two meta
+rows per version are cheaper than one query that opens twenty files.
+
+Why the FTS tables have to be emptied with more than a `DELETE`, measured: a
+version is a copy of the library until it is narrowed, and the two FTS tables are
+the one part of it that holds *the text of every page* while reporting no
+foreign keys. The first version of this code did `DELETE FROM search_blocks` and
+the tests confirmed 0 rows — and a 201-page library's version file still weighed
+**1.4 MB more than it should**, because FTS5 keeps its term dictionary in a
+`<table>_data` b-tree that a plain delete leaves standing. `clear_index` now runs
+the `DELETE` and then the FTS5 `rebuild` command, which re-derives `_data` from
+the (already empty) content tables. `delete-all` is the shorter statement and
+SQLite refuses it here: it is only for contentless or external-content tables, and
+this index stores its own content. The assertion is now on `_data`'s row count,
+not on the tables a reader would query — a row count was exactly what lied.
+
+Why the cap is 20 and goes from the old end: 保留策略必须给出磁盘与 RAM 数字，不接受
+无限增长. Twenty answers "the last few drafts of this week" for a page whose
+version is measured in kilobytes (numbers in docs/PERFORMANCE.md: a 60-line page's
+version is **120 KB**, 1% of a 9.9 MB library; a 5 000-line page's is 790 KB, 7%;
+twenty of the long page are 15.8 MB in 20 files). A cap that drops the *newest*
+entry is worse than one that drops the oldest, and a refusal with no way to free
+room is a dead end, so the panel's own caption says the number out loud ("Quire
+keeps the 20 newest and lets the oldest go") and the prune that follows a save
+deletes the file before it deletes the rows naming it — the other way round
+leaves a row the panel offers and `read` refuses. RAM is the smaller half of the
+question, and it is bounded by the same shape: a version is only ever in memory
+one at a time, through a transient connection that closes when the row is read.
+
+Why the save flushes first: `VACUUM INTO` reads the **file**, not this session's
+memory, so a version taken over a queue of unwritten edits would be a picture of
+the page as of the last flush — a thing named "this" delivering "ten seconds ago".
+`save_page_version` therefore calls `persistence_force_flush()` before the copy,
+which is also why the same-second collision retries (up to four times, ≈ five
+versions a second) rather than letting the clock be picked silently: the file name
+and the metadata key are both that second, and two versions with one timestamp is
+a lost version whose label the user typed.
+
+Why restore is content, through the command system: `restore_version` is one
+`exec_all` batch — an `InsertForest { anchor: None }` of the version's rows, then
+one `DeleteBlock` per current **root** (a delete takes its subtree, which is how a
+table's cells and a columns layout's boxes go too), so it lands as **one Ctrl+Z**
+and the rows behave like anything typed since: fresh ids, re-derived order keys,
+ordinary change feed, FTS updated by the same path. Swapping files was not on the
+table: it would put the page's rows behind the editor's back, cost the undo stack
+its page, and leave the database with a file the app no longer has open. The page
+keeps its title, icon, cover and font on purpose — a version is of a page's
+*content*, and rolling back a name the user chose after the snapshot is not what
+"restore this version" reads as. Two gates, both inherited: `locked_refusal()`
+(ADR-0048) and "only the page on screen", because the command system addresses the
+open page and a stale row after a page switch must not write into the wrong one.
+
+Why compare is line-level and bounded: `core::diff::compare` takes identity from
+the block id — a snapshot carries the page's own rows, so an unchanged line has
+the same id on both sides — trims the common head and tail, and aligns only what
+survives the trim, which is what makes editing one line of a long page cost one
+comparison instead of one per line. The middle is LCS-shaped, `ALIGN_CELLS = 1 <<
+18` (a 512 × 512 middle, ≈1 MB of `u32`), and past that the middle is *reported*
+as a wholesale rewrite rather than aligned: the extra rows would still be true,
+and a panel that takes a second to open is worse than one that shows more of them.
+A row that changed in place arrives as a `Removed`/`Added` pair with the same kind
+label — word-level diffing would need a second format inside a block, which is
+the thing §三十八 forbids one level up. `same_body` excludes id / page / order and
+`folded`, the last because §三十七 registers it as view state: leaving a section
+collapsed is not an edit to what the page says.
+
+Why one popup with two views, and why a row is an index: the list and the
+comparison are the same four questions (which page, which version, what changed,
+what does the button do), so they share a 460px window whose height is fixed —
+clicking a row must not move the panel out from under the pointer. Naming is the
+field at the bottom (always there, because "now" is worth a version at any
+moment), comparing is a row click, and restoring is a button that only exists
+*after* a comparison: nothing restores a version the user has not looked at,
+because a restore replaces the page. Rows carry a **row index**, not the
+timestamp, because Slint's `int` is 32-bit and a unix second is not —
+`version_at` turns the index back into `(created, label)` and returns `None` for
+a row a delete removed between the click and here. Ages are `diff::age_text` over
+`now_secs() - created`, which keeps the app's rule of no timezone and no calendar
+arithmetic. The scene captures and the click handlers read the *same* four
+projection functions (`version_rows`, `versions_note`, `version_heading`,
+`version_diff_note`), so a pixel in the panel is produced by runtime code rather
+than by a copy of it — the discipline A4's sweeps exist to keep honest.
+
+Consequences:
+
+* A session with no database file has no versions, and that is the panel's empty
+  state rather than an error line: a version *is* a file, so a session that
+  writes no file can keep no version. The headless bench and the captures paint
+  their list through the projection functions for exactly this reason.
+* `versions/` is the third folder beside the library, after `attachments/` and
+  the `.bak<N>` family. Its housekeeping is its own: `sweep_orphans` deletes any
+  file the index no longer names (a save that died between the copy and its
+  metadata row) and takes `p<page>-<created>.db{,-wal,-shm}` only — a name it did
+  not write is somebody's other data. A `readme.txt` in that folder survives.
+* Deleting a page forgets its versions, its pins and its files
+  (`forget_versions`, called for the page and each descendant `delete_page`
+  takes), so a picture only a version pointed at is freed by the same action
+  that made it unreachable. The test that pins it restarts the session first, so
+  the undo stack cannot be what is secretly holding the file alive.
+* The library's own bytes are unaffected by how many versions exist — the whole
+  cost is in `versions/`, one file per version, and that folder is invisible to
+  every number the app says out loud: §三十七's reclaim line reports only the
+  attachment bytes it just freed, and never counts `versions/`. The arithmetic a
+  user cannot see is written down in docs/PERFORMANCE.md instead — measured worst
+  case there: 159% of the library for twenty versions of a 5 000-line page.
+* §二十五's rotation and §三十八's versions share one mechanism and no lifecycle:
+  `.bak<N>` is five generations and seven days, a version is twenty per page and
+  no age. A version is *named by the user*, so nothing may prune it by age.
+* Restore does not mark the page modified in any way the user has to learn: the
+  change feed it produces is ordinary `BlockInserted` / `BlockDeleted`, so the
+  flush, the FTS index, the LAN share and a restart all see a page that simply
+  changed — the same deal `InsertForest` made for templates in ADR-0049.
+* Three sweep scenes were added (`page-versions`, `page-versions-diff`,
+  `dark-page-versions`), so the baseline is `.scratch/sweep39` at 83 scenes; the
+  manifest diff against the previous baseline was 78 identical / 3 new /
+  2 expected-changed before anyone looked at a picture.
+* **Hand-test owed**: ⋯ → Version history → type a name → Save → click the row →
+  Restore, including Ctrl+Z afterwards. The captures paint both views but cannot
+  type into the name field, so the focus-on-open and the "one restore, one undo"
+  feel are the parts a human still has to press. That is on top of the cover,
+  colour-emoji and template-dialog arms owed since ADR-0046 / -0047 / -0049.
+* Track 3's draft does not need a `versions` table either: if a database row ever
+  wants version history, this is the same two metadata rows and the same folder.
+
 ## ADR-0049 · A template is a page nobody can open, and that costs one column
 
 Decision: SPEC §三十八's template is `pages.template INTEGER NOT NULL DEFAULT 0`
