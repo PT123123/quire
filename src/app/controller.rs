@@ -1462,6 +1462,232 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         });
     }
 
+    // ---- database rules (SPEC §三十九 「操作」, D4) ----
+    //
+    // The same two rules the cell callbacks carry, with one addition: the
+    // panel stays open across its own edits, so every accepted edit re-pushes
+    // the panel's rows (`db_push_filter`) the way the columns popup re-pushes
+    // its toggles. An edit that Rust refuses (a value of the wrong shape, a
+    // tree the panel cannot represent) writes nothing, and the panel shows
+    // the rules that are still in force.
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_filter_opened(move |block, x, y| {
+            let g = gw.upgrade().unwrap();
+            // the panel's value boxes are inputs: the block editor must not
+            // also be up
+            flush_pending_edit(&g, &s);
+            g.set_editing_id(-1);
+            db_push_filter(&g, &s, block);
+            g.set_db_filter_panel(0);
+            g.set_db_filter_block(block);
+            // anchored under the button (window coordinates, the columns
+            // popup's convention) and clamped to the rules state's height —
+            // the tallest the panel gets
+            let rows = state.db_filter_panel(block).1.len() as f32;
+            let popup_h = 40.0 + rows * 76.0 + 36.0 + 8.0;
+            let y = y.clamp(48.0, (g.get_window_h() - popup_h - 8.0).max(48.0));
+            let x = x.clamp(8.0, (g.get_window_w() - 348.0 - 8.0).max(8.0));
+            g.set_db_filter_x(x);
+            g.set_db_filter_y(y);
+            g.set_db_filter_open(true);
+        });
+    }
+    {
+        let gw = gw.clone();
+        ui.global::<UIState>().on_db_filter_closed(move || {
+            let g = gw.upgrade().unwrap();
+            g.set_db_filter_open(false);
+        });
+    }
+    {
+        let gw = gw.clone();
+        ui.global::<UIState>().on_db_filter_panel_set(move |panel| {
+            let g = gw.upgrade().unwrap();
+            g.set_db_filter_panel(panel);
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_filter_match_set(move |block, any| {
+            let g = gw.upgrade().unwrap();
+            if s.db_filter_set_match(block, any) {
+                db_refill_row(&s, block);
+                db_push_filter(&g, &s, block);
+            }
+        });
+    }
+    {
+        let gw = gw.clone();
+        ui.global::<UIState>().on_db_filter_add_rule(move |_block| {
+            let g = gw.upgrade().unwrap();
+            // the chooser's list is already pushed; the panel just turns a page
+            g.set_db_filter_panel(1);
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_filter_column_picked(move |block, property| {
+            let g = gw.upgrade().unwrap();
+            if s.db_filter_add_clause(block, property) {
+                db_refill_row(&s, block);
+                db_push_filter(&g, &s, block);
+                g.set_db_filter_panel(0);
+            }
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_filter_row_removed(move |block, index| {
+            let g = gw.upgrade().unwrap();
+            if s.db_filter_remove_clause(block, index as usize) {
+                db_refill_row(&s, block);
+                db_push_filter(&g, &s, block);
+            }
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_filter_op_menu(move |block, index| {
+            let g = gw.upgrade().unwrap();
+            db_push_filter_ops(&g, &s, block, index as usize);
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_filter_op_picked(move |block, index, op| {
+            let g = gw.upgrade().unwrap();
+            // switching the comparison resets the value (the old shape is not
+            // the new one's), so the row comes back unfilled
+            if s.db_filter_set_op(block, index as usize, op as usize) {
+                db_refill_row(&s, block);
+                db_push_filter(&g, &s, block);
+                g.set_db_filter_panel(0);
+            }
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_filter_text_set(move |block, index, text| {
+            let g = gw.upgrade().unwrap();
+            // a refused value (not a number, not a stored date) writes nothing
+            // and the panel keeps the text for the user to fix
+            if s.db_filter_set_text(block, index as usize, &text) {
+                db_refill_row(&s, block);
+                db_push_filter(&g, &s, block);
+            }
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_filter_flag_set(move |block, index, checked| {
+            let g = gw.upgrade().unwrap();
+            if s.db_filter_set_flag(block, index as usize, checked) {
+                db_refill_row(&s, block);
+                db_push_filter(&g, &s, block);
+            }
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_filter_option_menu(move |block, index| {
+            let g = gw.upgrade().unwrap();
+            db_push_filter_options(&g, &s, block, index as usize);
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_filter_option_picked(move |block, index, option| {
+            let g = gw.upgrade().unwrap();
+            // `is`: picking the held option clears the rule; `any of`: the
+            // pick toggles membership — either way the panel goes home
+            if s.db_filter_toggle_option(block, index as usize, &option) {
+                db_refill_row(&s, block);
+                db_push_filter(&g, &s, block);
+                g.set_db_filter_panel(0);
+            }
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_filter_not_toggled(move |block, index| {
+            let g = gw.upgrade().unwrap();
+            if s.db_filter_toggle_not(block, index as usize) {
+                db_refill_row(&s, block);
+                db_push_filter(&g, &s, block);
+            }
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_filter_cleared(move |block| {
+            let g = gw.upgrade().unwrap();
+            if s.db_filter_clear(block) {
+                db_refill_row(&s, block);
+                db_push_filter(&g, &s, block);
+            }
+        });
+    }
+    {
+        let s = state.clone();
+        ui.global::<UIState>().on_db_sort_cycled(move |block, property| {
+            // the header cycles none → asc → desc → none; a kind with no
+            // order refuses in Rust and the header stays as it was
+            if s.db_sort_cycle(block, property) {
+                db_refill_row(&s, block);
+            }
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_group_opened(move |block, x, y| {
+            let g = gw.upgrade().unwrap();
+            flush_pending_edit(&g, &s);
+            db_push_group(&g, &s, block);
+            g.set_db_group_block(block);
+            let rows = state.db_group_choices(block).len() as f32 + 1.0;
+            let popup_h = rows * 30.0 + 8.0;
+            let y = y.clamp(48.0, (g.get_window_h() - popup_h - 8.0).max(48.0));
+            let x = x.clamp(8.0, (g.get_window_w() - 224.0 - 8.0).max(8.0));
+            g.set_db_group_x(x);
+            g.set_db_group_y(y);
+            g.set_db_group_open(true);
+        });
+    }
+    {
+        let gw = gw.clone();
+        ui.global::<UIState>().on_db_group_closed(move || {
+            let g = gw.upgrade().unwrap();
+            g.set_db_group_open(false);
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_db_group_picked(move |block, property| {
+            let g = gw.upgrade().unwrap();
+            if s.db_group_pick(block, property) {
+                db_refill_row(&s, block);
+            }
+            // the pick is the whole interaction: the picker closes whether it
+            // changed anything or not (a refusal said its own word)
+            g.set_db_group_open(false);
+        });
+    }
+
     {
         let gw = gw.clone();
         let s = state.clone();
@@ -2338,34 +2564,6 @@ fn debounce_arm(
     );
 }
 
-/// Where the caret belongs after a row or column delete: `at` was the focused
-/// cell's row-major slot, so the same slot of the smaller grid is the cell
-/// nearest to it. `None` means the caret was never in this grid — the delete
-/// took a row from under someone else, so it keeps its own focus.
-fn table_refocus(g: &UIState<'_>, s: &Rc<AppState>, table: i32, at: Option<usize>) {
-    match at.and_then(|at| s.table_cell_at(table, at)) {
-        Some(cell) => focus_block(g, s, cell, i32::MAX),
-        None => refresh_focused_text(g, s),
-    }
-}
-
-/// Adding or removing a box rebuilds the layout's row, and the item's input
-/// is created with the focus — so it would come back with the caret at the
-/// start of the line. Hand it back where the reader left it.
-fn columns_refocus(g: &UIState<'_>, s: &Rc<AppState>) {
-    let id = g.get_editing_id();
-    if id > 0 && s.is_column_item(id) {
-        focus_block(g, s, id, i32::MAX);
-    }
-}
-
-/// The database cell's debounced commit (SPEC §三十九). The same 300 ms rhythm
-/// the prose rows use, but the ids it reads back are the cell's —
-/// (block, record, property), never `editing-id`, which is `-1` while a cell
-/// is live by the one-input discipline. A parse the column's kind refuses
-/// (`db_set_cell_text` returns `false`) keeps the editor open with the typed
-/// text: the cell's stored value is untouched, and closing the editor is what
-/// repaints it. A commit that lands re-reads the window in place.
 fn db_debounce_arm(
     t: &'static slint::Timer,
     gw: &slint::Weak<UIState<'static>>,
@@ -2450,6 +2648,103 @@ fn db_push_columns(g: &UIState<'_>, state: &Rc<AppState>, block: i32) {
         })
         .collect();
     g.set_db_columns_rows(Rc::new(slint::VecModel::from(rows)).into());
+}
+
+/// Push the filter panel's whole state (D4): the rule rows, the root's
+/// flavour, and the column chooser's list. Called on open and after every
+/// accepted edit, so the panel a user is looking at is always the document's
+/// current rules — the model is derived, never a second copy of the filter.
+fn db_push_filter(g: &UIState<'_>, state: &Rc<AppState>, block: i32) {
+    let (any, rows) = state.db_filter_panel(block);
+    g.set_db_filter_match_any(any);
+    let rows: Vec<crate::DbFilterRow> = rows
+        .into_iter()
+        .map(|r| crate::DbFilterRow {
+            property: r.property,
+            name: r.name.into(),
+            kind: r.kind,
+            op: r.op,
+            op_name: r.op_name.into(),
+            value: r.value.into(),
+            has_value: r.has_value,
+            invert: r.invert,
+        })
+        .collect();
+    g.set_db_filter_rows(Rc::new(slint::VecModel::from(rows)).into());
+    // The chooser lists every property of the database (the columns popup's
+    // own model shape, so a name and a type word are already what it draws).
+    let choices: Vec<crate::DbColumnToggle> = state
+        .db_column_toggles(block)
+        .into_iter()
+        .map(|t| crate::DbColumnToggle {
+            property: t.property,
+            name: t.name.into(),
+            kind: t.kind.into(),
+            visible: t.visible,
+            locked: t.locked,
+        })
+        .collect();
+    g.set_db_filter_columns(Rc::new(slint::VecModel::from(choices)).into());
+}
+
+/// Push the comparison chooser for one clause: the comparisons its column's
+/// kind has — the same list the parser accepts, so nothing the menu offers can
+/// be refused later. The panel switches to state 2.
+fn db_push_filter_ops(g: &UIState<'_>, state: &Rc<AppState>, block: i32, index: usize) {
+    let rows = state.db_filter_panel(block).1;
+    let Some(row) = rows.get(index) else {
+        return;
+    };
+    let ops: Vec<crate::DbFilterOp> = state
+        .db_ops_for_kind(row.kind)
+        .into_iter()
+        .map(|(op, name)| crate::DbFilterOp {
+            op,
+            name: name.into(),
+        })
+        .collect();
+    g.set_db_filter_ops(Rc::new(slint::VecModel::from(ops)).into());
+    g.set_db_filter_edit_row(index as i32);
+    g.set_db_filter_panel(2);
+}
+
+/// Push the value chooser for one clause: the column's options (an id and the
+/// name the config gives it). The panel switches to state 3.
+fn db_push_filter_options(g: &UIState<'_>, state: &Rc<AppState>, block: i32, index: usize) {
+    let rows = state.db_filter_panel(block).1;
+    let Some(row) = rows.get(index) else {
+        return;
+    };
+    let options: Vec<crate::DbOption> = state
+        .db_property_options(row.property)
+        .into_iter()
+        .map(|(id, name, color)| crate::DbOption {
+            id: id.into(),
+            name: name.into(),
+            color: color.into(),
+        })
+        .collect();
+    g.set_db_filter_options(Rc::new(slint::VecModel::from(options)).into());
+    g.set_db_filter_edit_row(index as i32);
+    g.set_db_filter_panel(3);
+}
+
+/// Push the group picker's rows (D4): the option-bounded columns, plus the
+/// active one so a row can mark itself.
+fn db_push_group(g: &UIState<'_>, state: &Rc<AppState>, block: i32) {
+    let rows: Vec<crate::DbColumnToggle> = state
+        .db_group_choices(block)
+        .into_iter()
+        .map(|t| crate::DbColumnToggle {
+            property: t.property,
+            name: t.name.into(),
+            kind: t.kind.into(),
+            visible: t.visible,
+            locked: t.locked,
+        })
+        .collect();
+    g.set_db_group_rows(Rc::new(slint::VecModel::from(rows)).into());
+    g.set_db_group_current(state.db_group_current(block));
 }
 
 /// Where the caret belongs after a row or column delete: `at` was the focused
@@ -2881,6 +3176,33 @@ fn seed_database_table(state: &Rc<AppState>) -> Option<i32> {
     Some(id)
 }
 
+/// Seed the database-filter scene (SPEC §三十九 「操作」, D4): the table seed plus
+/// one number rule — Points > 5 — written through the **same helpers the filter
+/// panel drives**, so the shot shows the real write path's result, not a
+/// hand-built fixture: 3 of the 5 rows, the header chip reading "Filter 1",
+/// and the rules persisted in the view's document (`{"and":[{…,"op":"gt",
+/// "value":5}]}`). The values are literals: a sweep that runs tomorrow must
+/// photograph the same table.
+fn seed_database_filter(state: &Rc<AppState>) -> Option<i32> {
+    let id = seed_database_table(state)?;
+    let points = state
+        .db_column_toggles(id)
+        .into_iter()
+        .find(|t| t.name == "Points")
+        .map(|t| t.property)?;
+    if !state.db_filter_add_clause(id, points) {
+        return None;
+    }
+    // `gt` is FILTER_OPS[3] (contains, eq, ne, gt, …), and the value goes
+    // through the kind's own validation — the same door a user's keystroke
+    // would.
+    if !state.db_filter_set_op(id, 0, 3) || !state.db_filter_set_text(id, 0, "5") {
+        return None;
+    }
+    db_refill_row(state, id);
+    Some(id)
+}
+
 /// The first cell a grid-building command created — the cell a table's caret
 /// starts in. `apply` inserts cells in row-major order, so this is the
 /// top-left one, which is where the converted line's words went.
@@ -3089,6 +3411,10 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             g.set_dark(true);
             apply_scene(ui, state, "database-table");
         }
+        "dark-database-filter" => {
+            g.set_dark(true);
+            apply_scene(ui, state, "database-filter");
+        }
         "title-edit" => {
             g.set_page_title("Renaming in place…".into());
             g.set_title_editing(true);
@@ -3161,6 +3487,14 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
         // paths — nothing here hand-builds a fixture the UI could not make.
         "database-table" => {
             seed_database_table(state);
+        }
+        // SPEC §三十九 「操作」(D4): the same table with one rule compiled into
+        // SQL — Points > 5 keeps 3 of the 5 rows. The shot shows the red
+        // line's visible half: the count and the rows answer to the rules,
+        // the chip says "Filter 1", and nothing filtered happens anywhere but
+        // in the statement.
+        "database-filter" => {
+            seed_database_filter(state);
         }
 
         "empty" => open(&g, state, 113),

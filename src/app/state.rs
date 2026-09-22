@@ -9,12 +9,15 @@
 use crate::app::workspace::{SearchHit, Workspace, BENCH_ID_BASE, MAX_RECENTS};
 use crate::core::database::{
     CellValue, DatabaseCatalog, DatabaseDraft, DatabaseId, Property, PropertyId, PropertyKind,
-    RecordId, RowRequest, RowWindow, ViewGeometry, ViewId,
+    RecordId, RowRequest, RowWindow, SortSpec, ViewGeometry, ViewId,
 };
+use crate::core::database_property::PropertyOptions;
 use crate::core::database_view::{
-    all_columns, table_columns, table_rows, view_columns, LayoutSupport, TableColumn, TableView,
-    ViewDefinition, ViewTab, WIDTH_AUTO,
+    all_columns, group_window, is_stored_date, table_columns, table_rows, view_columns,
+    FilterClause, FilterOp, FilterValue, FlatClause, FlatFilter, GroupKey, GroupSpec, LayoutSupport,
+    TableColumn, TableView, ViewDefinition, ViewRules, ViewTab, WIDTH_AUTO,
 };
+
 use crate::core::persistence::{Change, Repository};
 use crate::core::{
     Attachment, AttachmentId, Block, BlockId, BlockKind, ColorKind, Command, Document, History, Lang,
@@ -3817,11 +3820,20 @@ struct DbWindow {
     /// (different columns, and in D4 different rows), which is why it is here and
     /// not in a separate map.
     view: ViewId,
+    /// The view's definition document **as text**, part of the cache key: the
+    /// rules live in that document (ADR-0064), so a filter or sort edit — whose
+    /// row count and row set may change while the view id does not — must
+    /// invalidate exactly the way a view switch does. Compared as text rather
+    /// than re-parsed: the document is the only copy of the rules, and two
+    /// documents that differ as text can differ as rules.
+    definition: String,
     /// The columns the read was made with, in view order.
     columns: Vec<TableColumn>,
-    /// The database's row count at the time of the read.
+    /// The count the window was computed from — the rows the view's rules
+    /// admit (`COUNT(*)` / the group counts' sum), not the table's size.
     total: usize,
-    /// The slice of `total` the model holds.
+    /// The slice of `total` the model holds. When the view is grouped, the
+    /// "rows" are *entries*: a group header is one entry, its rows follow it.
     window: RowWindow,
     /// The realized rows, as the delegate reads them. Cloned into the block's
     /// row, so a re-read updates the UI without touching the page's row list.
@@ -3842,6 +3854,29 @@ pub struct DbColumnToggle {
     pub locked: bool,
 }
 
+/// One filter-panel row (D4), as the panel draws it: the clause's ids plus the
+/// display strings its column's kind needs — the comparison's word ("is",
+/// "contains", "after"), and the value as stored or as its option's name. A
+/// row with `has_value == false` is a rule nobody has filled in yet, which
+/// filters nothing by design (`FilterValue::Missing` compiles to no
+/// constraint).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DbFilterPanelRow {
+    pub property: i32,
+    pub name: String,
+    /// The `PropertyKind` int (`property_kind_int`'s legend in Types.slint) —
+    /// what decides the value editor the row draws.
+    pub kind: i32,
+    /// The `FilterOp` index (`FILTER_OPS`'s order, the same legend the op
+    /// picker's list is pushed from).
+    pub op: i32,
+    pub op_name: String,
+    pub value: String,
+    pub has_value: bool,
+    /// A `not` around this clause ("is not", "does not contain").
+    pub invert: bool,
+}
+
 /// The `PropertyKind` int a Slint delegate compares against. `PropertyKind::ALL`
 /// is the list and the index is the int, so the numbering has exactly one source
 /// and adding a kind appends a number instead of renumbering one — the same rule
@@ -3852,6 +3887,33 @@ fn property_kind_int(kind: crate::core::database::PropertyKind) -> i32 {
         .position(|k| *k == kind)
         .map(|at| at as i32)
         .unwrap_or(0)
+}
+
+/// Painted rows as the delegate reads them. `header` is a group header's label
+/// (D4) — a data row carries an empty one, which is the only thing the
+/// delegate's conditional asks. One conversion, used by both realize paths
+/// (the plain window's and the grouped one), so a row cannot come out shaped
+/// differently depending on which path built it.
+fn db_rows_of(rows: Vec<crate::core::database_view::TableRowView>) -> Vec<DbRow> {
+    rows.into_iter()
+        .map(|row| DbRow {
+            record: row.record as i32,
+            page: row.page.map(|p| p.as_u64() as i32).unwrap_or(-1),
+            title: row.title.into(),
+            header: "".into(),
+            cells: ModelRc::from(Rc::new(VecModel::from(row
+                .cells
+                .into_iter()
+                .map(|cell| DbCell {
+                    property: cell.property.as_u64() as i32,
+                    kind: property_kind_int(cell.kind),
+                    text: cell.painted.into(),
+                    checked: cell.checked,
+                    editable: cell.editable,
+                })
+                .collect::<Vec<_>>()))),
+        })
+        .collect()
 }
 
 impl AppState {
@@ -3898,6 +3960,21 @@ impl AppState {
             .iter()
             .find(|v| v.id == view)
             .map(|v| ViewDefinition::parse(&v.definition))
+            .unwrap_or_default()
+    }
+
+    /// One view's rules, parsed against the schema — the read side of D4: what
+    /// the header state (`db_fill_row`) and the two panels read. The write side
+    /// goes through `db_edit_definition` and, for the filter, the panel's flat
+    /// view of the tree. `ViewRules::note` is the visible degradation, so a
+    /// caller never has to guess whether the document's rules were applied.
+    fn db_rules(&self, db: DatabaseId, view: ViewId) -> ViewRules {
+        let catalog = self.databases.borrow();
+        catalog
+            .views
+            .iter()
+            .find(|v| v.id == view)
+            .map(|row| ViewDefinition::parse(&row.definition).rules(db, &catalog))
             .unwrap_or_default()
     }
 
@@ -4072,14 +4149,25 @@ impl AppState {
             // file holds, which is the honest thing to draw.
             let _ = persistence.force_flush();
         }
-        let catalog = self.databases.borrow();
-        let Some(db_row) = catalog.views.iter().find(|v| v.id == view) else {
-            return false;
+        // One catalog read for everything the refresh needs: the columns the
+        // view shows, its definition **text** (the cache key's rules half), and
+        // the rules parsed against the schema — filter, sorts, group, and the
+        // visible note if any of it could not be applied (D4's degradation,
+        // `ViewRules::note`).
+        let (definition_text, properties, columns, rules) = {
+            let catalog = self.databases.borrow();
+            let Some(db_row) = catalog.views.iter().find(|v| v.id == view) else {
+                return false;
+            };
+            let definition_text = db_row.definition.clone();
+            let properties = view_columns(&catalog, db, db_row);
+            // One parse for both readers: the rules (filter/sorts/group/note)
+            // and the widths the columns lay out at are the same document.
+            let definition = ViewDefinition::parse(&definition_text);
+            let rules = definition.rules(db, &catalog);
+            let columns = table_columns(&properties, &definition);
+            (definition_text, properties, columns, rules)
         };
-        let properties = view_columns(&catalog, db, db_row);
-        let definition = ViewDefinition::parse(&db_row.definition);
-        let columns = table_columns(&properties, &definition);
-        drop(catalog);
 
         // `top` is the anchor the delegate reports (`db-viewport`): the block
         // body's top — header included — **relative to the viewport's top
@@ -4097,11 +4185,70 @@ impl AppState {
         let offset = (-top).max(0.0);
         let geometry = ViewGeometry::new(TableView::ROW_HEIGHT, viewport);
 
-        let total = match repo.record_count(db) {
-            Ok(total) => total,
-            Err(e) => {
-                self.db_notice.borrow_mut().push(format!("database read failed: {e}"));
-                return false;
+        let title = properties.iter().find(|p| p.kind.is_title()).map(|p| p.id);
+        let Some(title) = title else {
+            // ADR-0061: a database without a title column cannot draw a row. The
+            // invariant is the insert path's, so this is only reachable through a
+            // hand-edited file — and the answer is an empty view, not a panic.
+            return false;
+        };
+        // The request carries the view's rules themselves (ADR-0076): sorts and
+        // the filter tree are compiled into the statement by the store, and the
+        // borrows live exactly this long — the queries below are the request's
+        // only readers. Nothing between here and SQL ever sees a row: that is
+        // the red line (「filter / sort 在 SQL 侧完成，不在 UI 侧过滤」) as a
+        // borrow, not a rule.
+        let request = RowRequest {
+            db,
+            title,
+            columns: &properties,
+            sorts: &rules.sorts,
+            filter: rules.filter.as_ref(),
+        };
+
+        // ── the count, SQL's, before the window ────────────────────────────
+        // A grouped view counts by its group query (one `GROUP BY` over an
+        // option-bounded column — the list of *headers*, a handful of rows);
+        // its entries are then Σ(count + 1). An ungrouped view counts with one
+        // `COUNT(*)` — over the filter's predicate when it has one, over the
+        // database alone when it does not. Either way the window arithmetic is
+        // computed FROM that number: filter a 10 000-row database down to 3
+        // rows and the window realizes 3 rows, and a grouped one realizes 3
+        // rows plus its headers — never the table, never one row per group.
+        let counts = match &rules.group {
+            Some(spec) => match repo.group_counts(&request, spec) {
+                Ok(counts) => Some(self.db_order_groups(spec, counts)),
+                Err(e) => {
+                    self.db_notice.borrow_mut().push(format!("database read failed: {e}"));
+                    return false;
+                }
+            },
+            None => None,
+        };
+        let total: usize = match &counts {
+            Some(counts) => counts.iter().map(|(_, n)| n + 1).sum(),
+            None => {
+                if rules.filter.is_some() {
+                    match repo.filtered_count(&request) {
+                        Ok(total) => total,
+                        Err(e) => {
+                            self.db_notice
+                                .borrow_mut()
+                                .push(format!("database read failed: {e}"));
+                            return false;
+                        }
+                    }
+                } else {
+                    match repo.record_count(db) {
+                        Ok(total) => total,
+                        Err(e) => {
+                            self.db_notice
+                                .borrow_mut()
+                                .push(format!("database read failed: {e}"));
+                            return false;
+                        }
+                    }
+                }
             }
         };
         let wanted = crate::core::database::window(total, geometry, offset);
@@ -4110,68 +4257,166 @@ impl AppState {
             let windows = self.db_windows.borrow();
             if let Some(existing) = windows.get(&block) {
                 // The whole point of overscan: a scroll that stays inside the
-                // window costs the arithmetic above and nothing else.
-                if existing.view == view && existing.window == wanted && existing.total == total {
+                // window costs the arithmetic above and nothing else. The
+                // definition text is part of the key because the rules — and
+                // with them the count and the row set — live in it: a filter or
+                // sort edit invalidates exactly the way a view switch does.
+                if existing.view == view
+                    && existing.definition == definition_text
+                    && existing.window == wanted
+                    && existing.total == total
+                {
                     return false;
                 }
             }
         }
 
-        let title = properties.iter().find(|p| p.kind.is_title()).map(|p| p.id);
-        let Some(title) = title else {
-            // ADR-0061: a database without a title column cannot draw a row. The
-            // invariant is the insert path's, so this is only reachable through a
-            // hand-edited file — and the answer is an empty view, not a panic.
-            return false;
-        };
-        let request = RowRequest::new(db, title, &properties);
-        let rows = match repo.window_rows(&request, wanted) {
-            Ok(rows) => rows,
-            Err(e) => {
-                self.db_notice
-                    .borrow_mut()
-                    .push(format!("database read failed: {e}"));
-                return false;
-            }
-        };
         // Which rows are pages (ADR-0063), for the row's own Open/name column.
         // One query for the database, not one per row: lazy pages mean this is a
         // handful of rows however large the database is.
         let pages = repo.record_pages(db).unwrap_or_default();
-        let view_rows: Vec<DbRow> = table_rows(&rows, &columns, &pages)
-            .into_iter()
-            .map(|row| DbRow {
-                record: row.record as i32,
-                page: row.page.map(|p| p.as_u64() as i32).unwrap_or(-1),
-                title: row.title.into(),
-                cells: ModelRc::from(Rc::new(VecModel::from(row
-                    .cells
-                    .into_iter()
-                    .map(|cell| DbCell {
-                        property: cell.property.as_u64() as i32,
-                        kind: property_kind_int(cell.kind),
-                        text: cell.painted.into(),
-                        checked: cell.checked,
-                        editable: cell.editable,
+        let mut view_rows: Vec<DbRow> = match &counts {
+            None => {
+                let rows = match repo.window_rows(&request, wanted) {
+                    Ok(rows) => rows,
+                    Err(e) => {
+                        self.db_notice
+                            .borrow_mut()
+                            .push(format!("database read failed: {e}"));
+                        return false;
+                    }
+                };
+                db_rows_of(table_rows(&rows, &columns, &pages))
+            }
+            Some(counts) => {
+                let spec = rules.group.as_ref().expect("counts imply a group");
+                // A group header is one entry and its rows follow it:
+                // `group_window` maps the entry window onto per-group slices,
+                // so the rows realized are the viewport's wherever they sit
+                // relative to their header — a group holding all 10 000 rows
+                // realizes the same 31 rows it would ungrouped, and each group
+                // costs one header entry, never one row per group.
+                let surface = group_window(&counts.iter().map(|(_, n)| *n).collect::<Vec<_>>(), wanted);
+                let mut entries: Vec<DbRow> = (0..wanted.len())
+                    .map(|_| DbRow {
+                        record: -1,
+                        page: -1,
+                        title: "".into(),
+                        header: "".into(),
+                        cells: ModelRc::default(),
                     })
-                    .collect::<Vec<_>>()))),
-            })
-            .collect();
+                    .collect();
+                for slice in &surface.rows {
+                    let (key, _) = &counts[slice.group];
+                    let rows = match repo.window_rows_in_group(&request, spec, key, slice.skip, slice.len)
+                    {
+                        Ok(rows) => rows,
+                        Err(e) => {
+                            self.db_notice
+                                .borrow_mut()
+                                .push(format!("database read failed: {e}"));
+                            return false;
+                        }
+                    };
+                    for (at, row) in db_rows_of(table_rows(&rows, &columns, &pages))
+                        .into_iter()
+                        .enumerate()
+                    {
+                        entries[slice.at - wanted.start + at] = row;
+                    }
+                }
+                for (group, header_at) in &surface.headers {
+                    let (key, count) = &counts[*group];
+                    let label = self.db_group_label(spec, key);
+                    entries[header_at - wanted.start] = DbRow {
+                        record: -1,
+                        page: -1,
+                        title: "".into(),
+                        header: format!("{label} · {count}").into(),
+                        cells: ModelRc::default(),
+                    };
+                }
+                entries
+            }
+        };
+        // (`ViewRules::note` — the visible degradation — is not toasted here:
+        // it rides the block row, and `db_fill_row` draws it where the row
+        // count would be, because a filter that is not being applied is a fact
+        // about every frame the user looks at, not about the moment it was
+        // noticed.)
 
         let mut windows = self.db_windows.borrow_mut();
         let entry = windows.entry(block).or_insert_with(|| DbWindow {
             view,
+            definition: String::new(),
             columns: Vec::new(),
             total,
             window: wanted,
             rows: Rc::new(VecModel::from(Vec::new())),
         });
         entry.view = view;
+        entry.definition = definition_text;
         entry.columns = columns;
         entry.total = total;
         entry.window = wanted;
         entry.rows.set_vec(view_rows);
         true
+    }
+
+    /// The group headers' order. SQL returned the keys unordered on purpose:
+    /// the order a user means is the schema's own option order (ADR-0061),
+    /// which lives in the column's config JSON where SQL cannot see it — so
+    /// these few rows are ordered here, from that same config. A select/status
+    /// follows its option list; an option id the config no longer has follows
+    /// the known ones in byte order (ADR-0069's fold, applied to a header); a
+    /// checkbox is unchecked-then-checked (the `false` before `true` ADR-0070
+    /// sorts by); "no value" is last, so the empty group never floats over the
+    /// real ones. This is ordering a handful of *headers* — the rows inside a
+    /// group are SQL's, each slice from its own ordered query.
+    fn db_order_groups(
+        &self,
+        spec: &GroupSpec,
+        counts: Vec<(GroupKey, usize)>,
+    ) -> Vec<(GroupKey, usize)> {
+        let config = self.db_property_config(spec.property.as_u64() as i32);
+        let options = PropertyOptions::from_config(&config);
+        let rank = |key: &GroupKey| -> (u64, String) {
+            match key {
+                GroupKey::Unchecked => (0, String::new()),
+                GroupKey::Checked => (1, String::new()),
+                GroupKey::Option(id) => {
+                    match options.iter().position(|o| o.id.as_u64().to_string() == *id) {
+                        Some(at) => (2 + at as u64, String::new()),
+                        None => (u64::MAX / 2, id.clone()),
+                    }
+                }
+                GroupKey::Empty => (u64::MAX, String::new()),
+            }
+        };
+        let mut ordered = counts;
+        ordered.sort_by(|(a, _), (b, _)| rank(a).cmp(&rank(b)));
+        ordered
+    }
+
+    /// What one group's header says: the option's name as the column's config
+    /// spells it, the checkbox's two states, and "No value" for the empty
+    /// group. An id the config forgot names itself (ADR-0069's fold) — a group
+    /// header that invented a name would be a second copy of the schema.
+    fn db_group_label(&self, spec: &GroupSpec, key: &GroupKey) -> String {
+        match key {
+            GroupKey::Empty => "No value".to_string(),
+            GroupKey::Unchecked => "Unchecked".to_string(),
+            GroupKey::Checked => "Checked".to_string(),
+            GroupKey::Option(id) => {
+                let config = self.db_property_config(spec.property.as_u64() as i32);
+                PropertyOptions::from_config(&config)
+                    .iter()
+                    .find(|o| o.id.as_u64().to_string() == *id)
+                    .map(|o| o.name.clone())
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or_else(|| id.clone())
+            }
+        }
     }
 
     /// The projection handed to a `Database` block's row: tabs, columns, the
@@ -4249,6 +4494,13 @@ impl AppState {
         row.db_row_count = 0;
         row.db_layout = "".into();
         row.db_layout_ok = true;
+        // The rules' header state (D4): no filter, no sort, no group, no note —
+        // refilled below from the active view's document.
+        row.db_filter_note = "".into();
+        row.db_filter_count = 0;
+        row.db_sort_property = -1;
+        row.db_sort_desc = false;
+        row.db_group_property = -1;
         // The two constants the window arithmetic is laid out at, handed to the
         // delegate rather than restated in .slint: `core::database::window`
         // divides the scroll offset by ROW_HEIGHT, and the block is as tall as
@@ -4266,6 +4518,30 @@ impl AppState {
             return;
         };
         row.db_ok = true;
+        // The rules' header state, from the same document the window was read
+        // with: how many clauses the filter holds (the button's chip and its
+        // active tint), the first sort term (the header's arrow — the panel
+        // edits that term; a document with more terms still sorts by all of
+        // them), the group column, and the note (a filter that could not be
+        // applied, drawn where the row count would be).
+        if let Some(db) = self.db_ref_of(block) {
+            if let Some(view_id) = self.db_active_view(block) {
+                let rules = self.db_rules(db, view_id);
+                row.db_filter_note = rules.note.clone().into();
+                row.db_filter_count = rules
+                    .filter
+                    .as_ref()
+                    .map(|f| f.clause_count() as i32)
+                    .unwrap_or(0);
+                if let Some(first) = rules.sorts.first() {
+                    row.db_sort_property = first.property.as_u64() as i32;
+                    row.db_sort_desc = first.descending;
+                }
+                if let Some(spec) = &rules.group {
+                    row.db_group_property = spec.property.as_u64() as i32;
+                }
+            }
+        }
         row.db_title = self
             .db_ref_of(block)
             .and_then(|db| self.databases.borrow().database(db).map(|d| d.name.clone()))
@@ -4784,6 +5060,410 @@ impl AppState {
         true
     }
 
+    // ─── D4: the view's rules, written back into the document (ADR-0076) ────
+    //
+    // Every helper here is the same three moves: read the active view's
+    // document as text, apply one edit to the **typed** rules, write the
+    // document back through `db_edit_definition` — which is where the
+    // `SetDatabaseViewDefinition` change comes from, so an undo restores the
+    // whole document (the filter, the sorts, the group and the two D3 keys
+    // together) and `db_absorb` teaches the catalog. What none of them does is
+    // touch a row: the *next* window read compiles the new rules into SQL, and
+    // the rows the user sees are the ones that query returns.
+
+    /// Edit the active view's filter as the panel represents it: one
+    /// `and`/`or` root over clauses, each optionally inverted. A stored tree
+    /// the panel cannot represent (a group inside a group) is **refused** —
+    /// with a notice, not a silent reshaping of rules the user wrote elsewhere
+    /// — while the table keeps filtering by the tree it has, because the
+    /// compiler reads the whole recursive shape and only the panel is flat.
+    fn db_edit_filter(&self, block: i32, edit: impl FnOnce(&mut FlatFilter)) -> bool {
+        let (Some(db), Some(view)) = (self.db_ref_of(block), self.db_active_view(block)) else {
+            return false;
+        };
+        let tree = {
+            let catalog = self.databases.borrow();
+            let Some(row) = catalog.views.iter().find(|v| v.id == view) else {
+                return false;
+            };
+            let rules = ViewDefinition::parse(&row.definition).rules(db, &catalog);
+            rules.filter
+        };
+        let mut flat = match FlatFilter::from_tree(tree.as_ref()) {
+            Some(flat) => flat,
+            None => {
+                self.set_db_notice(
+                    "This view's filter uses nesting the filter panel does not edit yet.".into(),
+                );
+                return false;
+            }
+        };
+        edit(&mut flat);
+        let tree = flat.to_tree();
+        self.db_edit_definition(block, |definition| definition.set_filter(Some(&tree)))
+    }
+
+    /// The kind of the clause the panel has open at `index` — what the value
+    /// editors validate against (a number must parse, a date must be one of
+    /// the two stored shapes).
+    fn db_filter_clause_kind(&self, block: i32, index: usize) -> Option<PropertyKind> {
+        let (db, view) = (self.db_ref_of(block)?, self.db_active_view(block)?);
+        let rules = self.db_rules(db, view);
+        let flat = FlatFilter::from_tree(rules.filter.as_ref())?;
+        flat.clauses.get(index).map(|c| c.clause.kind)
+    }
+
+    /// Whether the active view's filter is one the panel may edit. The popup
+    /// reads this on open; a `false` leaves the table filtering by a tree the
+    /// panel declines to reshaping.
+    pub fn db_filter_editable(&self, block: i32) -> bool {
+        let (Some(db), Some(view)) = (self.db_ref_of(block), self.db_active_view(block)) else {
+            return false;
+        };
+        let rules = self.db_rules(db, view);
+        FlatFilter::from_tree(rules.filter.as_ref()).is_some()
+    }
+
+    /// Match all (`and`) or match any (`or`) — the root's flavour.
+    pub fn db_filter_set_match(&self, block: i32, any: bool) -> bool {
+        self.db_edit_filter(block, |flat| flat.any = any)
+    }
+
+    /// Add one rule for `property`: the kind's first comparison, no value yet.
+    /// The clause persists as `value: null` — [`FilterValue::Missing`], which
+    /// compiles to no constraint — so "add a rule" never hides rows before the
+    /// user has said what the rule is, and a half-written rule survives a
+    /// restart as exactly what it is.
+    pub fn db_filter_add_clause(&self, block: i32, property: i32) -> bool {
+        let Some(kind) = self.db_property_kind(property) else {
+            return false;
+        };
+        // A kind with no comparisons (formula / rollup / relation) has no rule
+        // to add: refused here, where the picker should not have offered it.
+        let Some(op) = FilterOp::ops_for(kind).first().copied() else {
+            return false;
+        };
+        self.db_edit_filter(block, |flat| {
+            flat.clauses.push(FlatClause {
+                clause: FilterClause {
+                    property: PropertyId(property as u64),
+                    kind,
+                    op,
+                    value: FilterValue::Missing,
+                },
+                invert: false,
+            });
+        })
+    }
+
+    pub fn db_filter_remove_clause(&self, block: i32, index: usize) -> bool {
+        self.db_edit_filter(block, |flat| {
+            if index < flat.clauses.len() {
+                flat.clauses.remove(index);
+            }
+        })
+    }
+
+    /// Switch a clause's comparison. The value resets: the stored shape of an
+    /// `is` (an option id) is not the shape of `contains` (a substring), and a
+    /// value carried across a comparison change would be a value the new
+    /// comparison never asked for.
+    pub fn db_filter_set_op(&self, block: i32, index: usize, op_index: usize) -> bool {
+        let Some(op) = FilterOp::from_index(op_index) else {
+            return false;
+        };
+        self.db_edit_filter(block, |flat| {
+            if let Some(clause) = flat.clauses.get_mut(index) {
+                clause.clause.op = op;
+                clause.clause.value = FilterValue::Missing;
+            }
+        })
+    }
+
+    /// `¬` on one clause — a `not` around it, which is how "is not empty" and
+    /// "does not contain" are built from the same comparisons.
+    pub fn db_filter_toggle_not(&self, block: i32, index: usize) -> bool {
+        self.db_edit_filter(block, |flat| {
+            if let Some(clause) = flat.clauses.get_mut(index) {
+                clause.invert = !clause.invert;
+            }
+        })
+    }
+
+    /// Set a clause's value from the text box, **validated by kind**: a number
+    /// must parse (and be finite — a filter value of `NaN` compares as false
+    /// against everything and would look like a broken rule), a date must be
+    /// one of ADR-0062's two stored shapes, everything text-shaped is taken
+    /// verbatim (ADR-0069: the three string kinds are never rewritten). A
+    /// refused value returns `false` and the panel keeps the text; nothing is
+    /// written and nothing is silently reworded.
+    pub fn db_filter_set_text(&self, block: i32, index: usize, text: &str) -> bool {
+        let Some(kind) = self.db_filter_clause_kind(block, index) else {
+            return false;
+        };
+        let value = match kind {
+            PropertyKind::Number => match text.trim().parse::<f64>() {
+                Ok(num) if num.is_finite() => FilterValue::Number(num),
+                _ => return false,
+            },
+            PropertyKind::Date | PropertyKind::CreatedTime | PropertyKind::LastEditedTime => {
+                if !is_stored_date(text) {
+                    return false;
+                }
+                FilterValue::Text(text.to_string())
+            }
+            _ => FilterValue::Text(text.to_string()),
+        };
+        self.db_edit_filter(block, move |flat| {
+            if let Some(clause) = flat.clauses.get_mut(index) {
+                clause.clause.value = value;
+            }
+        })
+    }
+
+    /// A checkbox clause's value: the pick button is the whole editor.
+    pub fn db_filter_set_flag(&self, block: i32, index: usize, checked: bool) -> bool {
+        self.db_edit_filter(block, |flat| {
+            if let Some(clause) = flat.clauses.get_mut(index) {
+                clause.clause.value = FilterValue::Flag(checked);
+            }
+        })
+    }
+
+    /// A pick (select / status) or list (multi-select / files) clause's value.
+    /// Under `is` the pick writes the option **id** (ADR-0061 stores ids, not
+    /// labels) and picking the one already held clears the rule back to
+    /// unfilled; under `is any of` / `has any of` the pick toggles membership.
+    pub fn db_filter_toggle_option(&self, block: i32, index: usize, option: &str) -> bool {
+        self.db_edit_filter(block, |flat| {
+            let Some(clause) = flat.clauses.get_mut(index) else {
+                return;
+            };
+            match clause.clause.op {
+                FilterOp::AnyOf => {
+                    let mut items = match &clause.clause.value {
+                        FilterValue::Any(items) => items.clone(),
+                        FilterValue::Text(one) => vec![one.clone()],
+                        _ => Vec::new(),
+                    };
+                    match items.iter().position(|item| item == option) {
+                        Some(at) => {
+                            items.remove(at);
+                        }
+                        None => items.push(option.to_string()),
+                    }
+                    clause.clause.value = if items.is_empty() {
+                        FilterValue::Missing
+                    } else {
+                        FilterValue::Any(items)
+                    };
+                }
+                _ => {
+                    clause.clause.value = match &clause.clause.value {
+                        FilterValue::Text(current) if current == option => FilterValue::Missing,
+                        _ => FilterValue::Text(option.to_string()),
+                    };
+                }
+            }
+        })
+    }
+
+    /// Delete every rule. The document keeps the `filter` key as an empty
+    /// group — "I own this key and it is empty" (ADR-0074's widths argument,
+    /// applied to the key this slice owns) — which the parser reads back as no
+    /// filter at all.
+    pub fn db_filter_clear(&self, block: i32) -> bool {
+        self.db_edit_filter(block, |flat| flat.clauses.clear())
+    }
+
+    /// Cycle one column's sort from the column header: none → ascending →
+    /// descending → none; a different column starts at ascending. The header
+    /// edits the **first** term — the one that decides the order's head. A
+    /// document may hold more terms, which the read path sorts by (every term
+    /// is in the `ORDER BY`) and this one control leaves alone: multi-key
+    /// editing waits for a panel of its own, and the SQL side is already
+    /// general. A kind with no order (ADR-0070's table) refuses quietly — the
+    /// header is also the resize handle's row, so a click that does nothing
+    /// must not be a click that lied.
+    pub fn db_sort_cycle(&self, block: i32, property: i32) -> bool {
+        let (Some(db), Some(view)) = (self.db_ref_of(block), self.db_active_view(block)) else {
+            return false;
+        };
+        let rules = self.db_rules(db, view);
+        let id = PropertyId(property as u64);
+        let Some(row) = self
+            .databases
+            .borrow()
+            .properties_of(db)
+            .find(|p| p.id == id)
+            .cloned()
+        else {
+            return false;
+        };
+        let descending = match rules.sorts.first() {
+            // Same column: cycle the direction, clearing at the end.
+            Some(first) if first.property == id => {
+                if first.descending {
+                    None
+                } else {
+                    Some(true)
+                }
+            }
+            // Another column (or no sort): start at ascending.
+            _ => Some(false),
+        };
+        let sorts: Vec<SortSpec> = match descending {
+            None => Vec::new(),
+            Some(descending) => match SortSpec::of(&row, descending) {
+                Some(spec) => vec![spec],
+                None => return false,
+            },
+        };
+        self.db_edit_definition(block, move |definition| definition.set_sorts(&sorts))
+    }
+
+    /// Pick the column a view groups by — `-1` clears the grouping. Only the
+    /// option-bounded kinds group (ADR-0076: the list of headers has to be
+    /// small enough to compute in full, and a text column's distinct values
+    /// are exactly what would make it one row per group); the popup offers
+    /// only those, and a caller that insists on another is refused rather
+    /// than silently ungrouped.
+    pub fn db_group_pick(&self, block: i32, property: i32) -> bool {
+        let group = if property >= 0 {
+            let Some(kind) = self.db_property_kind(property) else {
+                return false;
+            };
+            if !GroupSpec::admits(kind) {
+                return false;
+            }
+            Some(PropertyId(property as u64))
+        } else {
+            None
+        };
+        self.db_edit_definition(block, |definition| definition.set_group(group))
+    }
+
+    /// The filter panel's rows: the active filter as the flat panel draws it.
+    /// `None` (a block with no entity, or a tree the panel cannot represent)
+    /// means an empty panel — the table still filters by the tree it has, and
+    /// an edit attempt says why nothing happened.
+    pub fn db_filter_panel(&self, block: i32) -> (bool, Vec<DbFilterPanelRow>) {
+        let (Some(db), Some(view)) = (self.db_ref_of(block), self.db_active_view(block)) else {
+            return (false, Vec::new());
+        };
+        let rules = self.db_rules(db, view);
+        let Some(flat) = FlatFilter::from_tree(rules.filter.as_ref()) else {
+            return (false, Vec::new());
+        };
+        let rows = flat
+            .clauses
+            .iter()
+            .map(|flat_clause| {
+                let clause = &flat_clause.clause;
+                // The value as the panel shows it: a pick's option id is named
+                // by the column's config (an id the config forgot names
+                // itself, ADR-0069's fold); anything else displays as stored.
+                let value = match &clause.value {
+                    FilterValue::Text(id)
+                        if matches!(clause.kind, PropertyKind::Select | PropertyKind::Status) =>
+                    {
+                        let config = self.db_property_config(clause.property.as_u64() as i32);
+                        PropertyOptions::from_config(&config)
+                            .iter()
+                            .find(|o| o.id.as_u64().to_string() == *id)
+                            .map(|o| o.name.clone())
+                            .filter(|name| !name.is_empty())
+                            .unwrap_or_else(|| id.clone())
+                    }
+                    other => other.display(),
+                };
+                let name = self
+                    .databases
+                    .borrow()
+                    .properties
+                    .iter()
+                    .find(|p| p.id == clause.property)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_default();
+                DbFilterPanelRow {
+                    property: clause.property.as_u64() as i32,
+                    name,
+                    kind: property_kind_int(clause.kind),
+                    op: clause.op.index() as i32,
+                    op_name: clause.op.label(clause.kind).to_string(),
+                    value,
+                    has_value: clause.value.is_set(),
+                    invert: flat_clause.invert,
+                }
+            })
+            .collect();
+        (flat.any, rows)
+    }
+
+    /// The comparisons one kind's panel may offer, as (op index, word) — the
+    /// same list the parser admissibility-checks against, so the menu can
+    /// never offer a comparison the compiler would refuse.
+    pub fn db_ops_for_kind(&self, kind: i32) -> Vec<(i32, String)> {
+        crate::core::database::PropertyKind::ALL
+            .get(kind as usize)
+            .map(|kind| {
+                FilterOp::ops_for(*kind)
+                    .iter()
+                    .map(|op| (op.index() as i32, op.label(*kind).to_string()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// A column's options, as the pick-value editor offers them — (id, name,
+    /// color), read from the config JSON once per open of the picker.
+    pub fn db_property_options(&self, property: i32) -> Vec<(String, String, String)> {
+        let config = self.db_property_config(property);
+        PropertyOptions::from_config(&config)
+            .iter()
+            .map(|o| {
+                (
+                    o.id.as_u64().to_string(),
+                    o.name.clone(),
+                    o.color.clone(),
+                )
+            })
+            .collect()
+    }
+
+    /// Which column the active view groups by, or `-1` — what the picker's
+    /// rows (and its "No group" row) mark themselves against.
+    pub fn db_group_current(&self, block: i32) -> i32 {
+        let (Some(db), Some(view)) = (self.db_ref_of(block), self.db_active_view(block)) else {
+            return -1;
+        };
+        self.db_rules(db, view)
+            .group
+            .map(|spec| spec.property.as_u64() as i32)
+            .unwrap_or(-1)
+    }
+
+    /// The columns a view may group by — the option-bounded kinds only
+    /// (ADR-0076), in schema order. Empty when nothing groups, which is what
+    /// the popup says instead of offering a grouping that cannot be computed.
+    pub fn db_group_choices(&self, block: i32) -> Vec<DbColumnToggle> {
+        let Some(db) = self.db_ref_of(block) else {
+            return Vec::new();
+        };
+        self.databases
+            .borrow()
+            .properties_of(db)
+            .filter(|p| GroupSpec::admits(p.kind))
+            .map(|p| DbColumnToggle {
+                property: p.id.as_u64() as i32,
+                name: p.name.clone(),
+                kind: p.kind.as_str().to_string(),
+                visible: true,
+                locked: false,
+            })
+            .collect()
+    }
+
     fn db_property_kind(&self, property: i32) -> Option<PropertyKind> {
         self.databases
             .borrow()
@@ -4822,16 +5502,29 @@ impl AppState {
         }
         let db = self.db_ref_of(block)?;
         let view = self.db_active_view(block)?;
-        let (properties, columns) = {
+        let (properties, columns, rules) = {
             let catalog = self.databases.borrow();
             let row = catalog.views.iter().find(|v| v.id == view)?;
             let properties = view_columns(&catalog, db, row);
             let definition = ViewDefinition::parse(&row.definition);
-            (properties.clone(), table_columns(&properties, &definition))
+            let rules = definition.rules(db, &catalog);
+            (properties.clone(), table_columns(&properties, &definition), rules)
         };
         let title = properties.iter().find(|p| p.kind.is_title())?.id;
         let repo = self.db_repo()?.clone();
-        let rows = repo.unwindowed_rows(&RowRequest::new(db, title, &properties)).ok()?;
+        // The export says what the view shows (ADR-0065: "按视图的顺序与成员，
+        // 即过滤排序照做") — so the request carries the view's rules and the
+        // control read runs the same statement the window read does, minus the
+        // window. The group is *screen* furniture and a file has no screen: a
+        // grouped view exports its rows in the view's order, without headers.
+        let request = RowRequest {
+            db,
+            title,
+            columns: &properties,
+            sorts: &rules.sorts,
+            filter: rules.filter.as_ref(),
+        };
+        let rows = repo.unwindowed_rows(&request).ok()?;
         let pages = repo.record_pages(db).unwrap_or_default();
         let mut header: Vec<String> = vec![properties
             .iter()
@@ -5082,7 +5775,30 @@ pub fn project_blocks(blocks: &[Block], hits: &FindHits) -> Vec<BlockRow> {
                 } else {
                     ModelRc::default()
                 },
-                column_items, column_boxes,
+                column_items, column_boxes,                column_items, column_boxes,
+                // SPEC §三十九: the entity this block draws, -1 for none. The
+                // rest of the database fields are filled by `reproject_blocks`,
+                // which is where the state (the catalog and the realized window)
+                // is in reach — this function is pure and takes blocks only.
+                db_ref: b.db_ref.map(|d| d.as_u64() as i32).unwrap_or(-1),
+                db_ok: false,
+                db_title: "".into(),
+                db_rows: ModelRc::default(),
+                db_columns: ModelRc::default(),
+                db_views: ModelRc::default(),
+                db_row_start: 0,
+                db_row_count: 0,
+                db_row_height: TableView::ROW_HEIGHT,
+                db_header_height: TableView::HEADER_HEIGHT,
+                db_layout: "".into(),
+                db_layout_ok: true,
+                // the rules' header state (D4): neutral here — `db_fill_row`
+                // reads the view's document and fills these for a live block
+                db_filter_note: "".into(),
+                db_filter_count: 0,
+                db_sort_property: -1,
+                db_sort_desc: false,
+                db_group_property: -1,
             }
         })
         .collect();
@@ -5159,6 +5875,27 @@ fn block(kind: i32, text: &str) -> BlockRow {
         column_items: ModelRc::from(Rc::new(VecModel::from(Vec::new()))),
         column_boxes: ModelRc::from(Rc::new(VecModel::from(Vec::new()))),
         toc_entries: ModelRc::from(Rc::new(VecModel::from(Vec::new()))),
+        // database (23) + synced (24): neutral defaults; real projections
+        // fill these in (db_ref_of / sync_target), the helper only compiles.
+        db_ref: -1,
+        db_ok: false,
+        db_title: "".into(),
+        db_rows: ModelRc::from(Rc::new(VecModel::from(Vec::new()))),
+        db_columns: ModelRc::from(Rc::new(VecModel::from(Vec::new()))),
+        db_views: ModelRc::from(Rc::new(VecModel::from(Vec::new()))),
+        db_row_start: 0,
+        db_row_count: 0,
+        db_row_height: 0.0,
+        db_header_height: 0.0,
+        db_layout: "".into(),
+        db_layout_ok: false,
+        // the rules' header state (D4): neutral here like the rest, filled by
+        // db_fill_row for a live block
+        db_filter_note: "".into(),
+        db_filter_count: 0,
+        db_sort_property: -1,
+        db_sort_desc: false,
+        db_group_property: -1,
     }
 }
 

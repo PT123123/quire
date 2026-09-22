@@ -905,3 +905,274 @@ v18、`export_service.rs` 的 `DatabaseTable` + `render_database` + 导出臂**�
 4. `DbColumnToggle` 有两个同名类型：`crate::DbColumnToggle`（slint 生成，popup 的模型行）与
    `crate::app::state::DbColumnToggle`（state 的构建形状）——并存是有意的（生成的类型不该从
    state 导出），控制器里 `db_push_columns` 是两者唯一的转换点。
+
+# Track 3 — Database（D4：filter / sort / group，代码刀）
+
+D3 画出了 table，D4 让视图**有规则**：过滤树、多键排序、分组，全部在 SQL 侧编译，全部持久化在
+视图自己的 JSON 文档里。本刀遵守任务书铁律：**只写代码，一行 cargo 都没跑**（不 check / 不 build /
+不 test / 不 run，不跑 sweep）——编译、测试、视觉对照、性能数字全部留给总测试。行号是**工作树**
+（四条 track 未提交改动的合集）的行号。
+
+## 1 · 核心立场：红线是模块边界，不是纪律
+
+「filter / sort 在 SQL 侧完成，不在 UI 侧过滤」最容易违反，因为「取回再过滤」写起来最短。本刀把它
+做成**结构**：
+
+```
+视图文档（db_views.definition 的 JSON，ADR-0064）
+    │  core::database_view::ViewRules —— 按 schema 解析成类型化规则（纯，无 SQL）
+    ▼
+RowRequest { sorts: &[SortSpec], filter: Option<&FilterNode> }   ← 规则本身随请求走
+    │  storage::database_query —— 唯一把规则变成 SQL 文本+绑定的模块
+    ▼
+一条语句：SELECT … FROM … WHERE db ∧ (树) ORDER BY (各键, 空值置后) …, r.ord, r.id LIMIT/OFFSET
+    │  core::database::window —— 窗口算术，开在过滤后的计数上
+    ▼
+realize 的就是那一窗
+```
+
+三个契约（注释里都钉死了，测试要验）：
+
+1. **计数先算、窗口后开**：过滤视图的总数是 `filtered_count`——`COUNT(*)` 跑在与行读**同样的
+   `FROM`/`WHERE`** 上（`database_store.rs:437`）；过滤 10 000 行剩 3 行，窗口就 realize 3 行。
+2. **tie-break 稳定**：每个排序键各一段（空值置后项永远升序，值项跟方向），最后统一 `r.ord, r.id`
+   ——同一窗口的重读是同样的行（`database_query.rs:604` 的 `order_clause`）。
+3. **规则从不单独成为一次内存过滤**：`RowRequest` 只借出规则，读路径上没有任何函数同时拿到
+   「全部行」和「规则」（state.rs 的 `db_refresh` 注释里写成「作为借用的红线」）。
+
+## 2 · 改了 / 新增了哪些文件（为什么 + 关键行号）
+
+| 文件 | 为什么 | 关键位置（工作树行号） |
+|------|--------|------------------------|
+| `src/storage/database_query.rs`（**新**，655 行） | 本刀的核心：规则 → SQL 的编译器。`Sql`（带 `Value` 绑定与隐藏 join 别名分配 `s0,s1…`）、`build_from`（共用的 FROM+槽位）、`column_expr`（ADR-0070 的「每种 kind 比较在哪一列」决策，排序与过滤共用一处）、`row_query_plan`（窗口读）、`row_query_in_group`（组内切片读）、`count_query`、`group_query`、`node_predicate`/`clause_predicate`（WHERE 生成器）、`order_clause`（多键排序）、`group_predicate` | `Sql` L67、`hidden_join` L130、`build_from` L164、`column_expr` L213、`row_query_plan` L268、`row_query_in_group` L298、`count_query` L337、`group_query` L357、`node_predicate` L396、`clause_predicate` L469、`order_clause` L604、`group_predicate` L628 |
+| `src/core/database_view.rs` | 规则的**纯**一半：`FilterOp`（10 种比较符 + 每种 kind 的可用名单 `ops_for` + 面板用词 `label`）、`FilterValue`（含 `Missing`=没填完的规则）、`FilterClause`/`FilterNode`（树）、`FlatFilter`（面板可表示的扁平子集）、`GroupSpec`/`GroupKey`、`group_window`（分组的条目窗口算术）、`ViewRules`（解析 + 降级 + note）、`ViewDefinition::set_filter/set_sorts/set_group`（写回三把键）、`is_stored_date`（日期值形状检查） | D4 段 L576 起；`FilterOp` L638、`FILTER_MAX_DEPTH` L603、`FilterClause` L880、`FilterNode` L892、`FlatFilter` L980、`GroupSpec` L1080、`GroupKey` L1102、`group_window` L1167、`ViewRules` L1227、`rules()` L1250、`set_*` L1333/1344/1366、`is_stored_date` L1543 |
+| `src/core/database.rs` | `RowRequest` 长出 `sorts: &[SortSpec]`（替换 D2 的 `sort: Option<SortSpec>`，ADR-0070 预言的那一步）与 `filter: Option<&FilterNode>`；`SortSpec` 文档更新 | L868 起（字段 L876/L880） |
+| `src/storage/database_store.rs` | 执行侧：`row_query_plan`/`sort_expression`/`Sql` 移去 database_query（store 只执行）；`read_rows` 拆成薄壳 + `run_row_query`（三种读形共用一个上色管道）；新增 `filtered_count` / `group_counts`（`GROUP BY` + `GroupKey` 归一化）/ `window_rows_in_group`；`realized_rows` 对带 filter 的请求改用 filtered 计数；测试/探针的 `req.sort` 六处、`RowRequest` 字面量两处机械补 `sorts`/`filter`（D2 先例）；`row_binds` 返回 `Vec<Value>`（过滤绑定异构：id / REAL / 文本） | `filtered_count` L437、`group_counts` L463、`window_rows_in_group` L498、`row_binds` L745、`read_rows` L751、`run_row_query` L765 |
+| `src/storage/mod.rs` | 声明新模块 | `pub mod database_query;` L9 |
+| `src/app/state.rs` | 接线：`db_refresh` 规则化（规则解析→计数→开窗→分组条目装配；缓存键加入 definition 文本）；`DbWindow` 加 `definition` 字段；`db_fill_row` 填规则头部状态（filter 计数/排序箭头/分组列/可见提示）；写路径 9 个 `db_filter_*` + `db_sort_cycle` + `db_group_pick`（全部经 `db_edit_definition` → `SetDatabaseViewDefinition`，一个 change 一步 undo）；面板数据 `db_filter_panel`/`db_ops_for_kind`/`db_property_options`/`db_group_choices`/`db_group_current`；`db_markdown_table` 带上规则（补上 ADR-0065「过滤排序照做」的欠账） | `db_rows_of` L4592、`DbFilterPanelRow` L4559、`db_rules` L4666、`db_refresh` L4834、`db_order_groups` L5071、`db_group_label` L5100、`db_fill_row` 规则段 L5194 起、`db_edit_filter` L5775、写 helper L5823–6044、`db_filter_panel` L6045、`db_markdown_table` L6190 |
+| `src/app/controller.rs` | 面板模型推送 4 个 helper + 19 个 callback 接线 + 两个场景 + 种子函数 | `db_push_filter` L2873、`db_push_filter_ops` L2909、`db_push_filter_options` L2929、`db_push_group` L2950、dispatch 段 L1523–1746、`dark-database-filter` L3866、`database-filter` L3868、`seed_database_filter` L3606 |
+| `ui/Types.slint` | `DbRow.header`（组头条目）；`BlockRow` 的规则头部状态 5 字段（`db-filter-note/-count/-sort-property/-sort-desc/-group-property`）；`DbFilterRow`/`DbFilterOp` 结构；UIState 的面板属性（filter 11 个 + group 5 个）与 19 个 callback | `header` L127、BlockRow 字段 L204–212、`DbFilterRow` L232、`DbFilterOp` L245、UIState 属性 L419–437、callback L623–647 |
+| `ui/components/DatabaseFilterPopup.slint`（**新**，530 行） | 过滤面板：一个 popup 四个状态（0 规则 / 1 选列 / 2 选比较符 / 3 选值）——一个会变列表的 popup，而不是 popup 开 popup | 全文件；高度公式 L29–34；规则行 L160 起；选列 L436 起；选比较符 L468 起；选值 L492 起 |
+| `ui/components/DatabaseGroupPopup.slint`（**新**，134 行） | 分组 picker：No group + option-bounded 列，行用 `db-group-current` 自标 | 全文件 |
+| `ui/components/DatabaseView.slint` | 头部 `Filter`/`Group` 按钮（含激活色与计数 chip）；`db-filter-note` 占据行数文本位置（危险色，可见降级）；列头排序箭头 + 点击循环；行委托的组头臂（`row.header != ""` 画一条 muted 行、无格子无删除） | note L139、filter 按钮 L259、group 按钮 L299、排序 L352/L364、组头 L467、数据行 L489 |
+| `ui/AppWindow.slint` | 两个 popup 的注册（import / 实例 / is-open 镜像 / changed 开合），照 DatabaseColumnsPopup 的三件套 | import L20、open 属性 L392–393、changed L474 起、实例 L718/L723 |
+| `docs/DECISIONS.md` | ADR-0076（规则编译进语句 + 降级策略）/ ADR-0077（分组是条目投影，组头永远不是行） | 文件末尾（0075 之后） |
+| `docs/SPEC.md` | §三十九「操作」标注 D4 交付 + 「性能红线」第二条标注形状已交付、数字留总测试 | 两处 hunk |
+| `PLAN.md` | 末尾追加 `## Track 3 · D4 filter / sort / group` | 文件末尾 |
+| `docs/REPORT_TRACK3.md` | 本节 | — |
+
+**没碰**：`CHANGELOG.md`、`docs/ROADMAP.md`、`docs/PERFORMANCE.md`、`Cargo.toml`（**零新依赖**——
+JSON 用的是 `core::database_property::json` 那个全仓库唯一的阅读器，SQL 是手拼的，比较符菜单与解析
+共用一张 `ops_for` 表）、`[profile.release]`、`src/storage/migrations.rs`（**没有新迁移步**）、
+Track 1/2/4 的功能文件。
+
+## 3 · WHERE 生成器：比较符 × 属性类型 → SQL
+
+比较符 10 种（`FILTER_OPS`，序即 int：contains, eq, ne, gt, gte, lt, lte, any-of, is-empty, is-not-empty），
+每种 kind 只接受它有意义的子集（`FilterOp::ops_for` 一张表同时管解析接受与面板菜单，所以菜单永远
+开不出编译器要拒绝的东西）：
+
+| kind | 比较列（ADR-0070 的决策复用） | 映射 |
+|------|------|------|
+| title / text / url / email / phone（含 person 折叠后的 text） | `text`（title 走 `COALESCE(p.title, t.text)`） | contains = `INSTR(LOWER(expr), LOWER(?)) > 0`（不用 LIKE，值里的 `%` 是它自己；LOWER 只折 ASCII——全仓库文本搜索同一边界）；eq/ne 文本原样绑定；空值判定 `IS NULL OR = ''` |
+| date / created time / last edited time | `text` / `r.created` / `r.edited` | before/after 绑**定宽 ISO 文本**——字节序即时间序（ADR-0062 的形状在这里兑现）；值必须过 `is_stored_date` 两种形状之一 |
+| number | `num`（REAL） | eq/ne/gt/gte/lt/lte 绑 `Value::Real`——`2` 排在 `10` 前、`10 > 9` 是数值比较 |
+| checkbox | `flag` | `is checked` = `expr = 1`；`is unchecked` = `(expr = 0 OR expr IS NULL)`（没碰过就是没勾）；`is not checked` 是其否定（排除没碰过的行——「不是」断言有一个值） |
+| select / status | `text` = 选项 **id** | `is` = `expr = ?`（id）；`is any of` = `expr IN (ids)`；不存在 contains——按标签匹配要读 config JSON，SQL 做不到，菜单也不提供 |
+| multi-select / files | `db_value_items` | `has` = 一次 `EXISTS (… WHERE record = r.id AND property = ? AND value = ?)`；`has any of` = `value IN (…)`——都是 PK 前缀上的索引探针（ADR-0062 预言的形状） |
+| formula / rollup / relation | —（不存值） | `ops_for` 为空：子句必然被解析层丢弃并计数提示（D6 才有计算值可比） |
+
+另两条语义决定：**`ne` = `NOT (eq 形)`**——三值逻辑让「没有值的行」两边都不匹配（「有一个不是这个
+的值」）；**没填完的规则（`FilterValue::Missing`，文档里是 `value: null`）编译成 `1`**——加一条规则
+不会在用户说出它之前藏掉任何行，半成品规则重启后还是半成品。
+
+## 4 · 解析失败的降级策略（全部写在 ADR-0076，代码在 `ViewRules::rules`）
+
+| 失败 | 动作 | 可见性 |
+|------|------|--------|
+| 文档整篇不是 JSON / 不是对象 | `ViewDefinition::parse` 折成空文档（ADR-0064 的既有折法） | 视图打开，无规则 |
+| `filter` 树骨架读不开（`and`/`or` 子女不是数组、嵌套 > 8 层） | **整棵树丢弃**，`note` = "This view's filter could not be read and was ignored." | 视图上永久可见（行数文本的位置、危险色）——不静默、不崩、不是一闪而过的 toast |
+| 单条子句不可读（属性 id 不存在 / 比较符不适用于该 kind / 值不是该列存的形状） | **丢那一条**（`not` 包着它就一起丢——消失的规则不能变成自己的否定把所有行藏掉），其余树照常编译；`note` 计数（"N filter rule(s) were dropped …"） | 可见（这是 ADR-0064 的删列规则，扩大到子句的其它不可读方式） |
+| 排序项编不出来（列没了 / kind 无序）/ 分组编不出来（列没了 / kind 不可分组） | **静默丢弃** | 顺序与分组只改变「怎么看」，不藏行——诚实的失败在第一帧就看得见 |
+| 空组 `{"and":[]}`（面板删空规则的正常状态） | 无过滤、无提示 | — |
+| 面板遇到嵌套树（它能过滤、不能表示） | **拒绝编辑** + 一次性 notice 说明；表继续按树过滤 | 面板拒绝改写，绝不把用户的树重塑成自己画得出的形状 |
+
+## 5 · group by：分组头怎么避开「全量 realize」
+
+`core::database_view::group_window(counts, window)`（L1167）是答案。三个要点：
+
+1. **条目列表是虚拟的，组列表是小的。** 视图滚动面上是「组头条目 + 该组行」的交错列表，
+   `total_entries = Σ(count + 1)`。组列表来自**一次** `GROUP BY`（`group_counts`，`database_store.rs:463`），
+   而且只对 checkbox / select / status 这三种 option-bounded kind 开放——一张几行的表，不是全表。
+   按 text / date 分组会让组列表和表一样长，正是「分组头不能变成 10 000 行」禁止的事，picker 干脆
+   不提供（按 number 分组需要分桶，那是另一个问题，不猜）。
+2. **窗口跑在条目数上，映射到每组的行切片。** `window(total_entries, geometry, scroll)` 照旧先开，
+   `group_window` 把 `[start, end)` 映射成「窗口内的组头（通常一两个：一个组头就是一个条目高）+
+   每个触及窗口的组的 `(skip, len)` 切片」；每片用 `row_query_in_group` 取——组谓词进 `WHERE`、
+   视图的 filter/sort 照常编译、`LIMIT len OFFSET skip` 是**组内**偏移。装 10 000 行的一组和不分组的
+   整表一样只 realize 31 行；**一个组的成本是一个条目，永远不是一行/组**。走组列表累加条目位置是
+   O(组数)，不是 O(条目数)——组头因此不可能被 realize 成全量。
+3. **组头是条目不是记录。** `DbRow.header` 非空 = 组头（带计数文案，Rust 拼好），委托画一条 muted
+   行、无格子无删除动作；数据行的窗口算术、`db-row-start` 摆放、块高全部与不分组共用。
+
+组头的**顺序**是 Rust 排的（config 的选项表 SQL 看不见）：已知选项按 config 序、config 忘了的 id
+按字节序跟在后面（ADR-0069 的折叠用到组头上）、checkbox 未勾在先、「No value」最后。排序的是一小把
+**组头**，行还是 SQL 的——红线没有弯。
+
+## 6 · 持久化：落在哪个表哪个列
+
+全部落在 **`db_views.definition`**（ADR-0064 的 JSON 文档，一个视图一行）：
+
+| 键 | 形状 | 写入方 |
+|----|------|--------|
+| `filter` | 递归树：`{"and":[…]}` / `{"or":[…]}` / `{"not":{…}}` / `{"property":7,"op":"eq","value":…}`；子句级非用 `not` 包裹；未填完的值是 `null` | `ViewDefinition::set_filter`（database_view.rs L1333），面板的每个编辑经 `db_edit_filter` → `db_edit_definition` → `Change::SetDatabaseViewDefinition` |
+| `sorts` | `[{"property":7,"descending":false}, …]`，首位最显著 | `set_sorts`（L1344），列头点击循环 |
+| `groups` | `[7]`——只读第一项；`[]` = 无分组 | `set_group`（L1366），picker |
+| `columns` / `widths` | D3 原样 | 不动 |
+
+写法仍是 ADR-0074 的**文本读改写**：`db_edit_definition`（state.rs）读出整段文档文本 → 编辑函数替换
+自己拥有的键 → 整段文本作为 `SetDatabaseViewDefinition` 的 `from`/`to`——一次编辑一个 change、
+一步 Ctrl+Z 恢复全部五把键，`db_absorb`（ADR-0075）让 catalog 从 change 批次学会新文档，缓存键里的
+definition 文本让下一次投影重读窗口。**没有新表、没有新列、没有新迁移。**
+
+## 7 · UI 接线点
+
+* **面板**：`DatabaseFilterPopup`（AppWindow import L20、实例 L718、`changed db-filter-open` L474、
+  is-open 镜像）；一个 popup 四个状态（`db-filter-panel`：0 规则 / 1 选列 / 2 选比较符 / 3 选值），
+  比较符与选项两个选择器由 Rust 推送（`db_push_filter_ops` controller.rs:2909 / `db_push_filter_options`
+  L2929）。值的文本框 **Enter 提交**（一次规则编辑 = 一个 undo 步；每键提交会把「输入 2026」变成
+  五个 undo 步），离散控件（比较符 / ¬ / 删除 / 选项）即时生效。
+* **回调**：19 个（`Types.slint` L623–647 全部声明、controller L1523–1746 全部绑定、popup/DatabaseView
+  全部使用，三件套齐）：filter 16 个 + `db-sort-cycled` + group 3 个 − 重复计数。每次被接受的编辑：
+  写文档（Rust 校验，值形状不对就拒写并让文本留着）→ `db_refill_row`（行数/内容变了）→
+  `db_push_filter`（面板还开着，行模型就地换）。
+* **列头**：点击循环排序（DatabaseView.slint L382 起 `head-ta.clicked`），排序中的列画 chevron 箭头
+  （L364，升/降），无可排序 kind 的列在 Rust 里静默拒绝（点击不撒谎）。
+* **分组**：`Group` 按钮（L299）开 `DatabaseGroupPopup`（AppWindow L723），行内勾标当前组；
+  `db-group-picked(-1)` = No group。
+* **可见降级**：`db-filter-note` 非空时占据行数文本的位置（L139，危险色）——「过滤器没在起作用」是
+  每一帧的事实，不是某一刻的事件，所以不用 toast。
+* **场景**：`database-filter`（controller.rs L3868）+ `dark-database-filter`（L3866）+
+  `seed_database_filter`（L3606，**走面板同一套写路径**：`db_filter_add_clause` → `db_filter_set_op(0,3)`
+  （`gt` 是 `FILTER_OPS[3]`）→ `db_filter_set_text(0,"5")`；5 行里 `Points > 5` 留 3 行）。值是字面量，
+  明天的 sweep 拍到同一张表。`quire_shot` 的 `needs_db` 已含 `contains("database")`（D3 的），新场景
+  自动被覆盖。
+
+## 8 · 迁移号
+
+**没有用新号。** 动手前读 `src/storage/migrations.rs`：工作树 `CURRENT_VERSION = 19`（12–15 D1、
+16 Track 2、17 D2、18 本 track D3、19 Track 4 未提交）。本刀的规则全部落进 `db_views.definition`
+这份已存在的 JSON 文档（ADR-0064 当初把规则放进文档，就是因为 SQL 不需要在规则上过滤），所以
+**零迁移步**；本刀的提交 blob 不含 migrations.rs，提交树里仍是 18（D3 的现状）。
+
+## 9 · 未验证（诚实清单——因为一行 cargo 都没跑）
+
+1. **编译**：本刀约 2 900 行新代码 + 多处重接没有过 `cargo check`。静态自查做了：六个文件的
+   括号/圆括号/方括号平衡（带生命周期与字符字面量处理的检查器）全部归零；按名字核对过每个
+   `use` 的使用次数（`SortSpec`/`Value` 这两个只剩测试用的 import 已加 `#[cfg(test)]`）；Slint 侧
+   19 个 callback 的「声明 / 使用 / 绑定」三件套逐个 grep 核对；`BlockRow`/`DbRow` 字面量补齐新字段
+   （state.rs 两处 BlockRow、一处 `DbRow` 工厂 + db_refresh 里两处构造）。但那不是编译器。
+2. **测试**：没有跑任何已有测试；铁律禁止新增 `#[test]`，本刀没有写。**已知风险点**（统一测试
+   先看这里）：`column_read` 测试 helper 的 `sort.as_slice()` 借用、`RowRequest` 新字面量的临时值
+   生存期（已用局部变量绕开 `Option::as_slice` 对临时值的借用）、Slint 的 `if + for` 嵌套作用域、
+   `TextInput.accepted(text)` 的签名。
+3. **视觉**：`database-filter` / `dark-database-filter` 从未渲染；filter 面板的四个状态、排序箭头、
+   组头行全部没有像素证据；按钮重排后 `menu`/`plus`/`slash` 场景不涉及（头部按钮在 database 块内），
+   预期只有两个新场景为 new。
+4. **分组与排序的交互**：组内行按视图的 sorts 排、组间按 config 序——组合行为只存在于代码与
+   注释里，没有运行证据。
+5. **性能**：D2 量出的「排序 +8 ms（TEMP B-TREE）」与 D1 量出的「底部 OFFSET 12.9 ms」原样有效，
+   本刀没有换游标读；过滤会给语句再加谓词成本，对照数字见下面测试计划（D8 收口）。
+
+## 10 · 测试计划（追加到「留给最终统一测试」清单）
+
+**B. 功能（headless 可证的，接着 D3 的 §10 编号）**
+
+14. 过滤后窗口只 realize 过滤后的行：10 000 行的库、过滤到 3 行，`realized_rows` 的 `realized()`
+    == 3 且 `window()` 与 3 一致——建议测试名 `a_filtered_window_realizes_the_filtered_count`（钉住
+    「计数先 `COUNT(*)` 后开窗」这条契约）；
+15. 每种比较符一句 SQL、语义各有一个对照：contains 的大小写折叠（`INSTR(LOWER,LOWER)`）、
+    `any-of` 的 `IN` 绑定 id 数、`ne` 排除空值行而 `is unchecked` 包含它们、number 的 `2 < 10`（数值序）
+    与同对值的字节序对照、日期 before/after 依赖定宽（写一个 `2026-9-2` 进去要么被形状检查拒、要么
+    顺序可见地坏）——建议测试名 `a_filter_clause_compiles_to_the_comparison_it_names`；
+16. 降级三态：整棵读不开 → 行数不变 + `note` 非空；单条子句指向已删列 → 该子句丢弃、其余生效、
+    note 计数；空 `{"and":[]}` → 无过滤、无 note——建议测试名
+    `an_unreadable_filter_is_dropped_with_a_visible_note` /
+    `a_clause_naming_a_deleted_column_is_dropped_and_counted`；
+17. 多键排序：两个 `sorts` 项的 `ORDER BY` 文本与实际顺序（首键并列时次键定序、`r.ord, r.id` 收尾）
+    ——建议测试名 `a_second_sort_key_orders_the_ties_the_first_leaves`；
+18. 分组：组列表 = `GROUP BY` 的归一化键（NULL 与 `''` 同组、flag 0 与缺失同组）、条目数
+    Σ(count+1)、跨组滚动只取触及窗口的组、被删选项的值以其 id 成组——建议测试名
+    `a_group_header_is_one_entry_and_never_one_row_per_group`；
+19. 规则持久化与透传：带嵌套 filter + `sorts` + `groups` + 外来键的文档经一次 D4 编辑后，外来键
+    原样保留（ADR-0074 的往返，现在两边都有规则）；undo 一步恢复整段文档——建议测试名
+    `a_rule_edit_keeps_the_keys_this_build_does_not_own`；
+20. 导出跟随视图：带 filter + sorts 的视图 `Copy page as Markdown`，文件行数 = 过滤后行数、顺序 =
+    sorts（ADR-0065 的「过滤排序照做」）——建议测试名 `a_database_exports_the_view_it_is_showing`；
+21. 面板拒绝嵌套树：手写 `{"or":[{"and":[…]}]}` 后 `db_filter_editable` 为 false、编辑调用全部返回
+    false、表仍按树过滤——建议测试名 `the_panel_refuses_to_reshape_a_tree_it_cannot_draw`。
+
+**C. 视觉（接着 §10 的编号）**
+
+22. sweep 对照 D2 基线：67 个既有场景逐字节相同；`database-filter`、`dark-database-filter` 为 new
+    （人工核对：计数 chip "Filter 1"、行数 3、值列仍是全表 5 列）；filter 面板四状态的人工截图
+    （打开面板 → 加规则 → 选比较符 → 选值 → 表随 Enter 变化）；
+23. 排序箭头与分组头的人工核对：点列头两次（升→降）箭头换向、点第三次消失；分组后组头行是
+    muted 满宽行、无删除叉、计数在标签里。
+
+**D. 性能（SPEC 要求的证据，本刀欠的对照）**
+
+24. **「10 000 行的库加一个过滤条件」的耗时 vs 「取回 10 000 行再在内存里过滤」**——SPEC 红线第二
+    条要的证据，量法与要量的两个数：
+    * **数 A（SQL 侧）**：release 下（D1 的探针写法，`#[ignore]` 打印型），10 000 行 × 5 列的库上，
+      构造一个含 text-contains + number-gt 的过滤树，跑 `realized_rows`（= `filtered_count` 的
+      `COUNT(*)` + 窗口读）端到端，报 `Instant::elapsed` 与窗口 realize 行数（应 ≈31，不是 10 000）；
+      同时打印 `EXPLAIN QUERY PLAN`（预期 `SEARCH r USING INDEX idx_db_records_db_ord` + 每列一个
+      索引探针，没有 `SCAN db_values`）。
+    * **数 B（对照臂，明知违规才存在）**：同一库 `unwindowed_rows` 取回全部 10 000 行（D1 量过
+      ≈56 ms / 1.84 MB 堆），在 Rust 里对同一谓词 `retain`，报耗时与堆字节数。
+    * **结论读法**：A 的总耗时（两次查询）对 B 的总耗时（一次大查询 + 内存过滤），以及
+      **行对象数与堆字节**（A ≈ 31 行 / ≈6 KB，B = 10 000 行 / ≈1.8 MB）——红线赢在行与内存上，
+      时间上若 A 更慢，第一嫌疑是谓词没吃到索引（探针的计划能直接看见），修法是加
+      `db_values(property, num)` 类索引或换游标读，**不是把过滤挪回 Rust**。
+    * 原始行落 `benchmarks/results/2026-09-22-track3-d4-filter.jsonl`（三次运行），进
+      `docs/PERFORMANCE.md` 的收口随 D8。
+25. 顺带可量的：一次规则编辑的端到端（写文档 change + force_flush + `filtered_count` + 窗口重读），
+    期望 ≈ D2 的单发 cell 写 + 一次 COUNT + D1 的窗口读；数字进同一 jsonl。
+
+## 11 · 给整合者的注意事项
+
+1. **共享文件的提交方式照 D0–D3**：`docs/DECISIONS.md`（排除 Track 4 的 ADR-0052 与其他 track 的
+   未提交 ADR；本刀只有末尾 ADR-0076/0077 两段）、`PLAN.md`（只追加 D4 节）、`docs/SPEC.md`
+   （「操作」与「性能红线」两处 hunk，排除 Track 2/4 的段落）、`src/storage/mod.rs`（只加
+   `database_query` 声明）、`src/app/state.rs` / `src/app/controller.rs` / `ui/Types.slint` /
+   `ui/AppWindow.slint`（只加 D4 段落；state.rs 与 controller.rs 里有大量别人的未提交内容，逐段
+   提取）。脚本在 `.scratch/track3-d4/stage.py`。提交后这些共享文件在工作树里仍是 modified——
+   那是别人的改动，不是脏数据。
+2. **本刀提交树带四处对 D3 的补漏**（都是「D3 的 hunk 留在了工作树、提交树缺失」这一类，D1 的
+   E0583 / D2 的 E0063 教训的实例；不补则 D4 的提交树单独编译必然是红的）：
+   a. HEAD 的 `src/core/command.rs` 引用 `DatabaseDraft`，而 HEAD 的 `src/core/database.rs` 没有它
+      （39 行，本就属于 D3）；
+   b. HEAD 的 `src/app/state.rs` 两处 `BlockRow` 字面量（页面投影的大字面量与 `block()` 测试工厂）
+      缺 D3 的 db 字段（`db_ref`…`db_layout_ok`）；
+   c. HEAD 的 `ui/Types.slint` **缺少 `DbCell` / `DbRow` / `DbOption` / `DbColumn` / `DbViewTab`
+      五个 struct 定义**（`BlockRow` 引用着它们，D3 的 blob 只带上了 `DbColumnToggle`）；
+   d. HEAD 的 `src/app/controller.rs` 把 `table_refocus` / `columns_refocus` 这一对 helper **冻结成
+      两份**（E0428 重复定义；工作树当时已并行修成一份，本刀的 blob 带上同一修复）。
+   给整合者：**D3 的提交树（93307ca）单独编译是红的**，以上四处随本刀提交树（c0734d2）闭合；统一
+   测试若要对照「D3 树 vs D4 树」，请以合并后的树为准。
+3. **`RowRequest` 的 API 变化会碰别人的字面量**：`sort: Option<SortSpec>` → `sorts: &[SortSpec]` +
+   `filter`。工作树里使用 `RowRequest` 的只有本 track 的文件与 `tests/integration/storage_test.rs`
+   的两处 `RowRequest::new(...)`（签名未变，不用改）；若 Track 2/4 在合并前也写了 `RowRequest { … }`
+   字面量或 `req.sort = …`，合并时要机械改字段名。
+4. **迁移号**不变（见 §8）；**ADR 号** 0076/0077 接在 0075 后，与 Track 4 的 0080+ 不冲突。
+5. **`INSTR(LOWER…)` 与 FTS**：contains 是 `INSTR` 上的全表达式，不吃索引——10 000 行的 contains
+   过滤是全扫（计划能看见）。SPEC 没有要求 contains 的性能红线，红线要的对照是「过滤在 SQL 侧」
+   的形状与行数；若统一测试觉得 contains 慢到影响体验，解法是 FTS5 影子列或 SQLite 的
+   `lower()` 函数索引，出 ADR 再做（§三十九 的视图内搜索 D7 也要经过这个决定）。
+6. **D3 报告 §8 的三条交叠**（导出调用点、quire_shot needs_db、合并痕迹）继续有效；本刀新增的
+   交叠只有一处：`db_markdown_table` 现在构造 `RowRequest` 的结构体字面量（原来用 `new`），如果
+   Track 2/4 也改了这个函数，合并时以「带规则的那份」为准。
+7. **提交**：`c0734d2`（feat(m14): a filter compiles into the statement, and a group header is
+   never a row）——共享文件照旧「只暂存自己那段」（脚本 `.scratch/track3-d4/stage.py`），提交后
+   这些文件在工作树里仍是 modified（那是别人的改动），不是脏数据。

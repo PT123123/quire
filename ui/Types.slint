@@ -78,6 +78,48 @@ export struct TocEntry {
     level: int, // 1..3 from the heading's kind, which is the indent
 }
 
+export struct DbCell {
+    property: int,     // the property id, which a write names
+    kind: int,         // PropertyKind index (see the legend in UIState's callbacks)
+    text: string,      // painted (option name, formatted number, ISO date)
+    checked: bool,     // checkbox only; derived from the painted word in Rust
+    editable: bool,    // false for computed/derived kinds: no inline editor
+}
+
+export struct DbRow {
+    record: int,
+    page: int,   // the page the row IS, -1 for a bare record (ADR-0063)
+    title: string,
+    // D4 (SPEC §三十九 「操作」): a group header's label ("Done · 3"), and ""
+    // for a data row — the one thing the row delegate's conditional asks. A
+    // header is an *entry*, not a record: it occupies one slot of the scroll
+    // surface and carries no cells, so a 10 000-row database grouped into
+    // three groups realizes three of these, never one per group.
+    header: string,
+    cells: [DbCell],
+}
+
+export struct DbOption {
+    id: string,   // the stored value (an option id, ADR-0061)
+    name: string, // what the row draws
+    color: string,
+}
+
+export struct DbColumn {
+    property: int,
+    name: string,
+    kind: int,
+    permille: int, // stored width in permille of the grid; 0 = equal share
+    title: bool,
+    options: [DbOption],
+}
+
+export struct DbViewTab {
+    view: int,
+    name: string,
+    active: bool,
+}
+
 export struct BlockRow {
     id: int,
     kind: int, // 0 para, 1 h1, 2 h2, 3 h3, 4 bullet, 5 numbered, 6 todo, 7 quote, 8 code, 9 divider, 10 callout, 11 page, 12 link, 13 toggle, 14 image, 15 file, 16 table, 18 columns, 20 math, 21 toc, 22 embed (17 = table_cell, 19 = column: containers' children, never a row)
@@ -123,6 +165,20 @@ export struct BlockRow {
     db-header-height: length,
     db-layout: string,     // the active view's layout, as its label
     db-layout-ok: bool,    // false = this build does not draw that layout yet
+    // D4 (SPEC §三十九 「操作」): the view's rules, as the header reads them.
+    // `db-filter-note` is the visible degradation — a filter the document held
+    // that this build could not apply, drawn where the row count would be and
+    // never toasted away. The other four are the buttons' state: how many
+    // clauses the filter holds (chip + active tint), the first sort term (the
+    // header arrow; a document may hold more terms and still sorts by all of
+    // them), and the group column.
+    db-filter-note: string,
+    db-filter-count: int,
+    db-sort-property: int,
+    db-sort-desc: bool,
+    db-group-property: int,
+
+
 }
 
 // Database (23) cell values (SPEC §三十九). Everything is already painted and
@@ -133,6 +189,28 @@ export struct DbColumnToggle {
     kind: string,
     visible: bool,
     locked: bool, // the title column: listed, never hideable
+}
+
+// D4 (SPEC §三十九 「操作」): one filter-panel row. The ids name the clause to
+// write; the strings are what the row shows. `has-value == false` is the
+// unfilled rule the panel draws as "not set yet" — it filters nothing by
+// design, so "add a rule" can be left half-done without hiding rows.
+export struct DbFilterRow {
+    property: int,
+    name: string,     // the clause's column, as its header says it
+    kind: int,        // PropertyKind index: drives the value editor
+    op: int,          // FilterOp index (the FILTER_OPS order in Rust)
+    op-name: string,  // the comparison's word ("is", "contains", "after")
+    value: string,    // as the value button shows it ("" = not set)
+    has-value: bool,
+    invert: bool,     // a `not` around this clause
+}
+
+// One comparison of the op picker's list: the op's index and its word for the
+// kind the row's column has.
+export struct DbFilterOp {
+    op: int,
+    name: string,
 }
 
 export struct CommandRow {
@@ -287,6 +365,33 @@ export global UIState {
     in-out property <[DbColumnToggle]> db-columns-rows;
     in-out property <length> db-columns-x: 300px;
     in-out property <length> db-columns-y: 200px;
+
+    // D4: the filter panel — a window-level popup like the columns one, with a
+    // small state machine of its own (0 rules · 1 column chooser · 2 comparison
+    // chooser · 3 option chooser), because one popup that changes its list is
+    // the shape a rule editor can have without a popup opening on a popup.
+    // `db-filter-rows` is the panel's rule list; `db-filter-columns` is every
+    // property of the database (the chooser's list); `db-filter-ops` and
+    // `db-filter-options` are the two choosers' lists, pushed when one opens.
+    in-out property <bool> db-filter-open: false;
+    in-out property <int> db-filter-block: -1;
+    in-out property <length> db-filter-x: 300px;
+    in-out property <length> db-filter-y: 200px;
+    in-out property <bool> db-filter-match-any: false; // the root: or over and
+    in-out property <[DbFilterRow]> db-filter-rows;
+    in-out property <[DbColumnToggle]> db-filter-columns; // the chooser: every property
+    in-out property <int> db-filter-panel: 0;
+    in-out property <int> db-filter-edit-row: -1;
+    in-out property <[DbFilterOp]> db-filter-ops;
+    in-out property <[DbOption]> db-filter-options;
+    // D4: the group picker — the option-bounded kinds only (the header list
+    // has to stay a handful of rows), plus "No group".
+    in-out property <bool> db-group-open: false;
+    in-out property <int> db-group-block: -1;
+    in-out property <int> db-group-current: -1; // the active group's property (-1 = none)
+    in-out property <length> db-group-x: 300px;
+    in-out property <length> db-group-y: 200px;
+    in-out property <[DbColumnToggle]> db-group-rows;
 
     // command palette
     in-out property <bool> palette-open: false;
@@ -466,6 +571,36 @@ export global UIState {
     callback db-columns-opened(int, length, length); // block, viewport-x, viewport-y
     callback db-column-toggled(int, int);        // block, property
     callback db-columns-closed();
+    // D4 (SPEC §三十九 「操作」): the view's rules. The filter panel edits a
+    // flat `and`/`or` root over clauses, each optionally inverted — a subset
+    // the panel can draw; the compiler reads the whole recursive tree, so a
+    // hand-edited or later-build document still filters and only the *editing*
+    // is refused. The value text commits on Enter (a keystroke write would be
+    // an undo step per key); the discrete controls apply immediately.
+    callback db-filter-opened(int, length, length); // block, viewport-x, viewport-y
+    callback db-filter-closed();
+    callback db-filter-panel-set(int);              // panel state (0 rules · 1 columns · 2 ops · 3 options)
+    callback db-filter-match-set(int, bool);        // block, match-any
+    callback db-filter-add-rule(int);               // block: switch the panel to the column chooser
+    callback db-filter-column-picked(int, int);     // block, property: append an unfilled clause
+    callback db-filter-row-removed(int, int);       // block, clause index
+    callback db-filter-op-menu(int, int);           // block, clause index: push that kind's comparisons
+    callback db-filter-op-picked(int, int, int);    // block, clause index, op
+    callback db-filter-text-set(int, int, string);  // block, clause index, value (Enter)
+    callback db-filter-flag-set(int, int, bool);    // block, clause index, checked
+    callback db-filter-option-menu(int, int);       // block, clause index: push the column's options
+    callback db-filter-option-picked(int, int, string); // block, clause index, option id
+    callback db-filter-not-toggled(int, int);       // block, clause index
+    callback db-filter-cleared(int);                // block
+    // Sort: the column header cycles none → ascending → descending → none, and
+    // every term lands in the statement's ORDER BY (multi-key documents sort
+    // by all of them; the header edits the first).
+    callback db-sort-cycled(int, int);              // block, property
+    // Group by: the option-bounded kinds only (the header list must stay a
+    // handful of rows), -1 = no group.
+    callback db-group-opened(int, length, length);  // block, viewport-x, viewport-y
+    callback db-group-closed();
+    callback db-group-picked(int, int);             // block, property (-1 = none)
     // The view switcher: one view today, and the shape that makes D5's second
     // view a row instead of a rewrite.
     callback db-view-picked(int, int);           // block, view id

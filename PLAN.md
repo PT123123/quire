@@ -2431,3 +2431,54 @@ false 的格是惰性的，日期与列表的输入控件是 D5/D6 的。
 `absolute-position` 的窗口坐标语义只在文档层面确认（统一测试要看 popup 是否落在按钮正下方）；
 10 000 行滚动时的读延迟仍受 D1 量出的 `OFFSET` + `LEFT JOIN` 影响（D4 的游标读）；
 `formula` / `rollup` 列在导出里的计算值是 D6 的正确性。
+
+## Track 3 · D4 filter / sort / group（2026-09-22，on track/3-database，ADR-0076/ADR-0077）
+
+**一行 cargo 都没跑**（本刀的铁律：只写代码；编译、测试、视觉、性能统一留给全部代码生成完之后的总测试）。
+
+### 缘起：把红线做成模块边界
+
+SPEC §三十九 的红线第二条（「filter / sort 在 SQL 侧完成，不在 UI 侧过滤」）是最容易违反的一条，因为
+「取回再过滤」写起来最短。本刀把它变成结构而不是纪律：`RowRequest` 带着**规则本身**
+（`sorts: &[SortSpec]` + `filter: Option<&FilterNode>`），`storage::database_query` 是唯一把规则变成 SQL
+的模块（`WHERE` / 多键 `ORDER BY` / 组谓词），`database_store` 是唯一执行它的模块，而
+`core::database::window` 仍然先开窗——只是过滤后的窗口开在**过滤后的计数**上（`SELECT count(*)` 跑在
+与行读同样的 `FROM`/`WHERE` 上）。没有任何一层拿得到行去丢。
+
+### 交付物
+
+* **过滤**：ADR-0064 的递归树（`and` / `or` / `not` / 子句）在 `core::database_view` 里按 schema 解析成
+  `FilterNode`，在 `storage::database_query` 里编译成 `WHERE`：text 是
+  `INSTR(LOWER(expr), LOWER(?)) > 0`；list 是 `db_value_items` 上的一次 `EXISTS` 探针（ADR-0062 预言过的形状）；
+  `any-of` 是选项 id 的 `IN`；number 绑 `REAL`（`2` 在 `10` 前）；date 绑定宽文本（字节序即时间序）；
+  `ne` 是 `NOT (eq 形)`（三值逻辑让空值两边都不匹配 =「有一个值且不是这个」）；checkbox 的「未勾选」含 `NULL`
+  （没碰过的勾选框就是没勾）。**降级都在 ADR-0076 里定死**：树整棵读不开 → 丢掉 + 在视图上可见提示；
+  单条子句不可读（列没了 / 比较符不适用于该 kind / 值不是该列存的形状）→ 丢那一条 + 计数提示；
+  排序项与分组编不出来 → 静默丢弃（顺序与分组只改变看法，不藏行，第一帧就看得出来）；空 `{"and":[]}`
+  （面板删空规则留下的状态）不是过滤、也不提示。
+* **排序**：多键——文档里每个 `sorts` 项各成 `ORDER BY` 的一段，每段自带空值置后项（永远升序），
+  最后统一 `r.ord, r.id` 作稳定 tie-break；列头点击循环 无→升→降→无，编辑的是第一项（决定顺序的头部）。
+* **分组**：**条目投影**——组头是条目不是行。`group_window(counts, window)` 把条目窗口映射成
+  「窗口内的组头 + 每组的 `(skip, len)` 切片」，每片用**组内自己的** `LIMIT`/`OFFSET` 取，所以一组装
+  10 000 行也只 realize 31 行、每个组只多一个条目；条目总数 Σ(count+1) 由 `GROUP BY` 的计数算出，
+  窗口照常先开。组列表只对 option-bounded 的 checkbox / select / status 开放（`COUNT(*) GROUP BY`
+  是一小把行）；组头顺序按 schema 自己的选项顺序在 Rust 里排（选项表在 config JSON 里，SQL 看不见）。
+* **UI**：`Filter` 按钮 + 面板（一个 popup 四个状态：规则 / 选列 / 选比较符 / 选值；根 all | any，
+  子句级 ¬，值按 kind 分别是文本输入 / 勾选 / 选项列表，值在 Enter 提交）；`Group` 按钮 + picker
+  （含 No group）；列头点击排序 + 箭头；组头行（同一个窗口算术与 `db-row-start` 摆放）。
+  规则全部写回 `db_views.definition`——`filter` / `sorts` / `groups` 三把键归 D4，ADR-0074 的文本读改写不变。
+* **场景**：`database-filter` / `dark-database-filter`（5 行里 `Points > 5` 留 3 行，走的是面板同一套写路径）。
+* **没有新迁移**：规则本来就在 `db_views.definition` 这份 JSON 文档里（ADR-0064），本刀一个字节都没有加列。
+
+### 验证（留给总测试）
+
+三条门槛（`cargo check --all-targets` / `cargo test --all-targets` / `cargo build --release`，零警告）＋
+视觉 sweep（既有 67 场景应逐字节相同，`database-filter` / `dark-database-filter` 为 new）＋ SPEC 要的
+**对照数字**：10 000 行的库加一个过滤条件的窗口读耗时 vs 取回 10 000 行再在内存里过滤的耗时
+（量法写在 REPORT_TRACK3 §D4 的测试计划里）。
+
+### 未验证（诚实清单）
+
+本刀一行 cargo 都没跑，所以编译、测试、视觉、性能全部未验证，静态自查的清单在报告里。
+已知约束：共享文件只加自己的部分（controller / state / Types / AppWindow）；ADR 号 0076/0077 接在
+0075 后；迁移号不动（工作树仍是 19，本刀提交树仍是 18）。

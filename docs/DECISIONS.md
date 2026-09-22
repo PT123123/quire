@@ -2832,3 +2832,136 @@ Consequences:
   (the bulk path's database snapshot is ADR-0066's, and is not a change
   batch), so the fold is exercised by the app's own paths only — a mixed
   replay test is on the final unified test's plan.
+
+## ADR-0076 · A view's rules compile into the statement, and a filter that cannot be read is dropped with a visible note
+
+Decision: SPEC §三十九's red line — 「filter / sort 在 SQL 侧完成，不在 UI 侧过滤」 — is a
+**module boundary** in this codebase, not a discipline. `RowRequest` carries the view's rules
+themselves: `sorts: &[SortSpec]` (D2's single term grown into the list ADR-0070 said D4 would
+grow) and `filter: Option<&FilterNode>` (ADR-0064's recursive tree, parsed by
+`core::database_view` against the schema). `storage::database_query` is the only module that
+turns rules into SQL text — `WHERE r.db = ? AND (tree)`, one `ORDER BY` term per sort key
+(blank-placement term per key, always ascending, then the value's direction, then
+`r.ord, r.id` as the tie-break after the last key) — and `database_store` is the only module
+that executes it. No function between the document and the window ever holds a row to throw
+one away.
+
+The count obeys the same boundary: a filtered view's window is computed from
+`SELECT count(*)` over the **same** `FROM` and `WHERE` the row read runs
+(`filtered_count`), so filtering a 10 000-row database down to 3 rows realizes 3 rows — the
+count is SQL's and it happens *before* the window, which is the contract the unified test
+must pin (see REPORT_TRACK3 §D4, the 对照 number: filtered window read vs. fetch-10 000-then-
+filter-in-Rust).
+
+A comparison's *column* is the decision `SortSpec` already made per kind (ADR-0070), and the
+filter reuses it: `contains` is `INSTR(LOWER(expr), LOWER(?)) > 0` (no `LIKE`, so the value's
+own `%` means itself; `LOWER` folds ASCII — the boundary every text search here has); a list
+column's `has` is one `EXISTS` probe on `db_value_items`' primary-key prefix, exactly the
+shape ADR-0062 predicted; `is any of` is an `IN` over the bound option **ids**; number
+comparisons bind `REAL` and date comparisons bind the stored fixed-width text, so "before"
+and "after" are byte comparisons because ADR-0062 stores dates fixed-width. `ne` is
+`NOT (eq-form)`, so three-valued logic makes an empty cell match neither `is` nor `is not` —
+"holds a value outside this one". A checkbox's `is unchecked` is `(expr = 0 OR expr IS NULL)`
+— an untouched checkbox *is* unchecked — while `is not checked` is its negation, excluding
+untouched rows. A clause whose value was never filled in (`FilterValue::Missing`, stored as
+JSON `null`) compiles to `1`: an unfinished rule filters nothing, so "add a rule" cannot hide
+rows before the user has said what the rule is.
+
+**Degradation is a decision, not an accident** (ADR-0064 named two of these; D4 states all of
+them):
+
+* the `filter` document does not parse as a tree this build reads (a group whose children are
+  not an array, nesting past depth 8) → **the whole tree is dropped** and the view draws the
+  note — "This view's filter could not be read and was ignored." — where the row count would
+  be, in the danger color. Not silent, not a crash, not a toast that outlives one frame: a
+  filter that is not being applied is a fact about every row on screen.
+* one clause names a deleted property, asks a comparison its kind does not have
+  (`contains` on a number), or carries a value of the wrong shape (`next tuesday` as a date —
+  the stored shapes are the only ones comparable, because fixed width is what makes bytes be
+  time) → **that clause is dropped and counted** ("N filter rule(s) were dropped …"). This is
+  ADR-0064's deleted-property rule applied to the other ways one clause can be unreadable; a
+  `not` around a dropped clause is dropped with it, so a vanished rule cannot come back as
+  its own negation hiding every row.
+* a sort term or a group that cannot compile is dropped **quietly**: an order and a grouping
+  are ways of looking at rows, never ways of hiding them, so the honest failure is visible in
+  the first frame.
+* an explicitly empty group (`{"and":[]}`, the panel's "no rules" state) is no filter at all
+  and produces no note.
+
+Why the panel edits a *flat subset*: one `and`/`or` root over clauses, each optionally
+inverted, is the shape a popup with one rule list can honestly draw. A tree outside the
+subset — a group inside a group — still **filters** (the compiler reads the full recursive
+shape), but the panel **refuses to edit** it rather than reshaping the user's rules into
+something it can represent; the refusal is a notice, and the table keeps filtering. Nested
+groups wait for a panel that can draw them (D5's board editor), which is an honest smaller UI,
+not a smaller compiler.
+
+Consequences:
+
+* D4 now owns three more keys of the definition document (`filter`, `sorts`, `groups`), and
+  `ViewDefinition::set_filter/set_sorts/set_group` replace exactly those keys — ADR-0074's
+  read-edit-write of the text, so a width drag still cannot eat a filter and a filter edit
+  still cannot eat a width. An undo restores the whole document, all five owned keys together.
+* The export follows the view for free: `db_markdown_table` builds the same `RowRequest`
+  (filter + sorts) and runs the control read, which is ADR-0065's 「过滤排序照做」 finally
+  having a rules compiler to mean. The group is *screen* furniture — a file has no viewport,
+  so a grouped view exports its rows in the view's order without headers.
+* `row_query`/`row_binds` (the tests' and the probe's evidence helpers) now return
+  heterogeneous binds (`rusqlite::types::Value`), because a filter's binds are heterogeneous
+  by design: an id, a `REAL`, a string, the window pair.
+* Still unverified: **no test ran** (the slice's iron rule). The unified test owes: the
+  filtered-window contract (filter to 3 rows, realize 3 rows), each op's predicate against
+  hand-built rows (contains case-folding, `any-of` over ids, `ne`'s empty-cell exclusion,
+  number order vs. byte order), the two degradation notes, the pass-through of foreign keys
+  across a filter edit (ADR-0074's round-trip, now with rules on both sides), and the
+  对照 number below. Also unverified: `INSTR`'s cost versus a FTS index for a 10 000-row
+  contains-filter — the D2 note about adding `db_values(property, num)` indexes applies to
+  filters too, and the probe prints the plan so the next slice can see what SQLite chose.
+
+## ADR-0077 · Group by is an entry projection over an option-bounded column, and a header is never a row
+
+Decision: grouping is **one column**, and the column must be one whose distinct values the
+schema already bounds — `checkbox`, `select`, `status` (plus "no value"). ADR-0064 stores
+`groups` as an array so a later build can nest; this build reads its first entry and only
+that. The grouped view's scroll surface is a list of **entries** — per group, one header
+entry, then its rows — and the window D0's `core::database::window` computes over
+`total_entries = Σ(count + 1)` is mapped onto queries by `core::database_view::group_window`:
+the headers that fall inside the window, and one `(group, skip, len)` slice per group that
+overlaps it. Each slice is fetched with its own `LIMIT`/`OFFSET` **inside the group**
+(`row_query_in_group`: the group's predicate joins the `WHERE`, the view's filter and sort
+compile in as always), so a group holding all 10 000 rows realizes the same 31 rows it would
+ungrouped, and a group costs **one entry, never one row per group**.
+
+The group list itself is one `GROUP BY` query over an option-bounded column
+(`group_counts`), normalized in the store into `GroupKey::{Empty, Option(id), Checked,
+Unchecked}` — SQL's `NULL` and `''` are one group, and a checkbox's `0` and its absence are
+one group, because an untouched checkbox is unchecked. The list is **unordered in SQL on
+purpose**: the order a user means is the schema's own option order (ADR-0061), which lives in
+the column's config JSON where SQL cannot see it, so the few headers are ordered in Rust from
+that same config (known options in config order, an id the config forgot in byte order after
+them — ADR-0069's fold applied to a header — a checkbox unchecked-then-checked, "No value"
+last). That is ordering a handful of headers, not the red line bent: the rows are SQL's, each
+slice from its own ordered query.
+
+Why the kinds are restricted: a group header is an entity the view has to place in the scroll
+surface, so the list of headers has to be small enough to compute **in full** — that is what
+makes the header walk O(groups). Grouping by `text` or a date would make the group list as
+long as the table (10 000 headers to realize is exactly what "group by must not become
+10 000 rows" forbids); grouping by a number needs buckets ("what are the buckets" is a
+different question, and guessing it would be inventing a histogram nobody asked for). The
+picker offers only the bounded kinds and refuses the rest by name.
+
+Consequences:
+
+* The delegate's rows model carries both shapes: `DbRow.header` is a group header's label
+  ("" for a data row), so the same window arithmetic, the same `db-row-start` row→model
+  conversion (§三十七) and the same block height serve grouped and ungrouped views. The count
+  text counts entries when grouped — honest, if slightly odd wording at 10 000.
+* A group edit goes through the same `SetDatabaseViewDefinition` batch as every other rule
+  edit: one change, one Ctrl+Z, the catalog learns it through `db_absorb` (ADR-0075), and the
+  window cache invalidates on the definition text.
+* Still unverified: no test ran. The unified test owes: a grouped read of a 10 000-row
+  database realizes headers + one window (the entry count is `Σ(count+1)`, asserted against
+  the group list), scrolling across a group boundary fetches only the groups the window
+  touches, a value whose option was deleted groups under its own id, and the "No value" group
+  contains exactly the rows the `IS NULL OR ''` predicate admits.

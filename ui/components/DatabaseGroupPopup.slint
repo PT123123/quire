@@ -1,0 +1,134 @@
+// The group-by picker (D4, SPEC §三十九 「操作」, ADR-0076): which column a
+// view groups by, or none. A window-level popup like the columns one, so it
+// lives above the page and cannot be clipped by the list view a row sits in.
+//
+// The rows are the **option-bounded kinds only** — checkbox, select, status
+// (ADR-0076): a group header is an entry the view has to place in the scroll
+// surface, so the list of headers has to be small enough to compute in full
+// (`COUNT(*) GROUP BY`, a handful of rows). Grouping by `text` or a date would
+// make that list as long as the table — exactly what "group by must not become
+// 10 000 rows" forbids — so the picker does not offer what the compiler would
+// refuse. Which group is active travels as `db-group-current` (the property id,
+// -1 = none), so a row can mark itself without Rust re-pushing the model.
+
+import { Theme } from "../Theme.slint";
+import { Colors } from "../Colors.slint";
+import { Typography } from "../Typography.slint";
+import { UIState } from "../Types.slint";
+
+export component DatabaseGroupPopup inherits PopupWindow {
+    width: 224px;
+    // one "No group" row above the columns
+    height: (UIState.db-group-rows.length + 1) * 30px + 8px;
+    // outside click / Escape dismiss; UIState syncs via the is-open mirror
+    close-policy: PopupClosePolicy.close-on-click-outside;
+
+    Rectangle {
+        x: 2px; y: 3px;
+        width: parent.width - 4px;
+        height: parent.height - 5px;
+        border-radius: Theme.radius-md + 2px;
+        background: Colors.shadow;
+    }
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        border-radius: Theme.radius-md;
+        background: Colors.surface-overlay;
+        border-width: 1px;
+        border-color: Colors.border;
+
+        // "No group": the ordinary table, headers gone. First, because it is
+        // the state most views are in and the one a user is most likely
+        // reaching for.
+        Rectangle {
+            x: 4px;
+            y: 4px;
+            width: parent.width - 8px;
+            height: 30px;
+            border-radius: Theme.radius-sm;
+            background: no-group-ta.has-hover ? Colors.surface-hover : transparent;
+            animate background { duration: Theme.duration-instant; }
+
+            HorizontalLayout {
+                x: 8px;
+                width: parent.width - 16px;
+                spacing: Theme.spacing-sm;
+                Text {
+                    text: "No group";
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-ui;
+                    color: no-group-ta.has-hover ? Colors.text-primary : Colors.text-secondary;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+                if UIState.db-group-current == -1 : Text {
+                    text: "✓";
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-ui;
+                    color: Colors.accent-text;
+                    vertical-alignment: center;
+                }
+            }
+            no-group-ta := TouchArea {
+                width: parent.width;
+                height: parent.height;
+                mouse-cursor: MouseCursor.pointer;
+                clicked => {
+                    UIState.db-group-picked(UIState.db-group-block, -1);
+                }
+            }
+        }
+
+        for item[index] in UIState.db-group-rows : Rectangle {
+            x: 4px;
+            y: 4px + ((index + 1) * 30px);
+            width: parent.width - 8px;
+            height: 30px;
+            border-radius: Theme.radius-sm;
+            background: row-ta.has-hover ? Colors.surface-hover : transparent;
+            animate background { duration: Theme.duration-instant; }
+
+            HorizontalLayout {
+                x: 8px;
+                width: parent.width - 16px;
+                spacing: Theme.spacing-sm;
+                Text {
+                    text: item.name;
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-ui;
+                    color: row-ta.has-hover ? Colors.text-primary : Colors.text-secondary;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+                // the column's type, as the kind's own word — the picker is
+                // also the one place that shows *why* other columns are
+                // missing (they are not option-bounded)
+                Text {
+                    text: item.kind;
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-caption;
+                    color: Colors.text-muted;
+                    vertical-alignment: center;
+                }
+                if item.property == UIState.db-group-current : Text {
+                    text: "✓";
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-ui;
+                    color: Colors.accent-text;
+                    vertical-alignment: center;
+                }
+            }
+            row-ta := TouchArea {
+                width: parent.width;
+                height: parent.height;
+                mouse-cursor: MouseCursor.pointer;
+                clicked => {
+                    UIState.db-group-picked(UIState.db-group-block, item.property);
+                }
+            }
+        }
+    }
+}

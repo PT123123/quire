@@ -14,6 +14,12 @@ import { ContextMenu } from "components/ContextMenu.slint";
 import { IconPicker } from "components/IconPicker.slint";
 import { ConfirmDialog } from "components/Dialog.slint";
 import { SettingsDialog } from "components/SettingsDialog.slint";
+// D4 (SPEC §三十九 「操作」): the view rules' two popups — the filter panel and
+// the group-by picker — as separate components, the way DatabaseView and its
+// siblings are. They mount at the window root like every popup here.
+import { DatabaseFilterPopup } from "components/DatabaseFilterPopup.slint";
+import { DatabaseGroupPopup } from "components/DatabaseGroupPopup.slint";
+
 
 // Row menus (slash + block handle): one window-level popup each, positioned
 // by the controller from the delegate's reported geometry. Declared before
@@ -384,6 +390,8 @@ export component AppWindow inherits Window {
     in-out property <bool> slash-open <=> UIState.slash-open;
     in-out property <int> block-menu-open-id <=> UIState.block-menu-open-id;
     in-out property <bool> db-columns-open <=> UIState.db-columns-open;
+    in-out property <bool> db-filter-open <=> UIState.db-filter-open;
+    in-out property <bool> db-group-open <=> UIState.db-group-open;
     in-out property <bool> link-open <=> UIState.link-open;
     in-out property <bool> dialog-open <=> UIState.dialog-open;
     in-out property <bool> settings-open <=> UIState.settings-open;
@@ -457,6 +465,37 @@ export component AppWindow inherits Window {
             dbColumns.show();
         } else {
             dbColumns.close();
+        }
+    }
+
+    // D4: the two rules popups, same three-piece pattern as the columns one —
+    // the open bit mirrored, the changed handler showing/closing, the is-open
+    // mirror clearing the bit when the user clicks outside.
+    changed db-filter-open => {
+        if (db-filter-open) {
+            dbFilter.show();
+        } else {
+            dbFilter.close();
+        }
+    }
+    property <bool> db-filter-shown: dbFilter.is-open;
+    changed db-filter-shown => {
+        if (!db-filter-shown && UIState.db-filter-open) {
+            UIState.db-filter-open = false;
+        }
+    }
+
+    changed db-group-open => {
+        if (db-group-open) {
+            dbGroup.show();
+        } else {
+            dbGroup.close();
+        }
+    }
+    property <bool> db-group-shown: dbGroup.is-open;
+    changed db-group-shown => {
+        if (!db-group-shown && UIState.db-group-open) {
+            UIState.db-group-open = false;
         }
     }
 
@@ -674,6 +713,16 @@ export component AppWindow inherits Window {
     dbColumns := DatabaseColumnsPopup {
         x: UIState.db-columns-x;
         y: UIState.db-columns-y;
+    }
+
+    dbFilter := DatabaseFilterPopup {
+        x: UIState.db-filter-x;
+        y: UIState.db-filter-y;
+    }
+
+    dbGroup := DatabaseGroupPopup {
+        x: UIState.db-group-x;
+        y: UIState.db-group-y;
     }
 
     linkDialog := LinkDialog {
