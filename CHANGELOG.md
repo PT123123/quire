@@ -525,7 +525,7 @@ First functional release: a local, single-file-database notes workspace.
   `rusqlite` and `image` — and the root package keeps the Slint shell. That is the
   precondition for the Android port and for a Rust sync module, and it moved the gate
   command: **`cargo test` at a workspace root tests only the root package**, so the bare
-  form here reported 134 passed and exit 0 while 389 data-layer tests sat unrun. `just
+  form here reported 134 passed and exit 0 while 431 data-layer tests sat unrun. `just
   check` says `--workspace` on all three lines now. Nothing else moved: 565 passed / 23
   ignored with the 589 test names proved identical to the run before, and 131 of 131
   sweep PNGs byte-identical between two shot binaries that differ by md5

@@ -39,12 +39,14 @@ Consequences:
 - **The gate command changed, and that is the load-bearing part.** `cargo test` at a
   workspace root tests the *root package only*. Caught on the first run here: bare
   `cargo test --all-targets` reported **134 passed / 0 failed and exit 0** while
-  `quire-data`'s 389 tests never executed. `just check` now passes `--workspace` to all
+  `quire-data`'s 431 tests never executed. `just check` now passes `--workspace` to all
   three cargo lines, and a future green gate has to name which scope it ran.
 - The suite is proved *carried*, not merely counted: the two runs' test **name** sets are
   identical (`comm` both directions empty, 589 names) and the totals match the D10 gate
-  exactly — 565 passed / 0 failed / 23 ignored, now 134 on the shell side and 389 on the
-  data side.
+  exactly — 565 passed / 0 failed / 23 ignored, now 134 on the shell side and 431 on the
+  data side. That split was first written as 389, which is a hand-summed number that
+  dropped `storage_test`'s 42; the figure above is the same tree run standalone in the
+  extracted repository, not an arithmetic. Sum per-target lines with `awk`, never by eye.
 - Pixels prove the shell did not move, with each arm identifying itself: the control was
   built and swept at `0089008` **before any file moved** (`.scratch/split-control`, exe
   md5 `63f021af…`), the post-split arm swept the same tree afterwards
@@ -59,9 +61,11 @@ Consequences:
   `app::state`, and pulling them in would mean pulling `AppState` into the data crate,
   which is exactly the edge this split exists to forbid.
 - What this does **not** do yet: it is still one repository, and `path = "crates/data"`
-  is the entire coupling. The next step is `git filter-repo` over a throwaway clone,
-  carrying `crates/data` out as its own history, with the shell depending on it by pinned
-  rev.
+  is the entire coupling. The `git filter-repo` pass has since been run over a throwaway
+  clone (69 of 172 commits, the data-layer paths kept at their original spelling so
+  nothing in the blame chain breaks) and the extracted tree builds and tests standalone at
+  431 passed / 0 failed — but it has **no remote**, so the shell still consumes the crate
+  by path. Pushing it, and switching to a pinned `git = ` dependency, are one decision away.
 - One seam left visible rather than papered over: `storage::data_location::roaming_root()`
   is the only function in the data crate that reads an environment variable
   (`%APPDATA%`), and its neighbour `app_data(&Path)` already takes the value as a

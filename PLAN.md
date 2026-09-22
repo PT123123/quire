@@ -3225,14 +3225,29 @@ testing};`，于是壳里的 `crate::core::…` 与集成测试里的 `quire::se
 | 关 | 命令 | 结果 |
 |---|---|---|
 | 类型 | `cargo check --workspace --all-targets` | Finished，0 warning |
-| 测试 | `cargo test --workspace --all-targets --no-fail-fast` | **565 passed / 0 failed / 23 ignored**，与 D10 门槛逐字相同；壳侧 134、数据侧 389 |
+| 测试 | `cargo test --workspace --all-targets --no-fail-fast` | **565 passed / 0 failed / 23 ignored**，与 D10 门槛逐字相同；壳侧 134、数据侧 431 |
 | 名单 | `comm` 双向比对 D10 的 `gate-test-d15.txt` | 589 个测试名，**双向 0 差**——不是「数字对得上」，是「同一批测试」 |
 | release | `cargo build --workspace --release` | Finished in **5m31s、0 warning**（`target/release/quire.exe` 27 846 656 B）；这是最后一处 doc 注释改动之后重跑的那一轮，它之前一轮 6m36s——长短差在缓存不在代码，能比的只有两轮都 0 warning |
 | 像素 | `sweep.ps1 -OutDir .scratch/split-after -Baseline .scratch/split-control` | **0 changed / 131 identical**；控制臂在任何文件移动之前建并扫（exe md5 `63f021af…`），后臂 `1851e577…` |
 
 **本刀买到最重要的一条不是编译，是门禁命令本身**：`cargo test` 在工作区根**只测根包**。第一次
-跑报的是 134 passed / 0 failed / **exit 0**，把 `quire-data` 的 389 个测试静默跳过了——这正是
+跑报的是 134 passed / 0 failed / **exit 0**，把 `quire-data` 的 431 个测试静默跳过了——这正是
 「静默探针 ≠ 阴性」的形状。`just check` 三行都补了 `--workspace`，注释写明不加会怎样。
+（这一段初稿写的测试数是 389，那是**用眼睛加** per-target 行、漏了 `storage_test` 的 42 个。
+431 是同一棵树在剥出来的独立仓里自己跑出来的数，`awk` 加的，不是心算的。）
+
+**同日的物理剥离**（`.scratch/wt/quire-data-extract/repo`，一次性 clone，主树未动一根毛）：
+`git filter-repo --path src/core --path src/storage --path src/services --path src/testing.rs
+--path <5 个测试>` → **172 枚里留下 69 枚**，从 `feat(core): persistence contract — model
+types + Repository trait (ADR-0012)` 一路到 D10，路径全部保持原样（数据层一辈子住在
+`src/core` 那些位置，所以没有一枚 commit 被改名打断，`git blame` 仍然逐行成立）。之后两枚本地
+commit 把边界补上：`Cargo.toml`（依赖只有 `image` + `rusqlite`，外加一枚**空的** `[workspace]`
+表——这棵树目前物理上嵌在本仓目录里，不加它 cargo 会往上找到父 workspace 直接拒绝编译）、
+`src/lib.rs`、`tests/` 上移一层、`.gitignore` / `.gitattributes` / `README.md`。
+**它自己跑 `cargo test --all-targets` = 431 passed / 0 failed / 13 ignored，0 warning**；与
+本仓 `crates/data` 的内容逐文件比对，差异只有换行符（5 个文件的 CRLF 是本仓 checkout 的老毛病，
+`tr -d '\r'` 之后全等）。**没有远端**，所以壳仓仍然走 `path = "crates/data"`，改成锁 rev 的
+git 依赖要等仓名和推送落地。
 
 **未验证（诚实）**：① `cargo check -p quire-data --target aarch64-linux-android` **没跑过**。
 ADR-0093 说的是「这条边界是安卓的前提」，不等于「已经能为安卓编出来」；`rusqlite` bundled 要
@@ -3242,5 +3257,8 @@ master 本来就没在当前 head 上跑过它们（ROADMAP:108 自己记着）�
 `data_location::roaming_root()` 仍读 `%APPDATA%`，安卓侧要自己注入路径，本刀只是把那个接缝
 **量出来**了（同文件的 `app_data(&Path)` 已经是收参数的可测那半），没改调用方；④ `crate::core`
 这类拼写靠 4 行 re-export 撑着，边界目前是「编译强制 + 注释维持的命名习惯」的混合体，物理搬仓
-之后要删掉 re-export 才算真强制；⑤ **git 历史剥离与建仓未做**，仓名要用户定，且 `filter-repo`
-会重写 SHA、只能在一次性 clone 上跑。
+之后要删掉 re-export 才算真强制；⑤ **剥离本身做完了，交付没有**：那枚仓目前只是
+`.scratch/wt/` 底下的一棵树，**没有远端、没有推**，仓名待定；壳仓改成锁 rev 的 git 依赖之后
+`just check` 是否仍全绿**没跑过**（现在仍是 `path = "crates/data"`）；⑥ 新仓的
+`Cargo.toml` 里那枚空 `[workspace]` 是为「它暂时无处可去」写的，搬出本仓目录之后它变成多余的
+一行——留着无害，但要认得它为什么在那儿。

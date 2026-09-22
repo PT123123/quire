@@ -34,11 +34,14 @@ nothing graphical. The root package (`quire`) is the Slint shell: `app/`,
 
 This is the prerequisite for M9 and for sync, and it is a *prerequisite*, not
 either of them: `cargo check -p quire-data --target aarch64-linux-android` has
-not been run, and the physical split into a second repository (history carried
-out with `git filter-repo`, shell depending on it by pinned rev) is still ahead.
+not been run. The history has since been cut out with `git filter-repo` into a
+standalone crate that builds and tests on its own (431 passed, 69 of the 172
+parent commits carried, at `.scratch/wt/quire-data-extract/repo`) — it has no
+remote yet, so the shell still consumes `crates/data` by path rather than by
+pinned rev.
 One gate consequence to know before trusting a green run: **`cargo test` at a
 workspace root tests the root package only** — the bare form reports 134 passed
-and exit 0 while the data crate's 389 tests never run. `just check` carries
+and exit 0 while the data crate's 431 tests never run. `just check` carries
 `--workspace` on all three lines for that reason.
 
 ## Explicitly out of scope for v1
