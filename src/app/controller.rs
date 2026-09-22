@@ -1485,7 +1485,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
             // anchored under the button (window coordinates, the columns
             // popup's convention) and clamped to the rules state's height —
             // the tallest the panel gets
-            let rows = state.db_filter_panel(block).1.len() as f32;
+            let rows = s.db_filter_panel(block).1.len() as f32;
             let popup_h = 40.0 + rows * 76.0 + 36.0 + 8.0;
             let y = y.clamp(48.0, (g.get_window_h() - popup_h - 8.0).max(48.0));
             let x = x.clamp(8.0, (g.get_window_w() - 348.0 - 8.0).max(8.0));
@@ -1658,7 +1658,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
             flush_pending_edit(&g, &s);
             db_push_group(&g, &s, block);
             g.set_db_group_block(block);
-            let rows = state.db_group_choices(block).len() as f32 + 1.0;
+            let rows = s.db_group_choices(block).len() as f32 + 1.0;
             let popup_h = rows * 30.0 + 8.0;
             let y = y.clamp(48.0, (g.get_window_h() - popup_h - 8.0).max(48.0));
             let x = x.clamp(8.0, (g.get_window_w() - 224.0 - 8.0).max(8.0));
@@ -1804,7 +1804,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                     s.db_column_toggles(block)
                         .into_iter()
                         .find(|t| t.property == property)
-                        .map(|t| t.name)
+                        .map(|t| t.name.into())
                         .unwrap_or_default(),
                 );
                 g.set_db_formula_text(text.into());

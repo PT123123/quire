@@ -19,8 +19,8 @@ use crate::core::database_view::{
     all_columns, board_slots, board_window, date_key, day_number_of, day_of, days_in_month,
     group_window, is_stored_date, layout_metrics, month_cells, month_key, month_label, shift_month,
     table_columns, table_rows, view_columns, CALENDAR_PEEK, FilterClause, FilterNode, FilterOp,
-    FilterValue, FlatClause, FlatFilter, GroupKey, GroupSpec, LayoutSupport, TableColumn, TableView,
-    ViewDefinition, ViewRules, ViewTab, WIDTH_AUTO,
+    FilterValue, FlatClause, FlatFilter, GroupKey, GroupSpec, LayoutSupport, TableColumn,
+    TableRowView, TableView, ViewDefinition, ViewRules, ViewTab, WIDTH_AUTO,
 };
 
 use crate::core::persistence::{Change, Repository};
@@ -4644,8 +4644,8 @@ impl AppState {
         // `rows`, filled below): a board's columns with their own card slices,
         // and the calendar's 42 day cells.
         let mut view_rows: Vec<DbRow> = Vec::new();
-        let mut board_model: Rc<VecModel<crate::DbBoardColumn>> = Rc::new(VecModel::new());
-        let mut cal_model: Rc<VecModel<crate::DbCalendarDay>> = Rc::new(VecModel::new());
+        let mut board_model: Rc<VecModel<crate::DbBoardColumn>> = Rc::new(VecModel::default());
+        let mut cal_model: Rc<VecModel<crate::DbCalendarDay>> = Rc::new(VecModel::default());
 
         // Which rows are pages (ADR-0063), for the row's own Open/name column.
         // One query for the database, not one per row: lazy pages mean this is a
@@ -5210,8 +5210,8 @@ impl AppState {
             total,
             window: wanted,
             rows: Rc::new(VecModel::from(Vec::new())),
-            board: Rc::new(VecModel::new()),
-            cal: Rc::new(VecModel::new()),
+            board: Rc::new(VecModel::default()),
+            cal: Rc::new(VecModel::default()),
             body: 0.0,
             tl_start: 0,
             tl_days: 1,
@@ -6988,12 +6988,9 @@ impl AppState {
     /// with no values at all creates a bare record — the same thing the table's
     /// "New row" makes.
     pub fn db_form_submit(&self, block: i32) -> bool {
-        let Some(db) = self.db_ref_of(block) else {
+        if self.db_ref_of(block).is_none() || self.db_repo().is_none() {
             return false;
-        };
-        let Some(repo) = self.db_repo().cloned() else {
-            return false;
-        };
+        }
         let catalog = self.databases.borrow();
         let draft = self.db_form.borrow().get(&block).cloned().unwrap_or_default();
         let mut values: Vec<(PropertyId, CellValue)> = Vec::new();
@@ -7138,13 +7135,13 @@ impl AppState {
         // the page "Untitled", which is what a row nobody named is).
         let title = {
             let catalog = self.databases.borrow();
-            catalog
+            let named = catalog
                 .properties_of(db)
                 .find(|p| p.kind.is_title())
                 .and_then(|p| repo.cell(record_id, p.id).ok())
                 .map(|value| value.display())
-                .filter(|title| !title.trim().is_empty())
-                .unwrap_or_else(|| "Untitled".to_string())
+                .filter(|title| !title.trim().is_empty());
+            named.unwrap_or_else(|| "Untitled".to_string())
         };
         // The page's own facts, the way `create_page` writes them: a child of
         // the page this database sits on, last among its siblings. Duplicated
