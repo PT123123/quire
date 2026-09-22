@@ -65,6 +65,17 @@ Consequences:
   diff against the pre-rewrite commit is what caught it. Every SHA quoted anywhere in
   these documents predates that pass, including the `09ef5aa` above and the pre-split
   control arm's `0089008`; the commit subjects still find them.
+- **What the rewrite reaches, and what it deliberately does not.** It reaches the
+  network and every ref: `origin/master` and `v0.1.0-rc1` went out under
+  `--force-with-lease` pinned to the exact values this repository had published minutes
+  earlier, so the push could not have clobbered anything it had not itself written, and
+  the remote was then read back through the API — 177/177 on author, 177/177 on
+  committer, and the tag's tagger — rather than believed from the local log. It does not
+  reach the objects in this checkout: the old commits are unreachable but still on local
+  disk until a `reflog expire` and `gc --prune`, which would also be the only way back.
+  Not taken, on purpose — the leak being closed is the public one, and a machine that
+  already names that user in twenty file paths gains nothing from local amnesia. The run
+  left `commit-map` behind, so every old SHA still resolves to its replacement on paper.
 - `Cargo.lock` is committed **in the extracted repository** as well, which a library
   normally would not: the Android shell will consume it as a git dependency with no
   workspace root above it to inherit a lock from, and `rusqlite` is `bundled` there,

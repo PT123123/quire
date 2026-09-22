@@ -3317,6 +3317,23 @@ libgit2 主动递了凭证，服务器回 401，报错长得像权限问题，�
 **没动的一条**：`src/lib.rs` 那 4 行 re-export 仍然撑着 `crate::core::…` 的 959 处拼写——
 上一节列的④「物理搬仓之后要删掉 re-export 才算真强制」这条债**本刀没还**，跨仓之后它反而更明显了。
 
+**重写落地的对照表**（`origin/master` 新尖 = `f475026`；本文和 ADR 里被引用的旧号一律按这张表找）：
+
+| 旧 | 新 | 那枚 commit |
+|---|---|---|
+| `0089008` | `3afd5e0` | ADR-0093 像素门的控制臂 |
+| `09ef5aa` | `531634a` | 两 crate 的那一刀（blob 比对的基准就在这枚的树里） |
+| `3ae8124` | `ac4da23` | 431 不是 389 的那次自纠 |
+| `b2e3cd2` | `5f8d3e3` | M14 D10，`merge-t3` 归档 worktree 现在指这枚 |
+| `382fd58` | `e6758a6` | 本仓删 `crates/data` 改锁 rev |
+| `28502d6` | `ef905eb` | 决定重写、改正经的那枚文档 |
+
+`filter-repo` 写的 `.git/filter-repo/commit-map` 是全量那张表（177 行）。**已核实**：远端按 author
+和 committer 各扫一遍都是 177/177 noreply，tag `v0.1.0-rc1` 的 tagger 也是（对象号
+`16aed13`→`1dbbde4`）。**未清的部分**：主仓本地仍留着旧 SHA 的对象（`split/quire-data` 已跟着挪走、
+`merge-t3` 已重挂，但没有 `reflog expire` + `gc --prune`，那批旧 commit 在本地还捞得回来）。这是
+本机磁盘上的事，公网那侧已经干净；要连本地一起抹需要另开一刀，动的是恢复手段本身。
+
 **未验证（诚实）**：① `cargo check --target aarch64-linux-android` 仍**没跑过**，而且现在只能在
 `quire-core` 那棵树里跑（`-p quire-core` 在本仓已经不解析）；② `dist.ps1` / `verify-installer.ps1`
 / `verify-portable.ps1` 依旧没在新布局上验过；③ 新仓没有 tag、没有 release 节奏，rev 是一枚裸

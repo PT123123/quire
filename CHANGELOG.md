@@ -537,7 +537,10 @@ First functional release: a local, single-file-database notes workspace.
   174 commits and the tagger of `v0.1.0-rc1` carried the same address on a public remote
   — Track 3's handoff had asserted the metadata was clean because it had scanned the
   diff and never `%ae`, and that sentence has been corrected in place rather than
-  quietly fixed. Every SHA quoted in these documents predates it. The rename is the only content change: 38 of 45 source files
+  quietly fixed. Every SHA quoted in these documents predates it. Landed as
+  `origin/master` = `f475026` and `v0.1.0-rc1` = `1dbbde4`; the check that says the
+  source did not move is that `cargo check` on the adopted head finished in **11 s**
+  having recompiled nothing, and the shell's suite still reads 134 / 0 / 10 The rename is the only content change: 38 of 45 source files
   still hash byte-identical to the blobs this repository holds at `09ef5aa:crates/data/`,
   and the other 7 hash identical once the name is reversed. Two things follow that are
   worth knowing before quoting a green run. **The suite is no longer reachable from
