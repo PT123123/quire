@@ -149,3 +149,25 @@ docs/REPORT_TRACK4.md，不要自己改 ROADMAP。
 做不完就诚实报状态。installer / portable 两套验证需要本机装了 Inno Setup，
 跑不了就明写「未跑 + 原因」，不要跳过不提。
 ```
+
+---
+
+## 4 · 汇合现场（整合者记，2026-09-22 17:3x）
+
+四条 track 的未提交改动已经在 `a89f91b` 一次性进 `track/3-database`（工作树共享、HEAD 只有一个，
+所以「按 track 分别提交」在这棵树上做不到 —— 只能按 hunk 分）。**唯一被排除的是 T4.1 的 PDF 首页缩略图**
+（用户 2026-09-22 决定「pdf先不做」）：
+
+| 内容 | 状态 |
+|------|------|
+| hayro 依赖（`Cargo.toml` / `Cargo.lock`）、`src/services/{mod,attachment_store}.rs` 的 PDF 分支、未跟踪的 `src/services/pdf_thumb.rs` + `tests/fixtures/*.pdf` + `make_fixture_pdfs.py` | **留在工作树里未提交**；要做就整套重新落地 |
+| SPEC §三十七 的 PDF 小节、`CHANGELOG` 的 PDF 条目、`ROADMAP` M10 的交付注 | **未写**，SPEC 仍是 2026-09-20「推迟，未做」的原文 |
+| ADR-0080 | 号**空着**，下次做 PDF 仍用它；`docs/DECISIONS.md` 里 ADR-0081 的那句「same milestone as ADR-0080's」已改成不引用编号 |
+| ADR-0081（bookmark 撤回）、T4.3 的 ⋮⋮ 菜单 re-anchor / 表格 Ctrl+L / `rc_gates.ps1` / verify 脚本删除守卫 | **已落地**，`CHANGELOG` 三条 Known-limitations 与 `ROADMAP` M11 同步改过 |
+| T2（mention / @date / backlinks / synced block，ADR-0050…0052）与 T3（chart/formula/D3…D8） | **已落地**；提交时顺手补了三处纯查找错误（`AppWindow.slint` 重复的 `db-formula-open`、chart 块把自身条件元素的几何属性写成 `root.*`、`SlashRow.hint` 少了 `.into()`） |
+
+门槛只跑了 `cargo check --all-targets` + `cargo test`（476 passed / 0 failed，在 detached worktree
+`.scratch/landnote/probe` 里用与提交逐字节相同的副本验的）。**release / sweep / installer 都没跑**，
+所以 `docs/REPORT_TRACK4.md` 里那两张 ROADMAP snapshot 草稿仍只是草稿，RC 证据要等收敛 head 重跑
+`benchmarks/scripts/rc_gates.ps1 -Baseline .scratch/sweep34`。像素基线自 `sweep40` 之后没再更新，
+新增的 `synced` / `move-to-tall` / dark 场景**从没出过图**。
