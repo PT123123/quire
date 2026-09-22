@@ -560,7 +560,10 @@ First functional release: a local, single-file-database notes workspace.
   would get terribly wrong
 - A PDF attaches and opens, but shows no first-page thumbnail: it looks
   like any other file apart from its name. Deferred by explicit decision
-  2026-09-20; the renderer route for it is still undecided
+  2026-09-20, and a version that was built but never committed was
+  dropped on 2026-09-23. How it would be drawn is no longer an open
+  question (four routes measured, the pure-Rust one chosen — docs/
+  REPORT_TRACK4.md §T4.1); that it ships at all still is
 - Tables are a grid, not a database: no per-column widths, no header
   formatting, no sorting. Inside a cell only Tab / Shift+Tab cross between
   cells — Enter does not split one, Backspace does not merge it with a
