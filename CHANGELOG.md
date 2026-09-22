@@ -288,7 +288,7 @@ First functional release: a local, single-file-database notes workspace.
   page's *content* only — the title, icon, cover and style the user chose since stay.
   The comparison is line-level and identifies a line by its block, so a moved or
   edited line reads as the pair it is; a stretch too large to align is reported as a
-  rewrite rather than computed (ADR-0050)
+  rewrite rather than computed (ADR-0091)
 - Slash menu ("/") for block types; command palette (Ctrl+K) with page
   jumping, plus Go Back / Go Forward (Alt+← / Alt+→) along the pages
   visited this session — a page deleted since drops out of the history
@@ -306,7 +306,7 @@ First functional release: a local, single-file-database notes workspace.
 - Debounced batched writes; Ctrl+S forces a save; close saves too
 - Rotating snapshots on every open (5 generations), restore-at-open when
   the main file is damaged, damaged file quarantined (`.corrupt`)
-- Named page versions (ADR-0050) share that mechanism and not its lifecycle:
+- Named page versions (ADR-0091) share that mechanism and not its lifecycle:
   one self-contained SQLite file per version in a `versions/` folder beside the
   database, twenty newest per page, pruned by hand or by the cap and never by age.
   A file the index no longer names is swept on the next save, so a save that died

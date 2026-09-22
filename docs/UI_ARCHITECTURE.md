@@ -107,7 +107,7 @@ dark-block-menu, dark-block-colors, dark-title-edit, dark-style-serif,
 dark-page-icon, dark-page-cover, dark-page-cover-white, dark-page-lock,
 dark-page-templates, dark-page-versions).
 `benchmarks/scripts/sweep.ps1` holds the authoritative list — 83 scenes as of
-ADR-0050 — and this prose is the summary, so when the two disagree trust the
+ADR-0091 — and this prose is the summary, so when the two disagree trust the
 script. Every visual change ships with re-shot
 scenes; the judge-reviewed set is the regression baseline. `toggle` and
 `toggle-fold` are a pair on purpose: the same section open and closed, so a
@@ -186,7 +186,7 @@ the representation, and `default.png` already proves those rows draw. The librar
 these scenes paint is seeded by hand (`seed_template_library` in the controller),
 because `seed_builtin_templates` refuses a session with no database — and the
 headless capture is exactly that.
-The three version scenes are ADR-0050's, and they are the panel's two views plus
+The three version scenes are ADR-0091's, and they are the panel's two views plus
 the dark arm: `page-versions` is the list (five rows, each a name over an age, a
 trash glyph per row, the caption saying the cap out loud, and the name field with
 its Save button under the list), `page-versions-diff` is what a row click opens
@@ -439,7 +439,7 @@ and the slash tail 2 332 px in x 340..618 / y 260..298 — one row, at the caret
 scene parked it at. No scene shows an insert: a template's copy lands as ordinary
 rows on an ordinary page, which is the whole point of the representation, and
 `default.png` already proves those rows draw.
-`sweep38` → `sweep39` (version history, ADR-0050) moved **78 of 80 byte-identical**
+`sweep38` → `sweep39` (version history, ADR-0091) moved **78 of 80 byte-identical**
 and added 3. The two movers are the page ⋯ menu at its two anchors again, because
 that popup grew a fourteenth row: `menu.png` at 5 sampled px in the single column
 x 414 at y 672..680 (its scrollbar thumb, in a popup `min(rows*30+8,

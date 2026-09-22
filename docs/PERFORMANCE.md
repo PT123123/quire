@@ -1537,7 +1537,7 @@ drawing path — a row that re-reads the workspace, a token written per frame �
 71 would not have been 71. And unlike the cover, this slice has no raster to argue
 about at all: the gate's resolution floor is ≈1 MB and everything above is bytes.
 
-## M12 · a version is a file, so the cap is written in bytes and seconds (2026-09-22, ADR-0050)
+## M12 · a version is a file, so the cap is written in bytes and seconds (2026-09-22, ADR-0091)
 
 **This slice owes §三十八 two numbers — 保留策略必须给出磁盘与 RAM 数字，不接受无限
 增长 — and they are different kinds of number.** Disk is measured, because a version
@@ -1579,7 +1579,7 @@ The first version emptied the two FTS tables and the tests agreed: 0 rows in
 the 60-line page, because FTS5 keeps its term dictionary in a `search_blocks_data`
 b-tree — 368 rows, 1 441 792 bytes — that a plain delete walks and leaves standing:
 the words of every page the version was not allowed to contain. `clear_index` now
-runs the `DELETE` and then FTS5's `rebuild` command (see ADR-0050 for why the shorter
+runs the `DELETE` and then FTS5's `rebuild` command (see ADR-0091 for why the shorter
 `delete-all` is refused here). Before → after, same fixture:
 
 | | before | after |
@@ -1622,7 +1622,7 @@ history; the other 78 were byte-identical, which is what turns "this slice touch
 drawing path" from a claim into a check. The three new scenes (`page-versions`,
 `page-versions-diff`, `dark-page-versions`) are the panel's two views in both themes,
 and their pixels come out of the same four projection functions the click handlers call
-(ADR-0050), so a drift between the panel and the library shows up as a hash change
+(ADR-0091), so a drift between the panel and the library shows up as a hash change
 rather than as a stale screenshot of a copy.
 
 ## M12 · a template costs one bool per page, and its library is 48 rows you pay for once (2026-09-22, ADR-0049)

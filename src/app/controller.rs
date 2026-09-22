@@ -646,7 +646,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         });
     }
 
-    // ---- version history (SPEC §三十八, ADR-0050) ----
+    // ---- version history (SPEC §三十八, ADR-0091) ----
     //
     // Six callbacks for one panel, and the panel never closes on its own: a
     // save, a delete or a restore all leave the user looking at the list they
@@ -5764,7 +5764,7 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             g.set_dark(true);
             apply_scene(ui, state, "page-templates");
         }
-        // Version history (SPEC §三十八, ADR-0050): the list, then one of its
+        // Version history (SPEC §三十八, ADR-0091): the list, then one of its
         // rows opened into a comparison.
         "page-versions" => {
             seed_versions(state, &g, state.open_page.get());

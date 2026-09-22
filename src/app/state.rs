@@ -57,7 +57,7 @@ pub struct AppState {
     pub menu: Rc<VecModel<MenuRow>>,
     pub slash: Rc<VecModel<SlashRow>>,
     pub block_menu: Rc<VecModel<MenuRow>>,
-    /// The version panel's two views (SPEC §三十八, ADR-0050): the page's list
+    /// The version panel's two views (SPEC §三十八, ADR-0091): the page's list
     /// of named versions, and the comparison of one of them with the page. Both
     /// are models rather than a `Vec` handed over on open because the panel
     /// stays on screen while a save, a delete or a restore changes what it
@@ -142,7 +142,7 @@ pub struct AppState {
     /// row click reads it. Nothing else uses it, so it never needs clearing.
     template_pick: Cell<i32>,
     /// Named versions this library holds, by page, newest first (SPEC §三十八
-    /// "version history", ADR-0050). Mirrored from the `version/<page>/<when>`
+    /// "version history", ADR-0091). Mirrored from the `version/<page>/<when>`
     /// metadata rows at load rather than queried, so the panel fills without a
     /// read of its own and a session with no database — which can have no
     /// versions, since a version *is* a file — shows an empty list instead of
@@ -470,7 +470,7 @@ pub fn version_diff_note(lines: &[crate::core::diff::DiffLine]) -> String {
 }
 
 /// Mirror the library's version index out of the metadata rows it persisted
-/// (SPEC §三十八, ADR-0050). Both halves come from the same scan: which
+/// (SPEC §三十八, ADR-0091). Both halves come from the same scan: which
 /// versions a page has, and which pictures each one is holding alive. A row
 /// that parses as neither is skipped, so a half-written version reads as absent
 /// rather than as a page zero.
@@ -2705,7 +2705,7 @@ impl AppState {
         // a sweep that frees bytes another page still draws would be a data
         // loss disguised as housekeeping.
         live.extend(self.workspace.borrow().cover_ids());
-        // And the same for a version's rows (SPEC §三十八, ADR-0050): a version
+        // And the same for a version's rows (SPEC §三十八, ADR-0091): a version
         // file is a database this scan never opens, so its pointers are mirrored
         // into the live library when the version is saved, and this is where the
         // mirror is read back. Freeing a picture a version points at would turn
@@ -4553,7 +4553,7 @@ impl AppState {
         self.template_pick.get()
     }
 
-    // ---- version history (SPEC §三十八, ADR-0050) ----
+    // ---- version history (SPEC §三十八, ADR-0091) ----
 
     /// The library file a version would be copied from, or `None` for a session
     /// with no database at all. That `None` is not an error to report so much as
@@ -4907,7 +4907,7 @@ pub const MENU_TEMPLATE_DELETE: i32 = 23;
 /// menu" and would drop two levels at once.
 pub const MENU_TEMPLATE_PICK_BACK: i32 = 24;
 /// ⋯ → Version history, the one row the page menu gains for the whole feature
-/// (SPEC §三十八, ADR-0050). One row and not three, because the page menu is
+/// (SPEC §三十八, ADR-0091). One row and not three, because the page menu is
 /// already thirteen deep and every popup in this app shares one 184px
 /// `ContextMenu` whose rows elide rather than wrap: "Compare versions" and
 /// "Restore version" would both arrive as "…". The panel this row opens holds
@@ -14282,7 +14282,7 @@ mod tests {
         );
     }
 
-    // --- version history (SPEC §三十八, ADR-0050) ---
+    // --- version history (SPEC §三十八, ADR-0091) ---
 
     /// A session on a real library file, with one page holding `lines` as its
     /// paragraphs. A version *is* a file, so every test below needs the database

@@ -2,7 +2,7 @@
 
 Format: decision → context → consequences. Newest first.
 
-## ADR-0050 · A version is a database file with one page left in it, and the cap is twenty
+## ADR-0091 · A version is a database file with one page left in it, and the cap is twenty
 
 Decision: SPEC §三十八's version history stores a named version as **a whole
 SQLite file** — `versions/p<page>-<created>.db` beside the library — produced by
@@ -169,6 +169,19 @@ Consequences:
   colour-emoji and template-dialog arms owed since ADR-0046 / -0047 / -0049.
 * Track 3's draft does not need a `versions` table either: if a database row ever
   wants version history, this is the same two metadata rows and the same folder.
+
+* **Numbering note (2026-09-22).** This decision landed as `ADR-0050`, which Track 2
+  had already taken for its mention/date storage shape — the two briefs overlapped
+  (Track 1 was told `ADR-0044…0050`, Track 2 `ADR-0050…0059`), and the tracks each
+  appended on their own side of this file, so the collision stayed invisible until
+  the four tracks met. It is renumbered `ADR-0091`: the first free number after
+  `ADR-0090`, since `ADR-0080`/`ADR-0081` are Track 4's (still uncommitted on its own
+  tree) and `ADR-0053…0059` are left as the unused tail of Track 2's range. Track 2's
+  `ADR-0050` keeps its number and every pointer that meant it; the pointers that meant
+  *this* one — in `SPEC.md`, `CHANGELOG.md`, `PERFORMANCE.md`, `ROADMAP.md`,
+  `UI_ARCHITECTURE.md`, `PLAN.md` and the version-history comments in `src/` — moved
+  with it. `docs/REPORT_TRACK1.md` keeps writing `ADR-0050` in its own narrative,
+  because that is the number it had when the report was filed.
 
 ## ADR-0049 · A template is a page nobody can open, and that costs one column
 

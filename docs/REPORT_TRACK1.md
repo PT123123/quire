@@ -9,7 +9,7 @@
 
 §三十八 六个特性全部交付：`icon` / `cover` / `font`+`full width`+`small text` / `lock` / 模板按钮 + 模板库 /
 version history。schema 从 v9 走到 **v14**，每片一列，而**最后一片一条迁移都没加**（`CURRENT_VERSION = 14`
-不动）。ADR-0044 … ADR-0050 七条（其中 0046 是一条「决定不做」）。闸门全绿：**438 passed / 0 failed / 13
+不动）。ADR-0044 … ADR-0050 七条（其中 0046 是一条「决定不做」；那条 0050 与 Track 2 的 mention/date 重号，2026-09-22 由整合者让号为 **ADR-0091**，本文件按写下之时的号记账所以保留 0050）。闸门全绿：**438 passed / 0 failed / 13
 ignored**，`cargo check --all-targets` 与 `cargo build --release` 零警告，视觉基线
 `.scratch/sweep39`（**83 场景**）。真人一次都没点过这六片里的任何一个 —— 手测清单在 §8。
 
@@ -122,7 +122,7 @@ LCS 表 1 MiB、每连接 SQLite 默认 −2000 KiB ≈ 2 MB、留二十个版�
 
 ## 7 · 给整合者的注意事项
 
-* **已落文档清单**（本轮，六处）：`docs/DECISIONS.md` 头部 ADR-0050；`docs/PERFORMANCE.md` 新节
+* **已落文档清单**（本轮，六处）：`docs/DECISIONS.md` 头部 ADR-0050（现 ADR-0091）；`docs/PERFORMANCE.md` 新节
   `:1540-1626`；`docs/SPEC.md` §三十八 三条 + M12 清单；`docs/ROADMAP.md` M12 行翻成「✅ delivered」+ 那一
   格末尾的中文写法 + 文件末尾一段英文叙事；`CHANGELOG.md` 三条（Editor 的功能条、reclaim 那条把版本 pin 列
   进引用者、Persistence 新条说明版本与 §二十五 共享机制不共享生命周期）；`docs/UI_ARCHITECTURE.md` 场景清单
