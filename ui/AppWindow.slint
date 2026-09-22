@@ -23,7 +23,6 @@ import { DatabaseGroupPopup } from "components/DatabaseGroupPopup.slint";
 // computed column has is its expression (the value is computed, ADR-0062).
 import { DatabaseFormulaPopup } from "components/DatabaseFormulaPopup.slint";
 
-
 // Row menus (slash + block handle): one window-level popup each, positioned
 // by the controller from the delegate's reported geometry. Declared before
 // use (slint rule).
@@ -430,6 +429,7 @@ export component AppWindow inherits Window {
     in-out property <bool> db-columns-open <=> UIState.db-columns-open;
     in-out property <bool> db-filter-open <=> UIState.db-filter-open;
     in-out property <bool> db-group-open <=> UIState.db-group-open;
+    in-out property <bool> db-formula-open <=> UIState.db-formula-open;
     in-out property <bool> link-open <=> UIState.link-open;
     in-out property <bool> dialog-open <=> UIState.dialog-open;
     in-out property <bool> settings-open <=> UIState.settings-open;
@@ -485,6 +485,8 @@ export component AppWindow inherits Window {
             // so a stale one can't hijack the next "/" menu
             UIState.slash-insert = false;
             UIState.slash-pick-page = false;
+            UIState.slash-pick-linkdb = false;
+            UIState.slash-pick-mention = false;
         }
     }
 
@@ -843,3 +845,4 @@ export component AppWindow inherits Window {
         }
     }
 }
+

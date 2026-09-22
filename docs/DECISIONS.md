@@ -1999,6 +1999,195 @@ embed-resource as a *build* dependency only (M8 installer — it runs rc.exe and
 adds nothing to the binary). Anything else waits for a milestone that cannot be
 built without it.
 
+---
+
+## ADR-0050 · mention 与 date 存储形态 & Markdown 往返语法
+
+**状态**：已决定
+**日期**：2026-09-23
+**驱动**：SPEC §四十 M13（引用、提及与反向链接）
+
+---
+
+### 上下文
+
+SPEC §四十 要求在正文中支持两类新的原子标记：
+1. **@page mention**：引用某一页面，渲染为 chip，存储引用的目标 page_id
+2. **@date**：内联日期，渲染为 chip，存储 ISO 日期字符串
+
+现有 `marks` 表结构：
+
+```sql
+CREATE TABLE marks (
+  block  TEXT NOT NULL,
+  start  INTEGER NOT NULL,
+  end    INTEGER NOT NULL,
+  kind   TEXT NOT NULL,
+  url    TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (block, start, kind)
+);
+```
+
+`MarkKind` 现有六种：`Bold | Italic | Strike | Code | Link | Math`。
+`Mark` 结构体字段：`start: u32, end: u32, kind: MarkKind, url: String`。
+
+---
+
+### 决策一：存储形态
+
+**复用 `marks.url` 列，不新增列，不改主键。**
+
+- mention：写入 `url = "quire://page/<page_id>"`
+- date：写入 `url = ""`（空），日期内容存入 `Mark.date: Option<String>`
+
+理由：
+- ADR-0026 已约定 block 级引用存 `blocks.page_ref = "quire://page/<id>"`；inline mention 共用同一 URI 格式是自然的延伸。
+- 主键 `(block, start, kind)` 不变。mention 与 link 在同一位置可以共存——两者 `kind` 不同，PK 允许共存，无需迁移。
+- `MarkKind` 枚举末尾追加 `Mention` 和 `Date` 两个-variant，对应字符串标识符 `"mention"` 和 `"date"`。
+- `Mark` 结构体末尾追加 `date: Option<String>` 字段（`""` 或 null 等价，SQL 层用 NULL 表示 None）。
+
+**存储映射**：
+
+| kind | `url` 字段 | `date` 字段 |
+|------|-----------|-------------|
+| `mention` | `"quire://page/<id>"` | NULL |
+| `date` | `""` | `"2026-09-22"` |
+
+---
+
+### 决策二：Markdown 往返语法
+
+**Mention**：`@[Page Title](quire://page/<id>)`
+- 导出（Rust → Markdown）：输出 `@[Title](quire://page/<id>)`，其中 Title 从 `blocks.title` 或内存中的 page title cache 读取
+- 导入（Markdown → Rust）：正则 `` `@\[\]\((quire://page/[^)]+)\)` `` → 解析出 page_id，构造 `Mark { kind: Mention, url: "quire://page/<id>", date: None }`
+- 渲染：chip 显示 Title，点击导航到目标页
+
+**Date**：`@[2026-09-22]`
+- 导出：输出 `@[YYYY-MM-DD]`
+- 导入：正则 `` `@\[(\d{4}-\d{2}-\d{2})\]` `` → 构造 `Mark { kind: Date, url: "", date: Some("2026-09-22") }`
+- 渲染：chip 显示格式化日期
+
+**共存约束**：同一 `(block, start)` 可同时存在 kind=`mention` 和 kind=`link`（PK 允许）；它们在 Slint 端通过两个独立的 cell/callback 渲染，互不干扰。
+
+---
+
+### 影响
+
+- **DB 迁移**：`MarkKind` 的两个新值**不需要迁移**——`marks.kind` 自 v3 起就是 TEXT，
+  存的是 kind 字符串本身。真正需要迁移的是反向链接的**索引**，那是 ADR-0051 / migration 16。
+- **Rust 类型**：`MarkKind` 末尾加 `Mention, Date`；`Mark` 加 `date: Option<String>`。
+- **repository.rs**：`load_marks` / `store_marks` 需解析新的 kind 值；`import_markdown_run` 需识别两个 regex；`export_markdown_run` 需输出 `@[...]` 格式。
+- **ADR-0051（反向链接索引）**依赖本 ADR：反向链接查询走 `marks` 表的
+  `kind='mention' AND url='quire://page/<id>'`（精确匹配，不是 `LIKE`）加另一条
+  `blocks.page_ref`，两条都靠 migration 16 的索引做 seek，不额外存储、不建派生表。
+
+---
+
+### 未验证边界
+
+- mention chip 的 Title 在离线场景下（目标页已被删除）应显示什么兜底？（待 T2.4 dangling ref 处理）
+- date chip 的显示格式是否需要 locale-aware？（当前约定 ISO 纯展示，待 UI 验证）
+- `@[Title](url)` 中的 Title 与存储的 page_id 是否做一致性校验？（导入时不做，写入时只存 id）
+
+---
+
+## ADR-0051 · 反向链接不做索引表：两条索引 + 每次投影现算
+
+**状态**：已决定（**取代本 ADR 早先的 FTS5 token 草案**）
+**日期**：2026-09-22
+**驱动**：SPEC §四十（反向链接面板）+ SPEC §二十（搜索类索引不许全库扫）+ SPEC §二十二（页面打开 <50 ms）
+
+---
+
+### 上下文
+
+§四十 要求页面底部列出"所有引用本页的块"。这份面板**每次投影一个页面都要算一遍**
+（和 §三十八 的 TOC 一样），所以它站在交互路径上，不是后台任务。
+
+引用在库里**已经存了恰好一次**，而且存的是两处：
+
+| 形态 | 存在哪 | 由哪条 ADR 定 |
+|---|---|---|
+| `@page mention`（正文里的一颗 chip） | `marks.url = "quire://page/<id>"`，`kind='mention'` | ADR-0050 |
+| 块级引用（`Page` / `Link to page` 这类"这一块就是引用"） | `blocks.page_ref = <id>` | ADR-0026 |
+
+`marks` 表自 migration v3 起只有一列载荷 `url`，主键 `(block, start, kind)`。
+
+---
+
+### 决策
+
+**不加表、不加列、不挂 FTS5：加两条索引，每次投影时直接查这两处。**
+
+migration 16（`src/storage/migrations.rs`）：
+
+```sql
+CREATE INDEX IF NOT EXISTS idx_marks_reference ON marks(kind, url);
+CREATE INDEX IF NOT EXISTS idx_blocks_page_ref ON blocks(page_ref);
+```
+
+查询在 `src/storage/backlinks.rs`，一次 UNION 拿两路来源：
+
+```sql
+SELECT b.id, b.page, b.text, 0 AS block_level
+  FROM marks m JOIN blocks b ON b.id = m.block
+ WHERE m.kind = 'mention' AND m.url = ?1
+UNION
+SELECT b.id, b.page, b.text, 1
+  FROM blocks b
+ WHERE b.page_ref = ?2
+ ORDER BY 2, 1
+```
+
+`refresh_backlinks()`（`src/app/state.rs`）每次投影做两次读：先 `count(*)`，**只在计数非零时**
+再取一个窗口（折叠 5 行 / 展开 50 行）。
+
+---
+
+### 为什么不是"派生表/派生列"
+
+这是本 ADR 唯一值得写下来的地方：**反链表是「一份只写一次就没有第二份可漂移」的数据**。
+
+- 引用已经存在两处真实事实里（`marks.url`、`blocks.page_ref`），而这两处正是**编辑器已经
+  在渲染的东西**。再存一份反链，就等于把同一句话抄第二遍，然后需要一条写入路径去维护它、
+  一个 rebuild 步骤去补救它、一次 sweep 去证明它没漂。
+- 索引不是这样：B-tree 由 SQLite 从**已经在磁盘上的行**建出来，没有写入路径、没有 rebuild、
+  没有"忘了同步"的状态。项目里唯一一类从不需要 sweep 的派生数据就是这个形状。
+- 反过来，FTS5 token 方案（本 ADR 的早期草案）恰好踩在这条线上：它要在 `search_blocks.content`
+  里塞 `__backlink:<id>` token，于是**删一条 mention 就得把旧 token 从 content 里摘掉**，
+  否则面板显示幽灵引用；摘的时候又会把用户正文一起重写。草案自己把这一条记成了 bug 待修——
+  那不是待修，那是这条路本身就有的形状：多一份派生数据，就多一条必须维护它的写入路径。
+
+### 为什么不是"每次打开页时扫 `marks`"
+
+这是 §二十 明令禁止的那一条，本 ADR 把它量了出来（`docs/PERFORMANCE.md` "T2 · the backlink
+panel is one index seek"）：1 200 页 / 100 200 条 mark 的库里，同一个折叠读
+**有索引 78 µs、去掉索引 6 068 µs**（78×）。控制臂就是同一进程里把 `idx_marks_reference`
+drop 掉再跑同一条查询——不是发布配置，是这句"不许全库扫"到底在说什么。
+
+`(kind, url)` 的顺序不是随手写的：谓词正好是这两列，而**只用最左列 `kind` 不够**——
+那还是要把同 kind 的每一行扫一遍，而一个一万个加粗 span 的页面一条 mention 都没有。
+
+---
+
+### 后果
+
+- **面板是投影，不是数据。** 它和目录（ADR-0039）同一条规则：每次投影现算，不入库，
+  所以**不可能过期**——没有副本可以过期。
+- **改名自然跟随。** 引用存 id（ADR-0050），行上的页面名是投影时向 workspace 问的，
+  所以改一个页面的名字，chip、面板分组标题、Markdown 导出同时变，且**没有任何一处被重写**。
+  代价的另一面也在这里：目标页被删时不会有谁去改引用，所以**退化必须是投影层自己的职责**——
+  `delete_page` 因此在删掉非当前页之后补一次 `reproject_blocks()`（T2 修的一个真 bug：
+  此前 chip 会一直显示旧标题）。
+- **成本落在打开页面上，且是可加的。** 实测：没有反链的页 +0（只做一次 `count(*)`），
+  200 条反链的页 **+0.06 ms**（折叠）/ **+0.07 ms**（展开），对 §二十二 的 50 ms 预算。
+- **展开的窗口也是窗口。** 折叠 5 行、展开 50 行，超过 50 条时面板给的是"总量"而不是全列表——
+  一句被引 200 次的话是**一个数字**，不是页面底部放得下的列表。它折叠回去而不是假装展开了全部。
+- **未验证边界**：① 面板的窗口没有虚拟化（它是一个文档行里的 `for`），所以 50 是硬上限，
+  没有量过 1000 条展开会怎样——因为那条路不存在；② 打开页面的两个读数取自**单块页面**，
+  因此只隔离了面板本身，对"大页面的投影成本"没有发言权（那个数字归 ADR-0039）；
+  ③ `count(*)` 是不带筛选的单页计数，带筛选的引用查询没有实现也没有量。
+
 ## ADR-0060 · A database is its own entity behind a block, and the six view layouts are one kind
 
 Decision: SPEC §三十九's `database` is a **new entity**, not a page flag and
@@ -2376,6 +2565,65 @@ Consequences:
   `formula` column inherits D6's recompute correctness, so a wrong formula is a
   wrong file.
 
+## ADR-0081 · `bookmark` is closed rather than deferred, and the embed card is what stands in its place
+
+Decision: SPEC §三十七 批次 C's `bookmark` line — 「链接卡片，抓标题与 favicon；
+离线或抓取失败退化为纯链接，且不得阻塞输入」 — is **withdrawn**, not postponed.
+Quire does not fetch a page's title or favicon, and no code is written for it in
+this milestone.
+
+Why: the premise the backlog item rested on ("Quire 至今没有任何网络客户端") is not
+accurate, and the correction is what changes the price. Quire **has** an HTTP
+client: `src/services/lan_client.rs` is a dependency-free HTTP/1.0 client — one
+`TcpStream`, one `GET`, read to EOF — behind `main.rs`'s `--pull <url>` for the
+LAN share feature. So the accurate statement is: **Quire has no TLS and no
+request it was not told to make.** The opt-in is real (server side behind the
+off-by-default `lan.share` setting, client side only for a URL typed on the
+command line), which means the gap is one of *transport security* and of
+*consent*, not of "does this app do networking".
+
+Against that, the three routes and their prices:
+
+1. **Transport.** `http_get` cannot reach an `https` URL at all, so route (a)
+   needs `rustls` (`ring` or `aws-lc-rs`) or `native-tls`/SChannel — a second
+   new dependency tree in the same milestone as the PDF thumbnail's, several MB of code,
+   and a certificate-store story. `http://`-only would be a downgrade no real
+   site's favicon is worth.
+2. **Consent.** SPEC answers the failure half, so the frame would have to be
+   "user pastes a URL or presses Fetch → a worker does the GET → the card
+   repaints or stays a plain link", never a projection, never a paint, never a
+   timer. The question that has to be answered first is whether Quire ever makes
+   a request the user did not just ask for — on import, on page open, to refresh
+   a stale title — and the honest answer for a local-first notes app is no.
+3. **Storage.** A title and a favicon have to be persisted or the card changes
+   shape whenever the machine is offline; that is a disk cap, an eviction rule,
+   and a "same host on ten cards" rule that need numbers, plus one more derived
+   copy of something that lives elsewhere (the argument ADR-0039/0040 already
+   make against derived data with no owner to invalidate it).
+
+With the transport cost, the consent question and the storage rules all landing
+in one milestone whose whole purpose is closing the backlog, and with the card
+shape SPEC actually asks for already delivered by the non-fetching embed card
+(ADR-0040) — a card that names its provider, shows the address it will hand the
+system, and degrades to nothing — the feature is closed. This is a decision and
+not an omission: the SPEC text is rewritten to say so, so the next reader does
+not re-open it as an oversight.
+
+Consequences:
+
+* SPEC §三十七 批次 C loses the `bookmark` promise; the embed card's "边界（不算
+  缺陷）" line loses its cross-reference to it (「那是 bookmark 的活」).
+* `CHANGELOG.md`'s Known-limitations entry for `bookmark` is re-worded from an
+  open item to a closed decision, so the RC's list of what is missing is
+  accurate rather than aspirational.
+* If it is ever wanted, the cheapest honest version is already specified by the
+  routes above: **explicit user action only, `https` only, a fixed timeout, no
+  refresh, and SPEC's existing degradation to a plain link** — with the title
+  frozen at fetch time, because there is no owner to invalidate it.
+* The dependency would be `rustls` (or `native-tls`) and would have to arrive in
+  a milestone of its own; it must not ride along with a renderer change, which
+  is why it is not being taken now.
+
 ## ADR-0066 · The bulk replace keeps the database layer, and a record dies with the page the incoming state dropped
 
 Decision: `replace_all` — the checkpoint, the repair, the LAN pull — replaces the
@@ -2468,7 +2716,6 @@ Consequences:
   written, so nothing yet proves that an export of a 10 000-row database is
   acceptable; and the count's cost is measured on an unfiltered database only
   (D4 owns the filtered number).
-
 ## ADR-0068 · A record's two instants are columns of the record, and no cell is ever written for them
 
 Decision: `created time` and `last edited time` — SPEC §三十九's last two kinds —
@@ -2685,6 +2932,159 @@ Consequences:
 * Still unverified: no picker consumes the list, so its cost (one `DISTINCT` over
   the file) is unmeasured; and "two spellings are two people" is a decision a UI
   may soften with a case-insensitive match — a UI decision, not this one.
+
+## ADR-0052 · synced block：源块持有内容，镜像只持有一根指针
+
+**状态**：已决定
+**日期**：2026-09-22
+**驱动**：SPEC §四十 末句「synced block 建在这一层之上：一个块被多处引用，编辑任意一处全部生效」+ SPEC §三十七 批次 C（依赖 §四十）+ SPEC §三十九（环检测在**保存时**做，不在渲染时）
+
+---
+
+### 上下文
+
+§四十 的引用基础设施已经落地，并且验证了同一条纪律的三种写法：
+
+| 引用 | 存的是 | 画的时候才解析的是 | 由谁定 |
+|---|---|---|---|
+| `@page mention` | `marks.url = "quire://page/<id>"` | 目标页的**当前**标题 | ADR-0050 |
+| `Page` / `Link to page` 块 | `blocks.page_ref = <id>` | 同上 | ADR-0026 |
+| 反向链接面板 | **什么都不存** | 谁在指本页 | ADR-0051 |
+
+三者的共同点是：**渲染时解析，不做第二次写入**。synced block 是同一条纪律的第四种形态，
+也是它第一次作用在「块的内容」而不是「块的标题」上：一份内容出现在两个位置。
+
+它动摇的是那个最核心的假设 —— **谁拥有这份内容？**
+
+---
+
+### 决策
+
+**一块内容只有一份。`Synced` 块自己不持有文本，它持有一根指向源块的指针。**
+
+```sql
+blocks.sync_ref  INTEGER NULL   -- NULL = 没有源（刚建还没选源，或源已被删）
+```
+
+一个 `Synced` 块的形状：
+
+```rust
+kind     = BlockKind::Synced     // as_str() == "synced"，UI int 24（23 是 Database，编号跟在它后面）
+sync_ref = Some(source)          // 源块的 BlockId
+text     = ""                    // 恒空：写它就违反本 ADR
+```
+
+**为什么是「引用另一个块」而不是「同一个块出现在两处」**：`blocks.page` 是单值的，一个块
+只能属于一页。「同一个 BlockId 出现在两个位置」在关系模型里没有落脚点，除非再引入一张位置表
+—— 那是把整个编辑器的地址规则重写一遍，只为了省一根指针。前者照 ADR-0026 `page_ref`
+的形状，几乎不新造东西。
+
+**为什么只同步一个块，不同步整块子树**：Notion 的 synced block 可以是一棵子树。子树意味着
+「行是动态的」—— `project_blocks` 要真删/插一段变长子树，§三十七 那两处附加改动（真删子树、
+row→model 换算）全都要跟上。那是另一个量级的一刀。本刀先交单块版本，并且把这条限制**写在这份
+ADR 里**，而不是塞进「已知问题」。
+
+---
+
+### 四个必须先回答的语义
+
+#### 1. 谁拥有内容 —— 源块
+
+镜像的 `text` **恒为空串**，任何写它的人都违反这份 ADR。它的代价也是空的：源块被删之后镜像
+什么都不剩 —— 而这恰恰是想要的结果（见下）。
+
+#### 2. 删除语义
+
+| 删掉谁 | 发生什么 |
+|---|---|
+| **镜像** | 只有这一行消失。源块和它的每一个其它镜像原样 —— **没有外键、没有级联**。`sync_ref` 是一列整数而不是一个关系，级联会让「删掉一个视图」连带毁掉内容，这是本 ADR 最贵的一次拒绝。 |
+| **源块** | 镜像**保留**，可见退化成「（源块已删除）」灰字，并且**变为只读**（解析不到源，编辑绑定就无处可落）。一次 `DeleteBlock` 不惩罚页面上别的任何东西。 |
+| **源块所在的整页** | 同上。孤儿镜像是**可见的** —— 留着还是删掉由用户决定，系统不替他猜。 |
+
+#### 3. undo 语义 —— 一次编辑，一步撤销
+
+「两处同时变」听起来需要一个写两份的实现，于是听起来需要一个合并撤销的机制。**两者都不需要**：
+既然只有源块持有内容，一次编辑**真的只写一处**。第二个位置的更新发生在下一次投影（投影不入库，
+§三十八），所以一次 Ctrl+Z 撤的就是那一次写。
+
+这是「没有第二份东西」买到的最实在的一件东西，也正是它比「双写 + 同步器」便宜的全部理由。
+
+#### 4. 环检测 —— 在**建立链路那一刻**做，不在渲染时
+
+`A → B → A` 是一个手就能改出来的状态。照 §三十九 对 relation 的要求，检测点在**保存**：
+
+- 建立或改这条链路时（`AppState::set_sync_source`）：从候选源沿 `sync_ref` 走最多
+  `SYNC_CHAIN_MAX` 跳，中途碰到自己就**拒绝**（返回 `false`，UI 拿到一个没变的视图）；
+  `source == self` 单独拒绝。
+- 渲染时是**有上界的解析**（最多 `SYNC_RESOLVE_MAX` 跳），所以即使一个**旧备份被手改成环**，
+  最坏情况也只是多走几跳，不会挂住。这条上界必须落在代码里的常量上、带注释 ——
+  「反正环不会出现」是任何样本都证明不了的一句话。
+
+---
+
+### 存储
+
+migration **19**（`src/storage/migrations.rs`）：
+
+```sql
+ALTER TABLE blocks ADD COLUMN sync_ref INTEGER;   -- NULL = 无源
+```
+
+**为什么是 19 而不是 17**：17 和 18 都是 Track 3 的 database 步（记录时间戳、`blocks.db_ref`），
+其中一个已经提交（`d3e4a0a`）。迁移是本项目唯一不可逆的东西，两个打磨不同事情的 step 撞同一个号，
+比临时跳号贵。
+当前在 `track/2-references` 这棵孤立树里 17 是空的 —— 那两棵树合并的一瞬间它就是满的；
+我不替整合者提前占用。
+
+`block_children` 不动：一个同步镜像没有子节点。
+
+---
+
+### 六个接点（SPEC §三十七 的硬性约束，少一处即视为未完成）
+
+| 接点 | 落在哪 |
+|---|---|
+| `core/types.rs` 的 `BlockKind` | `Synced` 变体（**加在枚举末尾**，永不重编号），`ALL` 变 24 项，`as_str() == "synced"` |
+| storage 的 kind 与列 | `kind_to_int` / `kind_from_int` = **24**（23 是 §三十九 的 `Database`，它在枚举里排在前面）；新列 `sync_ref` 由 migration 19 加 |
+| Markdown **导出** | **摊平**：镜像行导出成源块的那一行内容（照 ADR-0032 columns 的先例） |
+| Markdown **导入** | **有意地不认新语法** —— 理由见下 |
+| ⋮⋮ 的 Turn into | `TURN_INTO_ITEMS = SLASH_ITEMS`，那里加一行两者就都有了 |
+| slash 菜单 | `SLASH_ITEMS` 加「镜像块」；`INSERT_ITEMS` 同样加 |
+| 截图场景 | `synced` / `synced-source-gone` / `dark-synced` |
+
+**导入为什么什么都不认**：导出摊平之后，同一份 Markdown 再导回来就是一段普通的文字。
+这不是偷懒，是边界 —— **§二十六 把 Markdown 定成内容通道，不是保真格式**；而 block id
+在库与库之间也毫无意义。给镜像发明一种记号（`<!-- quire:synced -->` 之类）只会多产出一种东西：
+一个导进来立刻失去源、只能画成「（源块已删除）」的块 —— 比一段普通文字更糟。所以
+**同步关系不跨这条边界**，而且这句话要说在 ADR 里，不能藏在实现里。
+
+---
+
+### 「行是动态的」那两处附加改动 —— 本刀用不到，但要写下来
+
+§三十七 规定凡「行数会变」的块都要多改两处。一个同步镜像**没有子节点、占一行、行数恒定**，所以
+① `project_blocks` 不需要删行；② 拿 row index 当 model index 用的地方不需要换算。
+这两条是**在这一刀被判定的**，不是被漏掉的 —— 将来若把它升成「同步整棵子树」，
+第一个要回头的地方就是这里。
+
+---
+
+### 代价
+
+- 只同步一个块，不同步子树（Notion 的同步块可以是一整棵子树）。
+- Markdown 往返丢同步关系。
+- 每次投影为每个镜像行做一次 id 查 —— 一次哈希表查，不走 I/O，但它在**交互路径**上。
+- 源与镜像同时在屏时，两行都会画成「正在编辑」的样子（两者绑的是同一个 id 的同一份编辑态）。
+  这是我们想要的效果（Notion 也是两边一起动），但它的手感 headless 证明不了，见「未验证」。
+
+---
+
+### 未验证
+
+- headless 场景证明不了**真键盘输入**、两个输入框之间的焦点争用、真点一次跳转。
+- 「源被删 → 镜像只读」这条有单元测试钉住投影结果，但**没有**真的用鼠标点上去试。
+- 性能：本刀给每次投影加了「每个镜像行一次查表」。它是 O(1) 查表而不是 O(n) 扫描，所以
+  **没有欠量 RAM 闸的理由**；但**也没有数字**。若后来发现某页上有几十个镜像行，那个数字还欠着。
 
 ## ADR-0072 · The six tables' ids are session watermarks, seeded from the store and never re-read
 
@@ -3260,3 +3660,174 @@ Consequences:
   code will need to be reshaped when they land, only added to.
 * Still unverified: nothing to verify — this ADR is a decision and a
   handover, not a feature.
+
+## ADR-0085 · A linked database is a second block with the same `db_ref`, and no second entity exists to drift
+
+Decision: SPEC §三十九 「操作」's `linked database` — 「引用另一个库的某个视图，不复制数据」 —
+is **not a new block kind and not a new column**. A linked database is an ordinary
+`BlockKind::Database` block whose `blocks.db_ref` names a `databases` row that already exists;
+`Command::LinkDatabase { id, db }` is the whole write (the block's kind and its pointer, in one
+batch, with `BlockDbRefSet` reverted by undo and **no `DatabaseDeleted`** — the source entity
+outlives every link, which is the one sentence that separates this command from
+`Command::MakeDatabase`).
+
+Why the shape is this thin. Every read and every write in this layer already resolves *through
+the block's `db_ref`*: `db_ref_of` → the catalog (columns, views, definitions), the window read
+(`RowRequest.db`), every cell write (`SetDatabaseCell` → `db_ref?`), the view switcher, the
+filter/sort documents. So "it reads the source's data and the source's view definitions, and
+writes land on the source" is not something this feature implements — it is something it
+*cannot avoid*, because there is exactly one `databases` row, one set of `db_properties`, one
+set of `db_views` and one set of records, and both blocks name it. There is no copy anywhere for
+a linked database to drift from.
+
+A new kind (say `BlockKind::LinkedDatabase`) was rejected for ADR-0060's reason: it would
+duplicate all six of §三十七's integration points (kind string, Markdown channel, Turn-into,
+menus, scenes, the delegate) to express a fact that is *the same* for both blocks — and the
+delegate would then have to be kept in step between two kinds forever. A second pointer column
+was rejected because it would be a second spelling of `db_ref` for the same question.
+
+**The view half of SPEC's `(db, view)` sketch is session state** (ADR-0073), not a column: the
+stored reference is the database; "which view" is what the block is showing *now*, defaulting to
+the source's first view when the link is made. Pinning a `view` id in storage would add a second
+dangling case (a view deleted while linked) with no honest rendering that the database's own
+dangling state does not already have, and would fight ADR-0073's "which view is session state"
+on the very blocks that most need to follow it.
+
+Dangling: the source entity can die only one way — **undoing the block that created it**
+(`Change::DatabaseDeleted` has exactly one producer, `MakeDatabase`'s revert; deleting a
+`Database` *block* leaves the entity orphaned, which is today's behaviour for a single block
+too). A linked block whose entity is gone resolves to `db_exists == false` and draws the one
+muted line ADR-0060 already defines — `(deleted database)` — through the untouched existing
+path. Deleting a linked *block* deletes nothing else.
+
+Creation path: the slash / insert menu's `Linked view` row (`LINKED_VIEW_ROW = -2`, the picker
+rows' negative-id convention from `MENTION_DATE_ROW`) switches the popup to a **database
+picker** (`open_slash_links` — every live database by name, with its view count as the hint),
+and the pick runs `db_make_linked`: the line gives up its words, the kind and the pointer land
+in one batch, one Ctrl+Z. `plan` cannot see the catalog, so the *caller* checks the id is live;
+if it died in between, the write still lands and the next projection draws the dangling state —
+visible, not silent.
+
+Consequences:
+
+* Zero migration, zero new `Change` variant, zero new `Block` field: the pointer is v18's
+  `blocks.db_ref`, already there. The linked database's cost is one command, two state helpers,
+  one picker mode and one menu row.
+* `MakeDatabase` already refuses a block with `db_ref.is_some()`, so a linked block cannot be
+  "re-made" into an owner; `SetBlockType` refuses `Database` by design (D3). There is no
+  user-facing "delete this database" action anywhere, so "who owns the entity" never has to be
+  asked — and the ADR records that it is deliberately unrepresentable rather than guessed.
+* Writes from a linked block land on the source: adding a column from a linked block adds it to
+  the source's schema, editing a cell edits the source's record. That is what a linked view
+  means, and it costs no code because it is the only row set that exists.
+* Unverified (no cargo was run this knife): the picker's two-step flow end to end, the dangling
+  rendering of a linked block, and two blocks of the same entity on one page's pixels. The
+  unified test list (REPORT_TRACK3 §D7) names each.
+
+## ADR-0086 · A record template is a copy of stored cells on the `databases` row, applied in the creation batch
+
+Decision: SPEC §三十九 「操作」's 数据库模板 is **one JSON document in a new
+`databases.template` column** (migration v20; `''` = no template), shaped
+
+    {"cells":{"<property id>": <string|number|bool|array of strings>}}
+
+with every value in the **exact shape `CellValue` stores** (ADR-0062's three columns plus the
+items list). That is the discipline the brief states for templates on both tracks —
+「模板是内容的副本、不引入第二套内容格式」 — spelled for a record: the store's own value shape
+*is* the content format, so a template cell is a stored cell written down and applying a
+template is the ordinary `SetDatabaseCell` write, parsed by nothing and converted by nothing.
+
+Where it lives and why: a column on `databases`, not a table and not a per-view document
+(ADR-0064's judgement, applied at the database level): SQL never filters on a template, so a
+second table would be a join nobody runs; and a template is about the records a database
+*creates*, which every layout creates the same way, so per-view would be a second copy of one
+fact. The document is replaced whole by `Change::DatabaseTemplateSet` (the whole-document family
+`db_views.definition` and `db_properties.config` already belong to) and rides the row through
+load, insert, snapshot/restore (a checkpoint that dropped it would un-template every database —
+ADR-0066's class of loss) and `db_absorb`.
+
+Authoring: the row action slot's **T** (beside the row's x) runs `db_template_from_row`, which
+reads that row's cells *as stored* — computed and derived kinds are skipped by kind, because
+they have no stored value (ADR-0062/0068) — and writes the document in one change (one Ctrl+Z).
+Copying an empty row makes the empty template, which is how the affordance clears one: a copy of
+nothing is "prefill nothing", said the same way.
+
+Applying: `db_add_record` and `db_form_submit` append the template's cells as ordinary
+`SetDatabaseCell` commands **in the creation batch**, so a new row arrives complete and one
+Ctrl+Z takes record and prefill back together. In the form, a field the user typed always wins;
+a blank field prefills (an empty draft field is "not typed", not "cleared" — the form has no
+clear gesture). A template cell naming a column the schema has since lost has no command to
+name, which is the filter.
+
+Consequences:
+
+* No second content format, no second write path, no template *record* (Notion's gallery of
+  template rows is a stored flag plus a projection rule this build does not need) and no
+  per-view template — each mentioned here because each is the cheaper-looking shape this ADR
+  refuses.
+* The one thing a template cannot carry: a computed value (a formula's answer is not stored,
+  ADR-0062) and a stamp (created/edited are the record's own columns, ADR-0068). A copied row's
+  formula columns and stamps are whatever the *new* record computes — the honest answer.
+* Version/undo: `DatabaseTemplateSet`'s revert names the previous document, so Ctrl+Z restores
+  the whole template; a re-save of the same row is not an undo step.
+* Seam with Track 1's page templates: **there is no shared shape to arbitrate** — a page
+  template is a copy of a block sequence (their territory, their storage), a record template is
+  a copy of cells (this column). Both follow the same *discipline* (a copy in the existing
+  format) and neither introduces a format, but no type, column or function is shared, so nothing
+  crosses the tracks. If the integrator later wants "a page template can seed a database row",
+  that is a projection-time translation between two existing formats, and it needs its own ADR.
+* Unverified (no cargo was run): the v20 column's convergence on a v19 file, the T affordance's
+  pixels, the form's draft-wins path, and the prefill's undo as one step. Named in REPORT §D7.
+
+## ADR-0087 · The view's search is a predicate in the same statement, not a turn of the global index
+
+Decision: SPEC §三十九 「操作」's 视图内搜索 is compiled into **the window read's own `WHERE`** —
+`RowRequest.search: Option<&str>`, one `INSTR(LOWER(expr), LOWER(?)) > 0` per text-bearing column
+the request carries (the title through its `COALESCE`, plus text / url / email / phone / the
+stored date / the two record stamps), OR'd, sharing one bind. The needle is **session state**
+(`db_search` by block id; the header's count slot opens the box) — not a rule in the view's
+document — so it is not persisted and not an undo step.
+
+The rejected path, and why. §二十's index (ADR-0014) is an FTS5 mirror of **page titles and
+block texts**: nothing indexes `db_values`, and a database's cells are not blocks. Routing view
+search through it would mean either (a) indexing every cell into the mirror — a derived copy
+with a write path on every cell edit, a prune rule on every bulk path (checkpoint, repair, LAN
+pull), and a lag boundary measured in "which writers remembered to index", all to answer a
+question the live predicate answers inside the statement the view was already running; or
+(b) joining `search_blocks`' rowid list back into the row query — which searches *blocks*, not
+cells, respects no view rule (a search must narrow the same membership the count and the group
+headers see), and would make the count and the rows answer two different questions.
+
+What the chosen path costs, said plainly:
+
+* **`INSTR` is a scan, not a seek.** On a 10 000-row database a keystroke re-runs the count and
+  the window read over the predicate — the same class of cost D4's `contains` filter already
+  has, with the same honest remedy if it ever feels slow (a debounce on the callback; not a
+  second row set in Rust).
+* **ASCII-only case folding** (`LOWER`), the boundary every text search in this app has.
+* **What is not searched**: numbers (their text form is the *projection's*, and comparing
+  numbers is the filter panel's job), checkboxes, select/status (the stored text is the option
+  **id** — the name lives in the config JSON, where SQL cannot see it), the two list kinds
+  (their values are `db_value_items` rows) and the computed kinds (they store nothing). A view
+  whose visible columns hold no prose therefore answers `0` rows for any needle — "nothing here
+  can match it" said as an empty result, not as a full table.
+* **No lag**, because there is no copy: a search reads the values the cell writes wrote, in the
+  same transaction the writes flush into. That is the one boundary the FTS path would have
+  introduced and this one does not have.
+
+It rides the same clause as the filter in every statement `database_query` builds — the window
+read, the `count(*)`, the group query and each group's slice, the range query — so a searched
+view's count, its group headers and its rows all answer one predicate, and no path downstream
+can disagree about what the needle found. The Markdown export passes `search: None` on purpose:
+the file is the *view* the user configured, and a search is a question being asked of the
+screen.
+
+Consequences:
+
+* SPEC §二十's index is untouched: the global search panel's semantics (and its CJK
+  segmentation) are unchanged by this knife, and the two searches differ visibly in what they
+  can match — documented here rather than discovered later.
+* The needle is compiled per keystroke but the *rows* are still windowed: a searched 10 000-row
+  database realizes its viewport's rows, never the matches.
+* Unverified (no cargo was run): the per-keystroke cost, the OR-of-INSTR SQL text against
+  `EXPLAIN QUERY PLAN`, and the box's pixels. Named in REPORT §D7.

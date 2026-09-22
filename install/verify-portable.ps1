@@ -24,14 +24,22 @@
 # that is an assumption about the environment rather than about the code, the
 # run also hashes `%APPDATA%\Quire` before and after and fails if it moved.
 # No window is screenshotted and nothing is clicked; each launch self-exits.
+#
+# The scratch root is stamped with the run's own start time and nothing under
+# it is ever deleted, so the script is re-runnable at the next head without
+# depending on a delete succeeding. That matters here: a guard on this machine
+# caps deletes at 50 files per turn, and clearing 8 sticks plus 8 fake AppData
+# folders is well past it (see `verify-installer.ps1` for the same fix and the
+# observed failure).
 param(
     [string]$Exe = "target\release\quire.exe",
-    [string]$Scratch = ".scratch\portable",
+    [string]$Scratch = "",
     [int]$ExitAfter = 3
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
+if ($Scratch -eq "") { $Scratch = ".scratch\portable\run-$(Get-Date -Format 'yyyyMMdd-HHmmss')" }
 # The child's APPDATA and working directory must be absolute: a relative
 # APPDATA is resolved against the child's cwd, which sends the "per-user"
 # library into the stick folder and makes every roaming check vacuously true.
@@ -47,16 +55,16 @@ function Check([string]$name, [bool]$ok, [string]$detail) {
     "{0}  {1}{2}" -f ($(if ($ok) { "PASS" } else { "FAIL" })), $name, $(if ($detail) { "  ($detail)" } else { "" })
 }
 
-# A fresh stick (working directory) and a fresh fake per-user folder.
+# A fresh stick (working directory) and a fresh fake per-user folder. The
+# scratch root is unique per run and nothing is deleted, so "fresh" is a
+# consequence of the path rather than of a successful Remove-Item.
 function New-Stick([string]$tag) {
     $d = Join-Path $Scratch "stick-$tag"
-    if (Test-Path $d) { Remove-Item -Recurse -Force $d }
     New-Item -ItemType Directory -Force -Path $d | Out-Null
     $d
 }
 function New-FakeAppData([string]$tag) {
     $d = Join-Path $Scratch "appdata-$tag"
-    if (Test-Path $d) { Remove-Item -Recurse -Force $d }
     New-Item -ItemType Directory -Force -Path $d | Out-Null
     $d
 }
@@ -91,7 +99,7 @@ function Snapshot([string]$dir) {
         ForEach-Object { "$($_.Name):$((Get-FileHash -Algorithm MD5 -Path $_.FullName).Hash.Substring(0, 8))" }) -join ' ')
 }
 
-if (Test-Path $Scratch) { Remove-Item -Recurse -Force $Scratch }
+if (Test-Path $Scratch) { throw "$Scratch already exists; pass a different -Scratch" }
 New-Item -ItemType Directory -Force -Path $Scratch | Out-Null
 
 $realLibrary = Join-Path $env:APPDATA "Quire"

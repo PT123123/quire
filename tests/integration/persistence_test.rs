@@ -58,7 +58,7 @@ fn seeded(path: &Path) -> Arc<SqliteRepository> {
         columns: 0,
         lang: Lang::Plain,
         db_ref: None,
-        }),
+        sync_ref: None,        }),
     ])
     .unwrap();
     repo
@@ -119,7 +119,7 @@ fn shutdown_flush_then_next_session_loads_it() {
         columns: 0,
         lang: Lang::Plain,
         db_ref: None,
-        })]);
+        sync_ref: None,        })]);
         clock.set(10); // nowhere near due — this is the Ctrl+S/quit path
         svc.force_flush().unwrap();
         assert!(!svc.has_pending());

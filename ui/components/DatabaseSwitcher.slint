@@ -134,13 +134,15 @@ export component DatabaseSwitcher inherits Rectangle {
             spacing: 0px;
 
             // the layouts, in SPEC's order — the row's index IS the
-            // `ViewLayout::ALL` index Rust's `db_add_view` reads, and the
-            // eighth (chart) is D7's: visible, named, inert.
+            // `ViewLayout::ALL` index Rust's `db_add_view` reads. All eight
+            // are drawn now (D7 lit the eighth, `chart`, whose plot is the
+            // group list the board's columns come from); the `drawn` fold
+            // stays for a ninth a later build might name.
             for layout[index] in ["Table", "Board", "List", "Calendar", "Gallery", "Timeline", "Form", "Chart"] : Rectangle {
-                property <bool> drawn: index < 7;
+                property <bool> drawn: index < 8;
                 height: 26px;
                 border-radius: Theme.radius-xs;
-                background: layout-ta.has-hover && layout.drawn ? Colors.surface-hover : transparent;
+                background: layout-ta.has-hover && drawn ? Colors.surface-hover : transparent;
 
                 Text {
                     x: Theme.spacing-sm;
@@ -149,18 +151,17 @@ export component DatabaseSwitcher inherits Rectangle {
                     height: parent.height;
                     vertical-alignment: center;
                     overflow: elide;
-                    text: layout.drawn ? layout : layout + " - not in this build yet";
+                    text: drawn ? layout : layout + " - not in this build yet";
                     font-family: Typography.ui-font;
                     font-size: Typography.size-caption;
-                    color: layout.drawn ? Colors.text-primary : Colors.text-muted;
+                    color: drawn ? Colors.text-primary : Colors.text-muted;
                 }
                 layout-ta := TouchArea {
                     width: parent.width;
                     height: parent.height;
-                    mouse-cursor: layout.drawn ? MouseCursor.pointer : MouseCursor.default;
+                    mouse-cursor: drawn ? MouseCursor.pointer : MouseCursor.default;
                     clicked => {
-                        // a drawn layout creates the view (Rust refuses chart
-                        // with its own word; the menu just closes either way)
+                        // a drawn layout creates the view and switches to it
                         root.menu-open = false;
                         UIState.db-view-added(root.block, index);
                     }

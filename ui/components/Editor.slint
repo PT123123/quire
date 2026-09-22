@@ -9,6 +9,7 @@ import { Colors } from "../Colors.slint";
 import { Typography, PageType } from "../Typography.slint";
 import { Icon } from "../Icons.slint";
 import { EditorBlock } from "./EditorBlock.slint";
+import { BacklinkPanel } from "./BacklinkPanel.slint";
 import { IconButton } from "./IconButton.slint";
 import { Button } from "./Button.slint";
 import { BlockRow, UIState } from "../Types.slint";
@@ -19,7 +20,11 @@ component DocumentRow inherits Rectangle {
     in property <int> index;
     in property <bool> first;
 
-    height: head.height + body.height + (block.tail ? Theme.spacing-hero * 2 : 0px);
+    // The tail row also carries the backlink panel, and the panel's own height
+    // is 0 on a page nothing refers to — so a page with no backlinks measures
+    // exactly as it did before the panel existed.
+    height: head.height + body.height + panel.height
+        + (block.tail ? Theme.spacing-hero * 2 : 0px);
 
     // The page's own emoji, above its title (SPEC §三十八). It takes no space
     // at all until one is set, so the 56k rows below it measure exactly as
@@ -124,6 +129,19 @@ component DocumentRow inherits Rectangle {
         row-y: parent.y + head.height;
         content-x: root.content-x;
         content-width: root.content-width;
+    }
+
+    // The page's foot (SPEC §四十): what points back at this page. It rides on
+    // the tail row for the same reason the title rides on the first one — a
+    // `ListView` takes a single `for`, so page-level chrome lives inside the
+    // row wrappers. The panel is the last thing above the bottom spacer.
+    panel := BacklinkPanel {
+        x: 0px;
+        y: head.height + body.height;
+        width: parent.width;
+        content-x: root.content-x;
+        content-width: root.content-width;
+        active: root.block.tail;
     }
 
     in property <length> content-x;

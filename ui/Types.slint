@@ -29,6 +29,16 @@ export struct TextRun {
     // inside a word tints the whole cell, because a cell is the smallest thing
     // this layout can paint.
     hit: bool,
+    // SPEC §四十: a @page mention. The cell stores the *id* and shows the
+    // target page's live title (Rust resolves it at projection time, so a
+    // rename moves every chip without a write). -1 = not a mention.
+    mention: int,
+    // ...and the target page is gone. The chip stays on screen and reads
+    // "(deleted page)": a dangling reference must never fail a projection
+    // (ADR-0026 / ADR-0029's contract).
+    mention-deleted: bool,
+    // SPEC §四十: a @date atom. The label is the stored ISO text.
+    date: bool,
 }
 
 /// One cell of a table (SPEC §三十七 批次 B). The grid rides on its table's
@@ -76,6 +86,25 @@ export struct TocEntry {
     block: int, // the heading's id; clicking the entry jumps there
     label: string, // the heading's text
     level: int, // 1..3 from the heading's kind, which is the indent
+}
+
+// One line of the backlink panel at the foot of a page (SPEC §四十, ADR-0051).
+// Derived every time the page is projected and never stored: the panel is a
+// question asked of the marks table ("which blocks point at this page"), and a
+// stored copy is the one thing that could disagree with the editor.
+export struct BacklinkRow {
+    block: int, // the referring block; clicking the row jumps to it
+    page: int, // the page that block lives on
+    title: string, // that page's name, as the workspace calls it now
+    text: string, // the referring block's own text ("" = nothing to quote)
+    // true when the reference *is* the block (`Page` / `Link to page`,
+    // ADR-0026) rather than a mention typed inside one. The row marks it,
+    // because "this page names that page" and "this page mentions that page"
+    // are both references but only one of them reads as prose.
+    block-level: bool,
+    // The first row of a run that shares `page`: only it draws the page name,
+    // so a page quoted six times reads as one group instead of six headers.
+    first-on-page: bool,
 }
 
 export struct DbCell {
@@ -131,9 +160,61 @@ export struct DbViewTab {
     active: bool,
 }
 
+// ─── D5: the view family's own shapes (SPEC §三十九 「视图」) ────────────────
+// Everything here is already decided in Rust — labels, counts, windows — and
+// the delegate only places what it is handed, the same contract the table's
+// rows have kept since D3. Declared *before* BlockRow: Slint resolves struct
+// types in declaration order, and BlockRow's D5 fields name these.
+
+// One board column: the group's label and count (from one `GROUP BY` over an
+// option-bounded column — the list of *headers*, never one per card) and the
+// cards the slot window realizes inside it. A card is a `DbRow`: its `title`
+// is the card's words and its cells carry the checkbox the card draws.
+export struct DbBoardColumn {
+    label: string,
+    count: int,
+    cards: [DbRow],
+}
+
+// One calendar day cell: the day of the month (0 = a leading/trailing blank),
+// how many records the day holds (the fold's number, from one `GROUP BY`), and
+// up to three realized records — the rest say "and N more" without ever
+// becoming objects.
+export struct DbCalendarDay {
+    day: int,
+    count: int,
+    records: [DbRow],
+}
+
+// One form field: the column the field edits, and the draft text as typed.
+// A draft and not a record — nothing reaches SQL until Submit, and one submit
+// is one undo step.
+export struct DbFormField {
+    property: int,
+    name: string,
+    kind: int,
+    text: string,
+}
+
+// One point of a chart view's plot (D7, SPEC §三十九 「视图」): the group's
+// label and count — both decided in Rust, the same rule the board's columns
+// keep — plus the three numbers the shapes draw from. `frac` is the count over
+// the plot's largest (a bar's height, a line's y); `slot` is the palette tint
+// (`Colors.block-text`); `commands` is the pie slice's path in a 100×100
+// viewbox (cubic arcs, built in Rust where trig lives — the delegate draws a
+// string it cannot get wrong). The chart realizes **zero rows**: the plot is
+// the `GROUP BY`'s aggregates, never the records.
+export struct DbChartPoint {
+    label: string,
+    value: int,
+    slot: int,
+    frac: float,
+    commands: string,
+}
+
 export struct BlockRow {
     id: int,
-    kind: int, // 0 para, 1 h1, 2 h2, 3 h3, 4 bullet, 5 numbered, 6 todo, 7 quote, 8 code, 9 divider, 10 callout, 11 page, 12 link, 13 toggle, 14 image, 15 file, 16 table, 18 columns, 20 math, 21 toc, 22 embed (17 = table_cell, 19 = column: containers' children, never a row)
+    kind: int, // 0 para, 1 h1, 2 h2, 3 h3, 4 bullet, 5 numbered, 6 todo, 7 quote, 8 code, 9 divider, 10 callout, 11 page, 12 link, 13 toggle, 14 image, 15 file, 16 table, 18 columns, 20 math, 21 toc, 22 embed, 23 database (17 = table_cell, 19 = column: containers' children, never a row)
     text: string,
     checked: bool,
     number: int,
@@ -208,8 +289,21 @@ export struct BlockRow {
     db-tl-days: int,
     // form: the field list, fed from the draft until Submit creates the record
     db-form: [DbFormField],
+    // ─── D7 (chart): the plot's points (the group list, never rows) and the
+    // line's polyline (a path in a 100×100 viewbox; empty for bar and pie).
+    // `db-chart-kind` is the active shape's index (0 bar / 1 line / 2 pie) —
+    // the three buttons' state and the same index Rust stores in the view's
+    // document.
+    db-chart-points: [DbChartPoint],
+    db-chart-path: string,
+    db-chart-kind: int,
 
-
+    // ─── synced block (24), SPEC §四十 / ADR-0052 ─────────────────────────
+    // The block whose words this row draws — **resolved**, not as stored:
+    // Rust follows the chain before handing the row over, so this is always
+    // either the source that holds the sentence or -1 (nothing to draw and
+    // nothing to edit through). 0 never reaches the UI.
+    sync-source: int,
 }
 
 // Database (23) cell values (SPEC §三十九). Everything is already painted and
@@ -242,41 +336,6 @@ export struct DbFilterRow {
 export struct DbFilterOp {
     op: int,
     name: string,
-}
-
-// ─── D5: the view family's own shapes (SPEC §三十九 「视图」) ────────────────
-// Everything here is already decided in Rust — labels, counts, windows — and
-// the delegate only places what it is handed, the same contract the table's
-// rows have kept since D3.
-
-// One board column: the group's label and count (from one `GROUP BY` over an
-// option-bounded column — the list of *headers*, never one per card) and the
-// cards the slot window realizes inside it. A card is a `DbRow`: its `title`
-// is the card's words and its cells carry the checkbox the card draws.
-export struct DbBoardColumn {
-    label: string,
-    count: int,
-    cards: [DbRow],
-}
-
-// One calendar day cell: the day of the month (0 = a leading/trailing blank),
-// how many records the day holds (the fold's number, from one `GROUP BY`), and
-// up to three realized records — the rest say "and N more" without ever
-// becoming objects.
-export struct DbCalendarDay {
-    day: int,
-    count: int,
-    records: [DbRow],
-}
-
-// One form field: the column the field edits, and the draft text as typed.
-// A draft and not a record — nothing reaches SQL until Submit, and one submit
-// is one undo step.
-export struct DbFormField {
-    property: int,
-    name: string,
-    kind: int,
-    text: string,
 }
 
 export struct CommandRow {
@@ -334,9 +393,24 @@ export global UIState {
     // instead of the text after "/", and discard the text on apply.
     // slash-pick-page is the third mode: the rows are workspace pages and
     // applying one converts the line into a Link-to-page block.
+    // slash-pick-mention is the fourth (SPEC §四十): the rows are the date
+    // item followed by the workspace's pages, and applying one inserts an
+    // inline atom at the "@" the user typed.
     in-out property <bool> slash-open: false;
     in-out property <bool> slash-insert: false;
     in-out property <bool> slash-pick-page: false;
+    in-out property <bool> slash-pick-mention: false;
+    // slash-pick-synced is the fifth: the rows are *blocks* anywhere in the
+    // library, and picking one makes this line a second view of it
+    // (SPEC §四十, ADR-0052). A separate flag rather than a shared "id means
+    // something else" integer, because two of these modes are open over the
+    // same list and only one of them can own a keystroke.
+    in-out property <bool> slash-pick-synced: false;
+    // slash-pick-linkdb is the sixth (SPEC §三十九 「操作」, ADR-0085): the
+    // rows are the workspace's databases, and applying one makes the line a
+    // linked database — a second block drawing an entity that exists already,
+    // nothing copied.
+    in-out property <bool> slash-pick-linkdb: false;
     in-out property <string> slash-filter: "";
     in-out property <int> slash-focus: 0;
     in-out property <[SlashRow]> slash-items;
@@ -431,7 +505,6 @@ export global UIState {
     in-out property <[DbColumnToggle]> db-columns-rows;
     in-out property <length> db-columns-x: 300px;
     in-out property <length> db-columns-y: 200px;
-
     // D4: the filter panel — a window-level popup like the columns one, with a
     // small state machine of its own (0 rules · 1 column chooser · 2 comparison
     // chooser · 3 option chooser), because one popup that changes its list is
@@ -458,6 +531,15 @@ export global UIState {
     in-out property <length> db-group-x: 300px;
     in-out property <length> db-group-y: 200px;
     in-out property <[DbColumnToggle]> db-group-rows;
+    // D7: the view's own search (SPEC §三十九 「操作」, ADR-0087). The box
+    // lives in the view header's count slot; the needle is session state —
+    // a question being asked, not a rule stored — so the view's document is
+    // untouched and a restart opens unsearched. Rust compiles it into the
+    // same statement the filter rides, so the count and the rows always
+    // agree about what the needle found.
+    in-out property <bool> db-search-open: false;
+    in-out property <int> db-search-block: -1;
+    in-out property <string> db-search-text: "";
 
     // command palette
     in-out property <bool> palette-open: false;
@@ -690,6 +772,21 @@ export global UIState {
     callback db-form-text(int, int, string);     // block, property, draft text
     callback db-form-submitted(int);             // block
     callback db-form-cleared(int);               // block
+    // ─── D7 (SPEC §三十九 「操作」) ──────────────────────────────────────────
+    // The view's search: opening the box (the count slot's toggle), the
+    // needle's keystrokes (compiled into the view's statement — no write, no
+    // undo step), and closing it (which clears the search: an invisible
+    // predicate on a visible table is a state the header could not explain).
+    callback db-search-opened(int);              // block
+    callback db-search-text-set(int, string);    // block, needle (per keystroke)
+    callback db-search-closed(int);              // block
+    // The chart's shape buttons (bar / line / pie, the ChartKind index): one
+    // view-document edit, the same undo step every rule edit is. The data
+    // never changes with the shape — the same group counts feed all three.
+    callback db-chart-kind(int, int);            // block, ChartKind index
+    // Save a row's values as the database's record template (the row slot's
+    // T): one change, and every later "New row" starts from those values.
+    callback db-template-saved(int, int);        // block, record
     // ─── D6 (SPEC §三十九 「需计算」): the formula editor ───────────────────
     // A formula column's cell is read-only (it is computed, ADR-0062 — nothing
     // writes a value into it); clicking one opens the column's *editor* instead,
@@ -745,6 +842,29 @@ export global UIState {
     callback slash-move(int);
     callback slash-apply-selected();
     callback slash-close();
+    // SPEC §四十: a table cell reports that its text changed, so the "@"
+    // trigger can be noticed there too — a cell fires cell-changed (the
+    // debounced commit) but no editing-changed, because it is not a line of
+    // prose and must not run the markdown shortcuts. Args: the cell's own
+    // text (its `edited` may land before the two-way property is written, so
+    // the text travels with the call rather than being read back), then the
+    // cell's row top in list coords, its height, and the text column x.
+    callback mention-typed(string, length, length, length);
+    // backlink panel (SPEC §四十): the page that is open was named by the
+    // blocks in `backlinks`. The window is what the panel draws (folded, it is
+    // a handful of rows); `backlink-total` is the real number, which is what
+    // the folded line says instead of the rows it is not drawing.
+    in-out property <[BacklinkRow]> backlinks;
+    in-out property <int> backlink-total: 0;
+    in-out property <bool> backlinks-expanded: false;
+    // The two things the panel says that are not a row. They are built in Rust
+    // because both are a decision Slint cannot make: a plural ("1 reference"
+    // vs "3 references") and a count the panel is deliberately not drawing.
+    // "" means there is nothing to say — no fold control, no count.
+    in-out property <string> backlink-count-label: "";
+    in-out property <string> backlink-fold-label: "";
+    callback backlink-jump(int); // the referring block's id
+    callback backlink-toggle(); // fold / unfold the window
     callback block-menu-opened(int, length, length); // id, handle viewport-y, content-x
     callback block-menu-action(int);
     // "+" handle: id, the clicked block's bottom edge in list coords, and
@@ -772,3 +892,4 @@ export global UIState {
     callback settings-open-requested();
     callback settings-close-requested();
 }
+

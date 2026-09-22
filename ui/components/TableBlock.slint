@@ -22,6 +22,12 @@ import { TableEdge } from "./TableEdge.slint";
 export component TableBlock inherits Rectangle {
     in property <BlockRow> block;
     in property <length> grid-width;
+    // Where this row sits in the editor list, and where the text column
+    // starts — the delegate has both and the grid's cells need them to open
+    // the "@" mention picker under themselves (SPEC §四十), which is the one
+    // popup a cell is allowed to raise.
+    in property <length> anchor-y: 0px;
+    in property <length> anchor-x: 0px;
     // the editor row's hover: the edge toolbar rides in with it
     in property <bool> hovered;
     // ... and the ride is mutual. A cell's TouchArea takes the row's hover
@@ -124,7 +130,14 @@ export component TableBlock inherits Rectangle {
                         alignment: start;
                         spacing: 0px;
                         for run in cell.runs : Rectangle {
-                            min-width: run-text.preferred-width;
+                            // SPEC §四十: a mention / date particle, as in
+                            // EditorBlock — a cell carries inline marks like
+                            // any block, so the chip has to exist here too
+                            property <bool> particle: run.mention >= 0 || run.date;
+                            property <length> particle-glyph: particle ? 12px : 0px;
+                            property <length> particle-pad: particle ? 4px : 0px;
+                            min-width: run-text.preferred-width + particle-glyph
+                                + (particle ? 6px : 0px);
                             height: run-text.preferred-height;
                             vertical-stretch: 0;
                             horizontal-stretch: 0;
@@ -141,8 +154,22 @@ export component TableBlock inherits Rectangle {
                                 border-width: 1px;
                                 border-color: Colors.find-hit-border;
                             }
+                            if particle : Rectangle {
+                                border-radius: Theme.radius-xs;
+                                background: run.mention-deleted ? Colors.code-background
+                                    : (run.date ? Colors.code-background : Colors.accent-soft);
+                            }
+                            if particle : Icon {
+                                x: particle-pad;
+                                y: (parent.height - particle-glyph) / 2;
+                                name: run.date ? "clock" : "page";
+                                size: particle-glyph;
+                                color: run.mention-deleted ? Colors.text-muted
+                                    : (run.date ? Colors.text-muted : Colors.accent-text);
+                            }
                             run-text := Text {
-                                x: 0; y: 0;
+                                x: particle ? particle-pad + particle-glyph + 2px : 0px;
+                                y: 0;
                                 wrap: no-wrap;
                                 text: run.text;
                                 font-family: run.code ? Typography.mono-font
@@ -151,7 +178,11 @@ export component TableBlock inherits Rectangle {
                                     : PageType.size-body;
                                 font-weight: run.bold ? Typography.weight-bold
                                     : Typography.weight-regular;
-                                color: run.link ? Colors.accent-text : Colors.text-primary;
+                                color: run.link ? Colors.accent-text
+                                    : run.mention-deleted ? Colors.text-muted
+                                    : run.date ? Colors.text-secondary
+                                    : run.mention >= 0 ? Colors.accent-text
+                                    : Colors.text-primary;
                                 line-height-factor: PageType.line-body;
                             }
                             if run.strike : Rectangle {
@@ -165,6 +196,15 @@ export component TableBlock inherits Rectangle {
                                 width: parent.width;
                                 height: 1px;
                                 background: Colors.accent-text;
+                            }
+                            // a mention inside a cell goes to its page. A cell
+                            // *link* has no such target here — that predates
+                            // this slice and is left exactly as it was found.
+                            if run.mention >= 0 && !run.mention-deleted : TouchArea {
+                                mouse-cursor: MouseCursor.pointer;
+                                clicked => {
+                                    UIState.open-link(run.url);
+                                }
                             }
                         }
                     }
@@ -188,9 +228,28 @@ export component TableBlock inherits Rectangle {
                     selection-background-color: Colors.selection;
                     edited => {
                         UIState.cell-changed();
+                        // SPEC §四十: "@" reaches a cell too. The text pairs
+                        // with the call because `edited` may land before the
+                        // two-way property is written back.
+                        UIState.mention-typed(self.text, anchor-y, self.preferred-height, anchor-x);
                     }
                     key-pressed(event) => {
-                        if (event.text == Key.Tab) {
+                        // SPEC §四十: the only popup a cell can raise is the
+                        // mention picker, so it needs the four keys that drive
+                        // it — the same set EditorBlock and ColumnItemRow bind
+                        if (UIState.slash-open && event.text == Key.UpArrow) {
+                            UIState.slash-move(-1);
+                            accept
+                        } else if (UIState.slash-open && event.text == Key.DownArrow) {
+                            UIState.slash-move(1);
+                            accept
+                        } else if (UIState.slash-open && event.text == Key.Return) {
+                            UIState.slash-apply-selected();
+                            accept
+                        } else if (UIState.slash-open && event.text == Key.Escape) {
+                            UIState.slash-close();
+                            accept
+                        } else if (event.text == Key.Tab) {
                             UIState.table-cell-move(cell.id, event.modifiers.shift ? -1 : 1);
                             accept
                         } else if (event.modifiers.control && event.text == Key.B
@@ -212,6 +271,22 @@ export component TableBlock inherits Rectangle {
                         } else if (event.modifiers.control && event.text == Key.M
                             && self.anchor-position-byte-offset != self.cursor-position-byte-offset) {
                             UIState.toggle-mark(4, self.anchor-position-byte-offset, self.cursor-position-byte-offset);
+                            accept
+                        } else if (event.modifiers.control && event.text == Key.L
+                            && self.anchor-position-byte-offset != self.cursor-position-byte-offset) {
+                            // the fifth mark, wired here the way the other four
+                            // are. It works because a cell *is* a block: the
+                            // row that holds it is a `table_cell` child block
+                            // with its own id, `is-edit` above is
+                            // `editing-id == cell.id`, and the dialog applies
+                            // its mark through `editing-id`
+                            // (`controller.rs` `on_link_apply`) — so the link
+                            // lands on the cell the caret is in and there is no
+                            // second target to get wrong
+                            UIState.link-start = Math.min(self.anchor-position-byte-offset, self.cursor-position-byte-offset);
+                            UIState.link-end = Math.max(self.anchor-position-byte-offset, self.cursor-position-byte-offset);
+                            UIState.link-url = "";
+                            UIState.link-open = true;
                             accept
                         } else if (event.modifiers.control && event.text == Key.Z && event.modifiers.shift) {
                             UIState.redo-requested();

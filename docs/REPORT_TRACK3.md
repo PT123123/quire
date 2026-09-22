@@ -1723,3 +1723,401 @@ track 的第二批放在同一段），请以**内容**为准搬迁；ADR 之间
 8. **静态自查的方法学**（可能对别的 track 有用）：括号平衡检查器必须处理 Rust 的 lifetime
    （`Formatter<'_>`、`&'static str`）与含引号的字符字面量（`b'"'`），否则会把代码吞掉报
    假阳性；本刀的检查器在 `.scratch/track3-d6/balance.py`。
+
+# Track 3 — Database（D7：高级特性，代码刀）
+
+D0 决策、D1 存储、D2 属性、D3 table、D4 规则、D5 视图族、D6 formula 之后，D7 收掉 SPEC §三十九
+「视图」「操作」的收尾四件：**chart（第八种视图）**、**linked database**、**数据库模板**、
+**视图内搜索**。本刀遵守任务书铁律：**只写代码，一行 cargo 都没跑**（不 check / 不 build /
+不 test / 不 run，不跑 sweep）——编译、测试、视觉、性能全部留给全部代码生成完之后的总测试。
+本节行号是**工作树**（四条 track 未提交改动的合集）的行号。
+
+## 1 · 开工时查到的现状（先查再写）
+
+工作树里已经躺着**前一轮 D7 的 WIP**，本刀先核对归属再动手：
+
+* 属于本 track 的 WIP（保留并继续）：`src/core/database_view.rs` 的 chart 常量与
+  `LayoutSupport::of` 的 `Chart => Drawn`、`ui/components/DatabaseSwitcher.slint` 的
+  `layout.drawn` → `drawn` 修复（**这是真编译错误**：`for layout[index] in [...]` 里没有
+  `drawn` 这个属性，原写法引用了一个不存在的字段）、`ui/components/DatabaseView.slint` 的四处
+  修复（`if parent.is-sorted` → `if is-sorted`、board 卡片 `for + if` 复合体 → `visible/width`
+  零宽盒、gallery 的 `Math.mod`、form 的 `edited =>` 签名）、
+  `ui/components/DatabaseFilterPopup.slint` 的 `accepted =>` 与 `op-pick-ta` 两处修复。
+* 不属于本刀（只读不动）：T2 的 sync_ref/mention/backlinks 全量、T4 的 v19 与 hayro。
+
+**HEAD 的缺口（本刀顺手闭合）**：`ui/AppWindow.slint` 在 HEAD 里有 `changed db-formula-open`
+的处理体（D6 提交进去了）却**缺 `in-out property <bool> db-formula-open <=> UIState.db-formula-open;`
+声明**——这是 D6 提交树的一处漏行（工作树里已有人补上），本刀把它带进 blob（T4/T2 的两处
+uncommitted hunk 排除在外）。
+
+## 2 · chart：八种视图的最后一种（ADR-0078 契约落地，不另出 ADR）
+
+**画什么**：plot 画的是**聚合不是行**。数据侧一次 `GROUP BY`——复用 D4 的
+`repo.group_counts` 与 `db_order_groups`（与 board 的列、分组表的组头是**同一个查询**），
+返回 (归一化键, 计数) 的有界序列（checkbox 两键、select/status 至多选项数 + 无值键）。视图的
+分组列 = 视图文档的 `groups` 键（D4 的 picker 写的那个），没有则回落到 schema 第一个
+option-bounded 列（**不回写**：默认值不能变成用户要撤销的规则），没有可分组列就画
+「Pick a column to group by」并照实报库的行数（`layout_total`，不是 0——「有行但没得画」与
+「没有行」是两种空态）。
+
+**虚拟化契约（注释里钉死）**：`body = TableView::chart_surface_height()`（常数 260），
+`wanted = RowWindow { 0, 0 }`——**chart realize 0 行**。形状数是 `counts.len()`，键数由
+SQL 的 `GROUP BY` 与选项有界性给出，与总行数无关；图里的数字是 SQL 产生的标量。10 000 行的
+库画的是与它的组头同样多的形状。这是 SPEC 第一条红线在 chart 上的答案：不是「窗口取几行」，
+而是「根本没有行窗口」。
+
+**怎么画（全用现有 primitive，零图表库零新依赖）**：
+
+| 形状 | primitive | 谁算几何 |
+|------|-----------|----------|
+| bar | 等宽 `Rectangle`，高 `frac × plot-h`，零计数画 2px 桩 | delegate（一次乘除） |
+| line | 一条 `Path`（`commands` 为多段线，100×100 viewbox，笔画 accent） | Rust：`chart_line_path`（database_view.rs L2120） |
+| pie | 每片一个填充 `Path`（`commands` 为 κ 近似三次贝塞尔弧） | Rust：`chart_pie_paths`（L2148），单值整圆特例 |
+
+Rust 端几何是**纯函数**（`chart_line_path` / `chart_pie_paths`），三角函数只在 Rust 里
+（Slint 没有 cos/sin），`Path` 的 `viewbox-width/height` 把 100×100 缩放到真实 plot 尺寸，
+所以 delegate 只摆形状、不做算术、不解析字符串。颜色用现有 `Colors.block-text(slot)`
+（九槽轮转；选项编辑器是 D5 的欠账，真选项色落地后改这一处即可——边界写进注释）。
+
+**形状存哪**：视图文档的 `chart` 键（`"bar"/"line"/"pie"`，`ViewDefinition::chart_kind` /
+`set_chart_kind`，database_view.rs L2024/L2036），照 ADR-0074 的读改写；切换形状 = 一次
+`SetDatabaseViewDefinition`（一步 undo），定义文本是窗口缓存的键，所以刷新即重读。plot 上方
+三个按钮即这个写路径的 UI。`ChartKind` 枚举与 `CHART_KINDS` 在 L2045 起。
+
+**接点**：`db_add_view` 的 chart 拒绝**撤下**（八种全可建）；切换器「+」菜单第八行
+`drawn: index < 8`；`EditorBlock.slint` 的 `db-height` 公式不变（body 由 Rust 给）；
+`db_fill_row` 推 `db-chart-points` / `db-chart-path` / `db-chart-kind`。
+
+## 3 · linked database：同一根 `db_ref`，没有第二份数据（ADR-0085）
+
+**形态：不是新 kind、不是新列、零迁移。** linked database = 一个普通的 `BlockKind::Database`
+块，它的 `blocks.db_ref` 指向**已存在**的 `databases` 行；写路径是新命令
+`Command::LinkDatabase { id, db }`（command.rs L272 + plan 臂）：apply =
+`[BlockDbRefSet{Some(db)}, BlockKindSet{Database}]`，revert = `[BlockKindSet{old},
+BlockDbRefSet{None}]`——**revert 里没有 `DatabaseDeleted`**，这就是它与 `MakeDatabase` 的
+全部差别（源实体在任何一条 link 撤销后都活着）。
+
+**读 / 写都落源库怎么保证**：不是实现出来的，是**结构成立**的。本层所有读与写都经「块的
+`db_ref`」解析——`db_ref_of` → catalog（列/视图/定义）、窗口读（`RowRequest.db`）、每个格写入
+（`SetDatabaseCell` → `db_ref?`）、视图切换器、filter/sort 文档。世上只有一份 `databases` 行、
+一份 `db_properties`、一份 `db_views`、一份 record，两个块都指着它，**不存在可漂移的副本**。
+从 linked 块加列 = 往源库 schema 加列；从 linked 块改格 = 改源库的 record——这正是 linked view
+的语义。新 kind 被否的理由同 ADR-0060：会为「两个块完全相同的事实」复制 §三十七 六个接点。
+
+**SPEC 草案 `(db, view)` 的 view 一半**：按 ADR-0073 归**会话态**（存储只指库；「哪个视图」是
+这个块此刻在看什么），理由写进 ADR——钉死 view id 会多一种悬空（视图被删而块还在）而数据库
+自身的悬空态已经有一句诚实的画法。
+
+**悬空引用怎么画**：源实体只可能死一条路——撤销创建它的那个块（`DatabaseDeleted` 全仓唯一
+发射点就是 `MakeDatabase` 的 revert；删 Database *块* 不删实体）。linked 块的实体没了 →
+`db_exists == false` → **ADR-0060 既有的那一行 `(deleted database)`**（DatabaseView.slint 的
+`if !block.db-ok` 臂），零新代码。删 linked 块本身不删任何别的东西。
+
+**入口**：slash/插入菜单新行 `Linked view`（id = `LINKED_VIEW_ROW = -2`，picker 行的负数
+约定，同 `MENTION_DATE_ROW = -1`；`SLASH_ITEMS` + `INSERT_ITEMS` 各一行）→ 第二步切到
+**数据库 picker**（`open_slash_links`：每个活库按 `databases.name` 列名、hint 是视图数；
+`slash-pick-linkdb` 第六种模式，与 pick-page/pick-synced 同构，复用同一个 slash popup，无新组件）
+→ 选择跑 `db_make_linked`（state.rs L8177）：行放弃文字、kind 与指针**一批**落地、一步 Ctrl+Z。
+
+## 4 · 数据库模板：`CellValue` 形状的副本（ADR-0086）
+
+**存哪**：`databases` 表新列 `template`（**v20**，`''` = 无模板），一份 JSON：
+`{"cells":{"<property id>": <string|number|bool|array>}}`——每个值都是 **`CellValue` 的存储
+形状**。这是任务书那句「模板是内容的副本、不引入第二套内容格式」在 record 上的拼法：store
+自己的值形状就是内容格式，所以模板格是**写下来的存储格**，应用模板就是普通的
+`SetDatabaseCell` 写入，不经 parse、不做转换。模块：`src/core/database_template.rs`（新，
+128 行，纯函数 + 一个类型别名：`cells_of` / `from_cells` / `value_of_json` / `json_of_value`）。
+
+**为什么是一列而不是表 / 不是每视图一份**：SQL 从不在模板上过滤（ADR-0064 的判据在数据库层
+的复述）；模板属于「这个库怎么**建**行」，每种布局建行方式一样，每视图一份就是同一事实的第二
+份。整文档替换 = 新 Change `DatabaseTemplateSet`（persistence.rs L226）+ repository 臂 +
+`db_absorb` 臂 + `set_database_template`（database_store.rs L1135）；快照/恢复带上该列
+（`DatabaseSnapshot.databases` 从二元组变三元组，L1538——检查点丢掉它就等于给每个库悄悄
+解除模板，ADR-0066 的那一类损失）。
+
+**怎么预填**：`db_add_record` 与 `db_form_submit` 把模板格作为普通 `SetDatabaseCell` 命令
+并入**建行同批**（`from: CellValue::Empty`，因为 record 还不存在——与 form 的 submit 同形），
+一次 Ctrl+Z 连行带预填一起撤。表单里用户敲的字永远赢；**留空的字段会预填**（空草稿字段是
+「没敲」不是「清空」——form 没有清空手势）。模板里指向已删列的格没有命令可发，这就是过滤器。
+
+**怎么存模板**：行槽的 **T**（与行的 x 并排，hover 显现）→ `db_template_from_row`
+（state.rs L8088）：按列读该行的**存储值**（计算列与派生列按 kind 跳过——它们没有存储值可拷，
+ADR-0062/0068），`from_cells` 组文档，一个 change 一步 undo。对**空行**按 T 就是空模板，
+这就是清除手势：复制一行空的等于「什么都不预填」，同一句话。
+
+**与 Track 1 的接缝**：**没有需要整合者拍板的共享形状**——页面模板是「块序列的副本」（他们
+的 territory、他们的存储），record 模板是「格值的副本」（本列）；两边遵守同一条**纪律**（用
+既有格式做副本、不引入第二套格式），但类型 / 列 / 函数零共享，没有任何东西跨过去。若整合者
+将来想要「页面模板可以种出一行 record」，那是两种既有格式之间的投影期翻译，需要它自己的 ADR。
+（本刀**没有改动** Track 1 的任何文件。）
+
+## 5 · 视图内搜索：数据库自己的 SQL 谓词（ADR-0087）
+
+**选路**：编译进窗口读的**同一 `WHERE`**——`RowRequest.search: Option<&str>`（database.rs
+L902），`search_predicate`（database_query.rs L463）对请求自带的**承载文本的列**各生成一条
+`INSTR(LOWER(expr), LOWER(?)) > 0` 并 OR 起来、**共用一个绑定**：标题（经 `COALESCE`，所以
+页-backed 行的 `pages.title` 也搜，ADR-0063）+ text / url / email / phone / 存储形状的日期 /
+两个 record 戳。它挂在 `where_clause` **与** `row_query_in_group` 两处——所以窗口读、
+`count(*)`、`group_query`、组内切片、range 查询**同吃一个谓词**：被搜索视图的计数、组头与行
+永远对同一句话作答（把谓词只放进 `where_clause` 会让组头数与组内行各说各话，所以组内切片那
+处必须显式带上）。
+
+**被否的路（ADR 里写清代价）**：§二十 的索引（ADR-0014）是**页标题与块文本**的 FTS5 镜像，
+`db_values` 根本不在里面，格值也不是块。走它要么(a) 把每个格索引进镜像 = 派生副本 + 每次格
+写入一条维护路径 + 每条批量路径（检查点 / 修复 / LAN pull）一条清理规则 + 一个「哪个写入者
+记得索引」的滞后边界，只为回答一个活谓词在语句里已经回答的问题；要么(b) 把
+`search_blocks` 的 rowid 列表 join 回行查询 = 搜的是**块**不是格、不尊重任何视图规则
+（搜索必须收窄与 count/组头同一份成员集）、还会让计数与行回答两个不同问题。
+
+**代价与边界（明写）**：`INSTR` 是**全扫不是 seek**（10 000 行上一键重跑谓词上的计数与窗口
+读——与 D4 的 `contains` 同一量级与同一修法：真觉得慢就在回调上加 debounce，不是把搜索挪回
+Rust）；`LOWER` **只折 ASCII**（本仓每次文本搜索同一边界）；**不搜**数字（它的文本形态是投影
+的产物，比数字是过滤面板的事）、勾选、select/status（存的是选项 **id**，名字在 SQL 看不见的
+config JSON 里）、两个列表型（值是 `db_value_items` 行）、计算列（不存值）——因此一个可见列
+里没有散文的视图，任何 needle 都回 **0 行**（`0` 谓词：诚实地说「这里没有能匹配它的东西」，
+不是把全表端出来）；**零滞后**（没有副本：搜索读到的就是格写入写下的值，与写在同一事务里
+落盘）。
+
+**会话态 vs 持久化**：needle 是**会话态**（`db_search`，按块 id；ADR-0073 的规则用到一次
+提问上）——不进视图文档、不是 undo 步、重启回到未搜索。UI 是头部计数槽：关闭时是「N rows」
+（hover + 点击即开），打开时同类 TextInput + 一个 x（关闭即清空——不可见的谓词挂在可见的表上
+正是头部的计数解释不了的状态）。**导出带 `search: None`**（ADR-0087）：文件是用户配置的
+**视图**，搜索是对屏幕提的一个问题。
+
+## 6 · 本刀改了 / 新增了哪些文件
+
+| 文件 | 为什么 | 关键位置（工作树行号） |
+|------|--------|------------------------|
+| `src/core/database_view.rs` | chart 的纯一半：`ChartKind` + 文档键 + 两种几何 | `chart_kind` L2024、`set_chart_kind` L2036、`ChartKind` L2045、`chart_line_path` L2120、`chart_pie_paths` L2148 |
+| `src/core/database_template.rs`（**新**，128 行） | 模板文档的读 / 写（值是 `CellValue` 形状） | `cells_of` L74、`from_cells` L113、两个 value 映射 L32/L58 |
+| `src/core/database.rs` | `RowRequest.search`（D7）+ `Database.template`（存储字段） | `search` L902、`template` L290 |
+| `src/core/mod.rs` | 声明新模块（**只加一行**） | `pub mod database_template;` |
+| `src/core/persistence.rs` | `Change::DatabaseTemplateSet`（枚举末尾 append） | L226 |
+| `src/core/command.rs` | `Command::LinkDatabase` + plan 臂；`Command::SetDatabaseTemplate` + plan 臂 | 变体 L272/L283、plan L1599 起 |
+| `src/storage/migrations.rs` | **v20** `databases.template`（「缺哪列补哪列」） | `CURRENT_VERSION` L14 → 20、步 L423、`add_database_template_column` |
+| `src/storage/database_query.rs` | `RowRequest.search` → SQL 谓词（窗口 / 计数 / 组 / 组内切片 / range 同吃） | `where_clause` L421、`search_predicate` L463、`row_query_in_group` 的 `search_part` |
+| `src/storage/database_store.rs` | `template` 列贯穿 load/insert/快照/恢复 + `set_database_template` | `load_databases` L120、`set_database_template` L1135、`DatabaseSnapshot.databases` L1538 |
+| `src/storage/repository.rs` | `DatabaseTemplateSet` 的 apply 臂 | L1027 |
+| `src/app/state.rs` | 四件的地基：搜索会话态 + 请求、chart 分支与载荷、模板读取 / 预填、链接库 helper、`db_absorb` 臂、chart 拒绝撤下、两个 BlockRow 字面量 + 测试工厂补字段 | `db_search` 字段 L176、refresh 的 needle L5363、Chart 分支 L5883、D7 方法段 L8034–8238、`db_template_cells` L8067、`db_add_record` 预填、`db_form_submit` 预填 |
+| `src/app/controller.rs` | 5 个回调 + 链接 picker 两步 + 4 场景 + 3 seed + seed_database_view 的 chart 臂 | 回调段（公式块之后）、linked 行 L2226、picker 臂 L2195、dark 臂、`seed_database_search/linked/template` |
+| `ui/Types.slint` | `DbChartPoint` + BlockRow 三字段 + `slash-pick-linkdb` + 搜索三属性 + 4 回调 | struct L199、BlockRow L275、props L503、callbacks L740 |
+| `ui/components/DatabaseView.slint` | 搜索框（计数槽）+ chart 主体臂 + 行槽的 T | 搜索 L180 起、chart 臂 L1262 起、行槽 L640 起 |
+| `ui/components/DatabaseSwitcher.slint` | 第八行点亮（`drawn: index < 8`）+ 两处 `layout.drawn` 编译错误修复 | L139 起 |
+| `ui/AppWindow.slint` | slash 复位新 flag + **D6 缺的 `db-formula-open` 镜像声明** | L429、L488 |
+| `docs/DECISIONS.md` | ADR-0085 / 0086 / 0087 | 文件末尾 |
+| `docs/SPEC.md` | §三十九 四处标注（视图 chart / 操作 搜索 / linked database / 模板） | §三十九 |
+| `PLAN.md` | 末尾追加 `## Track 3 · D7 高级特性` | 文件末尾 |
+| `docs/REPORT_TRACK3.md` | 本节 | — |
+
+**没碰**：`CHANGELOG.md`、`docs/ROADMAP.md`、`docs/PERFORMANCE.md`、`Cargo.toml`
+（**零新依赖**——chart 是现有 primitive，几何是手写 κ 常数，JSON 用 D2 的唯一阅读器，
+SQL 仍手拼）、`[profile.release]`、Track 1/2/4 的功能文件、`tests/integration/**`
+（铁律：不写新测试、不动既有测试文件）。
+
+## 7 · 迁移号（串行接缝）
+
+动手前读 `src/storage/migrations.rs`：工作树 `CURRENT_VERSION = 19`（12–15 D1、16 Track 2、
+17 D2、18 D3、19 Track 4 的 sync_ref 未提交）。本刀取 **v20**（`databases.template`）。
+
+**提交 blob 里 `CURRENT_VERSION = 20` 且数组缺 19**（blob 建在 HEAD 的 18 之上 + 本刀的 v20）：
+runner 只应用「version > 文件当前版本」的步、按数组顺序，跳号是安全的（D2 报告 §2 已论证，
+v17 的落地是实证）；合并后 12…20 连续。linked database **零迁移**（复用 v18 的 `db_ref`），
+视图内搜索 **零迁移**（needle 是会话态）。
+
+## 8 · 未验证（诚实清单——因为一行 cargo 都没跑）
+
+1. **编译**：本刀约 2 300 行（新增 + 改动）没有过 `cargo check`。静态自查做了：**括号平衡**
+   （`.scratch/track3-d7/balance.py`：剥行注释 / 块注释 / 字符串 / 字符字面量（含 lifetime 与
+   `b'"'`）后统计 `(){}[]` 差值，**16 个文件在 HEAD 与工作树上的 delta 全部为 0**）；五个新
+   回调 + 一个会话 flag 的**三件套**逐个 grep（Types.slint 声明 / .slint 使用 / controller
+   `on_*` 绑定）；新 `Change` 变体的**全部 match 点**（`document.rs` L238 与
+   `settings_store.rs` L237 有 `_` 兜底；`attachment_ids_in` 有 `_`；`repository.rs::apply_one`
+   是穷尽 match，已加臂）；`RowRequest` 的**全部 9 处字面量**（state.rs 5 + database_store 测试
+   3 + `RowRequest::new`）都带上了 `search`；`Database` 的字面量只有 store 的 `load_databases`
+   一处（已带 template 列），其余全走 `Database::new`；`BlockRow` 的两个字面量（project_blocks
+   + 测试工厂）与 `DbRow` 无新字段。**写码时抓到并改掉的三个真问题**见 §9。
+2. **测试**：没有跑任何已有测试；铁律禁止新增 `#[test]`，本刀没有写（未来测试清单在 §11）。
+3. **视觉**：四个新场景（`database-chart` / `database-search` / `database-linked` /
+   `database-template`）与四个 dark- 臂从未渲染。**已知风险点**（统一测试先看这里）：
+   * `Path { commands: "M … L … C … Z" }` 的字符串路径（bar / line / pie 的几何）在 Slint 1.18
+     的 `commands` 解析里是否全接受（Icons.slint 用的是**类型化子元素**写法 `MoveTo/LineTo/
+     ArcTo`，本刀用 `commands` 字符串是为了让 Rust 算几何——若 `commands` 不被接受，退路是把
+     pie 的每段弧换成 `ArcTo` 子元素或按点展开 `LineTo`，**但 Slint 没有三角函数**，折线坐标
+     仍得由 Rust 给；这条退路若要写需要改 DatabaseView.slint 一处，几何函数（纯 Rust，已有）
+     不用动）；
+   * 搜索框 `TextInput` 的 `init => { self.focus(); }`（打开即聚焦的写法）与 `edited` 的
+     每键回调；
+   * 行槽的 T/x 双 11px 命中区（`parent.width / 2`）在 22px 槽里的落点；
+   * chart 臂里 `if … && … : HorizontalLayout` 的复合条件与 `for` 里嵌套 Rectangle 的摆放。
+4. **性能**：INSTR 全扫的每键成本、pie 几何每刷新的构造成本、模板预填的批量写入成本都**没量**
+   （量法见 §11）。
+5. **linked database 的端到端**：picker 两步、同页两个块画同一实体、撤销建库块后 linked 块转
+   `(deleted database)`——都只在代码里，没有运行证据。
+6. **模板的 v20 收敛**：v19 文件升上来后 `template` 默认 `''`、旧库读回「无模板」——没有真文件
+   跑过（范式与 v17 相同，v17 有测试钉住）。
+
+## 9 · 写码时抓到并改掉的三个真问题（值得记下来）
+
+1. **UIState 里属性与回调重名**：`db-search-text` 同时作为 `<string>` 属性和
+   `callback db-search-text(int, string)` 声明——Slint 会直接报重名。改成
+   `db-search-text-set`（照 `db-filter-text-set` 先例），三处同步（Types.slint / DatabaseView /
+   controller）。
+2. **无分组的 chart 把 body 塌成 0**：Chart 分支的 `None`（没有可分组列）原本 `body = 0.0`，
+   而「Pick a column to group by」的空态文案画在 body 里面——高 0 的父元素会把文案裁掉。改成
+   `body = TableView::chart_surface_height()`（常数 260）：没得画时表面仍是 plot 的形状，文案在
+   里面居中。顺带把 `total` 从 0 改成真实的 `layout_total`——「有行但没得画」与「没有行」是两种
+   空态，头部计数要能分开它们。
+3. **工作树里前一刀的编译错误（保留修复）**：`DatabaseSwitcher.slint` 的 `layout.drawn` 引用了
+   `for layout[index] in [...]` 里不存在的属性；`DatabaseView.slint` 的 `for … : if …` 复合体
+   （Slint 的 for body 只能是一个元素）、`if parent.is-sorted`、`edited(text) =>` 的签名。
+   这些是 D3–D5 落在工作树、从未编译过的写法，本刀按现有 primitive 改对并带入 blob。
+
+## 10 · 偏离与原因
+
+1. **没有为 chart 单独出 ADR**：任务书要求 linked database / 模板 / 视图内搜索各一个 ADR
+   （已出 0085/0086/0087），chart 的形状由 ADR-0078 的窗口单位契约与 ADR-0079 的
+   「以名字拒绝」直接覆盖——本刀做的是**兑现**（`LayoutSupport::of` 翻 Drawn、拒绝撤下、
+   加一个形状键），没有新的机制性决策。chart 的 `chart` 文档键走 ADR-0074 的既有纪律。
+2. **linked database 不新 kind、不新列**（任务书给了三个选项让我定，写进 ADR-0085）：理由
+   是所有读写已经经 `db_ref` 解析，「不复制数据」不需要实现、只需要不引入第二份。代价是
+   「谁是原主」不可表示——明写进 ADR 的代价小节（今天也没有任何用户可达的「删库」动作，
+   所以这个问题不会被问到）。
+3. **SPEC 草案的 `(db, view)` 只落了 db 一半**：view 一半按 ADR-0073 归会话态，理由在
+   ADR-0085；偏差明写在 ADR 里，SPEC 标注也照实写。
+4. **模板的存在形态是一列 JSON 而不是「模板 record」**（Notion 的模板画廊是「带标记的行 +
+   一条投影规则」）：本刀不需要那套，ADR-0086 把拒绝的理由写下来。
+5. **模板的入口是行槽的 T**（不是 ⋯ 菜单 / 不是独立编辑器）：一行现存值就是模板的**唯一**内容，
+   「把这一行存成模板」是唯一的写动作，不给它第二套 UI；空行按 T = 清除，同一手势。
+6. **视图内搜索没做防抖**：needle 改的是**读**的输入，`db_refresh` 的 `unchanged` 缓存已经挡掉
+   没有变化的窗口；真慢的修法是回调上的 debounce（ADR-0087 明写），不是内存里的第二份行集。
+7. **搜索不搜数字 / 选项 / 列表 / 计算列**：SQL 看不见 config JSON（选项名）、`num` 列没有文本、
+   列表值是另一张表、计算列不存值——四条边界写进 ADR-0087 与注释。
+
+## 11 · 测试计划（追加到「留给最终统一测试」清单，编号接 D6 的 52）
+
+**B. 功能（headless 可证的）**
+
+53. chart 只画聚合不取行：10 000 行的库、按 checkbox 分组，chart 视图的
+    `block.db-chart-points.len() == 2`（键数）且窗口 realize 0 行（`db_table` 的
+    `total` = 真实行数、`window` = 0..0）；两种键的计数之和 = `COUNT(*)`——建议测试名
+    `a_chart_draws_the_group_counts_and_realizes_no_row`；
+54. 无分组列时是「有得挑」而不是「没有行」：5 行库、清空 `groups` → points 空、
+    `db-row-count == 5`（不是 0）；空库 → `db-row-count == 0` 且不报错——建议测试名
+    `an_ungrouped_chart_says_pick_a_column_and_still_counts_its_rows`；
+55. 形状键往返（ADR-0074）：写 `{"chart":"pie"}` → `chart_kind()` 是 Pie；隐藏一列后
+    `chart` 键原样保留；未知值（`"donut"`）读回 Bar；`set_chart_kind` 是**一个** change
+    且 undo 恢复——建议测试名 `a_chart_shape_is_a_document_key_like_every_other_rule`；
+56. 几何纯函数：`chart_pie_paths(&[1.0,1.0,1.0,1.0])` 四片的起止点首尾相接、每片角度
+    90°（端点落在圆上 ±0.1）；`chart_pie_paths(&[5.0])` 是整圆特例（四个 C、不含中心线）；
+    零片与零值组返回空串；`chart_line_path(&[1.0,0.0])` 的首点在顶部、末点在底部且
+    x 对称——建议测试名 `the_pie_arcs_meet_and_the_line_spans_the_plot`；
+57. 搜索谓词进 SQL：带 `search: Some("the")` 的请求，`row_query_plan` 的 SQL 含
+    `INSTR(LOWER(` 的 OR、绑定里 needle 只出现一次、`count_query` 与窗口读的**谓词一致**
+    （同一份 FROM/WHERE）；`search: None` 或全空白 → 无谓词；可见列全无文本列 → `0`——
+    建议测试名 `a_view_search_is_one_predicate_in_the_same_statement`；
+58. 搜索与计数 / 组头一致：5 行库搜索 "the" → 计数 2；同库带 `groups` → 组计数之和 = 2
+    且每组的 `row_query_in_group` 与 `group_counts` 对同一 needle 作答——建议测试名
+    `a_searched_group_counts_what_its_own_rows_show`；
+59. 搜索不写文档：`db_view_search_set` 前后 `db_views.definition` 逐字节不变、
+    history 长度不变（不是 undo 步）；关掉搜索（空串）后计数回到 5——建议测试名
+    `a_search_is_a_question_not_a_rule`；
+60. 模板往返（ADR-0086）：一行填 title/number/flag → `db_template_from_row` → 重开库后
+    `databases.template` 读回同一文档、`cells_of` 给出三个 `(property, CellValue)`；
+    `from_cells(cells_of(x))` 逐字节稳定（键序）；空行按 T → `{"cells":{}}` 且预填不写一格
+    ——建议测试名 `a_row_becomes_a_template_and_an_empty_row_clears_it`；
+61. 预填是建行同批：设好模板后 `db_add_record` → 新行带模板格、**一次 Ctrl+Z** 行与格一起
+    消失；`db_form_submit` 里用户填的字段胜过模板、留空的字段吃模板——建议测试名
+    `a_templated_row_arrives_complete_and_leaves_in_one_undo`；
+62. 模板跳过计算列与派生列：模板源行含公式列与 created/edited → 文档里**没有**它们的键，
+    预填行的公式值是它自己算的、created 是**现在**（不是源的）——建议测试名
+    `a_template_copies_stored_cells_and_never_a_computed_one`；
+63. v20 迁移：真 v19 文件（DROP COLUMN template + 版本回退）升上来后旧行逐字段未变、
+    `template` 读作 `''`；snapshot/restore（`replace_all`）后模板原样保住——建议测试名
+    `the_v20_step_adds_the_template_and_the_bulk_path_keeps_it`；
+64. linked database 读写落源库：块 A `MakeDatabase` 建库、块 B `LinkDatabase` 指向同一个
+    db → 从 B `SetDatabaseCell` / `db_add_column` 后**源库**的行与 schema 变了（A 与 B 的
+    `db_table` 的列/行一致）；undo 掉 `LinkDatabase` → A 的实体仍在（`db_exists` 为真）且
+    B 回到原 kind——建议测试名 `a_linked_view_reads_and_writes_the_source_it_names`；
+65. 悬空 linked：undo 掉创建块（`DatabaseDeleted`）→ linked 块的 `db_table()` 为 `None`、
+    `block.db-ok` 为 false（即 `<deleted database>` 一行）；`db_add_record` 对它返回 `None`
+    而不是 panic——建议测试名 `a_link_whose_source_is_gone_draws_the_deleted_line`；
+66. `LinkDatabase` 的拒绝面：已有 `db_ref` 的块、cell / column、容器子块、已有子块的块 →
+    `plan` 返回 `None`（不烧 id、不产 change）——建议测试名
+    `linking_refuses_what_already_draws_something`。
+
+**C. 视觉（接着 §10 的编号）**
+
+67. sweep 对照 D6 基线：**既有的 67 个场景 + D3–D6 的 database 场景会动**——本刀改了头部的计数槽
+    （变成搜索开关的同槽控件，非 hover 态像素一致）、行槽（hover 态才显示，静态像素一致）、
+    `Types.slint` 新增结构（不动既有）。**要逐场景看的是**：`database-table` / `-filter` /
+    `-formula` / 六个 D5 场景在**非 hover** 下应逐字节相同；`menu` / `plus` / `slash` **必然动**
+    （插入菜单多一行 `Linked view`，slash 菜单多一行）——这正是要看的数字；四个新场景为 new。
+    人工核对：chart 的两种分组柱（unchecked 2 / checked 3）与按钮的激活态、pie 的两片角度比例、
+    line 的两点连线；search 场景计数「2 rows」+ 打开的框里的 `the`；linked 场景两个表内容一致；
+    template 场景最后一行 = 「Template row / 50 / checked」。
+68. 人工交互：hover 一行 → T 与 x 都出现、点 T 后下一次 New row 带预填；点计数 → 框打开并聚焦、
+    输入即收窄、点 x 恢复全表；点 chart 的 Line/Pie → 形状换、表数据不变、一次 Ctrl+Z 回到 Bar；
+    slash 输入 `/link` → 选中 `Linked view` → 第二个 picker 列出库名 → 选后当前行变成数据库
+    （内容 = 源库）。
+
+**D. 性能（D7 欠的，随 D8 收口）**
+
+69. **搜索每键成本**：release 探针（`#[ignore]` 打印型，D1 的写法），10 000 行 × 5 列的库上，
+    对同一 needle 跑 `realized_rows` 端到端（`COUNT(*)` + 窗口读），与 D4 的 contains 过滤读数
+    并列，打印 `EXPLAIN QUERY PLAN`（预期 `SEARCH r USING INDEX idx_db_records_db_ord` + 每列
+    索引探针 + 无 `SCAN db_values` 之外的意外）；原始行落
+    `benchmarks/results/2026-09-22-track3-d7-search.jsonl`；
+70. **chart 的构造成本**：同一库按 checkbox 分组的 chart 刷新（1 次 `GROUP BY` + 几何字符串
+    构造）对 5 行库的对照——两个数应当同阶（形状数不随行数长），验证「plot 是聚合不是行」；
+71. **模板预填**：一次 `db_add_record` 带 N 格模板的端到端（写入 = D2 的单发 cell 写的
+    批量形态），与不带模板的建行对照。
+
+## 12 · 给整合者的注意事项
+
+1. **共享文件的提交方式照 D0–D6**：`docs/DECISIONS.md`（只在末尾追加 ADR-0085/0086/0087，
+   排除 Track 2 的 0050–0052 与 Track 4 的 0080/0081）、`PLAN.md`（只追加 D7 节）、
+   `docs/SPEC.md`（§三十九 四处 hunk，排除 Track 2/4 的段落）、`src/core/mod.rs`（只加
+   `pub mod database_template;`，排除 Track 2 的 `date`/`reference`）、
+   `src/core/persistence.rs`（枚举末尾 +1 变体）、`src/core/command.rs`（+2 变体 +2 plan 臂）、
+   `src/storage/migrations.rs`（本刀 blob：`CURRENT_VERSION = 20` + v20 步与 backfill，
+   **数组缺 T4 的 19**）、`src/storage/database_store.rs`（template 列 + 测试字面量）、
+   `src/storage/repository.rs`（+1 臂）、`src/app/state.rs` / `src/app/controller.rs`（D7 段落）、
+   `ui/Types.slint` / `ui/AppWindow.slint` / `ui/components/DatabaseView.slint` /
+   `ui/components/DatabaseSwitcher.slint`（D7 段落 + 前一刀的编译修复；AppWindow 的
+   `slash-pick-mention` 复位行是 Track 2 的，排除）。脚本在 `.scratch/track3-d7/stage.py`。
+   提交后共享文件在工作树里仍是 modified（那是别人的改动）。
+2. **顺带闭合的两处 D6 提交树缺口**（都不补则提交树单独编译是红的）：
+   a. `ui/AppWindow.slint` **缺** `in-out property <bool> db-formula-open <=> UIState.db-formula-open;`
+      ——HEAD 有 `changed db-formula-open` 的处理体（D6 提交的）却没有这个声明；
+   b. 前一刀 D7-WIP 在 `DatabaseSwitcher.slint` / `DatabaseView.slint` 的四处编译错误修复
+      （`layout.drawn`、`for…:if…`、`if parent.is-sorted`、`edited(...) =>` 签名）——它们从未
+      进过任何提交，本刀带上。给整合者：**D6 的提交树（21f4e6e）里 AppWindow.slint 单独编译
+      是红的**；若要对照「D6 树 vs D7 树」，以合并后的树为准。
+3. **`RowRequest` 又长了字段**（`search`）：工作树里使用 `RowRequest` 的只有本 track 的文件与
+   `database_store` 的测试（已补）；若 Track 2/4 在合并前写了 `RowRequest { … }` 字面量，
+   合并时要机械补 `search: None`。
+4. **插入菜单多了一行**：`INSERT_ITEMS` / `SLASH_ITEMS` 各多一行 `Linked view`
+   （`LINKED_VIEW_ROW = -2`）。所以 `menu` / `plus` / `slash` 三个场景的像素**必然动**——这是
+   点亮新入口的正常代价（D3 点亮 `Table view` 时同一句话）。
+5. **迁移号**见 §7（blob 20 跳 19）；**ADR 号 0085–0087 是借号**（§8 明说）。
+6. **CHANGELOG 不要为 D7 写功能行吗？** 本刀有用户可见的一半（chart 可建可切、`Linked view`
+   入口、模板 T、视图内搜索框），本刀没碰 CHANGELOG（铁律）。整合者若要收口，条目草稿：
+   > - The eighth database view is a **chart**: bar, line and pie drawn from the view's own
+   >   grouping with the app's existing primitives (no charting library). Its plot is the group
+   >   counts SQL already computes — a chart of ten thousand rows realizes no rows at all.
+   > - A **linked view** puts a second block on an existing database; the two show one entity,
+   >   so a column or a cell edited in either lands in the same place. Deleted source entities
+   >   keep drawing the same one-line "(deleted database)".
+   > - A database can carry a **record template**: save a row's values as the template, and every
+   >   new row (the header's New row, a form submit) starts from them — one Ctrl+Z takes the row
+   >   and its prefill back together.
+   > - The **view search** narrows what a view shows as you type: it is compiled into the same
+   >   SQL the filter is, so the count, the group headers and the rows always agree.
+   > - Still not in this build: rollup and relation columns (they wait for §四十's reference
+   >   layer, ADR-0084), and the option editor that would let a select column's *colors* feed
+   >   the chart (its palette slots rotate today).
+7. **`quire_shot` 不用改**：`needs_db` 的 `contains("database")` 已覆盖四个新场景。
+8. **静态自查的方法学**（对别的 track 可能有用）：`.scratch/track3-d7/balance.py` 是本刀用的
+   括号平衡器（处理 `//`、`/* */`、`r"…"`、`r#"…"#`、普通串的转义、字符字面量与 `'a`
+   lifetime 的区分），它对**每个文件的 HEAD 版本与工作树版本**各算一次差值，delta 相等就说明
+   本刀的编辑没有改变平衡——比只查工作树更能发现「别人的 WIP 本来就是坏的」。

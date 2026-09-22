@@ -1441,3 +1441,64 @@ traps and both show up in that number: putting the emoji in a *second* box besid
 a parent's chevron pushed every parent's label one indent past its own children,
 and applying the initial to Favorites / Recent replaced the star and the clock —
 either one would have read as movers past x 53 in all 64.
+
+## T2 · the backlink panel is one index seek, and the control that says so (2026-09-22, ADR-0051)
+
+SPEC §四十 asks the panel for "all the blocks that reference this page" and
+**forbids answering it with a scan**. The panel runs on every projection of a
+page, so the honest question is not "how fast is the query" but "does opening a
+page cost more because the library is bigger" — and the second half of that
+question can only be answered against the counterfactual, which is the read with
+migration 16's index taken away.
+
+One database, one sitting, release: 1 200 pages, 1 200 blocks, **100 200 marks**,
+of which exactly **200 are references** to the opened page and the other 100 000
+are bold spans on unrelated pages. Seeding took 1.88 s and is not part of any
+number below.
+
+`app::state::tests::cost_of_the_backlink_panel_on_a_page_open` (`#[ignore]`,
+prints, release):
+
+```
+cargo test --release --lib cost_of_the_backlink_panel -- --ignored --nocapture
+```
+
+**The reference read** — the pair `refresh_backlinks` makes (the count, then the
+window), µs per read over 20 rounds:
+
+| arm | read | µs |
+|-----|------|---:|
+| A | nothing points at the page (`count(*)` → 0, plus a window that the app skips) | 28.3 |
+| B | 200 references, folded window (5 rows) | 78.2 |
+| D | 200 references, unfolded window (50 rows) | 113.9 |
+| **C** | **B with `idx_marks_reference` dropped — not a shipped configuration** | **6 067.9** |
+
+**C is 78× B**, on a table that holds 1 200 rows more than the reference count
+needs, and a single count on the same unindexed table is **2 567 µs** against a
+whole folded read's 78. That is the "no full scan" sentence turned into a
+measurement: the cost of this read follows the *index*, and the 100 200 marks
+that are not references are invisible to it. Arm A always calls both queries
+where the app calls one (it skips the window when the count is zero), so 28.3 µs
+is an upper bound on what a page nobody quotes pays.
+
+**The open** — the same call the UI makes, ms per open over 20 rounds:
+
+| arm | page opened | ms/open |
+|-----|-------------|--------:|
+| A | nothing points at it | 0.35 |
+| B | 200 references, folded | 0.41 |
+| D | 200 references, unfolded | 0.43 |
+
+The panel's own share is **+0.06 ms folded, +0.07 ms unfolded** — against the
+SPEC §二十二 budget of 50 ms for a page open, and against the ≈38 ms a
+10 000-row projection of the same page costs (M11 · ADR-0039), which is where
+this slice's time would go if it had one to spend. The window is what keeps it
+there: 200 references cost 5 rows of drawing, not 200.
+
+**What this does not measure**, stated rather than implied: the open arms are on
+a one-block page, so they isolate the panel and say nothing about a large page's
+projection (that number belongs to ADR-0039 and is quoted, not re-measured); the
+`count(*)` in every arm is the *unfiltered* count for one page, and nothing here
+covers a filter over references. The pixel evidence for the drawing itself is the
+T2 sweep (`backlinks`, `backlinks-open`, `backlinks-small`, `dangling` and their
+`dark-` arms): **67 of 67 pre-existing scenes byte-identical**, 10 new.

@@ -2208,6 +2208,35 @@ emoji、图片放封面——所以「放一张图」这件事由 cover 承接�
 「封面之上的标题对比度」那条验收还没人替它说话——而 ADR-0046 之后，「给页放一张图」这件事全压在 cover 上，
 下一刀要按这个分量做。
 
+## M13 · 引用、提及与反向链接（Track 2）— ✅ T2.1–T2.5 完成
+分支：`track/2-references`（提交 `19201c3` 四刀 + 合并提交收口 T2.5，逐刀报告在
+`docs/REPORT_TRACK2.md`）
+
+- **ADR-0050**（mention/date 复用 `marks.url`）与 **ADR-0051**（反向链接 =
+  两条索引 + 派生投影，取代 brief 的 FTS5 token 草案）：已落，随 `19201c3`。
+- **T2.1 `@page mention`** ✅ —— chip 存目标页 id、画时问标题；slash 第四模式
+  `slash-pick-mention`；`InsertReference` 一条命令一个 undo 步；改名/移父/删页
+  一条测试钉死。
+- **T2.2 `@date`** ✅ —— 同一枚 chip 的第二种载荷，ISO 格式只有 `core::date`
+  一个定义。
+- **T2.3 反向链接区** ✅ —— migration 16 两条索引；折叠 5 行 / 展开 50 行 /
+  "and N more"；78 µs 折叠读（去索引反事实 6 068 µs），数字进
+  `docs/PERFORMANCE.md`。
+- **T2.4 页面别名与悬空** ✅ —— 改名/移父/id 落空三件事一条测试覆盖。
+- **T2.5 synced block** ✅（2026-09-22 上午收口）—— **ADR-0052**：源块持有内容，
+  镜像只持一根指针（`blocks.sync_ref`，migration 19；`BlockKind::Synced`，
+  kind 字符串 `"synced"`，UI int 24）。删除 = 镜像退化 `(deleted source)` 只读；
+  undo 不需要合并（只有一份内容）；环检测在写入时（`sync_would_cycle`，
+  上界 32）；Markdown 导出按段落摊平、导入有意不认新语法；六接点全部点亮
+  （slash 的第五种 picker `slash-pick-synced`、Turn into、场景
+  `synced` / `synced-source-gone` 含 dark 臂）。lib 测试两条：
+  画源+退化、自指/环/非 Synced 拒绝。
+- **验证**：check 干净 / 按 target 全绿（lib 314+13ig、storage 39+2ig、
+  markdown 69 ……）/ release 零警告；sweep 的 synced 场景数字留给整合者
+  （共享工作树出不了干净对照）。
+- **未验证边界**：真键盘输入、双焦点争用、真点跳转（headless 证明不了，
+  见报告 §7.2）；镜像每行一次 O(1) 查表的成本没有单独数字。
+
 ## Track 3 · D0 决策与探针（2026-09-22，on `track/3-database`，ADR-0060…ADR-0065）
 
 Database 这条 track 的**第一条纪律是先证明通道存在**：SPEC §三十九 性能红线的第一句是「10 000 行的库
@@ -2545,3 +2574,53 @@ relation 目标的六个聚合、配置存 config、值投影时现算）已在 
 已知边界（全在 REPORT_TRACK3 §D6）：公式不能引用 list/pick 列的值（id 对算术无意义，
 读作 Empty）、没有日期运算函数、没有跨刷新值缓存（理由见 ADR-0083）、导出按行现算整个
 视图（显式产物的成本，不是输入红线）。迁移号不动（工作树 19 / 提交树 18，本轮零迁移）。
+
+## Track 3 · D7 高级特性（2026-09-22，on track/3-database，ADR-0085…0087 借号）
+
+D0 通道、D1 存储、D2 属性、D3 table、D4 规则、D5 视图族、D6 formula 之后，D7 收掉 SPEC §三十九
+「视图」「操作」剩下的四件：**chart（第八种视图）**、**linked database**、**数据库模板**、
+**视图内搜索**。铁律照旧：**只写代码，一行 cargo 都没跑**——编译、测试、视觉、性能全部留给
+总测试（D8）。
+
+### 缘起与形状
+
+* **chart**（ADR-0078 的窗口单位契约落地，不另出 ADR）：plot 画的是**聚合不是行**——一次
+  `GROUP BY`（复用 D4 的 `group_counts`，与 board 的列是同一查询）给出 (键, 计数)，10 000 行
+  realize **0** 行；bar / line / pie 三种全用现有 primitive（bar 是等宽 Rectangle、line 是
+  viewbox 缩放多段线、pie 是 Rust 端 κ 近似三次曲线的逐片 Path），**零图表库零新依赖**；形状
+  存视图文档的 `chart` 键（ADR-0074），切换器「+」第八行点亮、`db_add_view` 的拒绝撤下。
+* **linked database**（ADR-0085）：同一个 Database 块 + 同一根 `db_ref`——不是新 kind、不是
+  第二列、零迁移零新 Change；`Command::LinkDatabase` 一批落地，读写全部经既有 `db_ref` 解析
+  落源库，源死走 ADR-0060 既有的 `(deleted database)`；入口 = slash/插入菜单 `Linked view` 行
+  （`LINKED_VIEW_ROW = -2`）→ 数据库 picker → `db_make_linked`。
+* **数据库模板**（ADR-0086）：`databases.template` 一列 JSON（**v20**），值是 `CellValue`
+  存储形状的原样副本（「不引入第二套内容格式」）；行槽 T 存模板、`db_add_record` /
+  `db_form_submit` 在**建行同批**预填；与 Track 1 页面模板**没有需要仲裁的共享形状**（一边是
+  块序列的副本、一边是格值的副本，类型/列/函数零共享，报告已说明）。
+* **视图内搜索**（ADR-0087）：选**数据库自己的 SQL 谓词**（`INSTR(LOWER,LOWER)` 的 OR，编译进
+  同一 `WHERE`），不挂 §二十 的 FTS5——`db_values` 不在镜像里，挂进去 = 每格写入一条维护路径
+  + 每条批量路径一条清理规则 + 索引滞后边界；`INSTR` 全扫（D4 contains 同价）但零副本零滞后；
+  needle 是会话态，导出 `search: None`。
+
+### 验证
+
+未验证（诚实清单）：**全部**。一行 cargo 都没跑（铁律），静态自查做了括号平衡（剥注释/字符串
+的检查器，全部文件与 HEAD delta 归零）、回调三件套 grep（5 个新回调 + 1 个会话 flag：声明 /
+使用 / 绑定逐个核对）、新 `Change` 变体的全部 match 点（document / settings_store /
+attachment_ids_in 的 `_` 兜底 + repository 穷尽 match 已加臂）、`RowRequest` 全部 9 处字面量
+补 `search`、`Database` 字面量仅 store 的 load 一处（已带 template 列）。四个新场景
+（database-chart / -search / -linked / -template + 各自 dark-）从未渲染。性能：INSTR 全扫的
+每键成本、pie 几何的构造成本均未量——量法记在 REPORT_TRACK3 §D7 的测试计划。
+
+### 迁移号（串行接缝）
+
+动手前读 `src/storage/migrations.rs`：工作树 `CURRENT_VERSION = 19`（T4 的 sync_ref 未提交）。
+本刀取 **v20**（`databases.template`，「缺哪列补哪列」的收敛范式）。**提交 blob 里
+`CURRENT_VERSION = 20`、数组缺 19**（HEAD = 18 + 本刀 v20）——runner 按序应用「version > 文件
+当前版本」的步，跳号安全（v17 落地已证明）；合并后 12…20 连续。
+
+### 决策号（借号，请整合者确认）
+
+号段 0060…0079 早已用尽，D6 借了 0082–0084，本刀**继续借 0085 / 0086 / 0087**（linked
+database / 模板 / 视图内搜索）。工作树里 Track 4 的 0080/0081、Track 2 的 0050–0052 各归其主；
+若整合时要重编号，请以内容为准搬迁（正文交叉引用按内容书写）。

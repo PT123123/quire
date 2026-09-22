@@ -17,7 +17,17 @@
 #
 # The app's per-user library (%APPDATA%\Quire) is never used: every launch here
 # passes --db under the scratch dir. The icon comparison reads pixels, so it
-# needs System.Drawing; no window is shown and nothing is screenshotted.
+# needs System.Drawing; no window is shown and nothing screenshotted.
+#
+# Re-runnable by construction, and that is not cosmetic: this script used to
+# clear a fixed `.scratch\a6\{install,data}` and to delete each `dump.err`
+# before reusing it, which made a second run depend on the *previous* run's
+# files being deletable. On this machine a delete guard with a 50-file budget
+# per turn (SAFE_DELETE_BULK_CONFIRM_REQUIRED) refuses them, so the run died
+# half-way through (c) with all four groups green up to that point — a harness
+# that could not be re-run at the next head, which is the one thing an RC gate
+# has to be. Now every scratch path carries the run's own timestamp and no step
+# deletes anything, so run N+1 neither needs nor touches run N.
 param(
     [string]$Dir = ""
 )
@@ -26,11 +36,11 @@ $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 Add-Type -AssemblyName System.Drawing
 
-if ($Dir -eq "") { $Dir = Join-Path $root ".scratch\a6\install" }
-$data = Join-Path $root ".scratch\a6\data"
-if (Test-Path $Dir) { throw "$Dir already exists; clear it first" }
+$stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+if ($Dir -eq "") { $Dir = Join-Path $root ".scratch\a6\install-$stamp" }
+$data = Join-Path $root ".scratch\a6\data-$stamp"
+if (Test-Path $Dir) { throw "$Dir already exists; pass a different -Dir" }
 # a fresh library, so the (c) page-count delta is the import and nothing else
-if (Test-Path $data) { Remove-Item -Recurse -Force $data }
 New-Item -ItemType Directory -Force -Path $data | Out-Null
 
 # The release exe is the input; build it first (cargo build --release --bin
@@ -97,14 +107,18 @@ Write-Output ("(c) Add/Remove entry: {0} {1}" -f $un.DisplayName, $un.DisplayVer
 # and the command line the verb points at really imports the file: the same
 # argument list Explorer would pass, run against the scratch library.
 function Get-PageCount([string[]]$extra) {
-    $dump = Join-Path $data "dump.err"
-    if (Test-Path $dump) { Remove-Item $dump }
+    # one dump file per call: `-RedirectStandardError` truncates what it opens,
+    # so reusing a name would still read correctly — but only if the old file
+    # could be deleted first, and nothing here should have to be
+    $script:dumpN++
+    $dump = Join-Path $data "dump-$($script:dumpN).err"
     $a = @("--db", (Join-Path $data "quire.db"), "--auto-exit", "3", "--dump-state") + $extra
     Start-Process -FilePath (Join-Path $Dir "quire.exe") -ArgumentList $a -Wait -RedirectStandardError $dump | Out-Null
     $l = (Get-Content $dump -ErrorAction SilentlyContinue | Where-Object { $_ -like "dump-state: pages=*" } | Select-Object -Last 1)
     if ($l -match "pages=(\d+)") { return [int]$Matches[1] }
     return -1
 }
+$dumpN = 0
 $md = Join-Path $data "verb-check.md"
 Set-Content -Path $md -Value "# Verb check`n`nwritten by verify-installer" -Encoding UTF8
 $before = Get-PageCount @()

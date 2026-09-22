@@ -16,24 +16,25 @@ use crate::core::database_formula::{
 };
 use crate::core::database_property::PropertyOptions;
 use crate::core::database_view::{
-    all_columns, board_slots, board_window, date_key, day_number_of, day_of, days_in_month,
-    group_window, is_stored_date, layout_metrics, month_cells, month_key, month_label, shift_month,
-    table_columns, table_rows, view_columns, CALENDAR_PEEK, FilterClause, FilterNode, FilterOp,
-    FilterValue, FlatClause, FlatFilter, GroupKey, GroupSpec, LayoutSupport, TableColumn,
-    TableRowView, TableView, ViewDefinition, ViewRules, ViewTab, WIDTH_AUTO,
+    all_columns, board_slots, board_window, chart_line_path, chart_pie_paths, date_key,
+    day_number_of, day_of, days_in_month, group_window, is_stored_date, layout_metrics,
+    month_cells, month_key, month_label, shift_month, table_columns, table_rows, view_columns,
+    CALENDAR_PEEK, ChartKind, FilterClause, FilterNode, FilterOp, FilterValue, FlatClause,
+    FlatFilter, GroupKey, GroupSpec, LayoutSupport, TableColumn, TableRowView, TableView,
+    ViewDefinition, ViewRules, ViewTab, WIDTH_AUTO,
 };
-
+use crate::core::database_template;
 use crate::core::persistence::{Change, Repository};
 use crate::core::{
     Attachment, AttachmentId, Block, BlockId, BlockKind, ColorKind, Command, Document, History, Lang,
-    OrderKey, PageFont, Page, PageId,
+    Mark, OrderKey, PageFont, Page, PageId,
 };
 use crate::services::find_service::FindSession;
 use crate::services::persistence::PersistenceService;
 use crate::services::search_service::SearchService;
 use crate::storage::search_index::SearchRequest;
 use crate::storage::SqliteRepository;
-use crate::{BlockRow, ColumnBox, ColumnItem, TableCell, DbCell, DbColumn, DbOption, DbRow, DbViewTab, CommandRow, MenuRow, SearchRow, SidebarNode, SlashRow, TextRun, TocEntry};
+use crate::{BlockRow, ColumnBox, ColumnItem, TableCell, DbCell, DbColumn, DbOption, DbRow, DbViewTab, BacklinkRow, CommandRow, MenuRow, SearchRow, SidebarNode, SlashRow, TextRun, TocEntry};
 use slint::{Model, ModelRc, VecModel};
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
@@ -44,6 +45,10 @@ pub struct AppState {
     pub workspace: RefCell<Workspace>,
     pub sidebar: Rc<VecModel<SidebarNode>>,
     pub blocks: Rc<VecModel<BlockRow>>,
+    /// The backlink panel's window (SPEC §四十, ADR-0051). A model, but not
+    /// state: every projection of a page rebuilds it from `marks`, so nothing
+    /// it holds is anything but a reading of the page that is already open.
+    pub backlinks: Rc<VecModel<BacklinkRow>>,
     pub commands: Rc<VecModel<CommandRow>>,
     pub search: Rc<VecModel<SearchRow>>,
     pub menu: Rc<VecModel<MenuRow>>,
@@ -88,6 +93,11 @@ pub struct AppState {
     /// Rows whose runs currently carry a hit cell. The next search has to
     /// un-paint those too, and they are not the rows the new term hits.
     find_painted: RefCell<Vec<i32>>,
+    /// Folded or unfolded, the backlink panel's one piece of session state.
+    /// Not persisted: it is a reading preference about a panel, and the folded
+    /// shape is the default because it is the one that keeps the prose on
+    /// screen when a page is quoted two hundred times (SPEC §四十).
+    backlinks_expanded: Cell<bool>,
 
     search_generation: Cell<u64>,
     /// Persisted sibling order of every page (drives PageCreated/Moved).
@@ -156,6 +166,14 @@ pub struct AppState {
     db_cal_month: RefCell<HashMap<i32, (i32, u32)>>,
     db_gallery_per_row: RefCell<HashMap<i32, usize>>,
     db_form: RefCell<HashMap<i32, Vec<(u64, String)>>>,
+    // ─── D7: the view's live search (SPEC §三十九 「操作」, ADR-0087) ────────
+    // The needle a database block's header search box holds, by block id —
+    // **session state, not a column** (ADR-0073's rule applied to a query: a
+    // search is a question the user is currently asking, so a restart opens
+    // an unsearched view and the view's document is untouched). Compiled into
+    // the request's `search` half, which is what makes it part of the one
+    // statement: count, window and group headers all answer the same rows.
+    db_search: RefCell<HashMap<i32, String>>,
     // ─── D6: the formula editor's session state ─────────────────────────────
     // The popup's ids (which block / column / row it edits) live here, the
     // draft text and its preview live in `UIState` — the same split as the
@@ -186,7 +204,8 @@ pub struct AppState {
     next_db_id: Cell<u64>,
     next_property_id: Cell<u64>,
     next_record_id: Cell<u64>,
-    next_view_id: Cell<u64>,}
+    next_view_id: Cell<u64>,
+}
 
 /// One decoded picture plus what it costs to keep it decoded.
 #[derive(Clone)]
@@ -565,6 +584,7 @@ impl AppState {
             workspace: RefCell::new(workspace),
             sidebar: Rc::new(VecModel::from(Vec::new())),
             blocks,
+            backlinks: Rc::new(VecModel::from(Vec::new())),
             commands,
             search: Rc::new(VecModel::from(Vec::new())),
             menu: Rc::new(VecModel::from(Vec::new())),
@@ -575,7 +595,11 @@ impl AppState {
             recents_restored: Cell::new(restored_recents),
             ui: RefCell::new(None),
             db_notice: RefCell::new(
-                abort_notice.into_iter().chain(attachment_notice).collect(),
+                abort_notice
+                    .into_iter()
+                    .chain(attachment_notice)
+                    .chain(db_notice_read)
+                    .collect(),
             ),
             all_commands,
             doc: RefCell::new(doc),
@@ -595,13 +619,13 @@ impl AppState {
             find_session: RefCell::new(None),
             find_label: RefCell::new(String::new()),
             find_painted: RefCell::new(Vec::new()),
+            backlinks_expanded: Cell::new(false),
             page_order: RefCell::new(page_order),
             flush_hook: RefCell::new(None),
             open_page: Cell::new(0),
             nav: RefCell::new(NavHistory::default()),
             pending_delete: Cell::new(None),
             last_scroll_y: Cell::new(0.0),
-
             databases: RefCell::new(database_catalog),
             db_windows: RefCell::new(HashMap::new()),
             db_active_view: RefCell::new(HashMap::new()),
@@ -609,6 +633,7 @@ impl AppState {
             db_cal_month: RefCell::new(HashMap::new()),
             db_gallery_per_row: RefCell::new(HashMap::new()),
             db_form: RefCell::new(HashMap::new()),
+            db_search: RefCell::new(HashMap::new()),
             db_formula_block: Cell::new(-1),
             db_formula_property: Cell::new(-1),
             db_formula_record: Cell::new(-1),
@@ -638,6 +663,9 @@ impl AppState {
     }
     pub fn blocks_model(&self) -> ModelRc<BlockRow> {
         ModelRc::from(self.blocks.clone())
+    }
+    pub fn backlinks_model(&self) -> ModelRc<BacklinkRow> {
+        ModelRc::from(self.backlinks.clone())
     }
     pub fn commands_model(&self) -> ModelRc<CommandRow> {
         ModelRc::from(self.commands.clone())
@@ -821,7 +849,14 @@ impl AppState {
         let mut rows = {
             let doc = self.doc.borrow();
             let hits = self.find_hits();
-            project_blocks(doc.page_blocks(core_page_id(page)), &hits)
+            let blocks = doc.page_blocks(core_page_id(page));
+            // the mention chips read titles that live in the workspace, not in
+            // the block, so the projection is handed them as it builds
+            let titles = {
+                let ws = self.workspace.borrow();
+                MentionTitles::of_blocks(blocks, |id| ws.title_of(id).map(str::to_string))
+            };
+            project_blocks(blocks, &hits, &titles)
         };
         // a Page or Link block shows the target page's live title, not stale
         // text; a reference whose page is gone reads as deleted
@@ -830,8 +865,49 @@ impl AppState {
             .iter_mut()
             .filter(|r| r.kind == BLOCK_PAGE || r.kind == BLOCK_LINK)
         {
-            row.text = ws.title_of(row.page_ref).unwrap_or("(deleted page)").into();
+            row.text = ws.title_of(row.page_ref).unwrap_or(DELETED_PAGE_LABEL).into();
         }
+        // A mirror draws what its source holds, and it is read here rather
+        // than stored there (ADR-0052 §1) — for the same reason a mention
+        // stores an id instead of a title. It cannot move up into
+        // `project_blocks`: that function only ever sees the open page's slice
+        // of the document, and the whole point of the feature is the source
+        // being somewhere else.
+        {
+            let doc = self.doc.borrow();
+            let ws_titles = self.workspace.borrow();
+            for row in rows.iter_mut().filter(|r| r.kind == BLOCK_SYNCED) {
+                let target = if row.sync_source > 0 {
+                    sync_target(&doc, BlockId(row.sync_source as u64))
+                } else {
+                    None
+                };
+                match target {
+                    Some(src) => {
+                        row.text = src.text.clone().into();
+                        // Its marks come along: a mention inside mirrored
+                        // prose is still a mention, and still reads today's
+                        // title rather than the one it was written with.
+                        let titles = MentionTitles::of_blocks(
+                            std::slice::from_ref(src),
+                            |id| ws_titles.title_of(id).map(str::to_string),
+                        );
+                        row.runs = runs_to_model(src, &[], &titles);
+                        row.sync_source = src.id.0 as i32;
+                    }
+                    None => {
+                        // Nothing to draw and nothing to edit through. -1 is
+                        // read by the row as "unbound", which makes it read
+                        // only: an edit aimed at a source nobody can find has
+                        // nowhere honest to land (ADR-0052 §2).
+                        row.text = DELETED_SOURCE_LABEL.into();
+                        row.runs = ModelRc::default();
+                        row.sync_source = -1;
+                    }
+                }
+            }
+        }
+        drop(ws);
         // SPEC §三十九: a `Database` block's row is the one thing this
         // projection cannot build from blocks alone — its rows are records in
         // six tables, so they come from the state's realized window and the
@@ -846,7 +922,104 @@ impl AppState {
         // Every row was just rebuilt with the current hits in it, so the list
         // the next search un-paints from has to say the same.
         *self.find_painted.borrow_mut() = self.find_hit_rows();
+        self.refresh_backlinks();
         self.update_page_stats();
+    }
+
+    /// Rebuild the backlink panel for the open page (SPEC §四十, ADR-0051).
+    ///
+    /// **Two reads, and on the common page only one of them runs.** The count
+    /// is an index walk, and the window is fetched only when the count is
+    /// non-zero — so a page nobody quotes pays one `count(*)` and a page with
+    /// 200 references still draws only `BACKLINK_WINDOW` rows of text.
+    /// Migration 16's two indexes are what make both reads seeks; that is the
+    /// whole reason this layer has no derived table to keep in step.
+    ///
+    /// A read that *fails* degrades to an empty panel rather than an error
+    /// banner: this runs on every projection, and the same failure has already
+    /// been reported by the load that produced the page (see `open`).
+    pub fn refresh_backlinks(&self) {
+        let page = core_page_id(self.open_page.get());
+        let expanded = self.backlinks_expanded.get();
+        let window = if expanded {
+            BACKLINK_EXPANDED
+        } else {
+            BACKLINK_WINDOW
+        };
+        let (total, refs) = match self.repo.as_ref() {
+            None => (0, Vec::new()),
+            Some(repo) => {
+                let total = repo.reference_count(page).unwrap_or(0);
+                let refs = if total == 0 {
+                    Vec::new()
+                } else {
+                    repo.references(page, window).unwrap_or_default()
+                };
+                (total, refs)
+            }
+        };
+        self.backlinks.set_vec(self.backlink_rows(&refs));
+        if let Some(ui) = self.ui.borrow().clone() {
+            let g = ui.upgrade().unwrap();
+            g.set_backlink_total(total as i32);
+            g.set_backlink_count_label(backlink_count_label(total).into());
+            g.set_backlink_fold_label(
+                backlink_fold_label(total, refs.len(), expanded).into(),
+            );
+            // The fold state travels with the window: Rust chose the window
+            // from it, so telling the UI the flag *after* the rows is what
+            // keeps the header and the list describing the same thing.
+            g.set_backlinks_expanded(expanded);
+        }
+    }
+
+    /// Turn the repository's references into panel rows, adding the two things
+    /// only the workspace can answer: the source page's name *as it is now*,
+    /// and whether this row opens a new group.
+    fn backlink_rows(&self, refs: &[crate::storage::backlinks::Reference]) -> Vec<BacklinkRow> {
+        let ws = self.workspace.borrow();
+        let mut prev: Option<PageId> = None;
+        refs.iter()
+            .map(|r| {
+                let first_on_page = prev != Some(r.page);
+                prev = Some(r.page);
+                BacklinkRow {
+                    block: r.block.0 as i32,
+                    page: r.page.as_u64() as i32,
+                    // A page that cannot be named is one this workspace does
+                    // not have — a library edited underneath us, or a block
+                    // that outlived its page. It reads as deleted, the same
+                    // words a dangling mention chip uses, because it is the
+                    // same fact.
+                    title: ws
+                        .title_of(r.page.as_u64() as i32)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| DELETED_PAGE_LABEL.to_string())
+                        .into(),
+                    text: r.text.trim().into(),
+                    block_level: r.block_level,
+                    first_on_page,
+                }
+            })
+            .collect()
+    }
+
+    /// Fold or unfold the backlink panel. The only thing that changes is how
+    /// many rows are asked for, so the refresh is the same read one size up.
+    pub fn toggle_backlinks(&self) {
+        self.backlinks_expanded.set(!self.backlinks_expanded.get());
+        self.refresh_backlinks();
+    }
+
+    /// The block a backlink row names. The panel hands it to the same
+    /// `quire://block/` path a link in the text walks, so a reference on
+    /// another page opens that page first and a reference on this one does
+    /// not — one jump rule for both, because they are the same kind of jump.
+    pub fn backlink_target(&self, block: i32) -> Option<i32> {
+        let doc = self.doc.borrow();
+        doc.block(BlockId(block as u32 as u64))
+            .filter(|b| self.workspace.borrow().contains(b.page.0 as i32))
+            .map(|b| b.id.0 as i32)
     }
 
     /// Controller installs the UI weak handle at wire time.
@@ -1213,6 +1386,12 @@ impl AppState {
         {
             let doc = self.doc.borrow();
             let blocks = doc.page_blocks(core_page_id(self.open_page.get()));
+            // the painted rows carry mention chips too, so their labels have to
+            // come from the same place the full projection's do
+            let titles = {
+                let ws = self.workspace.borrow();
+                MentionTitles::of_blocks(blocks, |id| ws.title_of(id).map(str::to_string))
+            };
             for i in 0..self.blocks.row_count() {
                 let Some(mut row) = self.blocks.row_data(i) else {
                     continue;
@@ -1223,15 +1402,15 @@ impl AppState {
                 let Some(b) = blocks.iter().find(|x| x.id.0 as i32 == row.id) else {
                     continue;
                 };
-                row.runs = runs_to_model(b, hits_of(&hits, b.id));
+                row.runs = runs_to_model(b, hits_of(&hits, b.id), &titles);
                 // A cell or a layout's block has no row of its own, so its hit
                 // rides on the row that draws it -- which is the row this walk
                 // just landed on, and it has to be rebuilt whole.
                 if b.kind == BlockKind::Table {
-                    let cells = table_cells(blocks, b, &hits);
+                    let cells = table_cells(blocks, b, &hits, &titles);
                     row.table_cells = slint::ModelRc::from(Rc::new(VecModel::from(cells)));
                 } else if b.kind == BlockKind::Columns {
-                    let (items, boxes) = column_projection(blocks, b, &hits);
+                    let (items, boxes) = column_projection(blocks, b, &hits, &titles);
                     row.column_items = slint::ModelRc::from(Rc::new(VecModel::from(items)));
                     row.column_boxes = slint::ModelRc::from(Rc::new(VecModel::from(boxes)));
                 }
@@ -2333,6 +2512,7 @@ impl AppState {
                 end: m.end,
                 kind: m.kind,
                 url: m.url.clone(),
+                date: m.date.clone(),
             });
         }
     }
@@ -2474,7 +2654,14 @@ impl AppState {
             let title = self.workspace.borrow().title_of(nid).unwrap().to_string();
             let style = self.workspace.borrow().page_style(id).unwrap_or_default();
             let icon = self.workspace.borrow().icon_of(id);
-            let blob = block_search_blob(&title, &project_blocks(&copies, &FindHits::new()));
+            let blob = {
+                // the copy's blob is indexed once, so it resolves its mentions
+                // with the same query a projection does
+                let ws = self.workspace.borrow();
+                let titles =
+                    MentionTitles::of_blocks(&copies, |id| ws.title_of(id).map(str::to_string));
+                block_search_blob(&title, &project_blocks(&copies, &FindHits::new(), &titles))
+            };
 
             // order: right after the original when a gap exists, else the
             // end of the sibling run. The workspace children vec must agree
@@ -2558,6 +2745,19 @@ impl AppState {
             self.open_page.set(0);
         }
         self.rebuild_sidebar();
+        // A page that has just gone away is exactly what a mention chip, a
+        // `Page`/`Link` row and the backlink panel were rendering titles for,
+        // so the projection on screen is stale the moment this returns —
+        // unless the page that went away *is* the one on screen, in which case
+        // the caller is about to open another one and reprojecting here would
+        // draw a page that no longer exists.
+        //
+        // Nothing was rewritten to make that happen: the reference still holds
+        // the id it was given (SPEC §四十), which is why the degradation has to
+        // be the projector's job rather than a fan-out over every mention.
+        if !had_open {
+            self.reproject_blocks();
+        }
         had_open
     }
 
@@ -2608,10 +2808,246 @@ impl AppState {
         Some(row.id)
     }
 
+    /// Fill the slash popup with the **mention picker** (SPEC §四十): the date
+    /// item first, then every page in tree order, filtered by title.
+    ///
+    /// One picker and not two: `@` is a single trigger, so it has one menu, and
+    /// the date item is the first row of it — a second popup keyed on the same
+    /// character would race the first for the caret. The item's label is the
+    /// ISO text the atom will actually hold (`core::date`), not a prettier
+    /// "Today": what the picker shows is what the file gets.
+    pub fn open_slash_mention(&self, filter: &str) {
+        let needle = filter.to_lowercase();
+        let ws = self.workspace.borrow();
+        let today = crate::core::today_iso();
+        let date_hit = needle.is_empty() || "today".contains(&needle) || today.contains(&needle);
+        let mut rows: Vec<SlashRow> = Vec::new();
+        if date_hit {
+            rows.push(SlashRow {
+                id: MENTION_DATE_ROW,
+                label: today.into(),
+                hint: "Today".into(),
+                disabled: false,
+            });
+        }
+        rows.extend(ws.dfs_order().into_iter().filter_map(|id| {
+            let title = ws.title_of(id)?;
+            if !needle.is_empty() && !title.to_lowercase().contains(&needle) {
+                return None;
+            }
+            Some(SlashRow {
+                id,
+                label: title.into(),
+                hint: ws.breadcrumb(id).into(),
+                disabled: false,
+            })
+        }));
+        self.slash.set_vec(rows);
+    }
+
+    /// The mention picker's focused row: `(id, label)`. `id == MENTION_DATE_ROW`
+    /// means the date item, and every other id is a page. The label is what the
+    /// atom's span text becomes — the page's title as it is *now*, which is why
+    /// the atom keeps reading correctly after a rename.
+    pub fn slash_selected_mention(&self, focus: i32) -> Option<(i32, String)> {
+        let row = self.slash.row_data(focus.max(0) as usize)?;
+        if row.disabled {
+            return None;
+        }
+        Some((row.id, row.label.to_string()))
+    }
+
+    /// Apply the mention picker's focused row to the block `id`: the text from
+    /// the `@` trigger onwards is replaced by the label, and the label's span
+    /// becomes a Mention (address = the page's id) or a Date (payload = the ISO
+    /// text) atom. One recorded batch, so one Ctrl+Z takes the whole insert
+    /// back — the atom, its characters and the `@` alike.
+    ///
+    /// The label is stored as the span's text as well: a document has to read
+    /// as prose in its own right (SPEC §二十六), and the *mark* is what says
+    /// the characters are a reference rather than a typed title — the same
+    /// split a link already has.
+    pub fn apply_mention(&self, id: i32, at: usize, page: Option<i32>, label: &str) -> bool {
+        let block_id = BlockId(id as u64);
+        let Some(text) = self.block_text(id) else {
+            return false;
+        };
+        if at > text.len() || !text.is_char_boundary(at) {
+            return false;
+        }
+        let (kind, url, date) = match page {
+            Some(p) => (
+                crate::core::MarkKind::Mention,
+                crate::core::page_uri(PageId(p as u32 as u64)),
+                None,
+            ),
+            None => (
+                crate::core::MarkKind::Date,
+                String::new(),
+                Some(label.to_string()),
+            ),
+        };
+        self.exec_all_on_open_page(vec![Command::InsertReference {
+                id: block_id,
+                at,
+                label: label.to_string(),
+                kind,
+                url,
+                date,
+            },
+        ])
+        .is_some()
+    }
+
+    /// The stored text of one block on the open page, for the mention apply
+    /// path — which needs the bytes it is about to cut, not a row model.
+    fn block_text(&self, id: i32) -> Option<String> {
+        let doc = self.doc.borrow();
+        doc.block(BlockId(id as u64)).map(|b| b.text.clone())
+    }
+
     /// Convert the empty paragraph `id` (the "+" handle's fresh line) into a
     /// Link-to-page block pointing at `target`. The target is NOT owned:
     /// deleting the block leaves the page alone, so duplicates and pastes may
     /// share it freely. One recorded batch.
+    // ─── synced blocks (SPEC §四十, ADR-0052) ───────────────────────────────
+    //
+    // Everything a mirror needs answered in three questions: *what does this
+    // row draw* (`sync_target`), *what may it point at* (`sync_would_cycle`),
+    // and *how does the pointer get written* (`set_sync_source`). None of it
+    // ever writes into the mirror's own `text` — that column stays empty for
+    // the life of the block, and letting it fill up is the one thing this
+    // whole design is built to prevent.
+
+    /// The block whose words a row draws (SPEC §四十, ADR-0052). It is the row
+    /// itself for everything except a mirror, and the *source* for one — which
+    /// single sentence is the whole of "edit either copy and both change".
+    ///
+    /// `-1` means there is nothing to type into: the sources cannot be walked
+    /// to any more. Every caller has to be able to see that, because the
+    /// alternative is an edit that silently goes nowhere.
+    pub fn content_of(&self, id: i32) -> i32 {
+        let doc = self.doc.borrow();
+        let Some(b) = doc.block(BlockId(id as u64)) else {
+            return -1;
+        };
+        if b.kind != BlockKind::Synced {
+            return b.id.0 as i32;
+        }
+        match b.sync_ref.and_then(|sid| sync_target(&doc, sid)) {
+            Some(src) => src.id.0 as i32,
+            None => -1,
+        }
+    }
+
+    /// Fill the popup with the blocks a mirror may point at.
+    ///
+    /// **The whole library, not the open page.** The feature exists so that a
+    /// piece of writing can be looked at from somewhere else; a picker that
+    /// could only see the page already on screen would be the same idea with
+    /// its reason for existing removed. `Document::all_blocks` is an in-memory
+    /// walk, which is why the filter can be answered per keystroke instead of
+    /// being indexed.
+    ///
+    /// A mirror is deliberately not offered as a source: pointing at one adds a
+    /// hop that every later projection has to walk for no words of its own.
+    pub fn open_slash_block(&self, filter: &str) {
+        let needle = filter.to_lowercase();
+        let ws = self.workspace.borrow();
+        let doc = self.doc.borrow();
+        let mut rows: Vec<SlashRow> = Vec::new();
+        for b in doc.all_blocks() {
+            if b.kind == BlockKind::Synced || b.text.trim().is_empty() {
+                continue;
+            }
+            let page_title = ws.title_of(b.page.as_u64() as i32).unwrap_or_default();
+            if !needle.is_empty()
+                && !b.text.to_lowercase().contains(&needle)
+                && !page_title.to_lowercase().contains(&needle)
+            {
+                continue;
+            }
+            rows.push(SlashRow {
+                id: b.id.0 as i32,
+                label: first_line_of(&b.text).into(),
+                hint: page_title.into(),
+                disabled: false,
+            });
+            if rows.len() >= SYNC_PICKER_LIMIT {
+                break;
+            }
+        }
+        self.slash.set_vec(rows);
+    }
+
+    /// The focused row of that popup, which is a **block** id rather than a
+    /// kind — the same field this list uses for kinds in every other mode, and
+    /// precisely why the modes are separate flags instead of one integer.
+    pub fn slash_selected_block(&self, focus: i32) -> Option<i32> {
+        let row = self.slash.row_data(focus.max(0) as usize)?;
+        if row.disabled || row.id <= 0 {
+            return None;
+        }
+        Some(row.id)
+    }
+
+    /// Point a `Synced` block at `source`, or at nothing (`None` clears the
+    /// pointer and leaves an ordinary, unresolvable mirror behind).
+    ///
+    /// **Every refusal here is visible rather than silent**, because the picker
+    /// has nothing else to report through: `false` comes back when the block is
+    /// not there, when it is not a mirror, and — the interesting one — when the
+    /// pointer would **close a cycle**. ADR-0052 §4 puts that check at the
+    /// moment of writing on purpose: a check done while drawing discovers the
+    /// cycle once per frame for as long as it exists, and can never actually
+    /// refuse it.
+    ///
+    /// The words go in the same batch as the pointer when there are any: this
+    /// is the only place that can still say "this row owns nothing", and saying
+    /// it in one recorded batch means one Ctrl+Z takes the whole conversion
+    /// back rather than half of it.
+    pub fn set_sync_source(&self, id: i32, source: Option<i32>) -> bool {
+        if id <= 0 {
+            return false;
+        }
+        let block_id = BlockId(id as u64);
+        let source_id = source.filter(|s| *s > 0).map(|s| BlockId(s as u64));
+        let owned_text = {
+            let doc = self.doc.borrow();
+            let Some(b) = doc.block(block_id) else {
+                return false;
+            };
+            if b.kind != BlockKind::Synced {
+                // a pointer on a block that is not a mirror is a mirror nobody
+                // ever created: refusing here keeps `blocks.sync_ref` meaning
+                // exactly one thing, which is the whole of what the column has
+                // to offer a reader of the file ten years from now
+                return false;
+            }
+            if let Some(src) = source_id {
+                if sync_would_cycle(&doc, block_id, src) {
+                    return false;
+                }
+            }
+            !b.text.is_empty()
+        };
+        let mut changes = Vec::new();
+        if source_id.is_some() && owned_text {
+            changes.push(Change::BlockTextSet {
+                id: block_id,
+                text: String::new(),
+            });
+        }
+        changes.push(Change::BlockSyncSet {
+            id: block_id,
+            source: source_id,
+        });
+        self.doc.borrow_mut().apply(&changes);
+        self.record(changes);
+        self.reproject_blocks();
+        true
+    }
+
     pub fn create_page_link_block(&self, id: i32, target: i32) -> bool {
         let block_id = BlockId(id as u64);
         let page = self.open_page.get();
@@ -3351,6 +3787,11 @@ const SLASH_ITEMS: &[(BlockKind, &str, &str)] = &[
         "A database, as a table",
     ),
     (BlockKind::Divider, "Divider", "Visual separator — or type ---"),
+    (
+        BlockKind::Synced,
+        "Synced block",
+        "A second view of another block — edit either one",
+    ),
 ];
 
 /// "Turn into" targets: the same curation as the slash menu.
@@ -3401,7 +3842,20 @@ const INSERT_ITEMS: &[(i32, &str, &str)] = &[
         "Table view",
         "A database, as a table",
     ),
-    (-1, "Board", "Board view · later"),
+    (
+        kind_to_int(BlockKind::Synced),
+        "Synced block",
+        "A second view of another block — edit either one",
+    ),
+    // D7 (ADR-0085): a *linked database* — a second block drawing an entity
+    // that exists already. `LINKED_VIEW_ROW` is not a kind: the apply path
+    // switches to the database picker instead of converting directly, because
+    // "which database" is the one decision the row cannot make for you.
+    (
+        LINKED_VIEW_ROW,
+        "Linked view",
+        "A linked view of another database",
+    ),
     (-1, "Board", "Board view · later"),
     (-1, "Gallery", "Gallery view · later"),
     (-1, "List view", "Database list · later"),
@@ -3411,16 +3865,29 @@ const INSERT_ITEMS: &[(i32, &str, &str)] = &[
 
 fn slash_items(filter: &str) -> Vec<SlashRow> {
     let needle = filter.to_lowercase();
-    SLASH_ITEMS
+    let matches = |label: &str| needle.is_empty() || label.to_lowercase().contains(&needle);
+    let mut rows: Vec<SlashRow> = SLASH_ITEMS
         .iter()
-        .filter(|(_, label, _)| needle.is_empty() || label.to_lowercase().contains(&needle))
+        .filter(|(_, label, _)| matches(label))
         .map(|(kind, label, hint)| SlashRow {
             id: kind_to_int(*kind),
             label: (*label).into(),
             hint: (*hint).into(),
             disabled: false,
         })
-        .collect()
+        .collect();
+    // D7 (ADR-0085): the linked database, listed by name like every other row.
+    // Its id is the picker's, not a kind's (`LINKED_VIEW_ROW`), and the apply
+    // path handles it before the kind mapping ever sees it.
+    if matches("Linked view") {
+        rows.push(SlashRow {
+            id: LINKED_VIEW_ROW,
+            label: "Linked view".into(),
+            hint: "A linked view of another database".into(),
+            disabled: false,
+        });
+    }
+    rows
 }
 
 /// MenuRow constructor for the ⋮⋮ menu fillers (`swatch < 0` = no swatch).
@@ -3468,6 +3935,8 @@ pub fn kind_from_int(kind: i32) -> BlockKind {
         // Filled in here rather than left empty because a gap would silently
         // `kind_from_int(23)` into a paragraph the day somebody types it.
         23 => BlockKind::Database,
+        // SPEC §四十 / ADR-0052: the mirror.
+        24 => BlockKind::Synced,
         _ => BlockKind::Paragraph,
     }
 }
@@ -3497,6 +3966,7 @@ const fn kind_to_int(kind: BlockKind) -> i32 {
         BlockKind::Toc => 21,
         BlockKind::Embed => 22,
         BlockKind::Database => 23,
+        BlockKind::Synced => 24,
         BlockKind::Paragraph => 0,
     }
 }
@@ -3527,9 +3997,103 @@ fn hits_of<'a>(hits: &'a FindHits, id: BlockId) -> &'a [(usize, usize)] {
         .unwrap_or(&[])
 }
 
-fn runs_to_model(b: &Block, hits: &[(usize, usize)]) -> slint::ModelRc<TextRun> {
+/// What a projection knows about the page one mention points at.
+pub enum MentionTitle<'a> {
+    /// The page is there, and this is what it is called **now** — the whole
+    /// point of storing an id (SPEC §四十 "页面别名").
+    Live(&'a str),
+    /// The id names no page in this library: deleted, or a restored file whose
+    /// page never came with it. The chip says so; the projection continues
+    /// (ADR-0026 / ADR-0029 — a dangling reference is a display state, never a
+    /// failure).
+    Missing,
+    /// This projection did not collect the id. The span then keeps the
+    /// characters it already holds — which is what the search index wants: a
+    /// blob built for a page copy must not index "(deleted page)" over a
+    /// title that is perfectly fine, and the exporter reads the block's own
+    /// text rather than a projection anyway.
+    Unresolved,
+}
+
+/// The live titles behind the page ids one projection's mention spans point
+/// at (SPEC §四十). A mention stores an id, so the label is not in the block
+/// at all — it is asked for here, once per projection.
+///
+/// Keyed on the ids the page actually mentions rather than on every page in
+/// the workspace: a rename then moves every chip that points at the page with
+/// no write anywhere, and a projection still costs O(mentions in this page)
+/// instead of O(pages in the library), which is what keeps a 10 000-page
+/// library's structural edits cheap.
+#[derive(Default, Clone)]
+pub struct MentionTitles {
+    by_id: HashMap<i32, Option<String>>,
+}
+
+impl MentionTitles {
+    /// No titles collected: every mention falls back to the text it stores.
+    /// The projection tests want this; a live projection never does.
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// Collect every page id `blocks` mentions and resolve each once through
+    /// `title_of` (`None` = the page is gone). Duplicate mentions of the same
+    /// page cost one lookup between them.
+    pub fn of_blocks(blocks: &[Block], title_of: impl Fn(i32) -> Option<String>) -> Self {
+        let mut by_id: HashMap<i32, Option<String>> = HashMap::new();
+        for b in blocks {
+            for m in &b.marks {
+                if m.kind != crate::core::MarkKind::Mention {
+                    continue;
+                }
+                let Some(id) = crate::core::page_of(&m.url) else {
+                    continue;
+                };
+                let id = id.as_u64() as i32;
+                if !by_id.contains_key(&id) {
+                    let t = title_of(id);
+                    by_id.insert(id, t);
+                }
+            }
+        }
+        Self { by_id }
+    }
+
+    pub fn lookup(&self, id: i32) -> MentionTitle<'_> {
+        match self.by_id.get(&id) {
+            Some(Some(title)) => MentionTitle::Live(title),
+            Some(None) => MentionTitle::Missing,
+            None => MentionTitle::Unresolved,
+        }
+    }
+}
+
+/// The label a mention whose page is gone reads as. One string, one place:
+/// the projection and its tests must not disagree about what gone looks like.
+pub const DELETED_PAGE_LABEL: &str = "(deleted page)";
+/// What a `Synced` row reads when its source cannot be found: the source was
+/// deleted, or the file was edited by hand, or the pointer was never set.
+/// All three are the same answer because "why" is not something the row can
+/// know, and a guess would be worse than the honest blank (ADR-0052 §2).
+pub const DELETED_SOURCE_LABEL: &str = "(deleted source)";
+/// How far `set_sync_source` follows `sync_ref` looking for the block it is
+/// about to point at. **The cycle check is bounded, not recursive**: a file
+/// someone edited by hand can contain any shape at all, and the refusal has to
+/// be decided in bounded time every time (ADR-0052 §4).
+pub const SYNC_CHAIN_MAX: usize = 32;
+/// How many hops the projection follows while looking for real words. A chain
+/// of mirrors is legal; this is what keeps an old backup's cycle from being a
+/// hang instead of a picture that is merely wrong.
+pub const SYNC_RESOLVE_MAX: usize = 8;
+/// Rows the mirror picker offers. Every block in the library is a candidate,
+/// which is unbounded by construction, so the list is a window rather than an
+/// index — a picker you have to scroll through a thousand rows of is a search
+/// box wearing the wrong clothes.
+pub const SYNC_PICKER_LIMIT: usize = 50;
+
+fn runs_to_model(b: &Block, hits: &[(usize, usize)], titles: &MentionTitles) -> slint::ModelRc<TextRun> {
     slint::ModelRc::from(Rc::new(slint::VecModel::from(build_runs(
-        &b.text, &b.marks, hits,
+        &b.text, &b.marks, hits, titles,
     ))))
 }
 
@@ -3560,7 +4124,7 @@ fn rows_to_blocks(page: i32, rows: Vec<BlockRow>, doc: &mut Document) -> Vec<Blo
                 columns: 0,
                 lang: Lang::Plain,
                 db_ref: None,
-            }
+                sync_ref: None,            }
         })
         .collect()
 }
@@ -3575,7 +4139,12 @@ fn rows_to_blocks(page: i32, rows: Vec<BlockRow>, doc: &mut Document) -> Vec<Blo
 /// it — which is also why a row with no marks but a hit returns runs at all:
 /// an empty vec means "render `text` as one unbroken Text", and a row with a
 /// match in it cannot say that.
-fn build_runs(text: &str, marks: &[crate::core::Mark], hits: &[(usize, usize)]) -> Vec<TextRun> {
+fn build_runs(
+    text: &str,
+    marks: &[crate::core::Mark],
+    hits: &[(usize, usize)],
+    titles: &MentionTitles,
+) -> Vec<TextRun> {
     if (marks.is_empty() && hits.is_empty()) || text.is_empty() {
         return Vec::new();
     }
@@ -3645,12 +4214,34 @@ fn build_runs(text: &str, marks: &[crate::core::Mark], hits: &[(usize, usize)]) 
             let math = marks
                 .iter()
                 .any(|m| m.kind == crate::core::MarkKind::Math && m.start <= s && m.end >= e);
+            // SPEC §四十: a mention is an atom like Math, and its *label* is
+            // not in the block. The span holds the title as it was typed; what
+            // gets drawn is whatever the target page is called now, or the
+            // deleted notice when the id names no page. Resolved here, at
+            // projection time, rather than in a binding: a binding pays per
+            // repaint, and this walks the page once (the same reason math
+            // converts here — ADR-0038's note in ROADMAP).
+            let mention = marks
+                .iter()
+                .find(|m| m.kind == crate::core::MarkKind::Mention && m.start <= s && m.end >= e)
+                .and_then(|m| crate::core::page_of(&m.url).map(|id| (m, id.as_u64() as i32)));
+            let date = marks
+                .iter()
+                .any(|m| m.kind == crate::core::MarkKind::Date && m.start <= s && m.end >= e);
             let run_text = &text[s..e];
+            let (run_text, mention_deleted) = match mention {
+                Some((_, id)) => match titles.lookup(id) {
+                    MentionTitle::Live(title) => (title.to_string(), false),
+                    MentionTitle::Missing => (DELETED_PAGE_LABEL.to_string(), true),
+                    MentionTitle::Unresolved => (run_text.to_string(), false),
+                },
+                None => (run_text.to_string(), false),
+            };
             Some(TextRun {
                 text: if math {
-                    crate::core::math::to_unicode(run_text).into()
+                    crate::core::math::to_unicode(&run_text).into()
                 } else {
-                    run_text.into()
+                    run_text.as_str().into()
                 },
                 bold: marks
                     .iter()
@@ -3665,8 +4256,21 @@ fn build_runs(text: &str, marks: &[crate::core::Mark], hits: &[(usize, usize)]) 
                     .iter()
                     .any(|m| m.kind == crate::core::MarkKind::Code && m.start <= s && m.end >= e),
                 link: link_mark.is_some(),
-                url: link_mark.map(|m| m.url.clone()).unwrap_or_default().into(),
+                // The address this run points at, for a link *and* for a
+                // mention: the delegate's click path is one `open-link`, and
+                // `quire://page/<id>` is already a route it knows
+                // (ADR-0026 — a mention and a link-to-page end up in the
+                // same place, which is what makes the chip's click need no new
+                // command at all).
+                url: link_mark
+                    .map(|m| m.url.clone())
+                    .or_else(|| mention.map(|(m, _)| m.url.clone()))
+                    .unwrap_or_default()
+                    .into(),
                 hit: hits.iter().any(|(hs, he)| hs < &e && he > &s),
+                mention: mention.map(|(_, id)| id).unwrap_or(-1),
+                mention_deleted,
+                date,
             })
         })
         .collect()
@@ -3812,6 +4416,118 @@ fn grid_blocks<'a>(blocks: &'a [Block], table: &Block) -> Vec<&'a Block> {
 /// projection itself just built, so a heading hidden by a fold or by a
 /// container's delegate stays out of the contents too — a link you cannot
 /// scroll to is worse than no link. Reading order is the page's own.
+/// The backlink panel's count line: "1 reference" / "5 references". A plural
+/// is a decision Rust makes — Slint has no format, and the alternative is a
+/// second property for the singular.
+fn backlink_count_label(total: usize) -> String {
+    match total {
+        0 => String::new(),
+        1 => "1 reference".to_string(),
+        n => format!("{n} references"),
+    }
+}
+
+/// The fold control's label, and `""` when there is nothing to fold — a
+/// control that does nothing is worse than no control.
+///
+/// Beyond `BACKLINK_EXPANDED` the unfolded panel is *still* a window, not the
+/// whole list: a page quoted 200 times is a number, not a list the foot of a
+/// page can hold, and this says so by offering to fold again rather than by
+/// pretending it showed everything.
+fn backlink_fold_label(total: usize, drawn: usize, expanded: bool) -> String {
+    if expanded {
+        if total > BACKLINK_WINDOW {
+            "Show less".to_string()
+        } else {
+            String::new()
+        }
+    } else {
+        match total.saturating_sub(drawn) {
+            0 => String::new(),
+            n => format!("and {n} more"),
+        }
+    }
+}
+
+/// Follow a chain of mirrors to the block that actually holds the words
+/// (ADR-0052). A chain is legal to write — A may mirror B which mirrors C — and
+/// the row must show C's sentence either way.
+///
+/// **Bounded, and it stops on what it has.** `SYNC_RESOLVE_MAX` hops and no
+/// recursion: a file can hold *any* shape at all once somebody edits it by
+/// hand, and the difference between "an old backup draws the wrong sentence"
+/// and "the app stopped drawing" is entirely this loop having a ceiling. When
+/// the bound runs out, whatever is in hand gets drawn rather than nothing.
+fn sync_target(doc: &Document, mut id: BlockId) -> Option<&Block> {
+    for hop in 0..SYNC_RESOLVE_MAX {
+        let b = doc.block(id)?;
+        match b.sync_ref {
+            None => return Some(b),
+            Some(next) => {
+                if hop + 1 >= SYNC_RESOLVE_MAX {
+                    return Some(b);
+                }
+                id = next;
+            }
+        }
+    }
+    None
+}
+
+/// What a mirror's source says, handed to the Markdown exporter rather than a
+/// `Document` (ADR-0052 §7). The export layer is given this answer because it
+/// renders text it already has and fetches nothing — the same division the
+/// attachment sizes, the math glyphs and the database tables follow.
+///
+/// `None` is "there is nothing behind this row", and the exporter writes an
+/// empty line for it: a lost sentence, honestly marked, rather than a marker
+/// that no importer could ever resolve.
+pub fn sync_target_for_export(doc: &Document, id: BlockId) -> Option<(String, Vec<Mark>)> {
+    let b = doc.block(id)?;
+    let src = b.sync_ref.and_then(|sid| sync_target(doc, sid))?;
+    Some((src.text.clone(), src.marks.clone()))
+}
+
+/// Would pointing `id` at `source` make a block end up mirroring itself,
+/// directly or through the chain? This is the check ADR-0052 §4 puts at the
+/// moment of writing: the same question asked while drawing is discovered once
+/// per frame forever, and can never say no.
+///
+/// Also bounded, for the same reason as `sync_target`: `sync_would_cycle` runs
+/// before the pointer is written, when the file's shape is whatever it happens
+/// to be, not what this build would have written.
+fn sync_would_cycle(doc: &Document, id: BlockId, source: BlockId) -> bool {
+    if id == source {
+        return true;
+    }
+    let mut cur = source;
+    for _ in 0..SYNC_CHAIN_MAX {
+        let Some(b) = doc.block(cur) else {
+            return false;
+        };
+        let Some(next) = b.sync_ref else {
+            return false;
+        };
+        if next == id {
+            return true;
+        }
+        cur = next;
+    }
+    false
+}
+
+/// What the picker calls a block: its first line, cut short. A block can hold
+/// a page's worth of words and a menu row holds about fifty characters, so the
+/// row is an *excerpt* — enough to know which block it is, never the whole
+/// thing.
+fn first_line_of(text: &str) -> String {
+    let line = text.lines().next().unwrap_or(text).trim();
+    match line.char_indices().nth(48) {
+        Some((at, _)) => format!("{}…", line[..at].trim_end()),
+        None => line.to_string(),
+    }
+}
+
 fn toc_entries(blocks: &[Block], shown: &[usize]) -> Vec<TocEntry> {
     shown
         .iter()
@@ -3930,6 +4646,22 @@ struct DbWindow {
     /// pixels with these two numbers and nothing else.
     tl_start: i64,
     tl_days: i64,
+    /// D7 (chart): the plot's points — the group list (labels, counts, the
+    /// bar/line fractions and the pie slice paths), all decided here so the
+    /// delegate only places shapes. A chart realizes **zero rows** (the plot
+    /// is the `GROUP BY`'s aggregates, never the records — the layout's own
+    /// answer to the red line), so this model *is* the chart's whole payload.
+    chart: Rc<VecModel<crate::DbChartPoint>>,
+    /// The line chart's polyline, as one path in a 100×100 viewbox
+    /// (`chart_line_path`); the `viewbox` scales it to the plot's real size,
+    /// so no pixel width ever crosses the boundary. Empty for bar and pie,
+    /// which draw from `chart` alone.
+    chart_path: Rc<String>,
+    /// The active shape (`ChartKind`'s index) — the three buttons' state. It
+    /// is part of the window's read (the document was parsed for the refresh
+    /// anyway) and rides the row so the delegate's buttons can tint the
+    /// active one without re-parsing the document.
+    chart_kind: i32,
 }
 
 /// How a database block's columns popup is built: every property of the
@@ -4453,6 +5185,15 @@ impl AppState {
                         row.config = config.clone();
                     }
                 }
+                // D7 (ADR-0086): the database's record template, replaced
+                // whole — learned here for the same reason every other
+                // document is: the *undo* of a template edit has no call site
+                // of its own, and the prefill below reads the catalog's copy.
+                Change::DatabaseTemplateSet { id, template } => {
+                    if let Some(row) = catalog.databases.iter_mut().find(|d| d.id == *id) {
+                        row.template = template.clone();
+                    }
+                }
                 Change::ViewAdded(view) => {
                     if !catalog.views.iter().any(|v| v.id == view.id) {
                         catalog.views.push(view.clone());
@@ -4586,6 +5327,11 @@ impl AppState {
         let mut body: f32 = 0.0;
         let mut tl_start: i64 = 0;
         let mut tl_days: i64 = 0;
+        // D7 (chart): the plot's payload — the points and, for a line, the one
+        // polyline. Every other layout leaves them empty.
+        let mut chart_model: Rc<VecModel<crate::DbChartPoint>> = Rc::new(VecModel::default());
+        let mut chart_path = String::new();
+        let mut chart_kind: i32 = 0;
 
         let title = properties.iter().find(|p| p.kind.is_title()).map(|p| p.id);
         let Some(title) = title else {
@@ -4600,12 +5346,24 @@ impl AppState {
         // only readers. Nothing between here and SQL ever sees a row: that is
         // the red line (「filter / sort 在 SQL 侧完成，不在 UI 侧过滤」) as a
         // borrow, not a rule.
+        //
+        // D7 (ADR-0087): the view's live search rides the same request — the
+        // count, the group list and the rows below all answer one statement,
+        // and an empty needle is "not searching" (no constraint), the same
+        // reading an empty filter group gets.
+        let search = self
+            .db_search
+            .borrow()
+            .get(&block)
+            .filter(|needle| !needle.trim().is_empty())
+            .cloned();
         let request = RowRequest {
             db,
             title,
             columns: &properties,
             sorts: &rules.sorts,
             filter: rules.filter.as_ref(),
+            search: search.as_deref(),
         };
 
         // ── the layout's own read (D5) ──────────────────────────────────────
@@ -4792,6 +5550,7 @@ impl AppState {
                         columns: &properties,
                         sorts: &rules.sorts,
                         filter: Some(&month_filter),
+                        search: search.as_deref(),
                     };
                     let date_spec = GroupSpec {
                         property: date_prop,
@@ -4857,6 +5616,7 @@ impl AppState {
                             columns: &properties,
                             sorts: &rules.sorts,
                             filter: Some(&day_filter),
+                            search: search.as_deref(),
                         };
                         let records = match repo.window_rows(
                             &req_day,
@@ -4988,6 +5748,7 @@ impl AppState {
                             columns: &tl_columns,
                             sorts: &rules.sorts,
                             filter: Some(&filter),
+                            search: search.as_deref(),
                         };
                         total = match repo.filtered_count(&req_tl) {
                             Ok(total) => total,
@@ -5091,7 +5852,142 @@ impl AppState {
                 }
             }
 
-            // ── table / list (and chart, which draws its own refusal) ───────
+            // ── chart (D7): the plot is the group list, and it realizes no row ─
+            //
+            // The red line here is not about *how many* rows a window takes —
+            // it is about there being **no row window at all**. The chart's
+            // surface is the constant `CHART_HEIGHT` (it does not grow with
+            // the data), its shapes are the *group list* — one `GROUP BY` over
+            // an option-bounded column, the exact query the board's columns
+            // and the grouped table's headers already run — and the keys in it
+            // are as bounded as those headers are: a checkbox has two, a
+            // select/status its option list. So the plot of a 10 000-row
+            // database is a handful of `(label, count)` scalars, the records
+            // themselves never become objects, and the numbers inside the
+            // shapes came from SQL like every other layout's counts.
+            //
+            // The shapes (ADR-0060's one kind, SPEC's bar / line / pie from
+            // the existing primitives — no chart library):
+            //
+            // * **bar** — equal-width rectangles, height = `frac · plot`;
+            // * **line** — one polyline through the fractions
+            //   (`chart_line_path`, a 100×100 viewbox the delegate scales);
+            // * **pie** — one filled path per slice
+            //   (`chart_pie_paths`, cubic arcs built here, where trig lives).
+            //
+            // The grouping column is the view's own `groups` rule, else the
+            // first option-bounded column — the board's fallback, and also not
+            // written back: a default nobody chose is not a rule they have to
+            // undo. With no column to group by, the chart draws its empty
+            // state (the header's Group picker is how it gets one).
+            crate::core::database::ViewLayout::Chart => {
+                let spec = match rules.group {
+                    Some(spec) => Some(spec),
+                    None => self
+                        .databases
+                        .borrow()
+                        .properties_of(db)
+                        .find(|p| GroupSpec::admits(p.kind))
+                        .map(|p| GroupSpec {
+                            property: p.id,
+                            kind: p.kind,
+                        }),
+                };
+                match spec {
+                    Some(spec) => {
+                        let counts = match repo.group_counts(&request, &spec) {
+                            Ok(counts) => self.db_order_groups(&spec, counts),
+                            Err(e) => {
+                                self.db_notice
+                                    .borrow_mut()
+                                    .push(format!("database read failed: {e}"));
+                                return false;
+                            }
+                        };
+                        total = counts.iter().map(|(_, n)| *n).sum();
+                        body = TableView::chart_surface_height();
+                        // No row window: the plot is finished with the records
+                        // once the `GROUP BY` has answered. The `unchanged`
+                        // cache still gates the rebuild below, keyed the same
+                        // way every layout's is.
+                        wanted = RowWindow {
+                            start: 0,
+                            end: 0,
+                        };
+                        if unchanged(wanted, total, stamp) {
+                            return false;
+                        }
+                        // The chart's shape is the document's `chart` key —
+                        // re-read here (the parse is once per refresh and the
+                        // document is small), so a kind switch is the same
+                        // definition edit every other rule is.
+                        let kind = ViewDefinition::parse(&definition_text).chart_kind();
+                        chart_kind = kind.index() as i32;
+                        let max = counts.iter().map(|(_, n)| *n).max().unwrap_or(0) as f64;
+                        let fracs: Vec<f64> = counts
+                            .iter()
+                            .map(|(_, n)| if max > 0.0 { *n as f64 / max } else { 0.0 })
+                            .collect();
+                        let slices = chart_pie_paths(
+                            &counts.iter().map(|(_, n)| *n as f64).collect::<Vec<_>>(),
+                        );
+                        if kind == ChartKind::Line {
+                            chart_path = chart_line_path(&fracs);
+                        }
+                        let points: Vec<crate::DbChartPoint> = counts
+                            .iter()
+                            .enumerate()
+                            .map(|(at, (key, count))| crate::DbChartPoint {
+                                // the header's own wording — a label is a
+                                // word Rust made, not a lookup the delegate
+                                // does (ADR-0076's rule, restated)
+                                label: self.db_group_label(&spec, key).into(),
+                                value: *count as i32,
+                                // the palette slot the shape is tinted with:
+                                // the block palette's nine slots cycling, until
+                                // an option editor exists to carry real option
+                                // colors (D5's undone half) — the slot word is
+                                // decoration, the count is the datum
+                                slot: (at % 9 + 1) as i32,
+                                frac: fracs[at] as f32,
+                                commands: slices[at].clone().into(),
+                            })
+                            .collect();
+                        chart_model = Rc::new(VecModel::from(points));
+                    }
+                    None => {
+                        // No grouping yet: the plot draws its "pick a column"
+                        // state over the database's real count — the header
+                        // still says how many rows the view has, because the
+                        // chart is a view *of* the table even before it
+                        // aggregates it. (Empty db → 0, and the empty state
+                        // is the ordinary "No rows yet".)
+                        total = match layout_total(&repo, &request, db, rules.filter.is_some()) {
+                            Ok(total) => total,
+                            Err(e) => {
+                                self.db_notice
+                                    .borrow_mut()
+                                    .push(format!("database read failed: {e}"));
+                                return false;
+                            }
+                        };
+                        // The surface keeps the chart's constant height even
+                        // with nothing to plot: the "pick a column" state
+                        // centers inside the same body a plotted chart has,
+                        // and the block never collapses to a sliver.
+                        body = TableView::chart_surface_height();
+                        wanted = RowWindow {
+                            start: 0,
+                            end: 0,
+                        };
+                        if unchanged(wanted, total, stamp) {
+                            return false;
+                        }
+                    }
+                }
+            }
+
+            // ── table / list ────────────────────────────────────────────────
             _ => {
                 // A grouped view counts by its group query (one `GROUP BY` over
                 // an option-bounded column — the list of *headers*, a handful of
@@ -5215,6 +6111,9 @@ impl AppState {
             body: 0.0,
             tl_start: 0,
             tl_days: 1,
+            chart: Rc::new(VecModel::default()),
+            chart_path: Rc::new(String::new()),
+            chart_kind: 0,
         });
         entry.view = view;
         entry.definition = definition_text;
@@ -5229,6 +6128,9 @@ impl AppState {
         entry.rows.set_vec(view_rows);
         entry.board = board_model;
         entry.cal = cal_model;
+        entry.chart = chart_model;
+        entry.chart_path = Rc::new(chart_path);
+        entry.chart_kind = chart_kind;
         true
     }
 
@@ -5382,6 +6284,11 @@ impl AppState {
         row.db_tl_start = 0;
         row.db_tl_days = 0;
         row.db_form = ModelRc::default();
+        // D7 (chart): no points and no polyline until the refresh proves a
+        // live window — the same reset every other layout's payload gets.
+        row.db_chart_points = ModelRc::default();
+        row.db_chart_path = "".into();
+        row.db_chart_kind = 0;
         // The two constants the window arithmetic is laid out at, handed to the
         // delegate rather than restated in .slint: `core::database::window`
         // divides the scroll offset by the *layout's* row height, and the block
@@ -5517,6 +6424,13 @@ impl AppState {
                 })
                 .collect::<Vec<_>>(),
         )));
+        // D7 (chart): the plot's points and the line's polyline, from the
+        // window cache the refresh settled — the delegate draws them and does
+        // no arithmetic but the placement (the path is pre-scaled by its
+        // viewbox).
+        row.db_chart_points = ModelRc::from(window.chart.clone());
+        row.db_chart_path = (*window.chart_path).clone().into();
+        row.db_chart_kind = window.chart_kind;
     }
 
     /// The window's first row index — the row→model conversion §三十七 requires:
@@ -5621,16 +6535,39 @@ impl AppState {
         true
     }
 
-    /// Add one row to the database at `ord` (the end of the listing). Returns the
-    /// new record's id.
+    /// Add one row to the database at `ord` (the end of the listing), starting
+    /// from the database's **record template** (SPEC §三十九 「操作」,
+    /// ADR-0086) when it has one. Returns the new record's id.
+    ///
+    /// The prefill is not a second write path: the template's cells — already
+    /// in the shapes [`CellValue`] stores, because a template is a copy of
+    /// stored content — become ordinary `SetDatabaseCell` commands in the
+    /// **same batch** as the creation, so a new row arrives complete and one
+    /// Ctrl+Z takes record and prefill back together. The template names
+    /// values by property id, and a property the schema has since lost simply
+    /// has no command to name (the catalog lookup in `db_template_cells` is
+    /// the filter; a deleted column cannot prefill).
     pub fn db_add_record(&self, block: i32, ord: OrderKey) -> Option<i64> {
         let id = self.next_record_id.get();
-        let cmd = Command::AddDatabaseRecord {
+        let mut cmds = vec![Command::AddDatabaseRecord {
             block: BlockId(block as u64),
             record: RecordId(id),
             ord,
-        };
-        self.exec_on_open_page(cmd)?;
+        }];
+        if let Some(db) = self.db_ref_of(block) {
+            let cells = self.db_template_cells(db);
+            cmds.extend(cells.into_iter().map(|(property, to)| Command::SetDatabaseCell {
+                block: BlockId(block as u64),
+                record: RecordId(id),
+                property,
+                // the record does not exist yet, so every prefill writes from
+                // empty — the same `from` the form's submit uses, for the same
+                // reason (the plan reads the document, not the file)
+                from: CellValue::Empty,
+                to,
+            }));
+        }
+        self.exec_all_on_open_page(cmds)?;
         self.next_record_id.set(id + 1);
         // The new row is at the end: the window has to be recomputed, and a
         // database that fits on one screen re-reads instantly.
@@ -6451,12 +7388,19 @@ impl AppState {
         // control read runs the same statement the window read does, minus the
         // window. The group is *screen* furniture and a file has no screen: a
         // grouped view exports its rows in the view's order, without headers.
+        // `search` stays `None` on purpose (ADR-0087): the search is session
+        // state — a question being asked of the screen — and the file the user
+        // asked for is the *view*, whose rules are the document's. A view that
+        // looks filtered while searched exports its whole (filtered) row set,
+        // the same way a board's columns are screen furniture the file does
+        // not have.
         let request = RowRequest {
             db,
             title,
             columns: &properties,
             sorts: &rules.sorts,
             filter: rules.filter.as_ref(),
+            search: None,
         };
         let rows = repo.unwindowed_rows(&request).ok()?;
         let pages = repo.record_pages(db).unwrap_or_default();
@@ -7019,6 +7963,23 @@ impl AppState {
                 };
             values.push((PropertyId(*property), value));
         }
+        // D7 (ADR-0086): the template fills what the draft left blank — the
+        // typed words always win over the prefill, and a field the user
+        // deliberately left empty while the template carries a value still
+        // prefills, because an empty *draft* field is "not typed", not
+        // "cleared" (the form has no clear gesture; a template-carrying
+        // column the user wants blank is blanked on the new row itself).
+        {
+            let filled: std::collections::BTreeSet<u64> =
+                values.iter().map(|(property, _)| property.as_u64()).collect();
+            if let Some(db) = self.db_ref_of(block) {
+                for (property, cell) in self.db_template_cells(db) {
+                    if !filled.contains(&property.as_u64()) {
+                        values.push((property, cell));
+                    }
+                }
+            }
+        }
         drop(catalog);
         // One batch: the record and every parsed value, planned together and
         // reverted together. The `from` half of each cell write is `Empty`
@@ -7047,15 +8008,245 @@ impl AppState {
         true
     }
 
+    // ─── D7: the advanced features (SPEC §三十九 「操作」's last three) ─────
+    //
+    // The view's live search (ADR-0087), the record template (ADR-0086) and
+    // the linked database (ADR-0085). What the three share is a rule the rest
+    // of this impl has been stating since D3: *the stored thing is the only
+    // copy*. The search is a query compiled into SQL, never a Rust-side
+    // retain; the template is a document on the `databases` row applied
+    // through the ordinary cell write; a link is a pointer to one entity, and
+    // there is no second entity to drift from it.
+
+    /// The view's live search (SPEC §三十九 「操作」's 视图内搜索, ADR-0087).
+    /// Session state (ADR-0073's rule): the needle is a question the user is
+    /// asking, so it lives in `db_search`, never in the view's document, and a
+    /// restart opens an unsearched view. An empty needle clears the search.
+    /// Returns `true` when the request changed (the caller re-fills the row).
+    ///
+    /// There is **no debounce** on the write path, and that is deliberate:
+    /// the needle changes which rows a *read* returns, and a read is exactly
+    /// what `db_refresh` already gates (`unchanged` skips the query when the
+    /// window has not moved). A keystroke costs one `COUNT(*)` over the
+    /// predicate — the same class of scan D4's `contains` filter costs — and
+    /// the honest tuning knob if a 10 000-row view feels slow while typing is
+    /// a debounce on this callback, not a second row set in memory.
+    pub fn db_view_search_set(&self, block: i32, text: &str) -> bool {
+        if self.db_ref_of(block).is_none() {
+            return false;
+        }
+        let needle = text.trim().to_string();
+        {
+            let mut map = self.db_search.borrow_mut();
+            if needle.is_empty() {
+                map.remove(&block);
+            } else {
+                map.insert(block, needle);
+            }
+        }
+        self.db_refresh(block)
+    }
+
+    /// The needle a block's header search box holds (`""` = not searching).
+    /// The UIState property is the words being typed; this is the fact the
+    /// queries compile from — the same split as the cell editor's ids here
+    /// and its text there.
+    pub fn db_search_needle(&self, block: i32) -> String {
+        self.db_search
+            .borrow()
+            .get(&block)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// The template's cells, parsed against the catalog — the prefill every
+    /// new record starts from (ADR-0086). Values arrive in the shapes
+    /// [`CellValue`] stores (the template *is* a copy of stored content), and
+    /// an unreadable document is no template: the same fold every JSON
+    /// document in this layer takes.
+    fn db_template_cells(&self, db: DatabaseId) -> Vec<(PropertyId, CellValue)> {
+        let template = {
+            let catalog = self.databases.borrow();
+            catalog
+                .database(db)
+                .map(|d| d.template.clone())
+                .unwrap_or_default()
+        };
+        database_template::cells_of(&template)
+    }
+
+    /// Save a row's values as the database's template (the row action's T).
+    /// The cells are read **as stored** — computed and derived kinds have no
+    /// stored value (ADR-0062/0068) and are skipped, so a template cannot
+    /// carry a formula's answer or a stamp's date — and the document is built
+    /// by `database_template::from_cells` in one pass. A row with no values
+    /// makes the empty template, which is how the affordance clears one:
+    /// copying an empty row *is* "prefill nothing".
+    ///
+    /// One change (`SetDatabaseTemplate`, replace-whole), one Ctrl+Z restores
+    /// the previous document.
+    pub fn db_template_from_row(&self, block: i32, record: i64) -> bool {
+        let Some(db) = self.db_ref_of(block) else {
+            return false;
+        };
+        let Some(repo) = self.db_repo() else {
+            return false;
+        };
+        let cells: Vec<(u64, CellValue)> = {
+            let catalog = self.databases.borrow();
+            catalog
+                .properties_of(db)
+                .filter(|p| {
+                    // A template copies what is *stored*; the five kinds
+                    // without a stored cell are skipped by kind, not by value.
+                    !matches!(
+                        p.kind,
+                        PropertyKind::Formula
+                            | PropertyKind::Rollup
+                            | PropertyKind::Relation
+                            | PropertyKind::CreatedTime
+                            | PropertyKind::LastEditedTime
+                    )
+                })
+                .filter_map(|p| {
+                    let value = repo.cell(RecordId(record as u64), p.id).ok()?;
+                    if value.is_empty() {
+                        None
+                    } else {
+                        Some((p.id.as_u64(), value))
+                    }
+                })
+                .collect()
+        };
+        let to = database_template::from_cells(&cells);
+        let from = {
+            let catalog = self.databases.borrow();
+            catalog
+                .database(db)
+                .map(|d| d.template.clone())
+                .unwrap_or_default()
+        };
+        if from == to {
+            // Saving the same template twice is not an undo step (the rule
+            // `SetDatabaseFormula` states), and the copy that changed nothing
+            // says so by doing nothing.
+            return false;
+        }
+        if self
+            .exec_editor(Command::SetDatabaseTemplate {
+                block: BlockId(block as u64),
+                db,
+                from,
+                to,
+            })
+            .is_none()
+        {
+            return false;
+        }
+        // The prefill's source moved: the next projection shows the state the
+        // change recorded (the catalog learned it through `db_absorb`).
+        self.db_refresh(block);
+        true
+    }
+
+    /// The chart body's three buttons (bar / line / pie): one view-document
+    /// edit (`set_chart_kind`), the same ADR-0074 read-edit-write every other
+    /// rule edit is — and the definition text is the window cache's key, so
+    /// the refresh below re-reads the plot against the new shape. The *data*
+    /// never changes with the shape: the same group counts feed all three.
+    pub fn db_chart_kind_set(&self, block: i32, index: i32) -> bool {
+        let kind = ChartKind::from_index(index.max(0) as usize);
+        self.db_edit_definition(block, |definition| {
+            definition.set_chart_kind(kind);
+        })
+    }
+
+    /// Turn the line into a **linked database** (SPEC §三十九 「操作」,
+    /// ADR-0085): a `Database` block whose `db_ref` names an entity another
+    /// block already owns — the words go, the kind changes, and *nothing is
+    /// created or copied*. Reads and writes resolve through the same `db_ref`
+    /// every database block uses, so "the data and the view definitions are
+    /// the source's, and writes land on the source" holds by construction;
+    /// and when the source entity dies (only by undoing the block that created
+    /// it — `DatabaseDeleted` has no other producer), this block dangles and
+    /// draws the same one muted line a deleted database always has (ADR-0060).
+    ///
+    /// The caller checked the target exists; if it died since, the plan's
+    /// write would still land and the next projection draws the dangling
+    /// state — visible, not silent.
+    pub fn db_make_linked(&self, block: i32, db: i32) -> bool {
+        let db = DatabaseId(db.max(0) as u64);
+        if !self.databases.borrow().database(db).is_some() {
+            return false;
+        }
+        if self
+            .exec_all_on_open_page(vec![
+                Command::ReplaceText {
+                    id: BlockId(block as u64),
+                    text: String::new(),
+                },
+                Command::LinkDatabase {
+                    id: BlockId(block as u64),
+                    db,
+                },
+            ])
+            .is_none()
+        {
+            return false;
+        }
+        self.db_refresh(block);
+        true
+    }
+
+    /// The linked-database picker's rows: every live database, named as its
+    /// own (`databases.name` — what a link says, not a row's title), with the
+    /// view count as the hint, filtered the way every picker filters. One
+    /// picker and not a wizard: a link has exactly one decision in it.
+    pub fn open_slash_links(&self, filter: &str) {
+        let needle = filter.to_lowercase();
+        let rows: Vec<SlashRow> = {
+            let catalog = self.databases.borrow();
+            catalog
+                .databases
+                .iter()
+                .filter(|d| needle.is_empty() || d.name.to_lowercase().contains(&needle))
+                .map(|d| {
+                    let views = catalog.views_of(d.id).count();
+                    SlashRow {
+                        id: d.id.as_u64() as i32,
+                        label: d.name.clone().into(),
+                        hint: if views == 1 {
+                            "1 view".into()
+                        } else {
+                            format!("{views} views").into()
+                        },
+                        disabled: false,
+                    }
+                })
+                .collect()
+        };
+        self.slash.set_vec(rows);
+    }
+
+    /// The database id behind the focused link-picker row.
+    pub fn slash_selected_link(&self, focus: i32) -> Option<i32> {
+        let row = self.slash.row_data(focus.max(0) as usize)?;
+        if row.disabled {
+            return None;
+        }
+        Some(row.id)
+    }
+
     /// One new view of this database, in `ViewLayout::ALL`'s order — the
     /// switcher `+`'s menu row picked. The view is born named after its layout
     /// (renameable later, `ViewRenamed`), at the switcher's end, with an empty
     /// rules document; the app then *switches to it*, because a view created
     /// and not looked at is a gesture that did half of what it said.
     ///
-    /// `Chart` is refused by name: D7's layout, and a menu row that creates a
-    /// view this build cannot draw would be a promise the switcher has to
-    /// un-draw on the next frame.
+    /// All eight layouts create: D7 drew the last one (`chart`, whose plot is
+    /// the group list the board's columns already come from), so `db_add_view`
+    /// has no refusal left — a menu row that cannot create is a promise the
+    /// switcher keeps visibly instead.
     pub fn db_add_view(&self, block: i32, layout_index: i32) -> bool {
         let Some(db) = self.db_ref_of(block) else {
             return false;
@@ -7065,12 +8256,6 @@ impl AppState {
         else {
             return false;
         };
-        if matches!(layout, crate::core::database::ViewLayout::Chart) {
-            self.db_notice
-                .borrow_mut()
-                .push("Chart view is not in this build yet.".to_string());
-            return false;
-        }
         // The end of the switcher's order, from the catalog (a schema is a
         // handful of rows; no `MAX(ord)` query — the same fold the columns'
         // ord uses).
@@ -7196,13 +8381,18 @@ impl AppState {
 }
 
 /// The cells of one table, as the row's data.
-fn table_cells(blocks: &[Block], table: &Block, hits: &FindHits) -> Vec<TableCell> {
+fn table_cells(
+    blocks: &[Block],
+    table: &Block,
+    hits: &FindHits,
+    titles: &MentionTitles,
+) -> Vec<TableCell> {
     grid_blocks(blocks, table)
         .into_iter()
         .map(|c| TableCell {
             id: c.id.0 as i32,
             text: c.text.clone().into(),
-            runs: runs_to_model(c, hits_of(hits, c.id)),
+            runs: runs_to_model(c, hits_of(hits, c.id), titles),
         })
         .collect()
 }
@@ -7284,6 +8474,7 @@ fn column_projection(
     blocks: &[Block],
     layout: &Block,
     hits: &FindHits,
+    titles: &MentionTitles,
 ) -> (Vec<ColumnItem>, Vec<ColumnBox>) {
     // the layout's own boxes, left to right — the same reading
     // `command::column_blocks` makes
@@ -7321,7 +8512,7 @@ fn column_projection(
             depth: s.depth,
             kind: kind_to_int(b.kind),
             text: b.text.clone().into(),
-            runs: runs_to_model(b, hits_of(hits, b.id)),
+            runs: runs_to_model(b, hits_of(hits, b.id), titles),
             checked: b.checked,
             number,
             folded: b.folded,
@@ -7359,7 +8550,7 @@ fn column_projection(
 /// started.
 pub type FindHits = HashMap<i32, Vec<(usize, usize)>>;
 
-pub fn project_blocks(blocks: &[Block], hits: &FindHits) -> Vec<BlockRow> {
+pub fn project_blocks(blocks: &[Block], hits: &FindHits, titles: &MentionTitles) -> Vec<BlockRow> {
     let shown = visible_block_indices(blocks);
     let mut out: Vec<BlockRow> = shown
         .iter()
@@ -7367,7 +8558,7 @@ pub fn project_blocks(blocks: &[Block], hits: &FindHits) -> Vec<BlockRow> {
             let b = &blocks[i];
             // one walk per layout row, at most: the pair is built together
             let (column_items, column_boxes) = if b.kind == BlockKind::Columns {
-                let (items, boxes) = column_projection(blocks, b, hits);
+                let (items, boxes) = column_projection(blocks, b, hits, titles);
                 (
                     slint::ModelRc::from(Rc::new(VecModel::from(items))),
                     slint::ModelRc::from(Rc::new(VecModel::from(boxes))),
@@ -7382,11 +8573,16 @@ pub fn project_blocks(blocks: &[Block], hits: &FindHits) -> Vec<BlockRow> {
                 checked: b.checked,
                 number: 0,
                 tail: false,
-                runs: runs_to_model(b, hits_of(hits, b.id)),
+                runs: runs_to_model(b, hits_of(hits, b.id), titles),
                 depth: block_depth(blocks, b),
                 color: b.color.slot(),
                 bg: b.background.slot(),
                 page_ref: b.page_ref.map(|p| p.as_u64() as i32).unwrap_or(-1),
+                // SPEC §四十 / ADR-0052: the source this row mirrors, as
+                // *stored* — 0 when there is none. `reproject_blocks` replaces
+                // it with the block actually holding the words, or with -1
+                // when nothing does; a row alone never sees enough to say.
+                sync_source: b.sync_ref.map(|r| r.as_u64() as i32).unwrap_or(0),
                 folded: b.folded,
                 // 0 = none: the UI resolves an id through the attachment cache
                 attachment: b.attachment.map(|a| a.as_u64() as i32).unwrap_or(0),
@@ -7404,7 +8600,7 @@ pub fn project_blocks(blocks: &[Block], hits: &FindHits) -> Vec<BlockRow> {
                 // scan the page, so calling them for every row would make the
                 // projection quadratic on a 10 000-block page
                 table_cells: if b.kind == BlockKind::Table {
-                    slint::ModelRc::from(Rc::new(VecModel::from(table_cells(blocks, b, hits))))
+                    slint::ModelRc::from(Rc::new(VecModel::from(table_cells(blocks, b, hits, titles))))
                 } else {
                     ModelRc::default()
                 },
@@ -7415,7 +8611,7 @@ pub fn project_blocks(blocks: &[Block], hits: &FindHits) -> Vec<BlockRow> {
                 } else {
                     ModelRc::default()
                 },
-                column_items, column_boxes,                column_items, column_boxes,
+                column_items, column_boxes,
                 // SPEC §三十九: the entity this block draws, -1 for none. The
                 // rest of the database fields are filled by `reproject_blocks`,
                 // which is where the state (the catalog and the realized window)
@@ -7449,6 +8645,11 @@ pub fn project_blocks(blocks: &[Block], hits: &FindHits) -> Vec<BlockRow> {
                 db_tl_start: 0,
                 db_tl_days: 0,
                 db_form: ModelRc::default(),
+                // D7 (chart): the plot's payload, neutral until `db_fill_row`
+                // fills it for a live block
+                db_chart_points: ModelRc::default(),
+                db_chart_path: "".into(),
+                db_chart_kind: 0,
             }
         })
         .collect();
@@ -7485,9 +8686,25 @@ pub const BLOCK_TABLE: i32 = 16;
 pub const BLOCK_TABLE_CELL: i32 = 17;
 pub const BLOCK_COLUMNS: i32 = 18;
 pub const BLOCK_COLUMN: i32 = 19;
+
+/// The mention picker's date row (SPEC §四十). A page id is a positive
+/// integer, so a negative one can never collide with a real page — and unlike
+/// the `disabled` placeholder rows, this one is selectable: it is the second
+/// thing `@` can produce.
+pub const MENTION_DATE_ROW: i32 = -1;
+/// The slash / insert menu's "Linked view" row (SPEC §三十九 「操作」,
+/// ADR-0085): not a block kind, so its id is negative — the picker rows'
+/// convention (`MENTION_DATE_ROW` is `-1`), and the apply path reads it
+/// before any kind mapping. Picking it switches the popup to the
+/// database picker (`open_slash_links`); picking a database there makes
+/// this line a linked database (`db_make_linked`).
+pub const LINKED_VIEW_ROW: i32 = -2;
 pub const BLOCK_MATH: i32 = 20;
 pub const BLOCK_TOC: i32 = 21;
 pub const BLOCK_EMBED: i32 = 22;
+/// UI integer of a `Synced` block (kind 24 in declaration order — **after**
+/// §三十九's `Database`, which is declared before it).
+pub const BLOCK_SYNCED: i32 = 24;
 /// A database view (SPEC §三十九, ADR-0060). The *layout* — table / board / … —
 /// is `db_views.layout` and not a kind int: one kind, eight layouts, which is
 /// what lets the six insert-menu placeholders light one at a time.
@@ -7501,6 +8718,19 @@ pub const BLOCK_DATABASE: i32 = 23;
 /// the right order of magnitude, and `Editor.slint` replaces it on the first
 /// layout pass.
 pub const DEFAULT_EDITOR_VIEWPORT_H: f32 = 720.0;
+
+/// How many references the *folded* panel draws. A drawing budget, not a limit
+/// on the answer: a page quoted two hundred times must not push its own prose
+/// off the screen (SPEC §四十), so the list is a window and the folded line
+/// carries the real count instead of the rows it is not drawing.
+pub const BACKLINK_WINDOW: usize = 5;
+
+/// How many it draws once the reader asks for the rest. Still bounded, and for
+/// a different reason: the panel is a `for` inside one document row rather
+/// than a `ListView` of its own, so every row it is handed is a row the frame
+/// lays out — 50 is the point where a folded panel stops being a link to the
+/// rest and becomes a page of its own.
+pub const BACKLINK_EXPANDED: usize = 50;
 
 fn block(kind: i32, text: &str) -> BlockRow {
     BlockRow {
@@ -7557,6 +8787,11 @@ fn block(kind: i32, text: &str) -> BlockRow {
         db_tl_start: 0,
         db_tl_days: 0,
         db_form: ModelRc::default(),
+        // D7 (chart): neutral, like the rest of the family's fields here
+        db_chart_points: ModelRc::default(),
+        db_chart_path: "".into(),
+        db_chart_kind: 0,
+        sync_source: 0,
     }
 }
 
@@ -7784,6 +9019,7 @@ fn bench_marks(blocks: &mut [Block], marks: usize) {
             end: start + rel,
             kind: crate::core::MarkKind::Bold,
             url: String::new(),
+            date: None,
         }];
     }
 }
@@ -7994,6 +9230,7 @@ mod tests {
         CMD_NAV_FORWARD, CMD_PAGE_BASE, NAV_MAX, PaletteAction,
     };
     use crate::app::workspace::Workspace;
+    use crate::core::persistence::Change;
 
     /// A block in display order, page 1, no marks — the shape the projections
     /// below read.
@@ -8024,7 +9261,7 @@ mod tests {
             columns: 0,
             lang: Lang::Plain,
             db_ref: None,
-        }
+            sync_ref: None,        }
     }
 
     /// A page's blocks in display order: a folded toggle with two children
@@ -8055,7 +9292,7 @@ mod tests {
     #[test]
     fn a_folded_subtree_produces_no_rows_at_all() {
         let blocks = fold_scene();
-        let rows = super::project_blocks(&blocks, &FindHits::new());
+        let rows = super::project_blocks(&blocks, &FindHits::new(), &super::MentionTitles::empty());
         // SPEC §三十七: the collapsed section costs real rows, not hidden
         // delegates — block 2 and its own child 3 drop out with their parent.
         let ids: Vec<i32> = rows.iter().map(|r| r.id).collect();
@@ -8067,7 +9304,7 @@ mod tests {
     fn unfolding_returns_the_subtree_in_its_source_order() {
         let mut blocks = fold_scene();
         blocks[0].folded = false;
-        let rows = super::project_blocks(&blocks, &FindHits::new());
+        let rows = super::project_blocks(&blocks, &FindHits::new(), &super::MentionTitles::empty());
         let ids: Vec<i32> = rows.iter().map(|r| r.id).collect();
         assert_eq!(ids, vec![1, 2, 3, 4, 5, 6]);
     }
@@ -8075,7 +9312,7 @@ mod tests {
     #[test]
     fn the_fold_flag_reports_children_not_kind() {
         let blocks = fold_scene();
-        let rows = super::project_blocks(&blocks, &FindHits::new());
+        let rows = super::project_blocks(&blocks, &FindHits::new(), &super::MentionTitles::empty());
         assert!(rows.iter().find(|r| r.id == 1).unwrap().can_fold);
         assert!(rows.iter().find(|r| r.id == 4).unwrap().can_fold);
         // a section with nothing in it reports false: no chevron to click.
@@ -8086,7 +9323,7 @@ mod tests {
             b.parent = None;
             b
         }];
-        let rows = super::project_blocks(&lone, &FindHits::new());
+        let rows = super::project_blocks(&lone, &FindHits::new(), &super::MentionTitles::empty());
         assert!(!rows[0].can_fold, "toggle with no children");
         assert_eq!(rows[0].kind, super::BLOCK_TOGGLE);
         assert!(rows[0].folded, "the flag rides along with the block");
@@ -8100,7 +9337,7 @@ mod tests {
         blocks[1].kind = BlockKind::Numbered;
         blocks[2].kind = BlockKind::Numbered;
         blocks[5].kind = BlockKind::Numbered;
-        let rows = super::project_blocks(&blocks, &FindHits::new());
+        let rows = super::project_blocks(&blocks, &FindHits::new(), &super::MentionTitles::empty());
         // 2 and 3 are inside the fold: the visible list is 1 then 2, not 4
         let nums: Vec<i32> = rows.iter().filter(|r| r.kind == 5).map(|r| r.number).collect();
         assert_eq!(nums, vec![1, 2]);
@@ -8123,7 +9360,7 @@ mod tests {
             blk(6, None, 15, BlockKind::Heading3, false, ""),
             blk(7, None, 16, BlockKind::Paragraph, false, "prose"),
         ];
-        let rows = super::project_blocks(&blocks, &FindHits::new());
+        let rows = super::project_blocks(&blocks, &FindHits::new(), &super::MentionTitles::empty());
         let toc = rows
             .iter()
             .find(|r| r.kind == super::BLOCK_TOC)
@@ -8155,13 +9392,13 @@ mod tests {
             blk(1, None, 10, BlockKind::Toc, false, ""),
             blk(2, None, 11, BlockKind::Heading2, false, "Before"),
         ];
-        assert_eq!(toc_of(&super::project_blocks(&blocks, &FindHits::new())[0])[0].1, "Before");
+        assert_eq!(toc_of(&super::project_blocks(&blocks, &FindHits::new(), &super::MentionTitles::empty())[0])[0].1, "Before");
         blocks[1].text = "After".into();
-        assert_eq!(toc_of(&super::project_blocks(&blocks, &FindHits::new())[0])[0].1, "After");
+        assert_eq!(toc_of(&super::project_blocks(&blocks, &FindHits::new(), &super::MentionTitles::empty())[0])[0].1, "After");
         // the block's own row keeps whatever text it was made from, like a
         // divider does — painted by no one, and the list never read it
         blocks[0].text = "stale".into();
-        assert_eq!(toc_of(&super::project_blocks(&blocks, &FindHits::new())[0])[0].1, "After");
+        assert_eq!(toc_of(&super::project_blocks(&blocks, &FindHits::new(), &super::MentionTitles::empty())[0])[0].1, "After");
     }
 
     /// What one contents block adds to a projection, on the shape the RAM gate
@@ -8189,7 +9426,7 @@ mod tests {
         let time = |blocks: &[crate::core::Block]| {
             let t = Instant::now();
             for _ in 0..rounds {
-                std::hint::black_box(super::project_blocks(blocks, &FindHits::new()).len());
+                std::hint::black_box(super::project_blocks(blocks, &FindHits::new(), &super::MentionTitles::empty()).len());
             }
             t.elapsed().as_secs_f64() * 1e3 / rounds as f64
         };
@@ -8232,6 +9469,7 @@ mod tests {
                             end,
                             kind: MarkKind::Bold,
                             url: String::new(),
+                            date: None,
                         }];
                     }
                     b
@@ -8241,7 +9479,7 @@ mod tests {
         let time = |blocks: &[crate::core::Block]| {
             let t = Instant::now();
             for _ in 0..rounds {
-                std::hint::black_box(super::project_blocks(blocks, &FindHits::new()).len());
+                std::hint::black_box(super::project_blocks(blocks, &FindHits::new(), &super::MentionTitles::empty()).len());
             }
             t.elapsed().as_secs_f64() * 1e3 / rounds as f64
         };
@@ -8287,7 +9525,7 @@ mod tests {
         let time = |hits: &FindHits| {
             let t = Instant::now();
             for _ in 0..rounds {
-                std::hint::black_box(super::project_blocks(&blocks, hits).len());
+                std::hint::black_box(super::project_blocks(&blocks, hits, &super::MentionTitles::empty()).len());
             }
             t.elapsed().as_secs_f64() * 1e3 / rounds as f64
         };
@@ -8321,8 +9559,9 @@ mod tests {
             end: span("bold") + "bold words".len(),
             kind: MarkKind::Bold,
             url: String::new(),
+            date: None,
         }];
-        let runs = super::build_runs(text, &marks, &[]);
+        let runs = super::build_runs(text, &marks, &[], &super::MentionTitles::empty());
         let cells: Vec<&str> = runs.iter().map(|r| r.text.as_str()).collect();
         assert_eq!(
             cells,
@@ -8358,6 +9597,7 @@ mod tests {
                     end: 4,
                     kind: MarkKind::Code,
                     url: String::new(),
+                    date: None,
                 }],
             ),
             (
@@ -8367,6 +9607,7 @@ mod tests {
                     end: "写作与中文测试 link".len(),
                     kind: MarkKind::Italic,
                     url: String::new(),
+                    date: None,
                 }],
             ),
             // a mark whose end is the end of the line leaves no tail to cut
@@ -8377,10 +9618,11 @@ mod tests {
                     end: 9,
                     kind: MarkKind::Strike,
                     url: String::new(),
+                    date: None,
                 }],
             ),
         ] {
-            let runs = super::build_runs(text, &marks, &[]);
+            let runs = super::build_runs(text, &marks, &[], &super::MentionTitles::empty());
             let back: String = runs.iter().map(|r| r.text.as_str()).collect();
             assert_eq!(back, text, "the runs of {text:?} do not re-join");
             assert!(
@@ -8409,7 +9651,7 @@ mod tests {
         // No marks at all, yet the row has to be runs: an empty vec means
         // "paint this as one unbroken Text", which cannot show a match.
         let text = "alpha beta gamma beta";
-        let runs = super::build_runs(text, &[], &[span(text, "beta", 0), span(text, "beta", 11)]);
+        let runs = super::build_runs(text, &[], &[span(text, "beta", 0), span(text, "beta", 11)], &super::MentionTitles::empty());
         assert_eq!(
             cells(&runs),
             vec!["alpha ", "beta", " gamma ", "beta"],
@@ -8424,7 +9666,7 @@ mod tests {
 
         // a mid-word hit cuts the word it sits in
         let text = "unforgettable";
-        let runs = super::build_runs(text, &[], &[span(text, "forget", 0)]);
+        let runs = super::build_runs(text, &[], &[span(text, "forget", 0)], &super::MentionTitles::empty());
         assert_eq!(cells(&runs), vec!["un", "forget", "table"]);
         assert!(runs[1].hit && !runs[0].hit && !runs[2].hit);
         let back: String = runs.iter().map(|r| r.text.as_str()).collect();
@@ -8439,8 +9681,9 @@ mod tests {
             end: bold.1 + " words".len(),
             kind: crate::core::MarkKind::Bold,
             url: String::new(),
+            date: None,
         }];
-        let runs = super::build_runs(text, &marks, &[span(text, "old wor", 0)]);
+        let runs = super::build_runs(text, &marks, &[span(text, "old wor", 0)], &super::MentionTitles::empty());
         assert_eq!(
             cells(&runs),
             vec!["see ", "the ", "bold words", " now"],
@@ -8448,6 +9691,739 @@ mod tests {
         );
         assert!(runs[2].hit, "the mark the hit landed in is the cell");
         assert!(runs[2].bold);
+    }
+
+    /// SPEC §四十: a mention's label is not in the block. The span holds the
+    /// title as it was typed, and what is drawn is what the target page is
+    /// called *now* — the entire mechanism behind "页面别名", and the reason
+    /// the projection is handed titles instead of reading the characters.
+    #[test]
+    fn a_mention_run_reads_the_live_title_and_degrades_when_the_page_is_gone() {
+        use crate::core::{BlockKind, Mark, MarkKind, PageId};
+        use slint::Model as _;
+        let mut b = blk(1, None, 10, BlockKind::Paragraph, false, "see Project Atlas");
+        b.marks = vec![Mark {
+            start: 4,
+            end: 17,
+            kind: MarkKind::Mention,
+            url: crate::core::page_uri(PageId(12)),
+            date: None,
+        }];
+        let blocks = vec![b];
+
+        // the page is there: the chip reads its *current* title, and the run
+        // still carries the address a click needs
+        let live = super::MentionTitles::of_blocks(&blocks, |_| Some("Atlas (renamed)".into()));
+        let row = &super::project_blocks(&blocks, &FindHits::new(), &live)[0];
+        let chip = row.runs.row_data(1).unwrap();
+        assert_eq!(chip.text, "Atlas (renamed)");
+        assert_eq!(chip.mention, 12);
+        assert!(!chip.mention_deleted);
+        assert!(!chip.link, "a mention is not a link: it draws its own chip");
+        assert_eq!(chip.url, "quire://page/12", "no address, nowhere to go");
+
+        // the page is gone: the atom stays visible and says so
+        let gone = super::MentionTitles::of_blocks(&blocks, |_| None);
+        let row = &super::project_blocks(&blocks, &FindHits::new(), &gone)[0];
+        let dead = row.runs.row_data(1).unwrap();
+        assert_eq!(dead.text, super::DELETED_PAGE_LABEL);
+        assert!(dead.mention_deleted);
+        assert_eq!(dead.mention, 12, "the id outlives the page it names");
+
+        // a projection that collected no titles keeps the stored characters
+        let row =
+            &super::project_blocks(&blocks, &FindHits::new(), &super::MentionTitles::empty())[0];
+        let plain = row.runs.row_data(1).unwrap();
+        assert_eq!(plain.text, "Project Atlas");
+        assert!(!plain.mention_deleted);
+    }
+
+    /// SPEC §四十: a date's payload *is* its text, so the run needs no lookup —
+    /// and it must not be read as a mention, which is exactly what its empty
+    /// address says.
+    #[test]
+    fn a_date_run_carries_its_own_text_and_no_address() {
+        use crate::core::{BlockKind, Mark, MarkKind};
+        use slint::Model as _;
+        let mut b = blk(1, None, 10, BlockKind::Paragraph, false, "due 2026-09-22 ok");
+        b.marks = vec![Mark {
+            start: 4,
+            end: 14,
+            kind: MarkKind::Date,
+            url: String::new(),
+            date: Some("2026-09-22".into()),
+        }];
+        let row = &super::project_blocks(&[b], &FindHits::new(), &super::MentionTitles::empty())[0];
+        let atom = row.runs.row_data(1).unwrap();
+        assert!(atom.date);
+        assert_eq!(atom.text, "2026-09-22");
+        assert_eq!(atom.mention, -1, "a date is not a mention");
+        assert!(!atom.mention_deleted);
+        assert!(atom.url.is_empty(), "a date points at nothing");
+    }
+
+    /// The panel's two lines that are not rows. Both are decisions Slint cannot
+    /// make, which is why they are made here: a plural, and how much of the
+    /// answer the folded list is *not* drawing.
+    #[test]
+    fn the_panel_says_how_many_and_how_many_it_is_not_showing() {
+        use super::{backlink_count_label, backlink_fold_label, BACKLINK_WINDOW};
+        assert_eq!(backlink_count_label(0), "", "nothing to count, nothing to say");
+        assert_eq!(backlink_count_label(1), "1 reference", "one is not 'one references'");
+        assert_eq!(backlink_count_label(7), "7 references");
+        // a page quoted fewer times than the window: no control at all, because
+        // folding would hide nothing and a dead control is worse than none
+        assert_eq!(backlink_fold_label(3, 3, false), "");
+        assert_eq!(backlink_fold_label(BACKLINK_WINDOW, BACKLINK_WINDOW, false), "");
+        // quoted more: the folded line is the rest of the answer
+        assert_eq!(backlink_fold_label(200, BACKLINK_WINDOW, false), "and 195 more");
+        // unfolded, the way back — offered while the unfolded list is still a
+        // window, so a page quoted 200 times can fold again rather than pretend
+        assert_eq!(backlink_fold_label(6, BACKLINK_WINDOW, true), "Show less");
+        assert_eq!(backlink_fold_label(200, 50, true), "Show less");
+        assert_eq!(backlink_fold_label(3, 3, true), "");
+    }
+
+    /// SPEC §四十 + T2.4: three ways a reference can go stale, and the two that
+    /// are *visible*. A mention stores an id, so deleting the page rewrites
+    /// nothing — which is exactly why the projector has to notice by itself,
+    /// and why "the chip still shows the old title" is a bug rather than a
+    /// cosmetic lag: nothing on screen would ever correct it.
+    ///
+    /// (The third way — a target that this library never had, from a hand-edited
+    /// database — is the same code path as the deletion: a page the workspace
+    /// cannot name. Both read as one string, because it is one fact.)
+    #[test]
+    fn deleting_a_page_degrades_the_chip_that_named_it() {
+        use crate::core::{BlockKind, PageId};
+        use slint::Model as _;
+
+        let state = super::AppState::new(&plain_args(), None);
+        let doomed = state.create_page(None);
+        state.rename_page(doomed, "Doomed page");
+        let source = state.create_page(None);
+        assert_ne!(source, doomed);
+        let line = state.exec_on_open_page(crate::core::Command::AppendBlock {
+            kind: BlockKind::Paragraph,
+            text: String::new(),
+        }).as_deref().and_then(|changes| {
+            changes.iter().find_map(|c| match c {
+                crate::core::Change::BlockInserted(b) => Some(b.id.0 as i32),
+                _ => None,
+            })
+        }).expect("a line to write on");
+        assert!(state.apply_mention(line, 0, Some(doomed), "Doomed page"));
+
+        // alive: the chip reads the page's own name
+        let chip = |st: &super::AppState| {
+            st.blocks
+                .row_data(0)
+                .expect("the line is the page's first row")
+                .runs
+                // the line is nothing but the atom, so there is no plain run
+                // before it to skip
+                .row_data(0)
+                .expect("the chip is the line's only run")
+        };
+        let alive = chip(&state);
+        assert_eq!(alive.text, "Doomed page");
+        assert_eq!(alive.mention, doomed);
+        assert!(!alive.mention_deleted);
+
+        // the page goes, and the chip *on screen* has to say so — this is the
+        // assertion that fails if the deletion forgets to reproject
+        assert!(!state.delete_page(doomed), "the open page was not the one deleted");
+        assert_eq!(state.open_page.get(), source);
+        let dead = chip(&state);
+        assert_eq!(dead.text, super::DELETED_PAGE_LABEL);
+        assert!(dead.mention_deleted);
+        assert_eq!(dead.mention, doomed, "the id outlives the name it pointed at");
+        assert_eq!(
+            dead.url,
+            crate::core::page_uri(PageId(doomed as u32 as u64)).as_str(),
+            "and the address is unchanged: nothing was rewritten, only re-read"
+        );
+        // the workspace really has no such page any more, which is what makes
+        // the string above the honest one
+        assert!(state.workspace.borrow().title_of(doomed).is_none());
+    }
+
+    /// T2.4 · 页面别名与悬空引用. SPEC §四十 offers one sentence as a feature —
+    /// "因为引用存的是 ID，重命名后所有引用自然显示新标题" — and there is nothing
+    /// to build to get it: storing an id instead of a title already means every
+    /// surface reads the name at draw time. What is owed instead is **the proof
+    /// that all four surfaces do**, pinned at once so that a future one cannot
+    /// quietly take a copy: the mention chip, the sidebar row, the Markdown
+    /// export, and the block's own stored bytes staying untouched.
+    ///
+    /// The same mechanism then has three ways of *losing* its page, and the
+    /// brief asks for each to be visible rather than silent: **deleted**,
+    /// **moved under another parent** (not a loss at all — which is the point),
+    /// and an **id that names nothing here** (a hand-edited file, a backup whose
+    /// other half never came back).
+    #[test]
+    fn renaming_moving_and_losing_the_page_a_reference_points_at() {
+        use crate::core::{BlockId, BlockKind};
+        use crate::services::export_service::export_page_with;
+        use slint::Model as _;
+
+        let state = super::AppState::new(&plain_args(), None);
+        let atlas = state.create_page(None);
+        state.rename_page(atlas, "Project Atlas");
+        // a source page to write the mention into. Creating a page also opens
+        // it, which is why its id is kept: everything below has to come back
+        // here after another page is made.
+        let source = state.create_page(None);
+        let line = |st: &super::AppState, text: &str| -> i32 {
+            st.exec_on_open_page(crate::core::Command::AppendBlock {
+                kind: BlockKind::Paragraph,
+                text: text.to_string(),
+            })
+            .as_deref()
+            .and_then(|cs| {
+                cs.iter().find_map(|c| match c {
+                    crate::core::Change::BlockInserted(b) => Some(b.id.0 as i32),
+                    _ => None,
+                })
+            })
+            .expect("a line to write on")
+        };
+        let first = line(&state, "");
+        assert!(state.apply_mention(first, 0, Some(atlas), "Project Atlas"));
+
+        // the chip of a given row, whoever else is on the page with it
+        let chip = |id: i32| {
+            let st = &state;
+            let rows: Vec<i32> = (0..st.blocks.row_count())
+                .filter_map(|i| st.blocks.row_data(i).map(|r| r.id))
+                .collect();
+            (0..st.blocks.row_count())
+                .find(|i| st.blocks.row_data(*i).map(|r| r.id == id).unwrap_or(false))
+                .and_then(|i| st.blocks.row_data(i).and_then(|r| r.runs.row_data(0)))
+                .unwrap_or_else(|| panic!("the line's first run is its chip; rows={rows:?}, want={id}"))
+        };
+        let stored = || {
+            let d = state.doc.borrow();
+            let b = d.block(BlockId(first as u64)).expect("the line is still there");
+            (b.text.clone(), b.marks.len(), b.marks[0].url.clone())
+        };
+
+        // ── 1 · rename ───────────────────────────────────────────────────────
+        let before = stored();
+        assert_eq!(chip(first).text, "Project Atlas");
+        state.rename_page(atlas, "Atlas 2026");
+
+        // a: the chip — what is drawn changes although nothing was rewritten
+        assert_eq!(chip(first).text, "Atlas 2026");
+        assert!(!chip(first).mention_deleted, "a new name is not a loss");
+        // b: the block is byte-identical. This is the sentence "所有引用自然显示
+        // 新标题" costs nothing: renaming a page quoted from 3 000 places writes
+        // to exactly one page.
+        assert_eq!(stored(), before, "no reference was rewritten");
+        // c: the sidebar row is the page's own current title too
+        let sidebar_of = |id: i32| {
+            (0..state.sidebar.row_count())
+                .filter_map(|i| state.sidebar.row_data(i))
+                .find(|n| n.id == id)
+                .unwrap_or_else(|| panic!("page {id} has a sidebar row"))
+        };
+        assert_eq!(sidebar_of(atlas).label, "Atlas 2026");
+        // d: and so is the export, which reads the workspace rather than the run
+        let md = {
+            let d = state.doc.borrow();
+            let blocks = d.page_blocks(crate::core::PageId(source as u32 as u64));
+            export_page_with(&blocks, &|id| {
+                state.workspace.borrow().title_of(id.0 as i32).map(str::to_string)
+            },
+            &|_| None)
+        };
+        assert!(md.contains("Atlas 2026"), "the Markdown names it as it is now\n{md}");
+        assert!(!md.contains("Project Atlas"), "and not as it was when typed\n{md}");
+
+        // ── 2 · moved under another parent ───────────────────────────────────
+        // A move reparents the page; it does not become a different page. The
+        // id is the whole reference, so every chip that pointed at it still
+        // does, and this is where a "title + parent path" store would break.
+        let archive = state.create_page(None);
+        state.rename_page(archive, "Archive");
+        assert!(state.move_page(atlas, Some(archive)), "the move happens");
+        // back to the page the chip is on — making Archive moved the caret away
+        state.open_page(source);
+        assert!(
+            state
+                .workspace
+                .borrow()
+                .children_of(Some(archive))
+                .contains(&atlas),
+            "it really is a child now"
+        );
+        assert_eq!(chip(first).text, "Atlas 2026");
+        assert!(!chip(first).mention_deleted);
+        assert_eq!(stored(), before, "and still nothing was rewritten");
+
+        // ── 3 · an id that names nothing in this library ─────────────────────
+        // The realistic route in is not a broken write but a restored file: the
+        // payload is well-formed, and the page it names simply is not here.
+        let ghost = atlas + 900_000;
+        let second = line(&state, "");
+        assert!(state.apply_mention(second, 0, Some(ghost), "Ghost page"));
+        let orphan = chip(second);
+        assert_eq!(
+            orphan.text,
+            super::DELETED_PAGE_LABEL,
+            "the chip says so instead of naming a page that is not here"
+        );
+        assert!(orphan.mention_deleted);
+        assert_eq!(orphan.mention, ghost, "and keeps the id a repair would want");
+        // the deletion route lands in the same state, which is the point of the
+        // two being one rule rather than two cases
+        state.delete_page(atlas);
+        let dead = chip(first);
+        assert_eq!(dead.text, super::DELETED_PAGE_LABEL);
+        assert!(dead.mention_deleted);
+        assert_eq!(dead.mention, atlas, "still the id it was written with");
+    }
+
+    /// What the backlink panel costs a page open (SPEC §四十, ADR-0051).
+    ///
+    /// The panel is a read on the *interactive* path — it runs on every
+    /// projection of a page — so the question is not "how fast is one query",
+    /// it is "does opening a page cost more because the library is bigger".
+    /// Four arms, one database, one sitting, release:
+    ///
+    /// | arm | library | page opened |
+    /// |-----|---------|-------------|
+    /// | A | 1 200 pages, 100 000 marks that are **not** mentions | nothing points at it |
+    /// | B | the same | 200 references |
+    /// | C | the same, with migration 16's `idx_marks_reference` dropped | 200 references |
+    /// | D | the same | 200 references, panel unfolded |
+    ///
+    /// **C is the control the claim needs.** Migration 16 exists so that the
+    /// reference read is an index seek rather than a scan of `marks`; taking
+    /// the index away and running the same query is what says how much of the
+    /// sentence is the index and how much is the machine. It is not a
+    /// configuration the app ships — it is the counterfactual that "no full
+    /// scan" is a statement about.
+    /// A mirror draws what its source holds, and the row keeps drawing the page
+    /// after the source is gone (ADR-0052 §1 and §2).
+    ///
+    /// The two halves that matter are the ones a bug would hide: the words come
+    /// from **another page** (so nothing on this page's slices could have
+    /// answered it), and deleting the source is a `DeleteBlock` on the source's
+    /// own page, after which the mirror is still a row that says something.
+    /// The id of the block an append inserted, read back out of the
+    /// command's own changes: `exec_on_open_page` answers in changes,
+    /// and a test that wants to aim the next command at the new row
+    /// needs its id, not its text.
+    fn find_inserted_block_id(changes: &[Change]) -> Option<i32> {
+        changes.iter().find_map(|c| match c {
+            Change::BlockInserted(b) => Some(b.id.0 as i32),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn a_mirror_draws_its_source_and_degrades_when_the_source_goes() {
+        use crate::core::{BlockId, BlockKind, Command};
+        use slint::Model as _;
+
+        let state = super::AppState::new(&plain_args(), None);
+        let source_page = state.create_page(None);
+        state.rename_page(source_page, "Source page");
+        let appended = state.exec_on_open_page(Command::AppendBlock {
+            kind: BlockKind::Paragraph,
+            text: "The words live here, and nowhere else.".to_string(),
+        });
+        let source = appended
+            .as_deref()
+            .and_then(find_inserted_block_id)
+            .expect("a source line");
+
+        // the page that will hold the mirror — created second, so it is open
+        let home = state.create_page(None);
+        state.rename_page(home, "Mirror page");
+        let mirror = state
+            .exec_on_open_page(Command::AppendBlock {
+                kind: BlockKind::Paragraph,
+                text: String::new(),
+            })
+            .as_deref()
+            .and_then(find_inserted_block_id)
+            .expect("a line to become the mirror");
+        state.exec_on_open_page(Command::SetBlockType {
+            id: BlockId(mirror as u64),
+            kind: BlockKind::Synced,
+        });
+        assert!(state.set_sync_source(mirror, Some(source)), "the pointer lands");
+
+        let row_of = |id: i32| {
+            (0..state.blocks.row_count())
+                .filter_map(|i| state.blocks.row_data(i))
+                .find(|r| r.id == id)
+                .unwrap_or_else(|| panic!("row {id} is on screen"))
+        };
+
+        // ── 1 · the words, from a page that is not this one ──────────────────
+        let row = row_of(mirror);
+        assert_eq!(row.kind, super::BLOCK_SYNCED);
+        assert_eq!(row.text, "The words live here, and nowhere else.");
+        assert_eq!(row.sync_source, source, "the row names the block it draws");
+        // and the block itself still owns nothing
+        assert!(state
+            .doc
+            .borrow()
+            .block(BlockId(mirror as u64))
+            .map(|b| b.text.is_empty())
+            .unwrap_or(false),
+            "a mirror holding words would have two owners of one sentence");
+
+        // ── 2 · the source is deleted, on its own page ───────────────────────
+        state.open_page(source_page);
+        state.exec_on_open_page(Command::DeleteBlock {
+            id: BlockId(source as u64),
+        });
+        state.open_page(home);
+
+        let row = row_of(mirror);
+        assert_eq!(row.text, super::DELETED_SOURCE_LABEL);
+        // -1 is what makes the row read-only: an edit aimed at a source nobody
+        // can find has nowhere honest to land (§2)
+        assert_eq!(row.sync_source, -1);
+        assert_eq!(state.content_of(mirror), -1, "and Rust agrees with the row");
+        // the page still projects — a dangling mirror is a picture, not a crash
+        assert!(state.blocks.row_count() > 0);
+    }
+
+    /// The cycle refusal, which is the one question in this slice that has to be
+    /// answered **before** the pointer is written (§三十九's rule, §4 of ADR-0052).
+    ///
+    /// Both directions are pinned: pointing at yourself, and pointing at a block
+    /// that already mirrors you. The third case — a chain longer than the bound —
+    /// is deliberately *not* pinned here, because "a file somebody edited by
+    /// hand" is not a state this test can build honestly.
+    #[test]
+    fn a_mirror_refuses_to_point_at_itself_or_close_a_cycle() {
+        use crate::core::{BlockId, BlockKind, Command};
+
+        let state = super::AppState::new(&plain_args(), None);
+        let home = state.create_page(None);
+        let line = |st: &super::AppState| -> i32 {
+            st.exec_on_open_page(Command::AppendBlock {
+                kind: BlockKind::Paragraph,
+                text: String::new(),
+            })
+            .as_deref()
+            .and_then(find_inserted_block_id)
+            .expect("a line")
+        };
+        let make_mirror = |st: &super::AppState, id: i32| {
+            st.exec_on_open_page(Command::SetBlockType {
+                id: BlockId(id as u64),
+                kind: BlockKind::Synced,
+            });
+        };
+
+        let a = line(&state);
+        let b = line(&state);
+        make_mirror(&state, a);
+        make_mirror(&state, b);
+
+        // ── 1 · itself ───────────────────────────────────────────────────────
+        assert!(!state.set_sync_source(a, Some(a)), "nobody mirrors themselves");
+
+        // ── 2 · the two-hop cycle: b already mirrors a ────────────────────────
+        assert!(state.set_sync_source(b, Some(a)), "b mirrors a");
+        assert!(
+            !state.set_sync_source(a, Some(b)),
+            "a -> b -> a is refused rather than drawn once per frame forever"
+        );
+        // and the refusal changed nothing: b still mirrors a
+        assert_eq!(
+            state.doc.borrow().block(BlockId(b as u64)).and_then(|x| x.sync_ref),
+            Some(BlockId(a as u64))
+        );
+
+        // ── 3 · a pointer onto a block that is not a mirror is refused ────────
+        let plain = line(&state);
+        assert!(
+            !state.set_sync_source(plain, Some(a)),
+            "sync_ref means one thing; keeping it that way is a refusal"
+        );
+        let _ = home;
+    }
+
+    #[test]
+    #[ignore = "prints a timing; run with --release"]
+    fn cost_of_the_backlink_panel_on_a_page_open() {
+        use crate::core::{
+            Block, BlockId, BlockKind, Change, Mark, MarkKind, OrderKey, Page, PageFont, PageId,
+        };
+        use crate::core::persistence::Repository as _;
+        use crate::testing::ScratchDir;
+        use slint::Model as _;
+        use std::time::Instant;
+        use super::core_page_id;
+
+        const PAGES: u64 = 1_200;
+        const REFERRERS: u64 = 200;
+        const BLOAT_BLOCKS: u64 = 1_000;
+        const BLOAT_MARKS: usize = 100;
+        const ROUNDS: u32 = 20;
+        const WINDOW: usize = 5;
+
+        let page_row = |id: u64, title: String| Page {
+            id: PageId(id),
+            title,
+            parent: None,
+            // far apart, so the tree order is the id order and nothing clumps
+            order: OrderKey(id * 0x1_0000),
+            favorite: false,
+            expanded: false,
+            font: PageFont::default(),
+            full_width: false,
+            small_text: false,
+            icon: String::new(),
+        };
+        let block_row = |id: u64, page: u64, text: &str| Block {
+            id: BlockId(id),
+            page: PageId(page),
+            parent: None,
+            order: OrderKey::FIRST,
+            kind: BlockKind::Paragraph,
+            text: text.into(),
+            checked: false,
+            marks: Vec::new(),
+            color: crate::core::ColorKind::Default,
+            background: crate::core::ColorKind::Default,
+            page_ref: None,
+            folded: false,
+            attachment: None,
+            img_percent: 100,
+            columns: 0,
+            lang: Lang::Plain,
+            db_ref: None,
+            sync_ref: None,        };
+
+        let dir = ScratchDir::new("backlink-cost");
+        let repo = scratch_repo(&dir);
+        let target = PAGES as i32; // the page that is quoted, by REFERRERS of them
+        let plain = PAGES as i32 - 1; // and one nobody quotes, in the same library
+
+        let mut batch: Vec<Change> = Vec::new();
+        let mut mark_sets: Vec<(u64, Vec<Mark>)> = Vec::new();
+        for i in 1..=PAGES {
+            batch.push(Change::PageCreated(page_row(i, format!("Page {i}"))));
+            let bid = 1_000_000 + i;
+            let (text, marks) = if i <= REFERRERS {
+                (
+                    "See Project Atlas".to_string(),
+                    vec![Mark {
+                        start: 4,
+                        end: 17,
+                        kind: MarkKind::Mention,
+                        url: crate::core::page_uri(PageId(PAGES)),
+                        date: None,
+                    }],
+                )
+            } else if i <= REFERRERS + BLOAT_BLOCKS {
+                // the table filler: real marks on real lines, none of them a
+                // reference to anything
+                (
+                    "word ".repeat(BLOAT_MARKS),
+                    (0..BLOAT_MARKS)
+                        .map(|k| Mark {
+                            start: k * 5,
+                            end: k * 5 + 4,
+                            kind: MarkKind::Bold,
+                            url: String::new(),
+                            date: None,
+                        })
+                        .collect(),
+                )
+            } else {
+                ("a line of its own".to_string(), Vec::new())
+            };
+            batch.push(Change::BlockInserted(block_row(bid, i, &text)));
+            if !marks.is_empty() {
+                mark_sets.push((bid, marks));
+            }
+        }
+        let total_marks: usize = mark_sets.iter().map(|(_, m)| m.len()).sum();
+        for (id, marks) in mark_sets {
+            batch.push(Change::BlockMarksSet {
+                id: BlockId(id),
+                marks,
+            });
+        }
+        let t = Instant::now();
+        repo.apply(&batch).unwrap();
+        let seeded = t.elapsed().as_secs_f64();
+        assert_eq!(
+            repo.load().unwrap().pages.len(),
+            PAGES as usize,
+            "the fixture really is the library it claims to be"
+        );
+        println!(
+            "seeded {PAGES} pages / {total_marks} marks in {seeded:.2} s \
+             ({REFERRERS} of them references to page {target})"
+        );
+
+        // One read of the pair `refresh_backlinks` makes: the count, then the
+        // folded window. Microseconds, so the panel's own cost is not lost in
+        // the rounding of a millisecond.
+        let read = |repo: &crate::storage::SqliteRepository, page: i32, window: usize| {
+            let t = Instant::now();
+            let mut seen = 0usize;
+            for _ in 0..ROUNDS {
+                let n = repo.reference_count(core_page_id(page)).unwrap();
+                let rows = repo.references(core_page_id(page), window).unwrap();
+                seen += n + rows.len();
+            }
+            std::hint::black_box(seen);
+            t.elapsed().as_secs_f64() * 1e6 / ROUNDS as f64
+        };
+
+        // The whole open, through the same call the UI makes — the panel's read
+        // is inside it, which is the only way the number means "opening a page".
+        let state = super::AppState::new(&plain_args(), Some(repo.clone()));
+        let open_ms = |page: i32| {
+            let t = Instant::now();
+            for _ in 0..ROUNDS {
+                state.open_page(page);
+            }
+            std::hint::black_box(state.backlinks.row_count());
+            t.elapsed().as_secs_f64() * 1e3 / ROUNDS as f64
+        };
+
+        let a_read = read(&repo, plain, WINDOW);
+        let b_read = read(&repo, target, WINDOW);
+        let d_read = read(&repo, target, 50);
+        let a_open = open_ms(plain);
+        let b_open = open_ms(target);
+        state.toggle_backlinks();
+        let d_open = open_ms(target);
+
+        // the counterfactual: the same two reads with the index migration 16
+        // built taken away. Not a configuration the app ships.
+        let conn = rusqlite::Connection::open(repo.path().unwrap()).unwrap();
+        conn.execute("DROP INDEX idx_marks_reference", []).unwrap();
+        let c_read = read(&repo, target, WINDOW);
+        let c_count: usize = {
+            let t = Instant::now();
+            std::hint::black_box(repo.reference_count(core_page_id(target)).unwrap());
+            t.elapsed().as_micros() as usize
+        };
+        conn.execute(
+            "CREATE INDEX idx_marks_reference ON marks(kind, url)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        println!(
+            "reference read (count + window), µs/read over {ROUNDS} rounds:\n  \
+             A page nothing points at   {a_read:8.1}\n  \
+             B 200 references, folded   {b_read:8.1}\n  \
+             D 200 references, unfolded {d_read:8.1}\n  \
+             C B with the index dropped {c_read:8.1}   <- counterfactual, no index"
+        );
+        println!(
+            "open_page, ms/open over {ROUNDS} rounds:\n  \
+             A nothing points at it     {a_open:8.2}\n  \
+             B 200 references, folded   {b_open:8.2}\n  \
+             D 200 references, unfolded {d_open:8.2}"
+        );
+        println!(
+            "the panel's own share: A {:.2} ms, B {:.2} ms, D {:.2} ms (open minus open)",
+            a_open - a_open,
+            b_open - a_open,
+            d_open - a_open
+        );
+        println!("first count on the unindexed table: {c_count} µs");
+    }
+
+    /// SPEC §四十 lists "all the blocks that reference this page", and T2.4
+    /// says a rename has to follow everywhere. So the panel is read end to end
+    /// over a real library: four references from two pages, one of them a block
+    /// that *is* a reference rather than a mention inside one, every row
+    /// carrying the source block's own text — and then the source page is
+    /// renamed and the panel says the new name with nothing rewritten.
+    #[test]
+    fn the_backlink_panel_groups_by_page_and_names_each_page_as_it_is_called_now() {
+        use crate::testing::ScratchDir;
+        use slint::Model as _;
+
+        let dir = ScratchDir::new("backlinks-state");
+        let state = super::AppState::new(&plain_args(), Some(scratch_repo(&dir)));
+        // the page that gets quoted, and two pages that quote it
+        let target = state.create_page(None);
+        let notes = state.create_page(None);
+        // three references on `notes`: two mentions in prose, and one link
+        let a = state.start_page().expect("notes takes a line");
+        assert!(state.apply_mention(a, 0, Some(target), "Project Atlas"));
+        let b = state.start_page().expect("notes takes a second line");
+        assert!(state.apply_mention(b, 0, Some(target), "Project Atlas"));
+        let c = state.start_page().expect("notes takes a third line");
+        assert!(state.create_page_link_block(c, target), "the line *becomes* a link");
+        // and one on a second page, so the grouping has two groups to make
+        let index = state.create_page(None);
+        let d = state.start_page().expect("index takes a line");
+        assert!(state.apply_mention(d, 0, Some(target), "Project Atlas"));
+
+        // The panel is derived from the database, so the writes have to land
+        // before the page that reads them is opened — the debounce is the only
+        // thing between the two in the app, and it is not part of the claim.
+        state.persistence_force_flush();
+        state.open_page(target);
+
+        let rows: Vec<crate::BacklinkRow> = (0..state.backlinks.row_count())
+            .map(|i| state.backlinks.row_data(i).unwrap())
+            .collect();
+        assert_eq!(rows.len(), 4, "every reference, and nothing that is not one");
+        assert_eq!(
+            rows.iter().filter(|r| r.first_on_page).count(),
+            2,
+            "one group header per source page"
+        );
+        assert_eq!(
+            rows.iter().filter(|r| r.block_level).count(),
+            1,
+            "only the link is a block-level reference"
+        );
+        // grouped: a page's rows are contiguous, which is what lets the first
+        // one carry the header and the rest go without
+        let pages: Vec<i32> = rows.iter().map(|r| r.page).collect();
+        let distinct = {
+            let mut p = pages.clone();
+            p.dedup();
+            p
+        };
+        assert_eq!(distinct.len(), 2, "two source pages, contiguous");
+        assert!(rows.iter().all(|r| r.page == notes || r.page == index));
+        // the quoted text is the *source block's own*, and a mention's row is
+        // the line it was typed into
+        assert_eq!(rows.iter().filter(|r| r.text == "Project Atlas").count(), 3);
+        assert!(
+            rows.iter().all(|r| r.title == "Untitled" || !r.title.is_empty()),
+            "a row can always name the page it came from"
+        );
+
+        // T2.4: rename the source page and the panel follows, because it asked
+        // the workspace rather than a copy taken at reference time
+        state.rename_page(notes, "Meeting notes");
+        state.open_page(index);
+        state.open_page(target);
+        let rows: Vec<crate::BacklinkRow> = (0..state.backlinks.row_count())
+            .map(|i| state.backlinks.row_data(i).unwrap())
+            .collect();
+        assert!(
+            rows.iter().any(|r| r.title == "Meeting notes"),
+            "the group header reads the name the page has now"
+        );
+        assert!(
+            rows.iter().filter(|r| r.title == "Meeting notes").count() == 3,
+            "every row of that group moved with the name"
+        );
     }
 
     /// The hits reach all three places a line is drawn: a row, a grid cell,
@@ -8472,7 +10448,7 @@ mod tests {
         for id in [1u64, 4, 22] {
             hits.entry(id as i32).or_default().push((0, 6));
         }
-        let rows = super::project_blocks(&blocks, &hits);
+        let rows = super::project_blocks(&blocks, &hits, &super::MentionTitles::empty());
 
         let hit_cells = |runs: &slint::ModelRc<crate::TextRun>| -> Vec<String> {
             (0..runs.row_count())
@@ -8506,7 +10482,7 @@ mod tests {
         );
         // a search that never started leaves a markless line on the
         // single-Text path (cell A1 is the one marked block here)
-        let clean = super::project_blocks(&blocks, &FindHits::new());
+        let clean = super::project_blocks(&blocks, &FindHits::new(), &super::MentionTitles::empty());
         assert_eq!(clean[0].runs.row_count(), 0, "a closed bar still splits");
         assert_eq!(
             clean
@@ -8739,7 +10715,7 @@ mod tests {
                 columns: 0,
                 lang: Lang::Plain,
                 db_ref: None,
-            })
+                sync_ref: None,            })
             .collect();
         bench_pictures(&mut blocks, 250);
 
@@ -8837,14 +10813,14 @@ mod tests {
             columns: if kind == BlockKind::Table { 3 } else { 0 },
             lang: Lang::Plain,
             db_ref: None,
-        };
+            sync_ref: None,        };
         let cell = |id: u64, text: &str| mk(id, Some(8), BlockKind::TableCell, text);
         let mut blocks = vec![
             mk(1, None, BlockKind::Paragraph, "before"),
             mk(8, None, BlockKind::Table, ""),
             cell(2, "A0"),
             Block {
-                marks: vec![Mark { start: 0, end: 2, kind: MarkKind::Bold, url: String::new() }],
+                marks: vec![Mark { start: 0, end: 2, kind: MarkKind::Bold, url: String::new(), date: None }],
                 ..cell(3, "A1")
             },
             cell(4, "A2"),
@@ -8871,7 +10847,7 @@ mod tests {
     fn a_grid_costs_one_row_and_carries_its_cells() {
         use slint::Model;
         let blocks = grid_scene();
-        let rows = super::project_blocks(&blocks, &FindHits::new());
+        let rows = super::project_blocks(&blocks, &FindHits::new(), &super::MentionTitles::empty());
         // ADR-0028: the cells paint inside the grid delegate, so they must not
         // also cost a row each — SPEC §三十七 counts hidden as really hidden.
         let ids: Vec<i32> = rows.iter().map(|r| r.id).collect();
@@ -8900,7 +10876,7 @@ mod tests {
         // stray cells (a v8 database touched by hand) must not become a
         // half-row: the delegate chunks by `columns` and indexes into the list
         blocks.retain(|b| b.id != crate::core::BlockId(6) && b.id != crate::core::BlockId(7));
-        let rows = super::project_blocks(&blocks, &FindHits::new());
+        let rows = super::project_blocks(&blocks, &FindHits::new(), &super::MentionTitles::empty());
         assert_eq!(rows[1].table_cells.row_count(), 3, "four cells is one row of three");
         assert_eq!(cell_texts(&rows[1]), ["A0", "A1", "A2"]);
     }
@@ -8910,7 +10886,7 @@ mod tests {
         let blocks = grid_scene();
         // a cell has no row, so no row can carry kind 17 and no row index can
         // land inside a grid — drop_index_for_row reads the same list
-        let rows = super::project_blocks(&blocks, &FindHits::new());
+        let rows = super::project_blocks(&blocks, &FindHits::new(), &super::MentionTitles::empty());
         assert!(rows.iter().all(|r| r.kind != super::BLOCK_TABLE_CELL));
         assert_eq!(super::visible_block_indices(&blocks), vec![0, 1, 8]);
     }

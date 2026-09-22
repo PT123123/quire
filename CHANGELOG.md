@@ -372,11 +372,15 @@ First functional release: a local, single-file-database notes workspace.
 - Switching directly from one open menu to another (e.g. ⋮⋮ on a different
   block while a menu is open) takes two clicks — the first click only
   dismisses the open popup (standard Slint popup semantics)
-- A menu taller than the window (e.g. Move-to in a large workspace)
-  overflows the bottom — the anchor clamps but the list does not scroll
-  yet. The Settings dialog no longer has that shape: it fits 1280x800 with
-  its shortcut list, ABOUT and Done on screen, and the sidebar chord is now
-  one of the rows it lists
+- A menu taller than the window (e.g. Move-to in a large workspace) is
+  clamped to the space below its anchor and scrolls (the page menu) or is
+  re-anchored when a submenu changes its row count (the ⋮⋮ block menu) — so
+  nothing runs off the bottom any more. What is left is the difference
+  between the two: a menu taller than the whole window scrolls only the
+  page menu, because the ⋮⋮ menu is still a plain repetition, not a
+  `ListView`. The Settings dialog no longer has that shape: it fits 1280x800
+  with its shortcut list, ABOUT and Done on screen, and the sidebar chord is
+  now one of the rows it lists
 - Block colors are cosmetic: they do not survive a Markdown export/import
   round trip, and Callout blocks export as quotes
 - Inline-mark paragraphs wrap between words now, and still clip in two shapes:
@@ -408,8 +412,9 @@ First functional release: a local, single-file-database notes workspace.
   formatting, no sorting. Inside a cell only Tab / Shift+Tab cross between
   cells — Enter does not split one, Backspace does not merge it with a
   neighbour, and the arrow keys will not step up or down a row. A cell takes
-  bold / italic / code / strikethrough / formula but not a link (Ctrl+L is
-  not wired there), and converting a marked line into a table keeps its words
+  bold / italic / code / strikethrough / formula and — since this slice, on a
+  selection like the other four marks — a link (Ctrl+L). Converting a marked
+  line into a table keeps its words
   and drops its marks. Hovering the grid adds its toolbar as a row, so
   content below a
   table shifts down by 22 px while the pointer is on it
@@ -425,8 +430,11 @@ First functional release: a local, single-file-database notes workspace.
   line moves the caret, not the scrollbar — a heading below the fold still needs a
   wheel turn first, which is the same limit a `quire://block/` anchor has
 - An embed card says who a link belongs to, not what it is: no title, no preview,
-  no favicon and nothing fetched, because the app has no WebView and no network
-  client by design. A site outside the 21 names it knows is labelled with its own
+  no favicon and nothing fetched, because the app has no WebView and makes no
+  request it was not told to make (it does have an HTTP/1.0 client —
+  `--pull <url>`, no TLS). This is **closed**, not pending: `bookmark` was
+  withdrawn 2026-09-22 (ADR-0081), so no fetched title is coming. A site
+  outside the 21 names it knows is labelled with its own
   host, and a Google url is read as its product from the subdomain or the first
   path segment — anything else behind google.com says "Google". And since this
   slice, a link whose target is not http, https or mailto opens nothing at all:
@@ -436,5 +444,3 @@ First functional release: a local, single-file-database notes workspace.
   tables, and importing one back gives a paragraph per row. Deliberate and
   pinned by a test — the importer is line-at-a-time and a table needs
   lookahead
-- Chinese IME: the manual acceptance pass (docs/IME_CHECKLIST.md) is
-  signed off — 2026-09-20

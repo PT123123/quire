@@ -71,12 +71,18 @@ export component DatabaseView inherits Rectangle {
     property <bool> is-gallery: root.block.db-layout == "gallery";
     property <bool> is-timeline: root.block.db-layout == "timeline";
     property <bool> is-form: root.block.db-layout == "form";
+    property <bool> is-chart: root.block.db-layout == "chart";
     // The three layouts that place one row per unit and share the row
     // rectangle below; the others draw their own body arms.
     property <bool> row-based: root.is-table || root.is-list || root.is-timeline;
     // The layouts whose empty state is the delegate's own body (a calendar
-    // with no records is a month of blanks; a form is always its fields).
-    property <bool> shows-empty-state: !root.is-calendar && !root.is-form;
+    // with no records is a month of blanks; a form is always its fields; a
+    // chart says "pick a column to group by" inside its plot).
+    property <bool> shows-empty-state: !root.is-calendar && !root.is-form && !root.is-chart;
+    // D7: the view's search box, open on this block (the session state is
+    // one box at a time, keyed by block id — the same shape the popups use).
+    property <bool> search-open: UIState.db-search-open
+        && UIState.db-search-block == root.block.id;
 
     // The page scroll, and this block's place in it: where the viewport's top
     // edge falls inside this block, in px. Negative when the block's top is
@@ -177,18 +183,119 @@ export component DatabaseView inherits Rectangle {
             font-size: Typography.size-caption;
             color: Colors.danger;
         }
-        if root.block.db-filter-note == "" : Text {
+        // The count is also the search's home (D7): closed, it is the words
+        // it always was, clickable to open the box; open, the box takes the
+        // slot and stretches left into the switcher line's free space. The
+        // degraded-rules note keeps its slot in both states — a filter that
+        // is not being applied outranks a search box.
+        if root.block.db-filter-note == "" && !root.search-open : Rectangle {
             x: parent.width - 316px - 92px;
             y: 4px;
             width: 88px;
             height: 22px;
-            vertical-alignment: center;
-            horizontal-alignment: right;
-            text: root.block.db-row-count == 1 ? "1 row"
-                : root.block.db-row-count + " rows";
-            font-family: Typography.ui-font;
-            font-size: Typography.size-caption;
-            color: Colors.text-muted;
+            border-radius: Theme.radius-sm;
+            background: count-ta.has-hover ? Colors.surface-hover : transparent;
+
+            Text {
+                x: 0px;
+                y: 0px;
+                width: parent.width;
+                height: parent.height;
+                vertical-alignment: center;
+                horizontal-alignment: right;
+                text: root.block.db-row-count == 1 ? "1 row"
+                    : root.block.db-row-count + " rows";
+                font-family: Typography.ui-font;
+                font-size: Typography.size-caption;
+                color: Colors.text-muted;
+            }
+            count-ta := TouchArea {
+                width: parent.width;
+                height: parent.height;
+                mouse-cursor: MouseCursor.pointer;
+                clicked => {
+                    UIState.db-search-opened(root.block.id);
+                }
+            }
+        }
+        if root.search-open : Rectangle {
+            x: parent.width - 476px;
+            y: 4px;
+            width: 156px;
+            height: 22px;
+            border-radius: Theme.radius-sm;
+            background: Colors.surface-hover;
+            border-width: 1px;
+            border-color: Colors.border-strong;
+
+            // the muted word behind the empty box: what it is and that it
+            // narrows what the header counts
+            if UIState.db-search-text == "" : Text {
+                x: 10px;
+                y: 0px;
+                width: parent.width - 26px;
+                height: parent.height;
+                vertical-alignment: center;
+                text: "Search this view";
+                font-family: Typography.ui-font;
+                font-size: Typography.size-caption;
+                color: Colors.text-muted;
+            }
+            search-input := TextInput {
+                x: 10px;
+                y: 0px;
+                width: parent.width - 26px;
+                height: parent.height;
+                vertical-alignment: center;
+                font-family: Typography.ui-font;
+                font-size: Typography.size-caption;
+                color: Colors.text-primary;
+                text: UIState.db-search-text;
+                // per keystroke: the needle is a read's input — no change, no
+                // undo step; the count and the rows move with it
+                edited => {
+                    UIState.db-search-text-set(root.block.id, self.text);
+                }
+                // Enter accepts and keeps the box; the x closes and clears
+                accepted => {
+                    UIState.db-search-text-set(root.block.id, self.text);
+                }
+                // the box exists because the user clicked the count: the
+                // caret is already theirs
+                init => {
+                    self.focus();
+                }
+            }
+            // close and clear: an invisible predicate on a visible table is
+            // a state the header's count could not explain
+            Rectangle {
+                x: parent.width - 16px;
+                y: (parent.height - 12px) / 2;
+                width: 12px;
+                height: 12px;
+                border-radius: 6px;
+                background: search-x-ta.has-hover ? Colors.border-strong : transparent;
+
+                Text {
+                    x: 0px;
+                    y: -2px;
+                    width: parent.width;
+                    height: parent.height;
+                    text: "x";
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    font-size: 9px;
+                    color: search-x-ta.has-hover ? Colors.text-primary : Colors.text-muted;
+                }
+                search-x-ta := TouchArea {
+                    width: parent.width;
+                    height: parent.height;
+                    mouse-cursor: MouseCursor.pointer;
+                    clicked => {
+                        UIState.db-search-closed(root.block.id);
+                    }
+                }
+            }
         }
 
         // "New row": the one row action that is not per-row. It lives in the
@@ -394,7 +501,7 @@ export component DatabaseView inherits Rectangle {
                     color: Colors.text-secondary;
                 }
 
-                if parent.is-sorted : Icon {
+                if is-sorted : Icon {
                     x: parent.width - 18px;
                     y: (parent.height - 12px) / 2;
                     width: 12px;
@@ -631,12 +738,14 @@ export component DatabaseView inherits Rectangle {
                 }
             }
 
-            // The row's own action, in the slot both the header and the rows
+            // The row's own actions, in the slot both the header and the rows
             // reserve. Delete is ADR-0063's plan (`[values, record, page?]`, one
-            // Ctrl+Z) and the only row menu D3 ships: renaming a row is editing
-            // its title cell, and opening one as a page is the row's click in a
-            // list (above). A group header has nothing to delete — its slot
-            // stays empty.
+            // Ctrl+Z); the template (D7, ADR-0086) is the other — this row's
+            // values become the prefill every later "New row" starts from, so
+            // "T" on a row copies it and "T" on an empty row clears the
+            // template. Renaming a row is editing its title cell, and opening
+            // one as a page is the row's click in a list (above). A group
+            // header has neither action — its slot stays empty.
             if row.header == "" : Rectangle {
                 x: root.grid-w;
                 width: root.slot-w;
@@ -646,20 +755,41 @@ export component DatabaseView inherits Rectangle {
                 Text {
                     x: 0px;
                     y: 0px;
-                    width: parent.width;
+                    width: parent.width / 2;
+                    height: parent.height;
+                    text: "T";
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    font-size: 9px;
+                    // only on hover: a row that always shows its actions is a
+                    // row of noise, and these are two small targets
+                    color: tpl-ta.has-hover ? Colors.accent : Colors.text-muted;
+                    opacity: tpl-ta.has-hover || del-ta.has-hover ? 1.0 : 0.0;
+                }
+                tpl-ta := TouchArea {
+                    x: 0px;
+                    width: parent.width / 2;
+                    height: parent.height;
+                    mouse-cursor: MouseCursor.pointer;
+                    clicked => {
+                        UIState.db-template-saved(root.block.id, row.record);
+                    }
+                }
+                Text {
+                    x: parent.width / 2;
+                    y: 0px;
+                    width: parent.width / 2;
                     height: parent.height;
                     text: "x";
                     horizontal-alignment: center;
                     vertical-alignment: center;
                     font-size: Typography.size-caption;
-                    // only on hover: a row that always shows a delete affordance
-                    // is a row of noise, and the 22 px slot is a deliberate
-                    // small target for a destructive action
                     color: del-ta.has-hover ? Colors.danger : Colors.text-muted;
-                    opacity: del-ta.has-hover ? 1.0 : 0.0;
+                    opacity: tpl-ta.has-hover || del-ta.has-hover ? 1.0 : 0.0;
                 }
                 del-ta := TouchArea {
-                    width: parent.width;
+                    x: parent.width / 2;
+                    width: parent.width / 2;
                     height: parent.height;
                     mouse-cursor: MouseCursor.pointer;
                     clicked => {
@@ -800,8 +930,13 @@ export component DatabaseView inherits Rectangle {
                             height: 20px;
                             spacing: Theme.spacing-xs;
 
-                            for cell[ci] in card.cells : if cell.kind == 7 : Rectangle {
-                                width: 16px;
+                            // Slint's for-body must be one element — a
+                            // conditional cannot chain after the colon — so
+                            // the non-checkbox cells ride along as zero-width
+                            // invisible boxes.
+                            for cell[ci] in card.cells : Rectangle {
+                                visible: cell.kind == 7;
+                                width: cell.kind == 7 ? 16px : 0px;
                                 height: 16px;
                                 border-radius: Theme.radius-xs;
                                 border-width: 1.5px;
@@ -1049,23 +1184,23 @@ export component DatabaseView inherits Rectangle {
         property <int> per-row: Math.max(
             Math.floor(root.grid-w / 168px), 1);
         changed per-row => {
-            UIState.db-gallery-shaped(root.block.id, root.per-row);
+            UIState.db-gallery-shaped(root.block.id, per-row);
         }
         property <length> card-w: root.grid-w / Math.max(root.block.db-gallery-per-row, 1);
 
         for card[index] in root.block.db-rows : Rectangle {
-            x: (index % Math.max(root.block.db-gallery-per-row, 1)) * root.card-w;
+            x: Math.mod(index, Math.max(root.block.db-gallery-per-row, 1)) * card-w;
             y: (root.block.db-row-start
                 + Math.floor(index / Math.max(root.block.db-gallery-per-row, 1)))
                 * root.block.db-row-height;
-            width: root.card-w - Theme.spacing-sm;
+            width: card-w - Theme.spacing-sm;
             height: root.block.db-row-height - Theme.spacing-sm;
             border-radius: Theme.radius-sm;
             background: Colors.surface;
             border-width: 1px;
             border-color: Colors.border;
 
-            card-ta := TouchArea {
+            TouchArea {
                 width: parent.width;
                 height: parent.height;
                 mouse-cursor: MouseCursor.pointer;
@@ -1174,11 +1309,11 @@ export component DatabaseView inherits Rectangle {
                 font-family: Typography.ui-font;
                 font-size: Typography.size-caption;
                 color: Colors.text-primary;
-                edited(text) => {
-                    UIState.db-form-text(root.block.id, field.property, text);
+                edited => {
+                    UIState.db-form-text(root.block.id, field.property, self.text);
                 }
-                accepted(text) => {
-                    UIState.db-form-text(root.block.id, field.property, text);
+                accepted => {
+                    UIState.db-form-text(root.block.id, field.property, self.text);
                     UIState.db-form-submitted(root.block.id);
                 }
             }
@@ -1254,6 +1389,224 @@ export component DatabaseView inherits Rectangle {
         }
     }
 
+    // ── a chart (D7): the group list, drawn as bar / line / pie ──────────
+    // The one layout whose plot is **aggregates, not rows**: the points came
+    // from one `GROUP BY` over an option-bounded column — the same query the
+    // board's columns and the grouped table's headers run — so a 10 000-row
+    // database's chart realizes zero rows and draws a handful of shapes. The
+    // three shapes share the plot and the label strip; which one is drawn is
+    // the view document's `chart` key, and the buttons above the plot are one
+    // rule edit each (the same undo step a filter change is). The geometry
+    // that needs trigonometry (the pie's arcs, the line's polyline) is built
+    // in Rust in a fixed 100×100 viewbox, which these `Path`s scale — the
+    // delegate places shapes and computes nothing but a fraction times a
+    // height.
+    if root.live && root.is-chart : Rectangle {
+        x: 0px;
+        y: root.body-top;
+        width: root.content-width;
+        height: Math.max(root.body-h, 0px);
+        background: transparent;
+
+        // the surface Rust reserved (CHART_HEIGHT): a 30px shape-button strip,
+        // then the plot, then the 24px label strip
+        property <length> chrome-h: 30px;
+        property <length> label-h: 24px;
+        property <length> plot-w: root.grid-w;
+        property <length> plot-h: Math.max(
+            parent.height - chrome-h - label-h, 0px);
+        property <int> point-count: root.block.db-chart-points.length;
+
+        // the three shapes, right-aligned over the plot: the active one is
+        // tinted, and a click writes the view's `chart` key
+        for shape[index] in ["Bar", "Line", "Pie"] : Rectangle {
+            x: plot-w - (3 - index) * 52px;
+            y: 5px;
+            width: 48px;
+            height: 20px;
+            border-radius: Theme.radius-sm;
+            background: root.block.db-chart-kind == index ? Colors.accent-soft
+                : shape-ta.has-hover ? Colors.surface-hover : transparent;
+
+            Text {
+                x: 0px;
+                y: 0px;
+                width: parent.width;
+                height: parent.height;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                text: shape;
+                font-family: Typography.ui-font;
+                font-size: Typography.size-caption;
+                color: root.block.db-chart-kind == index
+                    ? Colors.accent-text : Colors.text-secondary;
+            }
+            shape-ta := TouchArea {
+                width: parent.width;
+                height: parent.height;
+                mouse-cursor: MouseCursor.pointer;
+                clicked => {
+                    UIState.db-chart-kind(root.block.id, index);
+                }
+            }
+        }
+
+        // the plot
+        Rectangle {
+            x: 0px;
+            y: chrome-h;
+            width: plot-w;
+            height: plot-h;
+            background: transparent;
+
+            // the baseline: every bar and the line read against it
+            if point-count > 0 : Rectangle {
+                x: 0px;
+                y: parent.height - 1px;
+                width: parent.width;
+                height: 1px;
+                background: Colors.border;
+            }
+
+            // ── bar: equal-width columns, each as tall as its fraction ────
+            if point-count > 0 && root.block.db-chart-kind == 0 : HorizontalLayout {
+                x: 0px;
+                y: 0px;
+                width: parent.width;
+                height: parent.height;
+                spacing: 12px;
+                padding-left: 12px;
+                padding-right: 12px;
+
+                for pt in root.block.db-chart-points : Rectangle {
+                    horizontal-stretch: 1;
+                    background: transparent;
+                    // a zero-count group is a 2px stub rather than nothing:
+                    // the group exists, and its label below says whose it is
+                    Rectangle {
+                        y: parent.height - Math.max(parent.height * pt.frac, 2px);
+                        width: parent.width;
+                        height: Math.max(parent.height * pt.frac, 2px);
+                        border-radius: 2px;
+                        background: Colors.block-text(pt.slot);
+                    }
+                }
+            }
+
+            // ── line: one polyline through the fractions ──────────────────
+            // The path arrived in a 100×100 viewbox (Rust built it), so the
+            // `viewbox-*` pair below scales it to this plot; a single point
+            // draws nothing (a move without a line), which is the honest
+            // picture of one group.
+            if point-count > 0 && root.block.db-chart-kind == 1 : Path {
+                x: 0px;
+                y: 0px;
+                width: parent.width;
+                height: parent.height;
+                viewbox-width: 100;
+                viewbox-height: 100;
+                commands: root.block.db-chart-path;
+                stroke: Colors.accent;
+                stroke-width: 2px;
+                stroke-line-cap: round;
+                stroke-line-join: round;
+                fill: transparent;
+            }
+
+            // ── pie: one filled path per slice, all in the same square ────
+            if point-count > 0 && root.block.db-chart-kind == 2 : Rectangle {
+                width: Math.max(Math.min(parent.width, parent.height) - 8px, 0px);
+                height: self.width;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                background: transparent;
+
+                for pt in root.block.db-chart-points : Path {
+                    width: parent.width;
+                    height: parent.height;
+                    viewbox-width: 100;
+                    viewbox-height: 100;
+                    commands: pt.commands;
+                    fill: Colors.block-text(pt.slot);
+                    // a hairline of surface between slices, so two adjacent
+                    // palette tints read as two slices
+                    stroke: Colors.surface;
+                    stroke-width: 1px;
+                }
+            }
+        }
+
+        // the label strip: one cell per point, "count · group" — the numbers
+        // are Rust's (the `GROUP BY`'s), the words are the group's own label
+        if point-count > 0 : HorizontalLayout {
+            x: 0px;
+            y: parent.height - label-h;
+            width: root.grid-w;
+            height: label-h;
+
+            for pt in root.block.db-chart-points : Rectangle {
+                horizontal-stretch: 1;
+                background: transparent;
+                Text {
+                    x: 2px;
+                    y: 0px;
+                    width: parent.width - 4px;
+                    height: parent.height;
+                    vertical-alignment: center;
+                    horizontal-alignment: center;
+                    overflow: elide;
+                    text: pt.value + " · " + pt.label;
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-caption;
+                    color: Colors.text-secondary;
+                }
+            }
+        }
+
+        // ── the two states a chart can be empty in ────────────────────────
+        // A database with rows but no grouping column has *nothing to plot*
+        // (the header's Group button is the door); a database with no rows
+        // says so and offers its first row, like every other layout.
+        if point-count == 0 && root.block.db-row-count > 0 : Text {
+            x: 0px;
+            y: chrome-h;
+            width: parent.width;
+            height: parent.height - chrome-h;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+            text: "Pick a column to group by";
+            font-family: Typography.ui-font;
+            font-size: Typography.size-caption;
+            color: Colors.text-muted;
+        }
+        if point-count == 0 && root.block.db-row-count == 0 : Rectangle {
+            x: 0px;
+            y: chrome-h;
+            width: parent.width;
+            height: 34px;
+            background: chart-empty-ta.has-hover ? Colors.surface-hover : transparent;
+
+            Text {
+                x: Theme.spacing-sm;
+                y: 0px;
+                height: parent.height;
+                vertical-alignment: center;
+                text: "No rows yet - New row adds one";
+                font-family: Typography.ui-font;
+                font-size: Typography.size-caption;
+                color: Colors.text-muted;
+            }
+            chart-empty-ta := TouchArea {
+                width: parent.width;
+                height: parent.height;
+                mouse-cursor: MouseCursor.pointer;
+                clicked => {
+                    UIState.db-row-added(root.block.id);
+                }
+            }
+        }
+    }
+
     // ── a layout this build cannot draw yet (D7) ─────────────────────────
     // SPEC §三十九's order is the implementation order, so a database written by
     // a later build can name a view this one has no drawing for. It says which
@@ -1278,3 +1631,4 @@ export component DatabaseView inherits Rectangle {
         }
     }
 }
+

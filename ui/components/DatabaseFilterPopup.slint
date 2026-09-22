@@ -318,8 +318,8 @@ export component DatabaseFilterPopup inherits PopupWindow {
                     // the kind refuses (not a number, not a stored date) is
                     // rejected in Rust and nothing is written — the text stays
                     // for the user to fix.
-                    accepted(text) => {
-                        UIState.db-filter-text-set(root.block, index, text);
+                    accepted => {
+                        UIState.db-filter-text-set(root.block, index, self.text);
                     }
                 }
             }
@@ -468,17 +468,17 @@ export component DatabaseFilterPopup inherits PopupWindow {
                 for item in UIState.db-filter-ops : Rectangle {
                     height: 30px;
                     border-radius: Theme.radius-sm;
-                    background: op-ta.has-hover ? Colors.surface-hover : transparent;
+                    background: op-pick-ta.has-hover ? Colors.surface-hover : transparent;
                     Text {
                         x: 8px;
                         height: parent.height;
                         text: item.name;
                         font-family: Typography.ui-font;
                         font-size: Typography.size-ui;
-                        color: op-ta.has-hover ? Colors.text-primary : Colors.text-secondary;
+                        color: op-pick-ta.has-hover ? Colors.text-primary : Colors.text-secondary;
                         vertical-alignment: center;
                     }
-                    op-ta := TouchArea {
+                    op-pick-ta := TouchArea {
                         width: parent.width;
                         height: parent.height;
                         mouse-cursor: MouseCursor.pointer;

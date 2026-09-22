@@ -24,7 +24,7 @@ export component EditorBlock inherits Rectangle {
     property <bool> is-list: block.kind == 4 || block.kind == 5 || block.kind == 6;
     property <length> list-indent: (is-list ? root.depth * 24px : 0px);
     property <bool> is-heading: block.kind == 1 || block.kind == 2 || block.kind == 3;
-    property <bool> is-plain: block.kind <= 6 || block.kind == 13;
+    property <bool> is-plain: block.kind <= 6 || block.kind == 13 || block.kind == 24;
     property <bool> is-page: block.kind == 11;
     property <bool> is-link: block.kind == 12;
     property <bool> is-page-ish: is-page || is-link;
@@ -49,6 +49,23 @@ export component EditorBlock inherits Rectangle {
     property <length> db-height: !block.db-ok ? 34px
         : block.db-header-height
             + Math.max(block.db-body-height, 34px);
+    // synced block (kind 24), SPEC §四十 / ADR-0052: a second view of one other
+    // block. Draws like a plain line because a plain line is what it is — the
+    // only thing that differs is *whose* words sit in it.
+    property <bool> is-synced: block.kind == 24;
+    // **Whose words the caret is in.** For a mirror this is the source block,
+    // not the row itself, because the row owns nothing — and that one
+    // substitution is the whole of "edit either copy and both change": there is
+    // still exactly one block being written to. `sync-source == -1` (nothing
+    // resolved) leaves this comparing against an id no block can have, so an
+    // unresolvable mirror simply cannot enter edit mode. Where those keystrokes
+    // would go is a question the row cannot answer, and putting them somewhere
+    // anyway is worse than refusing.
+    property <int> content-id: root.is-synced ? block.sync-source : block.id;
+    // the row keeps room for its own glyph in the same way a toggle keeps room
+    // for its chevron: the sentence in the column belongs to another block,
+    // while the glyph is the only part of this row that is its own.
+    property <length> sync-gutter: root.is-synced ? 22px : 0px;
     // picture (kind 14): the row's height comes from the raster's ratio, which
     // Rust knows from the attachments row. 0 means there is no picture to
     // show — a missing file or an attachment from another library — and the
@@ -69,10 +86,10 @@ export component EditorBlock inherits Rectangle {
     property <length> embed-height: PageType.size-body * PageType.line-body
         + Typography.size-caption * PageType.line-body + 2 * Theme.spacing-md;
     property <length> embed-inset: Theme.spacing-md + 19px + Theme.spacing-sm;
-    property <bool> editing: UIState.editing-id == block.id
+    property <bool> editing: UIState.editing-id == root.content-id
         && block.kind != 9 && block.kind != 11 && block.kind != 12
         && block.kind != 14 && block.kind != 15 && block.kind != 16
-        && block.kind != 18 && !is-toc;
+        && block.kind != 18 && !is-toc && !is-database;
 
     // toggle (kind 13) keeps a gutter for its chevron even when the block
     // has no children yet, so the text does not jump as the section grows
@@ -162,7 +179,8 @@ export component EditorBlock inherits Rectangle {
             }
             // a table owns its clicks: each cell is the thing you aim at, and
             // activating the table itself would put a caret in nowhere. Same
-            // for a layout: its boxes are where the text is.
+            // for a layout: its boxes are where the text is. And same for a
+            // database: its cells are the aim points too (SPEC §三十九).
             else if (!is-table && !is-columns && !is-database && !editing) {
                 UIState.block-activate(block.id);
             }
@@ -261,11 +279,13 @@ export component EditorBlock inherits Rectangle {
     property <bool> runs-line: is-plain || root.is-quote || root.is-callout;
     property <length> runs-x: root.is-quote ? content-x + Theme.spacing-md
         : root.is-callout ? content-x + 40px
-        : content-x + list-indent + (is-list ? 26px : 0px) + root.fold-gutter;
+        : content-x + list-indent + (is-list ? 26px : 0px) + root.fold-gutter
+        + root.sync-gutter;
     property <length> runs-y: root.is-callout ? top-margin + Theme.spacing-sm : top-margin;
     property <length> runs-width: root.is-quote ? content-width - Theme.spacing-md
         : root.is-callout ? content-width - 40px - Theme.spacing-sm
-        : content-width - list-indent - (is-list ? 26px : 0px) - root.fold-gutter;
+        : content-width - list-indent - (is-list ? 26px : 0px) - root.fold-gutter
+        - root.sync-gutter;
     property <length> runs-height: root.is-quote ? quote-text.height
         : root.is-callout ? callout-text.height : plain-text.height;
 
@@ -288,17 +308,28 @@ export component EditorBlock inherits Rectangle {
             alignment: start;
             spacing: 0px;
             for run in block.runs : Rectangle {
+                // SPEC §四十: a mention and a date are the two *particles* —
+                // atoms the line cannot break and that carry a surface of
+                // their own. Their glyph and padding are what the cell's floor
+                // has to include, so they are named here instead of being
+                // written out again in `min-width` and in the text's x.
+                property <bool> particle: run.mention >= 0 || run.date;
+                property <length> particle-glyph: particle ? 12px : 0px;
+                property <length> particle-pad: particle ? 4px : 0px;
                 // natural run size: decorations anchor to the text line
                 // (Slint Text has no font-style — italic via family name).
                 // min-width (instead of width — Slint rejects both) pins the
                 // layout: a long paragraph's natural run widths overflow the
                 // container, and without the floor the layout compressed the
                 // runs into each other (A4 sweep D1's overprint)
-                min-width: run-text.preferred-width;
+                min-width: run-text.preferred-width + particle-glyph + (particle ? 6px : 0px);
                 height: run-text.preferred-height;
                 vertical-stretch: 0;
                 horizontal-stretch: 0;
-                if run.link : TouchArea {
+                // a link and a live mention both go somewhere; a chip whose
+                // page is gone has nothing to open, so it is not a target
+                property <bool> follows: run.link || (run.mention >= 0 && !run.mention-deleted);
+                if follows : TouchArea {
                     mouse-cursor: MouseCursor.pointer;
                     clicked => {
                         UIState.open-link(run.url);
@@ -326,8 +357,29 @@ export component EditorBlock inherits Rectangle {
                     border-width: 1px;
                     border-color: Colors.find-hit-border;
                 }
+                // the chip's own surface, and again after the hit: a search
+                // that lands on a mention must still show the match, so the
+                // hit fill is the one that stays on top
+                if particle : Rectangle {
+                    border-radius: Theme.radius-xs;
+                    // gone = the target page was deleted: the atom keeps its
+                    // shape and loses its colour, which is the same "still
+                    // readable, clearly broken" state a dangling Page block
+                    // shows (ADR-0026 / ADR-0029)
+                    background: run.mention-deleted ? Colors.code-background
+                        : (run.date ? Colors.code-background : Colors.accent-soft);
+                }
+                if particle : Icon {
+                    x: particle-pad;
+                    y: (parent.height - particle-glyph) / 2;
+                    name: run.date ? "clock" : "page";
+                    size: particle-glyph;
+                    color: run.mention-deleted ? Colors.text-muted
+                        : (run.date ? Colors.text-muted : Colors.accent-text);
+                }
                 run-text := Text {
-                    x: 0; y: 0;
+                    x: particle ? particle-pad + particle-glyph + 2px : 0px;
+                    y: 0;
                     wrap: no-wrap;
                     text: run.text;
                     font-family: run.code ? Typography.mono-font
@@ -335,7 +387,11 @@ export component EditorBlock inherits Rectangle {
                     font-size: run.code ? PageType.size-code : body-font-size;
                     font-weight: run.bold ? Typography.weight-bold
                         : (is-heading ? Typography.weight-semibold : Typography.weight-regular);
-                    color: run.link ? Colors.accent-text : block-text-color;
+                    color: run.link ? Colors.accent-text
+                        : run.mention-deleted ? Colors.text-muted
+                        : run.date ? Colors.text-secondary
+                        : run.mention >= 0 ? Colors.accent-text
+                        : block-text-color;
                     line-height-factor: body-line-factor;
                 }
                 if run.strike : Rectangle {
@@ -935,6 +991,21 @@ export component EditorBlock inherits Rectangle {
         stroke-width: 1.6px;
         color: block.page-ref >= 0 ? Colors.text-secondary : Colors.text-muted;
     }
+    // A mirror says which row it is. Two interlocked rings, which is what the
+    // row *is*: one sentence, looked at from somewhere else. The glyph sits in
+    // the gutter the row reserved above, never in the sentence — those words
+    // belong to another block and this is the one thing here that does not.
+    if root.is-synced : Icon {
+        x: content-x;
+        y: top-margin + 2px;
+        name: "link";
+        size: 15px;
+        stroke-width: 1.6px;
+        // resolved and unresolved look alike on purpose: whether the sentence
+        // arrived is said by the words in the column, not by this getting louder
+        color: block.sync-source > 0 ? Colors.text-secondary : Colors.text-muted;
+    }
+
     page-text := Text {
         x: content-x + 26px;
         y: top-margin;
@@ -1086,6 +1157,9 @@ export component EditorBlock inherits Rectangle {
         visible: is-table;
         block: block;
         grid-width: content-width;
+        // the cells raise the "@" picker under their own row (SPEC §四十)
+        anchor-y: row-y + top-margin;
+        anchor-x: content-x;
         hovered: ta.has-hover || handle.hovered || tbl.inner-hover;
     }
 
