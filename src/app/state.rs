@@ -15,6 +15,8 @@ use crate::core::database_formula::{
     self, FormulaError, Program, Val, FORMULA_ERROR_PAINT, FORMULA_MAX_DEPTH,
 };
 use crate::core::database_property::PropertyOptions;
+use crate::core::database_relation;
+use crate::core::database_rollup::{self, Aggregate};
 use crate::core::database_view::{
     all_columns, board_slots, board_window, chart_line_path, chart_pie_paths, date_key,
     day_number_of, day_of, days_in_month, group_window, is_stored_date, layout_metrics,
@@ -200,15 +202,21 @@ pub struct AppState {
     // the request's `search` half, which is what makes it part of the one
     // statement: count, window and group headers all answer the same rows.
     db_search: RefCell<HashMap<i32, String>>,
-    // ─── D6: the formula editor's session state ─────────────────────────────
-    /// How many formula evaluations the *projection* has performed, since
-    /// startup. A counter nothing reads (no code path branches on it): it is
-    /// the number ADR-0083's recompute contract is measured in — "edit one
-    /// cell, and the evaluation count grows by the *window's* formula cells,
-    /// never by the table's rows" is a claim about this number and about
-    /// `COUNT(*)`. Bumped in `db_paint_formulas` only: the editor's preview
-    /// evaluates on demand and is not a projection.
-    db_formula_evals: Cell<u64>,
+    // ─── D6/D8: the computed columns' session state ─────────────────────────
+    /// How many **computed cells the projection has evaluated**, since startup.
+    /// A counter nothing reads (no code path branches on it): it is the number
+    /// ADR-0083's recompute contract is measured in — "edit one cell, and the
+    /// evaluation count grows by the *window's* computed cells, never by the
+    /// table's rows" is a claim about this number and about `COUNT(*)`.
+    ///
+    /// One number for both computed kinds (ADR-0089): a formula cell counts
+    /// when the engine evaluates it, and a *configured* rollup cell counts when
+    /// its fold runs, because "the window's computed cells" is the unit the
+    /// contract is stated in and two counters could quietly disagree about it.
+    /// A relation cell never counts — it is a stored list of ids with no engine
+    /// behind it (ADR-0088). Bumped only in `db_paint_computed`: the editor's
+    /// previews evaluate on demand and are not projections.
+    db_computed_evals: Cell<u64>,
     /// The editor list's own height, in px, reported by `Editor.slint` when it
     /// changes. The window's *viewport height* — the number `core::database::window`
     /// divides by — and a property rather than a callback argument because it is
@@ -787,7 +795,7 @@ impl AppState {
             db_gallery_per_row: RefCell::new(HashMap::new()),
             db_form: RefCell::new(HashMap::new()),
             db_search: RefCell::new(HashMap::new()),
-            db_formula_evals: Cell::new(0),
+            db_computed_evals: Cell::new(0),
             editor_viewport_h: Cell::new(DEFAULT_EDITOR_VIEWPORT_H),
             next_db_id: Cell::new(db_ids.0),
             next_property_id: Cell::new(db_ids.1),
@@ -5928,6 +5936,21 @@ fn property_kind_int(kind: crate::core::database::PropertyKind) -> i32 {
 /// reach that row's cells. Same-row references are the boundary (ADR-0083);
 /// cross-row values are rollup / relation's, which this build does not have
 /// (ADR-0084 — they wait for §四十's reference infrastructure, Track 2).
+/// One visible rollup column, resolved once for a projection (ADR-0089):
+/// the relation whose targets supply the rows, the column of the related
+/// database that gets folded, that column's kind (which is what turns a
+/// stored `CellValue` into the evaluator's `Val`), and the fold.
+///
+/// Resolved once per column per refresh and not once per cell: the config
+/// parse and the two catalog lookups are the *column's* cost, and a window
+/// of thirty rows should pay it once rather than thirty times.
+struct RollupPlan {
+    relation: PropertyId,
+    column: Option<PropertyId>,
+    target_kind: PropertyKind,
+    aggregate: Aggregate,
+}
+
 struct FormulaSource<'a> {
     repo: &'a SqliteRepository,
     /// The one row this source knows how to read. Every path below reads
@@ -7946,6 +7969,356 @@ impl AppState {
         self.db_write_cell(block, record, property, value)
     }
 
+    // ─── SPEC §三十九's relation and rollup (ADR-0088/0089) ─────────────────
+    //
+    // The data path these four functions complete is the whole of the feature
+    // as far as the store is concerned: a relation is a list of record ids and
+    // its mirror is an involution, a rollup is a config and a fold, and both
+    // are enforced here because this is the only layer that holds a catalog and
+    // a store at once. `core::command::plan` sees a `Document` and no SQL, so
+    // every check that needs to know what a column *is* happens before the
+    // command is built — the same split ADR-0082's formula save already uses.
+
+    /// A relation column's settings as the UI reads them: `(target, mirror)`,
+    /// each `-1` for "not set" — the negative-means-absent convention the
+    /// group-by and sort slots already use for one id that may be nothing.
+    pub fn db_relation_config(&self, property: i32) -> (i32, i32) {
+        let config = database_relation::config_relation(&self.db_property_config(property));
+        (
+            config.target.map(|db| db.as_u64() as i32).unwrap_or(-1),
+            config.mirror.map(|p| p.as_u64() as i32).unwrap_or(-1),
+        )
+    }
+
+    /// The records a relation column may point at — the picker's list
+    /// (ADR-0088), capped by the caller's `limit` so that opening a picker over
+    /// a 10 000-row database is not the windowed read's red line undone by the
+    /// back door.
+    pub fn db_relation_candidates(
+        &self,
+        property: i32,
+        needle: &str,
+        limit: usize,
+    ) -> Vec<(i32, String)> {
+        let config = database_relation::config_relation(&self.db_property_config(property));
+        let Some(target) = config.target else {
+            return Vec::new();
+        };
+        let Some(repo) = self.db_repo() else {
+            return Vec::new();
+        };
+        repo.records_named(target, needle, limit)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(record, title)| (record as i32, title))
+            .collect()
+    }
+
+    /// Declare a relation column's target database and its back-pointer
+    /// (ADR-0088), or say why not.
+    ///
+    /// The refusals are `database_relation::check_pair`'s, checked here because
+    /// they need the catalog. An accepted pairing writes **both** documents in
+    /// one batch — this column's `mirror` key, and the other column's keys
+    /// pointing back — because half a pair is a state the very next frame would
+    /// paint as a back-pointer that never appears. A pairing that is *moved* or
+    /// *cleared* unwrites the side being dropped in the same batch, and only
+    /// when that side still names this column: a column re-paired from its own
+    /// end is not ours to unwrite. So the mirror map is an involution after
+    /// every accepted declaration, not merely after the lucky ones.
+    pub fn db_relation_configure(
+        &self,
+        block: i32,
+        property: i32,
+        target: i32,
+        mirror: i32,
+    ) -> Result<(), String> {
+        let Some(db) = self.db_ref_of(block) else {
+            return Err("this block draws no database".into());
+        };
+        let property_id = PropertyId(property as u64);
+        let target = (target >= 0).then(|| DatabaseId(target as u64));
+        let wanted = (mirror >= 0).then(|| PropertyId(mirror as u64));
+        let from;
+        let to;
+        let mut mirrors: Vec<(PropertyId, String, String)> = Vec::new();
+        {
+            let catalog = self.databases.borrow();
+            let Some(forward) = catalog.properties.iter().find(|p| p.id == property_id) else {
+                return Err("that column no longer exists".into());
+            };
+            if forward.db != db || forward.kind != PropertyKind::Relation {
+                return Err("that column is not a relation of this database".into());
+            }
+            from = forward.config.clone();
+            let before = database_relation::config_relation(&from);
+            if let Some(dropped) = before.mirror.filter(|old| Some(*old) != wanted) {
+                if let Some(other) = catalog.properties.iter().find(|p| p.id == dropped) {
+                    let theirs = database_relation::config_relation(&other.config);
+                    if theirs.mirror == Some(property_id) {
+                        let after = database_relation::config_set_relation(
+                            &other.config,
+                            theirs.target,
+                            None,
+                        );
+                        if after != other.config {
+                            mirrors.push((dropped, other.config.clone(), after));
+                        }
+                    }
+                }
+            }
+            if let (Some(target_db), Some(candidate)) = (target, wanted) {
+                let Some(other) = catalog.properties.iter().find(|p| p.id == candidate) else {
+                    return Err("that back-pointer column does not exist".into());
+                };
+                let theirs = database_relation::config_relation(&other.config);
+                database_relation::check_pair(
+                    property_id,
+                    db,
+                    target_db,
+                    candidate,
+                    &database_relation::ColumnFacts {
+                        kind: other.kind,
+                        db: other.db,
+                        target: theirs.target,
+                        mirror: theirs.mirror,
+                    },
+                )
+                .map_err(|refusal| refusal.message().to_string())?;
+                let after = database_relation::config_set_relation(
+                    &other.config,
+                    Some(db),
+                    Some(property_id),
+                );
+                if after != other.config && !mirrors.iter().any(|(id, _, _)| *id == candidate) {
+                    mirrors.push((candidate, other.config.clone(), after));
+                }
+            }
+            to = database_relation::config_set_relation(&from, target, wanted);
+        }
+        if to == from && mirrors.is_empty() {
+            return Ok(());
+        }
+        let cmd = Command::SetRelationConfig {
+            block: BlockId(block as u64),
+            property: property_id,
+            from,
+            to,
+            mirrors,
+        };
+        if self.exec_editor(cmd).is_none() {
+            return Err("the declaration could not be recorded".into());
+        }
+        self.db_refresh(block);
+        Ok(())
+    }
+
+    /// Write a relation cell: the targets the user picked **and the
+    /// back-pointers that pick implies**, in one command and therefore one
+    /// Ctrl+Z (ADR-0088).
+    ///
+    /// An unconfigured relation refuses: a target id nothing can name is a
+    /// value no cell could ever paint, and storing it would be writing a fact
+    /// the database cannot show.
+    pub fn db_pick_relation(
+        &self,
+        block: i32,
+        record: i64,
+        property: i32,
+        targets: &[String],
+    ) -> bool {
+        let Some(repo) = self.db_repo().cloned() else {
+            return false;
+        };
+        let config = database_relation::config_relation(&self.db_property_config(property));
+        if !config.is_configured() {
+            return false;
+        }
+        let property_id = PropertyId(property as u64);
+        let Ok(to) = crate::core::database_property::parse_many(
+            PropertyKind::Relation,
+            "",
+            targets,
+        ) else {
+            return false;
+        };
+        let record_id = RecordId(record as u64);
+        let from = repo
+            .cell(record_id, property_id)
+            .unwrap_or(CellValue::Empty);
+        let mirrors = match config.mirror {
+            Some(mirror) => self.relation_mirrors(&repo, record_id, mirror, &from, &to),
+            None => Vec::new(),
+        };
+        let cmd = Command::SetRelation {
+            block: BlockId(block as u64),
+            record: record_id,
+            property: property_id,
+            from,
+            to,
+            mirrors,
+        };
+        if self.exec_editor(cmd).is_none() {
+            return false;
+        }
+        self.db_refresh(block);
+        true
+    }
+
+    /// The back-pointer writes one pick implies: a target that was **added**
+    /// gains this record in the mirror column's list, a target that was
+    /// **removed** loses it. Both directions are the same list edit on the other
+    /// row, which is why this is one function and not two.
+    ///
+    /// A write that would change nothing is not returned at all — `plan` skips
+    /// an unchanged `CellSet` anyway, and not building it keeps the command's
+    /// contents equal to what actually changed, which is what makes the undo
+    /// entry's size an honest number.
+    fn relation_mirrors(
+        &self,
+        repo: &SqliteRepository,
+        record: RecordId,
+        mirror: PropertyId,
+        from: &CellValue,
+        to: &CellValue,
+    ) -> Vec<(RecordId, PropertyId, CellValue, CellValue)> {
+        let list_of = |value: &CellValue| match value {
+            CellValue::Items(items) => items.clone(),
+            _ => Vec::new(),
+        };
+        let (was, now) = (list_of(from), list_of(to));
+        let me = record.as_u64().to_string();
+        let mut out = Vec::new();
+        let write = |target: &str, join: bool, out: &mut Vec<_>| {
+            let Ok(id) = target.parse::<u64>() else {
+                return;
+            };
+            let target = RecordId(id);
+            let before = repo.cell(target, mirror).unwrap_or(CellValue::Empty);
+            let mut list = list_of(&before);
+            if join {
+                if list.contains(&me) {
+                    return;
+                }
+                list.push(me.clone());
+            } else {
+                let before_len = list.len();
+                list.retain(|held| held != &me);
+                if list.len() == before_len {
+                    return;
+                }
+            }
+            let after = if list.is_empty() {
+                CellValue::Empty
+            } else {
+                CellValue::Items(list)
+            };
+            out.push((target, mirror, before, after));
+        };
+        for target in now.iter().filter(|t| !was.contains(t)) {
+            write(target, true, &mut out);
+        }
+        for target in was.iter().filter(|t| !now.contains(t)) {
+            write(target, false, &mut out);
+        }
+        out
+    }
+
+    /// A rollup column's settings as the UI reads them:
+    /// `(relation, column, aggregate)`, the first two `-1` for "not set" and
+    /// the third the aggregate's index in `Aggregate::ALL`.
+    pub fn db_rollup_config(&self, property: i32) -> (i32, i32, i32) {
+        let config = database_rollup::config_rollup(&self.db_property_config(property));
+        (
+            config.relation.map(|p| p.as_u64() as i32).unwrap_or(-1),
+            config.column.map(|p| p.as_u64() as i32).unwrap_or(-1),
+            Aggregate::ALL
+                .iter()
+                .position(|a| *a == config.aggregate)
+                .unwrap_or(0) as i32,
+        )
+    }
+
+    /// Set a rollup column's relation, target column and fold — or say why not
+    /// (ADR-0089).
+    ///
+    /// Validated only when there are two names to validate: `none` and `count`
+    /// are legal before the second half is picked, which is what lets a rollup
+    /// be configured in two steps instead of refusing every intermediate state.
+    /// The check is `database_rollup::check_config`'s, and the refusal it exists
+    /// for is the one that makes a dependency cycle unrepresentable: a rollup
+    /// may not aggregate another computed column.
+    pub fn db_rollup_configure(
+        &self,
+        block: i32,
+        property: i32,
+        relation: i32,
+        column: i32,
+        aggregate: i32,
+    ) -> Result<(), String> {
+        let Some(db) = self.db_ref_of(block) else {
+            return Err("this block draws no database".into());
+        };
+        let property_id = PropertyId(property as u64);
+        let relation = (relation >= 0).then(|| PropertyId(relation as u64));
+        let column = (column >= 0).then(|| PropertyId(column as u64));
+        let aggregate = Aggregate::ALL
+            .get(aggregate.max(0) as usize)
+            .copied()
+            .unwrap_or_default();
+        let from;
+        let to;
+        {
+            let catalog = self.databases.borrow();
+            let Some(forward) = catalog.properties.iter().find(|p| p.id == property_id) else {
+                return Err("that column no longer exists".into());
+            };
+            if forward.db != db || forward.kind != PropertyKind::Rollup {
+                return Err("that column is not a rollup of this database".into());
+            }
+            from = forward.config.clone();
+            if let (Some(relation_id), Some(column_id)) = (relation, column) {
+                let Some(rel) = catalog.properties.iter().find(|p| p.id == relation_id) else {
+                    return Err("that relation column no longer exists".into());
+                };
+                if rel.db != db {
+                    return Err(database_rollup::ConfigRefusal::NotARelation
+                        .message()
+                        .into());
+                }
+                let rel_config = database_relation::config_relation(&rel.config);
+                let Some(target_db) = rel_config.target else {
+                    return Err(database_rollup::ConfigRefusal::NoTarget.message().into());
+                };
+                let Some(target) = catalog.properties.iter().find(|p| p.id == column_id) else {
+                    return Err("that column does not exist".into());
+                };
+                database_rollup::check_config(&database_rollup::RollupFacts {
+                    relation_kind: rel.kind,
+                    relation_target: rel_config.target,
+                    column_kind: target.kind,
+                    column_is_in_target: target.db == target_db,
+                })
+                .map_err(|refusal| refusal.message().to_string())?;
+            }
+            to = database_rollup::config_set_rollup(&from, relation, column, aggregate);
+        }
+        if from == to {
+            return Ok(());
+        }
+        let cmd = Command::SetDatabaseRollup {
+            block: BlockId(block as u64),
+            property: property_id,
+            from,
+            to,
+        };
+        if self.exec_editor(cmd).is_none() {
+            return Err("the rollup could not be recorded".into());
+        }
+        self.db_refresh(block);
+        Ok(())
+    }
+
     /// Delete one row: its values, the record, and the page it owns when it is
     /// page-backed — one `Entry`, one Ctrl+Z (ADR-0063).
     ///
@@ -8677,7 +9050,7 @@ impl AppState {
     //    The *evaluation count* for that edit is still "the window's formula
     //    cells" (the model is rebuilt on refresh, like every column's paint);
     //    what the dependency precision buys is the *guarantee about which
-    //    values can differ*, and `db_formula_evals` is the counter the unified
+    //    values can differ*, and `db_computed_evals` is the counter the unified
     //    test measures it against — evaluations grow with the window, never
     //    with `COUNT(*)`.
     // 3. **Errors paint, they do not fail the frame.** A formula that cannot
@@ -8686,7 +9059,7 @@ impl AppState {
     //    preview carries the sentence. A blank would read as "no value", which
     //    is a different fact.
 
-    /// `table_rows` plus the formula pass — the one realize shape every layout
+    /// `table_rows` plus the computed pass — the one realize shape every layout
     /// branch uses (table, list, board cards, calendar peeks, gallery, timeline
     /// lanes), so a computed column cannot be painted in one layout and blank
     /// in another. `preload` is the export's per-column sweep; the window path
@@ -8700,8 +9073,213 @@ impl AppState {
         preload: Option<&HashMap<u64, HashMap<u64, CellValue>>>,
     ) -> Vec<TableRowView> {
         let mut view = table_rows(rows, columns, pages);
-        self.db_paint_formulas(db, columns, &mut view, preload);
+        self.db_paint_computed(db, columns, &mut view, preload);
         view
+    }
+
+    /// The computed columns' one entry point (ADR-0082/0088/0089): formulas,
+    /// then the live titles a relation cell paints, then rollups.
+    ///
+    /// Three passes rather than one because they read three different things —
+    /// a row's stored cells, a set of other records by id, and one column of
+    /// those records — and one entry point rather than three call sites so no
+    /// layout can paint one computed kind in an arm and blank another. Each pass
+    /// is a no-op when its kind is not visible, so a database with no computed
+    /// column pays three folds over the column list.
+    fn db_paint_computed(
+        &self,
+        db: DatabaseId,
+        columns: &[TableColumn],
+        rows: &mut [TableRowView],
+        preload: Option<&HashMap<u64, HashMap<u64, CellValue>>>,
+    ) {
+        if rows.is_empty() {
+            return;
+        }
+        self.db_paint_formulas(db, columns, rows, preload);
+        self.db_paint_relations(columns, rows);
+        self.db_paint_rollups(columns, rows);
+    }
+
+    /// Paint every visible **relation** cell with the live titles of its targets
+    /// (ADR-0088). The stored value is a list of record ids; what a reader sees
+    /// is what those records are called *now* — which is exactly why this is a
+    /// projection pass and not a stored string: renaming a target moves every
+    /// cell that names it without a single write, and there is no second copy
+    /// that could fall out of step.
+    ///
+    /// **Two batched reads, however many cells are on screen**: one for the
+    /// window's target ids (the same `db_value_items` query the row read runs
+    /// for its list columns) and one for the union of the records those ids
+    /// name. A window of thirty rows whose relation columns point at a hundred
+    /// records costs two statements, not a hundred — and the target *database*
+    /// is never walked, for the reason ADR-0067 gives about the row table.
+    fn db_paint_relations(&self, columns: &[TableColumn], rows: &mut [TableRowView]) {
+        let Some(repo) = self.db_repo() else {
+            return;
+        };
+        let visible: Vec<usize> = columns
+            .iter()
+            .enumerate()
+            .filter(|(_, column)| column.kind == PropertyKind::Relation)
+            .map(|(at, _)| at)
+            .collect();
+        if visible.is_empty() {
+            return;
+        }
+        let records: Vec<RecordId> = rows.iter().map(|row| RecordId(row.record)).collect();
+        let mut items_of: Vec<(usize, HashMap<u64, Vec<String>>)> = Vec::new();
+        let mut wanted: Vec<u64> = Vec::new();
+        for at in visible {
+            // A read that fails paints nothing for this column rather than
+            // failing the frame: an unwritable cell is a blank one, and the
+            // alternative is a table that refuses to draw because one relation
+            // column could not be resolved.
+            let Ok(items) = repo.cell_items(&records, columns[at].property) else {
+                continue;
+            };
+            for targets in items.values() {
+                wanted.extend(targets.iter().filter_map(|t| t.parse::<u64>().ok()));
+            }
+            items_of.push((at, items));
+        }
+        if items_of.is_empty() {
+            return;
+        }
+        // One lookup for the union: a record two rows both point at is named
+        // once, and the ids are sorted so the query's plan is the same shape
+        // every refresh.
+        wanted.sort_unstable();
+        wanted.dedup();
+        let targets: Vec<RecordId> = wanted.iter().copied().map(RecordId).collect();
+        let names = repo.record_titles(&targets).unwrap_or_default();
+        for row in rows.iter_mut() {
+            for (at, items) in &items_of {
+                let Some(targets) = items.get(&row.record) else {
+                    continue;
+                };
+                let painted = database_relation::paint_targets(targets, |target| {
+                    target
+                        .parse::<u64>()
+                        .ok()
+                        .and_then(|id| names.get(&id).cloned())
+                });
+                if let Some(cell) = row.cells.get_mut(*at) {
+                    cell.painted = painted;
+                }
+            }
+        }
+    }
+
+    /// Paint every visible **rollup** cell (ADR-0089): fold one column of the
+    /// records the row's relation points at, with the aggregate the column's
+    /// config names.
+    ///
+    /// Three batched reads per rollup column per refresh — the relation's
+    /// targets, the target column's values, and nothing else. The work is
+    /// bounded by the window's **fan-out** (how many records its rows point at)
+    /// and never by the target table's size: no path walks the related
+    /// database, and no value is cached across refreshes (ADR-0083's decision,
+    /// whose reasons are undo, redo and the bulk paths).
+    ///
+    /// A fold that cannot fold — a text column summed, an id that names no
+    /// record — paints [`FORMULA_ERROR_PAINT`], the same word a formula's
+    /// failure paints, because to a reader they are the same event.
+    fn db_paint_rollups(&self, columns: &[TableColumn], rows: &mut [TableRowView]) {
+        let Some(repo) = self.db_repo() else {
+            return;
+        };
+        let catalog = self.databases.borrow();
+        let plans: Vec<(usize, RollupPlan)> = columns
+            .iter()
+            .enumerate()
+            .filter(|(_, column)| column.kind == PropertyKind::Rollup)
+            .filter_map(|(at, column)| {
+                let config = database_rollup::config_rollup(
+                    &catalog
+                        .properties
+                        .iter()
+                        .find(|p| p.id == column.property)?
+                        .config,
+                );
+                let (relation, aggregate) = (config.relation?, config.aggregate);
+                if !config.is_configured() {
+                    return None;
+                }
+                // The fold's second input is a column of the *related*
+                // database, so its kind is a second lookup: an unreadable one
+                // (a hand-edited config naming a column that is gone, or one
+                // that is computed) paints nothing rather than recursing.
+                let target_kind = config
+                    .column
+                    .and_then(|column| catalog.properties.iter().find(|p| p.id == column))
+                    .map(|property| property.kind);
+                if aggregate.reads_column() && target_kind.is_none() {
+                    return None;
+                }
+                Some((
+                    at,
+                    RollupPlan {
+                        relation,
+                        column: config.column,
+                        target_kind: target_kind.unwrap_or(PropertyKind::Text),
+                        aggregate,
+                    },
+                ))
+            })
+            .collect();
+        if plans.is_empty() {
+            return;
+        }
+        let records: Vec<RecordId> = rows.iter().map(|row| RecordId(row.record)).collect();
+        for (at, plan) in plans {
+            let Ok(items) = repo.cell_items(&records, plan.relation) else {
+                continue;
+            };
+            // The values of the target column for every record the window's
+            // relations name — one read, and an empty one for a fold that reads
+            // no column (`count` still counts the *targets*, which is the
+            // number it is asked for).
+            let values = match plan.column {
+                Some(property) if plan.aggregate.reads_column() => {
+                    let mut targets: Vec<u64> = items
+                        .values()
+                        .flat_map(|list| list.iter().filter_map(|t| t.parse::<u64>().ok()))
+                        .collect();
+                    targets.sort_unstable();
+                    targets.dedup();
+                    let ids: Vec<RecordId> = targets.into_iter().map(RecordId).collect();
+                    repo.values_of(&ids, property).unwrap_or_default()
+                }
+                _ => HashMap::new(),
+            };
+            for row in rows.iter_mut() {
+                let targets = items.get(&row.record);
+                let related = targets.map(|list| list.len()).unwrap_or(0);
+                let folded: Vec<Val> = match (targets, plan.column) {
+                    (Some(list), Some(_)) if plan.aggregate.reads_column() => list
+                        .iter()
+                        .filter_map(|target| {
+                            let id = target.parse::<u64>().ok()?;
+                            let value = values.get(&id)?;
+                            Some(database_formula::val_of(plan.target_kind, value))
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                let painted = match database_rollup::fold(plan.aggregate, &folded, related) {
+                    Ok(value) => database_rollup::paint(&value),
+                    Err(_) => FORMULA_ERROR_PAINT.to_string(),
+                };
+                // The counter ADR-0083/ADR-0089's contract is measured in: one
+                // bump per (row × visible configured rollup column), the same
+                // unit the formula loop below counts in.
+                self.db_computed_evals.set(self.db_computed_evals.get() + 1);
+                if let Some(cell) = row.cells.get_mut(at) {
+                    cell.painted = painted;
+                }
+            }
+        }
     }
 
     /// Compute and paint every **visible formula column** of `rows` — the one
@@ -8763,7 +9341,7 @@ impl AppState {
                 // (row × visible formula column) evaluation. After editing one
                 // cell it grows by the *window's* formula cells — never by the
                 // table's rows (see the section comment, contract 1).
-                self.db_formula_evals.set(self.db_formula_evals.get() + 1);
+                self.db_computed_evals.set(self.db_computed_evals.get() + 1);
                 if let Some(cell) = row.cells.get_mut(*at) {
                     cell.painted = painted;
                 }
@@ -8816,7 +9394,7 @@ impl AppState {
     /// refuses on.
     ///
     /// One evaluation per call, against one row: the preview is not a
-    /// projection and does not touch `db_formula_evals` (the section comment's
+    /// projection and does not touch `db_computed_evals` (the section comment's
     /// contract 1 measures projections).
     pub fn db_formula_preview(
         &self,
