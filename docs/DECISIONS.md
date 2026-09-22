@@ -4311,3 +4311,137 @@ Consequences:
   database realizes its viewport's rows, never the matches.
 * Unverified (no cargo was run): the per-keystroke cost, the OR-of-INSTR SQL text against
   `EXPLAIN QUERY PLAN`, and the box's pixels. Named in REPORT §D7.
+
+## ADR-0088 · A relation is a list of target record ids, and its mirror is an involution rather than a graph to walk
+
+Decision: SPEC §三十九's 「需计算：formula / rollup / relation（含双向关系）」, the third
+of the three, which ADR-0084 left unbuilt on purpose. This knife builds it, and the shape
+ADR-0084 wrote down is the shape that landed:
+
+* **A relation column stores what the user picked — target `RecordId`s — as
+  `CellValue::Items`**, one `db_value_items` row per target, in display order. So
+  `PropertyKind::Relation` stops being a computed kind: `is_computed()` is false for it,
+  `is_list()` is true, and `value_kind()` is `Items`. Nothing about ADR-0062's storage
+  shape changes; a relation is the third user of the list mechanism after multi-select and
+  files, which is exactly why ADR-0084 named it as the candidate that fits. **No
+  migration.**
+
+* **The target identity is the `RecordId`, not the `PageId`** — a deliberate departure from
+  ADR-0084's letter, which said a relation 「points at §四十's reference layer for its chips,
+  its backlinks and its open-link path」. §四十's reference layer addresses *pages*
+  (`quire://page/<id>`, ADR-0026/0050), and ADR-0063 makes a record page-less until someone
+  opens it: a relation storing page ids could not name most of the rows it points at, and
+  would have to create a page per pick — the opposite of the laziness ADR-0063 chose
+  deliberately. What ADR-0084 was protecting is the *discipline*, not the plumbing:
+  **store ids and never titles, so a renamed target shows its live name with no rewrite.**
+  That discipline is inherited whole, and it needed no new lookup to do it — the chip's text
+  is read at projection time through the existing `SqliteRepository::record_title`, which is
+  ADR-0063's `COALESCE` and already the one place a record's title lives (the page's title
+  when it has a page, the `title` value row when it does not). The open-link path is the
+  row's existing Open action, which is what already turns a bare record into a page.
+
+* **Config** (ADR-0061's one document per column): `{"target": <database id>, "mirror":
+  <property id>}`. `target` is the database the relation points at — a relation is *about*
+  one other database, and a relation with no readable target paints nothing and refuses a
+  pick. `mirror` is optional and names the **back-pointer column in the target database**,
+  which is the whole of what "two-way" means here.
+
+* **Two-way is one write.** `Command::SetRelation` carries the forward cell change *and*
+  every back-pointer change, and `plan` emits them as one `Entry` — one `apply` list, one
+  `revert` list, one Ctrl+Z. This is ADR-0084's requirement taken literally (「the forward
+  change and the back-pointers land in one change batch」), and it is the shape
+  `DeleteDatabaseRecord` already has for its values + record + page together.
+
+* **The mirror map is an involution with no fixed points, not a graph to walk.** Writing a
+  forward change touches the direct mirror and never descends further, so the write
+  terminates by construction — *if* the pairing is legal. It is legal exactly when
+  `mirror(mirror(a)) == a` and `mirror(a) != a`. So the save refuses four things: a column
+  that would be its own mirror; a `mirror` naming a property that is not a `relation` in
+  the target database; a `mirror` whose own target is not this column's database (then it is
+  not a back-pointer, it is a coincidence); and a `mirror` that already declares a
+  *different* partner. The first accepted declaration writes both sides in one batch; after
+  that the two are each other's, and the refusal is what keeps them so.
+
+  This is ADR-0084's 「relation 环检测在保存时做」 read precisely. The only cycle a relation
+  can have is a cycle in the mirror map, because a relation's *value* is a stored fact and
+  not a computed one — there is no dependency order for it to be missing from. Making the
+  map an involution is stronger than refusing a cycle after the fact: **cycles are not
+  representable**, so the read path needs no depth cap to survive one.
+
+* **A dangling target degrades, it does not fail.** A target record that was deleted, or an
+  id naming no row in this library (a hand-edited file, an old backup), paints the one word
+  ADR-0051 gave a dangling mention. The cell still counts it: the stored value is the fact
+  "the user picked this", and "what is it called now" is a separate question the store may
+  answer with "nothing".
+
+Consequences:
+
+* `PropertyKind::is_computed` loses `Relation`; `is_list` and `value_kind` gain it. The
+  three call sites that used `is_computed` to mean "this column stores no cell"
+  (`database_property::parse_one`, `table_rows`'s `editable`, `database_store`'s two read
+  paths) now mean what they say. `parse_one` keeps refusing a relation — it *is* a list
+  kind, and its input is `parse_many`'s — and `parse_many` gains an arm that accepts only
+  strings that spell record ids.
+* ADR-0084's handover is discharged: all four of its fixed points (ids not titles, one
+  batch, save-time refusal, rollup over the relation's targets) are implemented, and the one
+  place this ADR departs from its letter — record ids rather than page ids — is stated above
+  rather than buried.
+* Unverified: real clicking in the picker, the chip's pixels, and the cost of a pick on a
+  10 000-row target database. Named in `docs/REPORT_TRACK3.md`.
+
+## ADR-0089 · A rollup aggregates the related records' one column at projection time, and cannot depend on another rollup
+
+Decision: the last third of SPEC §三十九's 「需计算：formula / rollup / relation」. ADR-0084
+fixed the shape; this is the code, and every part of it is that ADR's handover taken up.
+
+* **Config**: `{"relation": <property id>, "column": <property id>, "aggregate": "<word>"}` in
+  the rollup column's own document — ADR-0061's one bit of JSON per column, the same home
+  ADR-0082 gave the formula expression, and the same read-edit-write discipline (ADR-0074)
+  when it is set. `relation` names a relation column **of this rollup's own database** (the
+  rollup's row supplies the targets); `column` names a property **of the relation's target
+  database** (what gets aggregated); `aggregate` is one of six — `sum` / `count` / `min` /
+  `max` / `average` / `none`.
+
+* **`none` is one of the six aggregates.** `count` counts the related records, `sum` /
+  `min` / `max` / `average` fold the target column's values with the same `Val` arithmetic
+  `core::database_formula` already defines — so a rollup and a formula agree about what `min`
+  of two dates is, because it is literally the same function, not a second implementation
+  that could drift. `none` is the identity: the cell paints nothing. That is what a rollup is
+  *before* its two columns are picked, and it is the same one-representation-of-nothing rule
+  ADR-0062 uses for cells and ADR-0086 for templates.
+
+* **Values are computed at projection time and stored nowhere** (ADR-0062), and the recompute
+  unit is ADR-0083's, unchanged: the realized window × the visible rollup columns. For one
+  refresh the projection makes **one batched read per rollup column**, not one per cell — the
+  window's rows hand over every target id they name, and a single statement answers
+  `record IN (…) AND property = ?`. The work is bounded by the window's *fan-out* (how many
+  records the window's rows point at) and never by the target table's size: there is no path
+  that walks the target database, for the same reason ADR-0067 has no path that walks the row
+  table.
+
+* **A rollup's target column may not itself be computed, which makes a dependency cycle
+  unrepresentable rather than refused.** This is stronger than ADR-0084's save-time check, and
+  it is the honest version of it. A rollup has exactly two inputs: a *stored* relation cell on
+  its own row, and one column of the records that relation names. A formula is same-row by
+  construction (ADR-0083: the engine's cell callback has no record parameter), so a rollup
+  targeting a formula reads a value that cannot reach back to it. The one shape that could
+  close a loop is a rollup targeting *another rollup*, and the config write refuses that —
+  along with a target that is a relation column (aggregating ids is not a thing a user asked
+  for) and a target that is not a column of the relation's target database at all. The two
+  derived stamps (`created time` / `last edited time`) *are* admitted, because they are
+  readable through the same one batched read and aggregating them is a common rollup. What
+  remains for the read path is the cap ADR-0084 promised: `ROLLUP_MAX_DEPTH`, small, for a
+  document that arrived by hand and nests a rollup where the writer would have refused.
+
+Consequences:
+
+* ADR-0084's 「rollup inherits it whole」 is what happened: the window bound, the counter and
+  the "no cross-refresh value cache" decision all carry over unchanged, and
+  `db_formula_evals` now counts rollup evaluations too — so the number the unified tests
+  measure (「editing one cell recomputes the window, never the table」) is one number for both
+  computed kinds rather than two that could quietly disagree.
+* The Markdown export gets rollup cells the way it already gets formula cells: by *rendering
+  the view*, not by learning about rollups (ADR-0065's discipline). No export-side code knows
+  a rollup exists.
+* Unverified: the six aggregates' pixels, the rollup editor's behaviour, and the measured
+  cost of a rollup column over a 10 000-row target database. Named in the report.
