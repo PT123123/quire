@@ -9,7 +9,7 @@
 use crate::app::workspace::{SearchHit, Workspace, BENCH_ID_BASE, MAX_RECENTS};
 use crate::core::database::{
     CellValue, DatabaseCatalog, DatabaseDraft, DatabaseId, Property, PropertyId, PropertyKind,
-    RecordId, RowRequest, RowWindow, SortSpec, ViewGeometry, ViewId,
+    RecordId, RowRequest, RowWindow, SortSpec, ViewGeometry, ViewId, ViewLayout,
 };
 use crate::core::database_formula::{
     self, FormulaError, Program, Val, FORMULA_ERROR_PAINT, FORMULA_MAX_DEPTH,
@@ -20,7 +20,7 @@ use crate::core::database_rollup::{self, Aggregate};
 use crate::core::database_view::{
     all_columns, board_slots, board_window, chart_line_path, chart_pie_paths, date_key,
     day_number_of, day_of, days_in_month, group_window, is_stored_date, layout_metrics,
-    month_cells, month_key, month_label, shift_month, table_columns, table_rows, view_columns,
+    month_cells, month_key, shift_month, table_columns, table_rows, view_columns,
     CALENDAR_PEEK, ChartKind, FilterClause, FilterNode, FilterOp, FilterValue, FlatClause,
     FlatFilter, GroupKey, GroupSpec, LayoutSupport, TableColumn, TableRowView, TableView,
     ViewDefinition, ViewRules, ViewTab, WIDTH_AUTO, WIDTH_MIN, WIDTH_UNIT,
@@ -410,7 +410,7 @@ fn version_label(label: &str, taken: usize) -> String {
         .take(60)
         .collect();
     if one_line.is_empty() {
-        return format!("Version {}", taken + 1);
+        return format!("版本 {}", taken + 1);
     }
     one_line
 }
@@ -439,11 +439,11 @@ pub fn version_rows(versions: &[(i64, String)]) -> Vec<VersionRow> {
 /// number someone might stop updating.
 pub fn versions_note(count: usize) -> String {
     format!(
-        "{} of this page. Quire keeps the {} newest and lets the oldest go.",
+        "此页面共有{}。Quire 只保留最新的 {} 个，更早的会被丢弃。",
         if count == 1 {
-            "1 version".into()
+            "1 个版本".into()
         } else {
-            format!("{count} versions")
+            format!("{count} 个版本")
         },
         crate::storage::versions::MAX_PER_PAGE,
     )
@@ -466,7 +466,7 @@ pub fn version_diff_note(lines: &[crate::core::diff::DiffLine]) -> String {
         .filter(|l| l.mark == crate::core::diff::DiffMark::Added)
         .count();
     let removed = lines.len() - added;
-    format!("{added} lines arrived, {removed} went. Restoring puts every one of them back.")
+    format!("新增 {added} 行，删除 {removed} 行。恢复会把它们全部还原。")
 }
 
 /// Mirror the library's version index out of the metadata rows it persisted
@@ -627,7 +627,7 @@ impl AppState {
                 }) {
                     let first_line = summary.lines().next().unwrap_or(summary);
                     abort_notice = Some(format!(
-                        "the previous session ended unexpectedly: {first_line}"
+                        "上次会话意外结束：{first_line}"
                     ));
                 }
             }
@@ -658,7 +658,7 @@ impl AppState {
                 }
                 Err(e) => {
                     attachment_notice =
-                        Some(format!("attachments could not be loaded: {e}"));
+                        Some(format!("附件无法加载：{e}"));
                 }
             }
         }
@@ -747,7 +747,7 @@ impl AppState {
                 Err(e) => (
                     DatabaseCatalog::default(),
                     (1, 1, 1, 1),
-                    Some(format!("database layer unreadable: {e}")),
+                    Some(format!("数据库层无法读取：{e}")),
                 ),
             },
             None => (DatabaseCatalog::default(), (1, 1, 1, 1), None),
@@ -903,7 +903,7 @@ impl AppState {
 
         let favorites = ws.favorites();
         if !favorites.is_empty() {
-            push(&mut rows, &mut y, header("Favorites"));
+            push(&mut rows, &mut y, header("收藏"));
             for (id, title) in favorites {
                 push(
                     &mut rows,
@@ -914,7 +914,7 @@ impl AppState {
         }
         let recents = ws.recents();
         if !recents.is_empty() {
-            push(&mut rows, &mut y, header("Recent"));
+            push(&mut rows, &mut y, header("最近"));
             for (id, title) in recents.iter().take(MAX_RECENTS) {
                 push(
                     &mut rows,
@@ -929,7 +929,7 @@ impl AppState {
             &mut y,
             SidebarNode {
                 id: WORKSPACE_HEADER_ID,
-                label: "Workspace".into(),
+                label: "工作区".into(),
                 kind: "header".into(),
                 depth: 0,
                 expanded: false,
@@ -957,7 +957,7 @@ impl AppState {
         // trailing "new page" action row
         rows.push(SidebarNode {
             id: ROW_NEW_PAGE,
-            label: "New page".into(),
+            label: "新建页面".into(),
             kind: "new-page".into(),
             depth: 0,
             expanded: false,
@@ -1435,7 +1435,7 @@ impl AppState {
     pub fn note_locked(&self) {
         // `…` and not `⋯`: U+22EF is outside Segoe UI's face, so the midline
         // dots painted as a hole where the button's name should be.
-        const LINE: &str = "This page is locked — … → Unlock page to edit.";
+        const LINE: &str = "此页面已锁定 — … → 解锁页面后可编辑。";
         match self.ui.borrow().clone().and_then(|ui| ui.upgrade()) {
             Some(g) => {
                 if g.get_db_notice().as_str() != LINE {
@@ -1605,7 +1605,7 @@ impl AppState {
         let blocks = self.doc.borrow().page_blocks(page).to_vec();
         let session = FindSession::new(term, &blocks);
         let label = if session.is_empty() {
-            "no matches".to_string()
+            "无匹配".to_string()
         } else {
             format!("0 / {}", session.total())
         };
@@ -1747,7 +1747,7 @@ impl AppState {
             .map(|(index, (_, title))| SlashRow {
                 id: TEMPLATE_SLASH_BASE + index as i32,
                 label: title.into(),
-                hint: "Template".into(),
+                hint: "模板".into(),
                 disabled: false,
             })
             .collect()
@@ -1856,26 +1856,26 @@ impl AppState {
     ///   IMAGE_WIDTH_BASE+percent / CODE_LANG_BASE+index of `Lang::ALL`
     pub fn fill_block_menu(&self, id: i32) {
         let mut rows = vec![
-            row(7, "Turn into", "chevron-right", false, -1, false),
-            row(3, "Duplicate", "copy", false, -1, false),
-            row(9, "Copy link to block", "link", false, -1, false),
-            row(10, "Move to", "arrow-right", false, -1, false),
-            row(11, "Text color", "palette", false, -1, false),
-            row(12, "Background color", "palette", false, -1, false),
-            row(1, "Move up", "chevron-up", false, -1, false),
-            row(2, "Move down", "chevron-down", false, -1, false),
-            row(4, "Copy block", "copy", false, -1, false),
+            row(7, "转换为", "chevron-right", false, -1, false),
+            row(3, "复制", "copy", false, -1, false),
+            row(9, "复制块链接", "link", false, -1, false),
+            row(10, "移动到", "arrow-right", false, -1, false),
+            row(11, "文字颜色", "palette", false, -1, false),
+            row(12, "背景颜色", "palette", false, -1, false),
+            row(1, "上移", "chevron-up", false, -1, false),
+            row(2, "下移", "chevron-down", false, -1, false),
+            row(4, "复制块", "copy", false, -1, false),
         ];
         if self.block_kind(id) == Some(BlockKind::Image) {
-            rows.insert(1, row(13, "Image width", "chevron-right", false, -1, false));
+            rows.insert(1, row(13, "图片宽度", "chevron-right", false, -1, false));
         }
         if self.block_kind(id) == Some(BlockKind::Code) {
-            rows.insert(1, row(14, "Language", "chevron-right", false, -1, false));
+            rows.insert(1, row(14, "语言", "chevron-right", false, -1, false));
         }
         if self.clipboard.borrow().is_some() {
-            rows.push(row(5, "Paste below", "import", false, -1, false));
+            rows.push(row(5, "粘贴到下方", "import", false, -1, false));
         }
-        rows.push(row(6, "Delete", "trash", true, -1, false));
+        rows.push(row(6, "删除", "trash", true, -1, false));
         // A locked page keeps the two rows that only take information out
         // (SPEC §三十八: "⋮⋮ 的编辑项全部关闭"). They are dropped rather than
         // greyed because this menu has no disabled state, and a row that lies
@@ -1896,7 +1896,7 @@ impl AppState {
             .borrow()
             .block(BlockId(id.max(0) as u64))
             .map(|b| b.img_percent as i32);
-        let mut rows = vec![row(8, "Back", "chevron-left", false, -1, false)];
+        let mut rows = vec![row(8, "返回", "chevron-left", false, -1, false)];
         for percent in [25, 50, 100] {
             let mut menu_row = row(
                 AppState::IMAGE_WIDTH_BASE + percent,
@@ -1923,7 +1923,7 @@ impl AppState {
             .borrow()
             .block(BlockId(id.max(0) as u64))
             .map(|b| b.lang);
-        let mut rows = vec![row(8, "Back", "chevron-left", false, -1, false)];
+        let mut rows = vec![row(8, "返回", "chevron-left", false, -1, false)];
         for (index, lang) in Lang::ALL.iter().enumerate() {
             let mut menu_row = row(
                 AppState::CODE_LANG_BASE + index as i32,
@@ -1943,7 +1943,7 @@ impl AppState {
     /// the block's own. Action ids encode the target kind as 100 + kind int.
     pub fn fill_block_menu_turn_into(&self, id: i32) {
         let current = self.block_kind(id);
-        let mut rows = vec![row(8, "Back", "chevron-left", false, -1, false)];
+        let mut rows = vec![row(8, "返回", "chevron-left", false, -1, false)];
         for (kind, label, _) in TURN_INTO_ITEMS {
             if Some(*kind) != current {
                 let icon = match kind {
@@ -1976,7 +1976,7 @@ impl AppState {
     /// depth-indented with em spaces. Targets are MOVE_TO_BASE + page id.
     pub fn fill_block_menu_move_to(&self) {
         let current = self.open_page.get();
-        let mut rows = vec![row(8, "Back", "chevron-left", false, -1, false)];
+        let mut rows = vec![row(8, "返回", "chevron-left", false, -1, false)];
         let ws = self.workspace.borrow();
         fn walk(
             ws: &Workspace,
@@ -1988,7 +1988,7 @@ impl AppState {
             for id in ws.children_of(parent) {
                 if id != skip {
                     let indent = "\u{2003}".repeat(depth);
-                    let title = ws.title_of(id).unwrap_or("Untitled");
+                    let title = ws.title_of(id).unwrap_or("无标题");
                     out.push(row(
                         AppState::MOVE_TO_BASE + id,
                         format!("{indent}{title}"),
@@ -2005,7 +2005,7 @@ impl AppState {
         drop(ws);
         if rows.len() == 1 {
             // inert row (id -1 is swallowed by the controller's id guard)
-            rows.push(row(-1, "No other page", "page", false, -1, false));
+            rows.push(row(-1, "没有其他页面", "page", false, -1, false));
         }
         self.block_menu.set_vec(rows);
     }
@@ -2020,20 +2020,20 @@ impl AppState {
             .borrow()
             .block(BlockId(id.max(0) as u64))
             .map(|b| if background { b.background } else { b.color });
-        let mut rows = vec![row(8, "Back", "chevron-left", false, -1, false)];
+        let mut rows = vec![row(8, "返回", "chevron-left", false, -1, false)];
         for (i, kind) in ColorKind::ALL.iter().enumerate() {
             let base = if background { AppState::COLOR_BG_BASE } else { AppState::COLOR_TEXT_BASE };
             let label = match kind {
-                ColorKind::Default => "Default",
-                ColorKind::Gray => "Gray",
-                ColorKind::Brown => "Brown",
-                ColorKind::Orange => "Orange",
-                ColorKind::Yellow => "Yellow",
-                ColorKind::Green => "Green",
-                ColorKind::Blue => "Blue",
-                ColorKind::Purple => "Purple",
-                ColorKind::Pink => "Pink",
-                ColorKind::Red => "Red",
+                ColorKind::Default => "默认",
+                ColorKind::Gray => "灰色",
+                ColorKind::Brown => "棕色",
+                ColorKind::Orange => "橙色",
+                ColorKind::Yellow => "黄色",
+                ColorKind::Green => "绿色",
+                ColorKind::Blue => "蓝色",
+                ColorKind::Purple => "紫色",
+                ColorKind::Pink => "粉色",
+                ColorKind::Red => "红色",
             };
             // the check renders as an icon (MenuRow.check): the software
             // renderer has no font fallback, so glyph marks are unreliable
@@ -2504,7 +2504,7 @@ impl AppState {
     pub fn paste_image(&self, id: i32, png: &[u8]) -> bool {
         let Ok(att) = self
             .store
-            .import_bytes(self.claim_attachment_id(), "Pasted image", png)
+            .import_bytes(self.claim_attachment_id(), "粘贴的图片", png)
         else {
             return false;
         };
@@ -2678,10 +2678,10 @@ impl AppState {
     pub fn backup_now(&self) -> Result<String, String> {
         match self.repo.as_ref().filter(|r| r.path().is_some()) {
             Some(r) => match r.snapshot() {
-                Ok(()) => Ok("a fresh backup was created".into()),
+                Ok(()) => Ok("已创建新的备份".into()),
                 Err(e) => Err(e.to_string()),
             },
-            None => Ok("running in memory — nothing to back up".into()),
+            None => Ok("运行于内存模式 — 无需备份".into()),
         }
     }
 
@@ -2701,7 +2701,7 @@ impl AppState {
     /// nothing, which is the only honest answer to "I cannot see the references".
     pub fn reclaim_attachments(&self) -> Result<String, String> {
         let Some(repo) = self.repo.as_ref().filter(|r| r.path().is_some()) else {
-            return Ok("running in memory — nothing to reclaim".into());
+            return Ok("运行于内存模式 — 无需清理".into());
         };
         // Queue first, sweep second. The debounced writer may still hold an
         // `AttachmentAdded` for a picture this session has already dropped from
@@ -2709,7 +2709,7 @@ impl AppState {
         // the row *behind* pointing at files this call is about to remove.
         if let Some(p) = &self.persistence {
             if let Err(e) = p.force_flush() {
-                return Err(format!("the queued edits could not be written ({e})"));
+                return Err(format!("排队的编辑无法写入（{e}）"));
             }
         }
 
@@ -2744,7 +2744,7 @@ impl AppState {
             .cloned()
             .collect();
         if doomed.is_empty() {
-            return Ok("no unused attachments to remove".into());
+            return Ok("没有可移除的未使用附件".into());
         }
 
         let changes: Vec<Change> = doomed
@@ -2767,15 +2767,13 @@ impl AppState {
 
         let removed = doomed.len();
         let mut notice = format!(
-            "{removed} unused attachment{} removed ({})",
-            if removed == 1 { "" } else { "s" },
+            "已移除 {removed} 个未使用的附件（{}）",
             crate::services::attachment_store::format_size(freed),
         );
         if !stuck.is_empty() {
             notice.push_str(&format!(
-                ", but {} file{} could not be deleted",
+                "，但有 {} 个文件无法删除",
                 stuck.len(),
-                if stuck.len() == 1 { "" } else { "s" }
             ));
         }
         Ok(notice)
@@ -2934,7 +2932,7 @@ impl AppState {
     }
 
     pub fn create_page(&self, parent: Option<i32>) -> i32 {
-        let id = self.workspace.borrow_mut().create(parent, "Untitled");
+        let id = self.workspace.borrow_mut().create(parent, "无标题");
         // the new page is the last sibling: order = previous last + 1
         let order = {
             let kids = self.workspace.borrow().children_of(parent);
@@ -2949,7 +2947,7 @@ impl AppState {
         self.page_order.borrow_mut().insert(id, order);
         self.record(vec![Change::PageCreated(crate::core::Page {
             id: PageId(id as u32 as u64),
-            title: "Untitled".into(),
+            title: "无标题".into(),
             parent: parent.map(|v| PageId(v as u32 as u64)),
             order,
             favorite: false,
@@ -3070,7 +3068,7 @@ impl AppState {
             .borrow()
             .title_of(page)
             .filter(|t| !t.trim().is_empty())
-            .unwrap_or("Untitled template")
+            .unwrap_or("未命名模板")
             .to_string();
         let src = {
             let doc = self.doc.borrow();
@@ -3159,7 +3157,7 @@ impl AppState {
     /// This is `create_page` and then the insert, which is the point: the new
     /// page is an ordinary page from its first change on — in the tree, in
     /// search, on its own undo stack — and the template stays hidden behind it.
-    /// It takes the template's name, since "Untitled" for a page the user just
+    /// It takes the template's name, since "无标题" for a page the user just
     /// chose a shape for says nothing. `create_page` already opened it, and a
     /// fresh page has no rows, so the copy lands with `anchor: None`.
     pub fn new_page_from_template(&self, parent: Option<i32>, template: i32) -> i32 {
@@ -3537,7 +3535,7 @@ impl AppState {
             rows.push(SlashRow {
                 id: MENTION_DATE_ROW,
                 label: today.into(),
-                hint: "Today".into(),
+                hint: "今天".into(),
                 disabled: false,
             });
         }
@@ -3816,7 +3814,7 @@ impl AppState {
                 return None;
             }
         }
-        let child = self.workspace.borrow_mut().create(Some(parent_page), "Untitled");
+        let child = self.workspace.borrow_mut().create(Some(parent_page), "无标题");
         let order = {
             let kids = self.workspace.borrow().children_of(Some(parent_page));
             let map = self.page_order.borrow();
@@ -3830,12 +3828,12 @@ impl AppState {
         self.page_order.borrow_mut().insert(child, order);
         self.workspace
             .borrow_mut()
-            .set_search_text(child, "Untitled".into());
+            .set_search_text(child, "无标题".into());
         let child_id = PageId(child as u32 as u64);
         let changes = vec![
             Change::PageCreated(crate::core::Page {
                 id: child_id,
-                title: "Untitled".into(),
+                title: "无标题".into(),
                 parent: Some(PageId(parent_page as u32 as u64)),
                 order,
                 favorite: false,
@@ -4197,11 +4195,11 @@ impl AppState {
         let n = ws.subtree_size(id);
         let message = if n > 1 {
             format!(
-                "“{title}” and its {} sub-pages will be deleted. This cannot be undone.",
+                "“{title}”及其 {} 个子页面将被删除。此操作无法撤销。",
                 n - 1
             )
         } else {
-            format!("“{title}” will be deleted. This cannot be undone.")
+            format!("“{title}”将被删除。此操作无法撤销。")
         };
         self.pending_delete.set(Some(id));
         (title, message)
@@ -4262,14 +4260,14 @@ impl AppState {
     pub fn fill_menu(&self, id: i32) {
         let ws = self.workspace.borrow();
         let fav_label = if ws.get(id).map(|p| p.favorite).unwrap_or(false) {
-            "Remove from favorites"
+            "取消收藏"
         } else {
-            "Add to favorites"
+            "添加到收藏"
         };
         let mut rows = vec![
             MenuRow {
                 id: MENU_NEW_SUBPAGE,
-                label: "New subpage".into(),
+                label: "新建子页面".into(),
                 icon: "plus".into(),
                 danger: false,
                 swatch: -1,
@@ -4278,7 +4276,7 @@ impl AppState {
             },
             MenuRow {
                 id: MENU_RENAME,
-                label: "Rename".into(),
+                label: "重命名".into(),
                 icon: "pencil".into(),
                 danger: false,
                 swatch: -1,
@@ -4287,7 +4285,7 @@ impl AppState {
             },
             MenuRow {
                 id: MENU_DUPLICATE,
-                label: "Duplicate".into(),
+                label: "复制".into(),
                 icon: "copy".into(),
                 danger: false,
                 swatch: -1,
@@ -4296,7 +4294,7 @@ impl AppState {
             },
             MenuRow {
                 id: MENU_MOVE_UP,
-                label: "Move up".into(),
+                label: "上移".into(),
                 icon: "chevron-up".into(),
                 danger: false,
                 swatch: -1,
@@ -4305,7 +4303,7 @@ impl AppState {
             },
             MenuRow {
                 id: MENU_MOVE_DOWN,
-                label: "Move down".into(),
+                label: "下移".into(),
                 icon: "chevron-down".into(),
                 danger: false,
                 swatch: -1,
@@ -4314,7 +4312,7 @@ impl AppState {
             },
             MenuRow {
                 id: MENU_MOVE_TO,
-                label: "Move to".into(),
+                label: "移动到".into(),
                 icon: "arrow-right".into(),
                 danger: false,
                 swatch: -1,
@@ -4332,7 +4330,7 @@ impl AppState {
             },
             MenuRow {
                 id: MENU_DELETE,
-                label: "Delete".into(),
+                label: "删除".into(),
                 icon: "trash".into(),
                 danger: true,
                 swatch: -1,
@@ -4345,11 +4343,11 @@ impl AppState {
         // holds the three switches.
         rows.insert(
             rows.len() - 1,
-            row(MENU_PAGE_STYLE, "Style", "palette", false, -1, false),
+            row(MENU_PAGE_STYLE, "样式", "palette", false, -1, false),
         );
         rows.insert(
             rows.len() - 2,
-            row(MENU_PAGE_ICON, "Set icon", "smile", false, -1, false),
+            row(MENU_PAGE_ICON, "设置图标", "smile", false, -1, false),
         );
         // The cover sits beside the icon because it is the same kind of fact
         // about the page. Its label answers "is there one?", and the removal
@@ -4358,7 +4356,7 @@ impl AppState {
         let has_cover = ws.cover_of(id).is_some();
         let mut look = vec![row(
             MENU_PAGE_COVER,
-            if has_cover { "Change cover" } else { "Set cover" },
+            if has_cover { "更换封面" } else { "添加封面" },
             "image",
             false,
             -1,
@@ -4367,7 +4365,7 @@ impl AppState {
         if has_cover {
             look.push(row(
                 MENU_PAGE_COVER_REMOVE,
-                "Remove cover",
+                "移除封面",
                 "trash",
                 false,
                 -1,
@@ -4383,7 +4381,7 @@ impl AppState {
             rows.len() - 2,
             row(
                 MENU_PAGE_LOCK,
-                if ws.locked_of(id) { "Unlock page" } else { "Lock page" },
+                if ws.locked_of(id) { "解锁页面" } else { "锁定页面" },
                 "lock",
                 false,
                 -1,
@@ -4396,7 +4394,7 @@ impl AppState {
         // is in the submenu, and what the workspace holds is nobody's page.
         rows.insert(
             rows.len() - 2,
-            row(MENU_PAGE_TEMPLATES, "Templates", "page", false, -1, false),
+            row(MENU_PAGE_TEMPLATES, "模板", "page", false, -1, false),
         );
         // Version history beside it (SPEC §三十八): the other row on this menu
         // about what the page *says*, rather than what it looks like or where it
@@ -4409,7 +4407,7 @@ impl AppState {
             .unwrap_or_else(|| rows.len() - 1);
         rows.insert(
             at,
-            row(MENU_PAGE_VERSIONS, "Version history", "clock", false, -1, false),
+            row(MENU_PAGE_VERSIONS, "版本历史", "clock", false, -1, false),
         );
         self.menu.set_vec(rows);
     }
@@ -4424,11 +4422,11 @@ impl AppState {
             .borrow()
             .page_style(id)
             .unwrap_or_default();
-        let mut rows = vec![row(MENU_BACK, "Back", "chevron-left", false, -1, false)];
+        let mut rows = vec![row(MENU_BACK, "返回", "chevron-left", false, -1, false)];
         for (index, kind) in PageFont::ALL.iter().enumerate() {
             let mut menu_row = row(
                 PAGE_FONT_BASE + index as i32,
-                kind.label(),
+                zh_page_font(*kind),
                 "",
                 false,
                 -1,
@@ -4437,10 +4435,10 @@ impl AppState {
             menu_row.check = *kind == font;
             rows.push(menu_row);
         }
-        let mut width = row(MENU_PAGE_FULL_WIDTH, "Full width", "", false, -1, false);
+        let mut width = row(MENU_PAGE_FULL_WIDTH, "全宽", "", false, -1, false);
         width.check = full_width;
         rows.push(width);
-        let mut small = row(MENU_PAGE_SMALL_TEXT, "Small text", "", false, -1, false);
+        let mut small = row(MENU_PAGE_SMALL_TEXT, "小号文字", "", false, -1, false);
         small.check = small_text;
         rows.push(small);
         self.menu.set_vec(rows);
@@ -4454,7 +4452,7 @@ impl AppState {
     pub fn fill_page_menu_move_to(&self, id: i32) {
         let mut rows = vec![row(
             MENU_BACK,
-            "Back",
+            "返回",
             "chevron-left",
             false,
             -1,
@@ -4462,7 +4460,7 @@ impl AppState {
         )];
         rows.push(row(
             PAGE_MOVE_TO_ROOT,
-            "Top level",
+            "顶层",
             "export",
             false,
             -1,
@@ -4481,7 +4479,7 @@ impl AppState {
                     continue;
                 }
                 let indent = "\u{2003}".repeat(depth);
-                let title = ws.title_of(cid).unwrap_or("Untitled");
+                let title = ws.title_of(cid).unwrap_or("无标题");
                 out.push(row(
                     PAGE_MOVE_TO_BASE + cid,
                     format!("{indent}{title}"),
@@ -4516,13 +4514,13 @@ impl AppState {
     /// from, and the picker that follows names it again.
     pub fn fill_template_menu(&self) {
         self.menu.set_vec(vec![
-            row(MENU_BACK, "Back", "chevron-left", false, -1, false),
-            row(MENU_TEMPLATE_INSERT, "Insert template", "plus", false, -1, false),
-            row(MENU_TEMPLATE_NEW_PAGE, "Use as new page", "page", false, -1, false),
-            row(MENU_TEMPLATE_SAVE, "Save as template", "copy", false, -1, false),
-            row(MENU_TEMPLATE_EXPORT, "Export Markdown", "export", false, -1, false),
-            row(MENU_TEMPLATE_IMPORT, "Import Markdown", "import", false, -1, false),
-            row(MENU_TEMPLATE_DELETE, "Delete template", "trash", true, -1, false),
+            row(MENU_BACK, "返回", "chevron-left", false, -1, false),
+            row(MENU_TEMPLATE_INSERT, "插入模板", "plus", false, -1, false),
+            row(MENU_TEMPLATE_NEW_PAGE, "用作新页面", "page", false, -1, false),
+            row(MENU_TEMPLATE_SAVE, "保存为模板", "copy", false, -1, false),
+            row(MENU_TEMPLATE_EXPORT, "导出 Markdown", "export", false, -1, false),
+            row(MENU_TEMPLATE_IMPORT, "导入 Markdown", "import", false, -1, false),
+            row(MENU_TEMPLATE_DELETE, "删除模板", "trash", true, -1, false),
         ]);
     }
 
@@ -4539,7 +4537,7 @@ impl AppState {
         self.template_pick.set(action);
         let mut rows = vec![row(
             MENU_TEMPLATE_PICK_BACK,
-            "Back",
+            "返回",
             "chevron-left",
             false,
             -1,
@@ -4620,10 +4618,10 @@ impl AppState {
     /// label is the thing worth keeping.
     pub fn save_page_version(&self, page: i32, label: &str) -> Result<String, String> {
         let (Some(db_file), Some(repo)) = (self.version_db(), self.repo.clone()) else {
-            return Err("this session has no database file, so a version has nowhere to live".into());
+            return Err("此会话没有数据库文件，版本无处存放".into());
         };
         if page <= 0 {
-            return Err("no page is open".into());
+            return Err("没有打开的页面".into());
         }
         let label = version_label(label, self.page_versions(page).len());
         self.persistence_force_flush();
@@ -4636,7 +4634,7 @@ impl AppState {
                 // the file name and the metadata key are both this second, so
                 // four tries covers four saves in a row faster than a clock tick
                 Ok(None) if attempt < 4 => attempt += 1,
-                Ok(None) => return Err("a version taken this second already exists".into()),
+                Ok(None) => return Err("这一秒已经保存过一个版本了".into()),
                 Err(e) => return Err(e.to_string()),
             }
         };
@@ -4723,7 +4721,7 @@ impl AppState {
         page: i32,
         created: i64,
     ) -> Result<Vec<crate::core::diff::DiffLine>, String> {
-        let db_file = self.version_db().ok_or("no database file")?;
+        let db_file = self.version_db().ok_or("没有数据库文件")?;
         let (_version_page, blocks) =
             versions::read(&db_file, page as i64, created).map_err(|e| e.to_string())?;
         let current = {
@@ -4752,12 +4750,12 @@ impl AppState {
             // The command system addresses the page on screen, and the panel
             // only ever shows the open page's versions, so reaching here for
             // another one means a row went stale under a page switch.
-            return Err("open that page before restoring its version".into());
+            return Err("请先打开该页面，再恢复它的版本".into());
         }
         if self.locked_refusal() {
-            return Err("this page is locked".into());
+            return Err("此页面已锁定".into());
         }
-        let db_file = self.version_db().ok_or("no database file")?;
+        let db_file = self.version_db().ok_or("没有数据库文件")?;
         let (_version_page, blocks) =
             versions::read(&db_file, page as i64, created).map_err(|e| e.to_string())?;
         let roots: Vec<Command> = {
@@ -4778,7 +4776,7 @@ impl AppState {
         // neither step has to know about the other.
         cmds.extend(roots);
         if self.exec_all_on_open_page(cmds).is_none() {
-            return Err("there was nothing to restore".into());
+            return Err("没有可恢复的内容".into());
         }
         Ok(count)
     }
@@ -4786,7 +4784,7 @@ impl AppState {
     /// Drop a version: its file, its two metadata rows, and its entry in the
     /// mirror. The file goes first, for the same reason the retention cut does.
     pub fn delete_version(&self, page: i32, created: i64) -> Result<(), String> {
-        let db_file = self.version_db().ok_or("no database file")?;
+        let db_file = self.version_db().ok_or("没有数据库文件")?;
         versions::remove(&db_file, page as i64, created).map_err(|e| e.to_string())?;
         if let Some(list) = self.version_index.borrow_mut().get_mut(&page) {
             list.retain(|(at, _)| *at != created);
@@ -5016,24 +5014,24 @@ pub fn core_page_id(id: i32) -> PageId {
 /// markdown line-shortcut ("# ", "- ", …) are deliberately absent — typing
 /// the symbol converts, so the menu only lists the rest (ADR-0022).
 const SLASH_ITEMS: &[(BlockKind, &str, &str)] = &[
-    (BlockKind::Paragraph, "Text", "Plain paragraph"),
-    (BlockKind::Toggle, "Toggle list", "Collapsible section"),
-    (BlockKind::Image, "Image", "Embed a picture from a file"),
-    (BlockKind::File, "File", "Attach a file of any type"),
-    (BlockKind::Table, "Table", "Simple grid of cells"),
-    (BlockKind::Columns, "Columns", "Two columns of blocks, side by side"),
-    (BlockKind::Callout, "Callout", "Highlighted box with an emoji"),
-    (BlockKind::Code, "Code", "Monospaced block — or type ```"),
-    (BlockKind::Math, "Math", "LaTeX formula — or type $$"),
+    (BlockKind::Paragraph, "文本", "普通段落"),
+    (BlockKind::Toggle, "折叠列表", "可折叠的区块"),
+    (BlockKind::Image, "图片", "从文件嵌入一张图片"),
+    (BlockKind::File, "文件", "附加任意类型的文件"),
+    (BlockKind::Table, "表格", "简单的单元格网格"),
+    (BlockKind::Columns, "分栏", "并排的两栏区块"),
+    (BlockKind::Callout, "标注", "带表情的高亮框"),
+    (BlockKind::Code, "代码", "等宽区块 — 或输入 ```"),
+    (BlockKind::Math, "公式", "LaTeX 公式 — 或输入 $$"),
     (
         BlockKind::Toc,
-        "Table of contents",
-        "Links to this page's headings",
+        "目录",
+        "链接到本页的标题",
     ),
     (
         BlockKind::Embed,
-        "Embed",
-        "A link as a card — paste an address",
+        "嵌入",
+        "把链接显示为卡片 — 粘贴网址",
     ),
     // SPEC §三十九 (D3): the database's first view. One entry, not six — the six
     // `INSERT_ITEMS` rows for the other layouts light up one phase at a time
@@ -5041,14 +5039,14 @@ const SLASH_ITEMS: &[(BlockKind, &str, &str)] = &[
     // curated "/" menu, which lists what exists rather than what is planned.
     (
         BlockKind::Database,
-        "Table view",
-        "A database, as a table",
+        "表格视图",
+        "数据库，以表格呈现",
     ),
-    (BlockKind::Divider, "Divider", "Visual separator — or type ---"),
+    (BlockKind::Divider, "分割线", "视觉分隔符 — 或输入 ---"),
     (
         BlockKind::Synced,
-        "Synced block",
-        "A second view of another block — edit either one",
+        "同步块",
+        "另一个区块的第二视图 — 任一处编辑",
     ),
 ];
 
@@ -5062,34 +5060,34 @@ const TURN_INTO_ITEMS: &[(BlockKind, &str, &str)] = SLASH_ITEMS;
 /// Notion and the roadmap stays visible. Keyboard navigation skips
 /// placeholders and applying to one is a no-op.
 const INSERT_ITEMS: &[(i32, &str, &str)] = &[
-    (kind_to_int(BlockKind::Paragraph), "Text", "Plain paragraph"),
-    (kind_to_int(BlockKind::Page), "Page", "Embed a child page"),
-    (kind_to_int(BlockKind::Link), "Link to page", "Point at an existing page"),
-    (kind_to_int(BlockKind::Image), "Image", "Embed a picture from a file"),
-    (kind_to_int(BlockKind::File), "File", "Attach a file of any type"),
-    (kind_to_int(BlockKind::Todo), "To-do list", "Track tasks with a checkbox"),
-    (kind_to_int(BlockKind::Heading1), "Heading 1", "Big section heading"),
-    (kind_to_int(BlockKind::Heading2), "Heading 2", "Medium section heading"),
-    (kind_to_int(BlockKind::Heading3), "Heading 3", "Small section heading"),
-    (kind_to_int(BlockKind::Table), "Table", "Simple grid of cells"),
-    (kind_to_int(BlockKind::Columns), "Columns", "Side-by-side columns"),
-    (kind_to_int(BlockKind::Bullet), "Bulleted list", "Simple bulleted list"),
-    (kind_to_int(BlockKind::Numbered), "Numbered list", "Ordered list"),
-    (kind_to_int(BlockKind::Toggle), "Toggle list", "Collapsible section"),
-    (kind_to_int(BlockKind::Quote), "Quote", "Capture a quote"),
-    (kind_to_int(BlockKind::Divider), "Divider", "Visual separator"),
-    (kind_to_int(BlockKind::Callout), "Callout", "Highlighted box with an emoji"),
-    (kind_to_int(BlockKind::Code), "Code", "Monospaced block"),
-    (kind_to_int(BlockKind::Math), "Math", "LaTeX formula, rendered as Unicode"),
+    (kind_to_int(BlockKind::Paragraph), "文本", "普通段落"),
+    (kind_to_int(BlockKind::Page), "页面", "嵌入子页面"),
+    (kind_to_int(BlockKind::Link), "链接到页面", "指向现有页面"),
+    (kind_to_int(BlockKind::Image), "图片", "从文件嵌入一张图片"),
+    (kind_to_int(BlockKind::File), "文件", "附加任意类型的文件"),
+    (kind_to_int(BlockKind::Todo), "待办列表", "用复选框跟踪任务"),
+    (kind_to_int(BlockKind::Heading1), "标题 1", "大号章节标题"),
+    (kind_to_int(BlockKind::Heading2), "标题 2", "中号章节标题"),
+    (kind_to_int(BlockKind::Heading3), "标题 3", "小号章节标题"),
+    (kind_to_int(BlockKind::Table), "表格", "简单的单元格网格"),
+    (kind_to_int(BlockKind::Columns), "分栏", "并排的栏"),
+    (kind_to_int(BlockKind::Bullet), "项目符号列表", "简单的项目符号列表"),
+    (kind_to_int(BlockKind::Numbered), "编号列表", "有序列表"),
+    (kind_to_int(BlockKind::Toggle), "折叠列表", "可折叠的区块"),
+    (kind_to_int(BlockKind::Quote), "引用", "记录一段引用"),
+    (kind_to_int(BlockKind::Divider), "分割线", "视觉分隔符"),
+    (kind_to_int(BlockKind::Callout), "标注", "带表情的高亮框"),
+    (kind_to_int(BlockKind::Code), "代码", "等宽区块"),
+    (kind_to_int(BlockKind::Math), "公式", "LaTeX 公式，渲染为 Unicode"),
     (
         kind_to_int(BlockKind::Toc),
-        "Table of contents",
-        "Links to this page's headings",
+        "目录",
+        "链接到本页的标题",
     ),
     (
         kind_to_int(BlockKind::Embed),
-        "Embed",
-        "A link as a card, opened in the browser",
+        "嵌入",
+        "把链接显示为卡片，在浏览器中打开",
     ),
     // SPEC §三十九's six placeholders, and D3 lights the first of them: a real
     // block-kind int makes this row insertable, and the menu shows it exactly as
@@ -5097,13 +5095,13 @@ const INSERT_ITEMS: &[(i32, &str, &str)] = &[
     // their layouts are D5's — the row is the promise, and D3 keeps one of them.
     (
         kind_to_int(BlockKind::Database),
-        "Table view",
-        "A database, as a table",
+        "表格视图",
+        "数据库，以表格呈现",
     ),
     (
         kind_to_int(BlockKind::Synced),
-        "Synced block",
-        "A second view of another block — edit either one",
+        "同步块",
+        "另一个区块的第二视图 — 任一处编辑",
     ),
     // D7 (ADR-0085): a *linked database* — a second block drawing an entity
     // that exists already. `LINKED_VIEW_ROW` is not a kind: the apply path
@@ -5111,14 +5109,14 @@ const INSERT_ITEMS: &[(i32, &str, &str)] = &[
     // "which database" is the one decision the row cannot make for you.
     (
         LINKED_VIEW_ROW,
-        "Linked view",
-        "A linked view of another database",
+        "链接视图",
+        "另一个数据库的链接视图",
     ),
-    (-1, "Board", "Board view · later"),
-    (-1, "Gallery", "Gallery view · later"),
-    (-1, "List view", "Database list · later"),
-    (-1, "Calendar", "Calendar view · later"),
-    (-1, "Timeline", "Timeline view · later"),
+    (-1, "看板", "看板视图 · 稍后"),
+    (-1, "图库", "图库视图 · 稍后"),
+    (-1, "列表视图", "数据库列表 · 稍后"),
+    (-1, "日历", "日历视图 · 稍后"),
+    (-1, "时间线", "时间线视图 · 稍后"),
 ];
 
 fn slash_items(filter: &str) -> Vec<SlashRow> {
@@ -5137,11 +5135,11 @@ fn slash_items(filter: &str) -> Vec<SlashRow> {
     // D7 (ADR-0085): the linked database, listed by name like every other row.
     // Its id is the picker's, not a kind's (`LINKED_VIEW_ROW`), and the apply
     // path handles it before the kind mapping ever sees it.
-    if matches("Linked view") {
+    if matches("链接视图") {
         rows.push(SlashRow {
             id: LINKED_VIEW_ROW,
-            label: "Linked view".into(),
-            hint: "A linked view of another database".into(),
+            label: "链接视图".into(),
+            hint: "另一个数据库的链接视图".into(),
             disabled: false,
         });
     }
@@ -5680,8 +5678,8 @@ fn grid_blocks<'a>(blocks: &'a [Block], table: &Block) -> Vec<&'a Block> {
 fn backlink_count_label(total: usize) -> String {
     match total {
         0 => String::new(),
-        1 => "1 reference".to_string(),
-        n => format!("{n} references"),
+        1 => "1 条引用".to_string(),
+        n => format!("{n} 条引用"),
     }
 }
 
@@ -5695,14 +5693,14 @@ fn backlink_count_label(total: usize) -> String {
 fn backlink_fold_label(total: usize, drawn: usize, expanded: bool) -> String {
     if expanded {
         if total > BACKLINK_WINDOW {
-            "Show less".to_string()
+            "收起".to_string()
         } else {
             String::new()
         }
     } else {
         match total.saturating_sub(drawn) {
             0 => String::new(),
-            n => format!("and {n} more"),
+            n => format!("还有 {n} 条"),
         }
     }
 }
@@ -5797,7 +5795,7 @@ fn toc_entries(blocks: &[Block], shown: &[usize]) -> Vec<TocEntry> {
                 // an empty heading still has a row to land on, so it still gets
                 // an entry; a blank line is nothing to click
                 label: if b.text.is_empty() {
-                    "Untitled".into()
+                    "无标题".into()
                 } else {
                     b.text.clone().into()
                 },
@@ -6123,7 +6121,7 @@ impl<'a> FormulaSource<'a> {
     fn value(&self, id: PropertyId, depth: u32) -> Result<Val, FormulaError> {
         if depth > FORMULA_MAX_DEPTH {
             return Err(FormulaError::Eval(format!(
-                "formulas are nested more than {FORMULA_MAX_DEPTH} deep"
+                "公式嵌套超过 {FORMULA_MAX_DEPTH} 层"
             )));
         }
         if let Some(cached) = self.cells.borrow().get(&id.as_u64()) {
@@ -6134,7 +6132,7 @@ impl<'a> FormulaSource<'a> {
             // same catalog), reachable if the schema moved mid-evaluation; the
             // honest answer is an error the cell paints, not a fake empty.
             return Err(FormulaError::Eval(
-                "the formula names a column this database does not have".into(),
+                "公式引用了此数据库不存在的列".into(),
             ));
         };
         let value = if kind == PropertyKind::Formula {
@@ -6759,7 +6757,7 @@ impl AppState {
                             Err(e) => {
                                 self.db_notice
                                     .borrow_mut()
-                                    .push(format!("database read failed: {e}"));
+                                    .push(format!("数据库读取失败：{e}"));
                                 return false;
                             }
                         };
@@ -6789,7 +6787,7 @@ impl AppState {
                                         Err(e) => {
                                             self.db_notice
                                                 .borrow_mut()
-                                                .push(format!("database read failed: {e}"));
+                                                .push(format!("数据库读取失败：{e}"));
                                             return false;
                                         }
                                     }
@@ -6861,7 +6859,7 @@ impl AppState {
                         Err(e) => {
                             self.db_notice
                                 .borrow_mut()
-                                .push(format!("database read failed: {e}"));
+                                .push(format!("数据库读取失败：{e}"));
                             return false;
                         }
                     };
@@ -6929,7 +6927,7 @@ impl AppState {
                             Err(e) => {
                                 self.db_notice
                                     .borrow_mut()
-                                    .push(format!("database read failed: {e}"));
+                                    .push(format!("数据库读取失败：{e}"));
                                 return false;
                             }
                         };
@@ -6971,7 +6969,7 @@ impl AppState {
                     Err(e) => {
                         self.db_notice
                             .borrow_mut()
-                            .push(format!("database read failed: {e}"));
+                            .push(format!("数据库读取失败：{e}"));
                         return false;
                     }
                 };
@@ -6993,7 +6991,7 @@ impl AppState {
                     Err(e) => {
                         self.db_notice
                             .borrow_mut()
-                            .push(format!("database read failed: {e}"));
+                            .push(format!("数据库读取失败：{e}"));
                         return false;
                     }
                 }
@@ -7055,7 +7053,7 @@ impl AppState {
                             Err(e) => {
                                 self.db_notice
                                     .borrow_mut()
-                                    .push(format!("database read failed: {e}"));
+                                    .push(format!("数据库读取失败：{e}"));
                                 return false;
                             }
                         };
@@ -7082,7 +7080,7 @@ impl AppState {
                             Err(e) => {
                                 self.db_notice
                                     .borrow_mut()
-                                    .push(format!("database read failed: {e}"));
+                                    .push(format!("数据库读取失败：{e}"));
                                 return false;
                             }
                         };
@@ -7136,7 +7134,7 @@ impl AppState {
                     Err(e) => {
                         self.db_notice
                             .borrow_mut()
-                            .push(format!("database read failed: {e}"));
+                            .push(format!("数据库读取失败：{e}"));
                         return false;
                     }
                 };
@@ -7200,7 +7198,7 @@ impl AppState {
                             Err(e) => {
                                 self.db_notice
                                     .borrow_mut()
-                                    .push(format!("database read failed: {e}"));
+                                    .push(format!("数据库读取失败：{e}"));
                                 return false;
                             }
                         };
@@ -7267,7 +7265,7 @@ impl AppState {
                             Err(e) => {
                                 self.db_notice
                                     .borrow_mut()
-                                    .push(format!("database read failed: {e}"));
+                                    .push(format!("数据库读取失败：{e}"));
                                 return false;
                             }
                         };
@@ -7304,7 +7302,7 @@ impl AppState {
                         Err(e) => {
                             self.db_notice
                                 .borrow_mut()
-                                .push(format!("database read failed: {e}"));
+                                .push(format!("数据库读取失败：{e}"));
                             return false;
                         }
                     },
@@ -7317,7 +7315,7 @@ impl AppState {
                         Err(e) => {
                             self.db_notice
                                 .borrow_mut()
-                                .push(format!("database read failed: {e}"));
+                                .push(format!("数据库读取失败：{e}"));
                             return false;
                         }
                     },
@@ -7338,7 +7336,7 @@ impl AppState {
                             Err(e) => {
                                 self.db_notice
                                     .borrow_mut()
-                                    .push(format!("database read failed: {e}"));
+                                    .push(format!("数据库读取失败：{e}"));
                                 return false;
                             }
                         };
@@ -7367,7 +7365,7 @@ impl AppState {
                                 Err(e) => {
                                     self.db_notice
                                         .borrow_mut()
-                                        .push(format!("database read failed: {e}"));
+                                        .push(format!("数据库读取失败：{e}"));
                                     return false;
                                 }
                             };
@@ -7517,9 +7515,9 @@ impl AppState {
     /// header that invented a name would be a second copy of the schema.
     fn db_group_label(&self, spec: &GroupSpec, key: &GroupKey) -> String {
         match key {
-            GroupKey::Empty => "No value".to_string(),
-            GroupKey::Unchecked => "Unchecked".to_string(),
-            GroupKey::Checked => "Checked".to_string(),
+            GroupKey::Empty => "无值".to_string(),
+            GroupKey::Unchecked => "未勾选".to_string(),
+            GroupKey::Checked => "已勾选".to_string(),
             GroupKey::Option(id) => {
                 let config = self.db_property_config(spec.property.as_u64() as i32);
                 PropertyOptions::from_config(&config)
@@ -7689,7 +7687,7 @@ impl AppState {
         row.db_rows = self.db_rows_model(block);
         row.db_row_start = self.db_row_start(block);
         row.db_row_count = self.db_row_count(block);
-        row.db_layout = view.layout.label().into();
+        row.db_layout = zh_view(view.layout).into();
         row.db_layout_index = view.layout.index();
         row.db_layout_ok = view.support.is_drawn();
         // An "auto" width is a *share*, and the share is Rust's to work out: a
@@ -7765,7 +7763,7 @@ impl AppState {
         row.db_board_columns = ModelRc::from(window.board.clone());
         row.db_cal_days = ModelRc::from(window.cal.clone());
         let (cal_year, cal_month) = self.db_calendar_month(block);
-        row.db_cal_label = month_label(cal_year, cal_month).into();
+        row.db_cal_label = zh_month(cal_year, cal_month).into();
         row.db_gallery_per_row = self
             .db_gallery_per_row
             .borrow()
@@ -7866,7 +7864,7 @@ impl AppState {
             // what a link to it would say. Renameable later (`DatabaseRenamed`).
             let ws = self.workspace.borrow();
             ws.title_of(self.open_page.get())
-                .unwrap_or("Database")
+                .unwrap_or("数据库")
                 .to_string()
         };
         let draft = DatabaseDraft::new(
@@ -8059,22 +8057,22 @@ impl AppState {
     fn kind_move_refusal(&self, property: PropertyId) -> Option<&'static str> {
         let catalog = self.databases.borrow();
         let Some(row) = catalog.properties.iter().find(|p| p.id == property) else {
-            return Some("That column no longer exists.");
+            return Some("该列已不存在。");
         };
         if row.kind.is_title() {
-            return Some("A database's title column is what its rows are named by.");
+            return Some("数据库的标题列决定每一行的名称。");
         }
         if row.kind == PropertyKind::Relation {
             if database_relation::config_relation(&row.config).mirror.is_some() {
                 return Some(
-                    "This relation is two-way — clear its back-pointer before changing its type.",
+                    "此关系是双向的 — 更改其类型前请先清除反向指针。",
                 );
             }
             if catalog.properties.iter().any(|p| {
                 p.kind == PropertyKind::Relation
                     && database_relation::config_relation(&p.config).mirror == Some(property)
             }) {
-                return Some("Another relation points back through this column.");
+                return Some("另一个关系通过此列反向指向。");
             }
         }
         if catalog.properties.iter().any(|p| {
@@ -8084,7 +8082,7 @@ impl AppState {
             let fold = database_rollup::config_rollup(&p.config);
             fold.relation == Some(property) || fold.column == Some(property)
         }) {
-            return Some("A rollup folds through this column.");
+            return Some("有汇总通过此列折叠。");
         }
         None
     }
@@ -8114,14 +8112,14 @@ impl AppState {
             .enumerate()
             .map(|(index, kind)| DbPickRow {
                 id: index as i32,
-                name: kind.label().to_string(),
+                name: zh_kind(*kind).to_string(),
                 chosen: current == Some(*kind),
                 // `title` is never a choice (a database is born with its one
                 // title column), and a column something else depends on is not
                 // a choice for *any* kind — hence the same sentence on every row.
                 disabled: moved.is_some() || kind.is_title(),
                 note: moved.unwrap_or(if kind.is_title() {
-                    "A database has one title column."
+                    "一个数据库只有一个标题列。"
                 } else {
                     ""
                 })
@@ -8141,7 +8139,7 @@ impl AppState {
         if kind.is_title() {
             return None;
         }
-        let base = kind.label();
+        let base = zh_kind(kind);
         let name = {
             let catalog = self.databases.borrow();
             let taken = |name: &str| {
@@ -8173,18 +8171,18 @@ impl AppState {
     /// per type pair (D2's unbuilt half), and a type menu that quietly rewrote
     /// values would be a write path no undo step covers.
     pub fn db_column_kind_set(&self, block: i32, property: i32, kind: i32) -> Result<(), String> {
-        let db = self.db_ref_of(block).ok_or("this block draws no database")?;
+        let db = self.db_ref_of(block).ok_or("此区块未绘制数据库")?;
         let to = *PropertyKind::ALL
             .get(kind.max(0) as usize)
-            .ok_or("that is not a column type")?;
+            .ok_or("这不是一种列类型")?;
         let property_id = PropertyId(property as u64);
         let from = {
             let catalog = self.databases.borrow();
             let Some(row) = catalog.properties.iter().find(|p| p.id == property_id) else {
-                return Err("that column no longer exists".into());
+                return Err("该列已不存在".into());
             };
             if row.db != db {
-                return Err("that column is not of this database".into());
+                return Err("该列不属于此数据库".into());
             }
             row.kind
         };
@@ -8201,7 +8199,7 @@ impl AppState {
             to,
         };
         if self.exec_editor(cmd).is_none() {
-            return Err("the change could not be recorded".into());
+            return Err("无法记录此更改".into());
         }
         // The cells change meaning, not existence, so the window is re-read
         // rather than the row re-filled: the same column list, painted through a
@@ -8213,15 +8211,15 @@ impl AppState {
         // the user hears when the type moved and the values did not.
         self.db_say(if to.is_computed() || to == PropertyKind::Relation {
             format!(
-                "\"{}\" is now \"{}\" — its cells are empty until it is defined.",
-                from.label(),
-                to.label()
+                "“{}”现在是“{}” — 定义之前其单元格为空。",
+                zh_kind(from),
+                zh_kind(to)
             )
         } else {
             format!(
-                "\"{}\" is now \"{}\" — the stored values did not change.",
-                from.label(),
-                to.label()
+                "“{}”现在是“{}” — 存储的值没有改变。",
+                zh_kind(from),
+                zh_kind(to)
             )
         });
         Ok(())
@@ -8407,7 +8405,7 @@ impl AppState {
         mirror: i32,
     ) -> Result<(), String> {
         let Some(db) = self.db_ref_of(block) else {
-            return Err("this block draws no database".into());
+            return Err("此区块未绘制数据库".into());
         };
         let property_id = PropertyId(property as u64);
         let target = (target >= 0).then(|| DatabaseId(target as u64));
@@ -8418,10 +8416,10 @@ impl AppState {
         {
             let catalog = self.databases.borrow();
             let Some(forward) = catalog.properties.iter().find(|p| p.id == property_id) else {
-                return Err("that column no longer exists".into());
+                return Err("该列已不存在".into());
             };
             if forward.db != db || forward.kind != PropertyKind::Relation {
-                return Err("that column is not a relation of this database".into());
+                return Err("该列不是此数据库的关联列".into());
             }
             from = forward.config.clone();
             let before = database_relation::config_relation(&from);
@@ -8442,7 +8440,7 @@ impl AppState {
             }
             if let (Some(target_db), Some(candidate)) = (target, wanted) {
                 let Some(other) = catalog.properties.iter().find(|p| p.id == candidate) else {
-                    return Err("that back-pointer column does not exist".into());
+                    return Err("反向指针列不存在".into());
                 };
                 let theirs = database_relation::config_relation(&other.config);
                 database_relation::check_pair(
@@ -8480,7 +8478,7 @@ impl AppState {
             mirrors,
         };
         if self.exec_editor(cmd).is_none() {
-            return Err("the declaration could not be recorded".into());
+            return Err("无法记录此声明".into());
         }
         self.db_refresh(block);
         // The back-pointer's own block is a different database on this page, and
@@ -8636,7 +8634,7 @@ impl AppState {
         aggregate: i32,
     ) -> Result<(), String> {
         let Some(db) = self.db_ref_of(block) else {
-            return Err("this block draws no database".into());
+            return Err("此区块未绘制数据库".into());
         };
         let property_id = PropertyId(property as u64);
         let relation = (relation >= 0).then(|| PropertyId(relation as u64));
@@ -8650,15 +8648,15 @@ impl AppState {
         {
             let catalog = self.databases.borrow();
             let Some(forward) = catalog.properties.iter().find(|p| p.id == property_id) else {
-                return Err("that column no longer exists".into());
+                return Err("该列已不存在".into());
             };
             if forward.db != db || forward.kind != PropertyKind::Rollup {
-                return Err("that column is not a rollup of this database".into());
+                return Err("该列不是此数据库的汇总列".into());
             }
             from = forward.config.clone();
             if let (Some(relation_id), Some(column_id)) = (relation, column) {
                 let Some(rel) = catalog.properties.iter().find(|p| p.id == relation_id) else {
-                    return Err("that relation column no longer exists".into());
+                    return Err("该关联列已不存在".into());
                 };
                 if rel.db != db {
                     return Err(database_rollup::ConfigRefusal::NotARelation
@@ -8670,7 +8668,7 @@ impl AppState {
                     return Err(database_rollup::ConfigRefusal::NoTarget.message().into());
                 };
                 let Some(target) = catalog.properties.iter().find(|p| p.id == column_id) else {
-                    return Err("that column does not exist".into());
+                    return Err("该列不存在".into());
                 };
                 database_rollup::check_config(&database_rollup::RollupFacts {
                     relation_kind: rel.kind,
@@ -8692,7 +8690,7 @@ impl AppState {
             to,
         };
         if self.exec_editor(cmd).is_none() {
-            return Err("the rollup could not be recorded".into());
+            return Err("无法记录该汇总".into());
         }
         self.db_refresh(block);
         // A rollup's second name is a column of the related database, whose own
@@ -8733,7 +8731,7 @@ impl AppState {
                 chosen: chosen == d.id.as_u64() as i32,
                 disabled: false,
                 note: if Some(d.id) == here {
-                    "this database".into()
+                    "当前数据库".into()
                 } else {
                     String::new()
                 },
@@ -8752,10 +8750,10 @@ impl AppState {
     pub fn db_relation_mirrors(&self, block: i32, property: i32, target: i32) -> Vec<DbPickRow> {
         let mut rows = vec![DbPickRow {
             id: -1,
-            name: "No back-pointer".into(),
+            name: "无反向关联".into(),
             chosen: self.db_relation_config(property).1 < 0,
             disabled: false,
-            note: "one-way - the related rows will not name this one".into(),
+            note: "单向 — 关联的行不会反向指向它".into(),
         }];
         let Some(db) = self.db_ref_of(block) else {
             return rows;
@@ -8829,7 +8827,7 @@ impl AppState {
             .into_iter()
             .map(|(id, name)| DbPickRow {
                 id,
-                name: if name.is_empty() { "Untitled".into() } else { name },
+                name: if name.is_empty() { "无标题".into() } else { name },
                 chosen: held.contains(&id),
                 disabled: false,
                 note: String::new(),
@@ -8872,7 +8870,7 @@ impl AppState {
             .iter()
             .find(|p| p.id == PropertyId(property as u64))
             .map(|p| p.name.clone())
-            .unwrap_or_else(|| "Not set".into())
+            .unwrap_or_else(|| "未设置".into())
     }
 
     /// What one database is called, as the relation editor's header says it.
@@ -8887,7 +8885,7 @@ impl AppState {
         catalog
             .database(DatabaseId(target as u64))
             .map(|d| d.name.clone())
-            .unwrap_or_else(|| "a database that is gone".into())
+            .unwrap_or_else(|| "数据库已不存在".into())
     }
 
     /// The relation columns of this database a rollup may fold through
@@ -8925,10 +8923,10 @@ impl AppState {
     pub fn db_rollup_columns(&self, relation: i32, chosen: i32) -> Vec<DbPickRow> {
         let mut rows = vec![DbPickRow {
             id: -1,
-            name: "No column".into(),
+            name: "无列".into(),
             chosen: chosen < 0,
             disabled: false,
-            note: "count needs no column".into(),
+            note: "计数不需要列".into(),
         }];
         let catalog = self.databases.borrow();
         let Some(rel) = catalog.properties.iter().find(|p| p.id == PropertyId(relation as u64))
@@ -8955,7 +8953,7 @@ impl AppState {
                 // also answers "what sort of column is this one".
                 note: refusal
                     .map(|r| r.message().to_string())
-                    .unwrap_or_else(|| p.kind.label().to_string()),
+                    .unwrap_or_else(|| zh_kind(p.kind).to_string()),
             }
         }));
         rows
@@ -8969,7 +8967,7 @@ impl AppState {
             .enumerate()
             .map(|(index, aggregate)| DbPickRow {
                 id: index as i32,
-                name: aggregate.label().to_string(),
+                name: zh_aggregate(*aggregate).to_string(),
                 chosen: chosen == index as i32,
                 disabled: false,
                 note: String::new(),
@@ -8986,8 +8984,8 @@ impl AppState {
             self.db_property_label(column),
             Aggregate::ALL
                 .get(aggregate as usize)
-                .map(|a| a.label().to_string())
-                .unwrap_or_else(|| "Not set".into()),
+                .map(|a| zh_aggregate(*a).to_string())
+                .unwrap_or_else(|| "未设置".into()),
         )
     }
 
@@ -9191,7 +9189,7 @@ impl AppState {
             Some(flat) => flat,
             None => {
                 self.set_db_notice(
-                    "This view's filter uses nesting the filter panel does not edit yet.".into(),
+                    "此视图的筛选使用了筛选面板尚无法编辑的嵌套结构。".into(),
                 );
                 return false;
             }
@@ -9498,7 +9496,7 @@ impl AppState {
                     name,
                     kind: property_kind_int(clause.kind),
                     op: clause.op.index() as i32,
-                    op_name: clause.op.label(clause.kind).to_string(),
+                    op_name: zh_filter_op(clause.op, clause.kind).to_string(),
                     value,
                     has_value: clause.value.is_set(),
                     invert: flat_clause.invert,
@@ -9517,7 +9515,7 @@ impl AppState {
             .map(|kind| {
                 FilterOp::ops_for(*kind)
                     .iter()
-                    .map(|op| (op.index() as i32, op.label(*kind).to_string()))
+                    .map(|op| (op.index() as i32, zh_filter_op(*op, *kind).to_string()))
                     .collect()
             })
             .unwrap_or_default()
@@ -10187,7 +10185,7 @@ impl AppState {
             };
             if database_formula::would_cycle(PropertyId(property as u64), program.deps(), deps_of) {
                 self.set_db_notice(
-                    "This formula would depend on itself, so it has no value to compute.".into(),
+                    "此公式会依赖自身，因而没有可计算的值。".into(),
                 );
                 return false;
             }
@@ -10372,7 +10370,7 @@ impl AppState {
                         self.db_notice.borrow_mut().push(format!(
                             "{}: {e}",
                             if row.name.is_empty() {
-                                "a column".to_string()
+                                "某一列".to_string()
                             } else {
                                 row.name.clone()
                             }
@@ -10635,9 +10633,9 @@ impl AppState {
                         id: d.id.as_u64() as i32,
                         label: d.name.clone().into(),
                         hint: if views == 1 {
-                            "1 view".into()
+                            "1 个视图".into()
                         } else {
-                            format!("{views} views").into()
+                            format!("{views} 个视图").into()
                         },
                         disabled: false,
                     }
@@ -10694,7 +10692,7 @@ impl AppState {
         let view = crate::core::database::View {
             id: ViewId(id),
             db,
-            name: layout.label().to_string(),
+            name: zh_view(layout).to_string(),
             layout,
             definition: String::new(),
             ord,
@@ -10736,7 +10734,7 @@ impl AppState {
             return Some(page.as_u64() as i32);
         }
         // The title, from the record's own title value (an empty title names
-        // the page "Untitled", which is what a row nobody named is).
+        // the page "无标题", which is what a row nobody named is).
         let title = {
             let catalog = self.databases.borrow();
             let named = catalog
@@ -10745,7 +10743,7 @@ impl AppState {
                 .and_then(|p| repo.cell(record_id, p.id).ok())
                 .map(|value| value.display())
                 .filter(|title| !title.trim().is_empty());
-            named.unwrap_or_else(|| "Untitled".to_string())
+            named.unwrap_or_else(|| "无标题".to_string())
         };
         // The page's own facts, the way `create_page` writes them: a child of
         // the page this database sits on, last among its siblings. Duplicated
@@ -11571,6 +11569,86 @@ pub fn palette_action(id: i32) -> PaletteAction {
     }
 }
 
+/// 中文显示层：core 的 label() 是英文，这些才是给用户看的词。
+fn zh_kind(kind: PropertyKind) -> &'static str {
+    match kind {
+        PropertyKind::Title => "标题",
+        PropertyKind::Text => "文本",
+        PropertyKind::Number => "数字",
+        PropertyKind::Select => "单选",
+        PropertyKind::MultiSelect => "多选",
+        PropertyKind::Status => "状态",
+        PropertyKind::Date => "日期",
+        PropertyKind::Checkbox => "复选框",
+        PropertyKind::Url => "链接",
+        PropertyKind::Email => "邮箱",
+        PropertyKind::Phone => "电话",
+        PropertyKind::Files => "文件",
+        PropertyKind::CreatedTime => "创建时间",
+        PropertyKind::LastEditedTime => "最后编辑时间",
+        PropertyKind::Formula => "公式",
+        PropertyKind::Rollup => "汇总",
+        PropertyKind::Relation => "关联",
+    }
+}
+
+fn zh_view(layout: ViewLayout) -> &'static str {
+    match layout {
+        ViewLayout::Table => "表格",
+        ViewLayout::Board => "看板",
+        ViewLayout::List => "列表",
+        ViewLayout::Calendar => "日历",
+        ViewLayout::Gallery => "图库",
+        ViewLayout::Timeline => "时间线",
+        ViewLayout::Form => "表单",
+        ViewLayout::Chart => "图表",
+    }
+}
+
+fn zh_page_font(font: PageFont) -> &'static str {
+    match font {
+        PageFont::Default => "默认",
+        PageFont::Serif => "衬线",
+        PageFont::Mono => "等宽",
+    }
+}
+
+fn zh_aggregate(agg: Aggregate) -> &'static str {
+    match agg {
+        Aggregate::None => "无",
+        Aggregate::Count => "计数",
+        Aggregate::Sum => "求和",
+        Aggregate::Average => "平均",
+        Aggregate::Min => "最小值",
+        Aggregate::Max => "最大值",
+    }
+}
+
+/// 比较词：日期类用“晚于/早于”，数字类用符号。
+fn zh_filter_op(op: FilterOp, kind: PropertyKind) -> &'static str {
+    let temporal = matches!(
+        kind,
+        PropertyKind::Date | PropertyKind::CreatedTime | PropertyKind::LastEditedTime
+    );
+    match op {
+        FilterOp::Contains => "包含",
+        FilterOp::Eq => "是",
+        FilterOp::Ne => "不是",
+        FilterOp::Gt => if temporal { "晚于" } else { ">" },
+        FilterOp::Gte => if temporal { "不早于" } else { "≥" },
+        FilterOp::Lt => if temporal { "早于" } else { "<" },
+        FilterOp::Lte => if temporal { "不晚于" } else { "≤" },
+        FilterOp::AnyOf => "属于",
+        FilterOp::IsEmpty => "为空",
+        FilterOp::IsNotEmpty => "不为空",
+    }
+}
+
+/// 日历标题：core 的 month_label 是 "September 2026"，这里用中文。
+fn zh_month(year: i32, month: u32) -> String {
+    format!("{year}年{month}月")
+}
+
 fn mock_commands(ws: &Workspace) -> Vec<CommandRow> {
     let mut v = Vec::new();
     let mut cmd = |id: i32, name: &str, hint: &str, section: &str, icon: &str| {
@@ -11582,47 +11660,47 @@ fn mock_commands(ws: &Workspace) -> Vec<CommandRow> {
             icon: icon.into(),
         })
     };
-    cmd(CMD_NEW_PAGE, "New Page", "Ctrl+N", "Editor", "plus");
-    cmd(CMD_SEARCH, "Search Pages…", "Ctrl+P", "Navigate", "search");
+    cmd(CMD_NEW_PAGE, "新建页面", "Ctrl+N", "编辑", "plus");
+    cmd(CMD_SEARCH, "搜索页面…", "Ctrl+P", "导航", "search");
     cmd(
         CMD_TOGGLE_SIDEBAR,
-        "Toggle Sidebar",
+        "切换侧边栏",
         "Ctrl+\\",
-        "Interface",
+        "界面",
         "panel-left",
     );
     cmd(
         CMD_TOGGLE_THEME,
-        "Toggle Dark Mode",
+        "切换深色模式",
         "Ctrl+Shift+L",
-        "Interface",
+        "界面",
         "moon",
     );
-    cmd(CMD_SETTINGS, "Settings", "", "Navigate", "settings");
-    cmd(CMD_RENAME_PAGE, "Rename Page", "F2", "Page", "pencil");
-    cmd(CMD_DUPLICATE_PAGE, "Duplicate Page", "", "Page", "copy");
-    cmd(CMD_DELETE_PAGE, "Delete Page", "", "Page", "trash");
+    cmd(CMD_SETTINGS, "设置", "", "导航", "settings");
+    cmd(CMD_RENAME_PAGE, "重命名页面", "F2", "页面", "pencil");
+    cmd(CMD_DUPLICATE_PAGE, "复制页面", "", "页面", "copy");
+    cmd(CMD_DELETE_PAGE, "删除页面", "", "页面", "trash");
     cmd(
         CMD_EXPORT_PAGE,
-        "Export Page as Markdown…",
+        "导出页面为 Markdown…",
         "",
-        "Page",
+        "页面",
         "export",
     );
-    cmd(CMD_IMPORT_MD, "Import Markdown…", "", "Page", "import");
+    cmd(CMD_IMPORT_MD, "导入 Markdown…", "", "页面", "import");
     cmd(
         CMD_COPY_MD,
-        "Copy Page as Markdown",
+        "复制页面为 Markdown",
         "",
-        "Page",
+        "页面",
         "copy",
     );
-    cmd(CMD_NAV_BACK, "Go Back", "Alt+Left", "Navigate", "arrow-left");
+    cmd(CMD_NAV_BACK, "后退", "Alt+Left", "导航", "arrow-left");
     cmd(
         CMD_NAV_FORWARD,
-        "Go Forward",
+        "前进",
         "Alt+Right",
-        "Navigate",
+        "导航",
         "arrow-right",
     );
     for id in ws.dfs_order() {
@@ -11630,7 +11708,7 @@ fn mock_commands(ws: &Workspace) -> Vec<CommandRow> {
             continue;
         }
         if let Some(title) = ws.title_of(id) {
-            cmd(CMD_PAGE_BASE + id, title, "", "Jump to page", "page");
+            cmd(CMD_PAGE_BASE + id, title, "", "跳转到页面", "page");
         }
     }
     v
@@ -12659,7 +12737,7 @@ mod tests {
             vec![
                 (2, "Top".into(), 1),
                 (5, "Second".into(), 2),
-                (6, "Untitled".into(), 3),
+                (6, "无标题".into(), 3),
             ]
         );
         // …and the walk runs for the one row that asks for it
@@ -13055,18 +13133,18 @@ mod tests {
     fn the_panel_says_how_many_and_how_many_it_is_not_showing() {
         use super::{backlink_count_label, backlink_fold_label, BACKLINK_WINDOW};
         assert_eq!(backlink_count_label(0), "", "nothing to count, nothing to say");
-        assert_eq!(backlink_count_label(1), "1 reference", "one is not 'one references'");
-        assert_eq!(backlink_count_label(7), "7 references");
+        assert_eq!(backlink_count_label(1), "1 条引用", "one is not 'one references'");
+        assert_eq!(backlink_count_label(7), "7 条引用");
         // a page quoted fewer times than the window: no control at all, because
         // folding would hide nothing and a dead control is worse than none
         assert_eq!(backlink_fold_label(3, 3, false), "");
         assert_eq!(backlink_fold_label(BACKLINK_WINDOW, BACKLINK_WINDOW, false), "");
         // quoted more: the folded line is the rest of the answer
-        assert_eq!(backlink_fold_label(200, BACKLINK_WINDOW, false), "and 195 more");
+        assert_eq!(backlink_fold_label(200, BACKLINK_WINDOW, false), "还有 195 条");
         // unfolded, the way back — offered while the unfolded list is still a
         // window, so a page quoted 200 times can fold again rather than pretend
-        assert_eq!(backlink_fold_label(6, BACKLINK_WINDOW, true), "Show less");
-        assert_eq!(backlink_fold_label(200, 50, true), "Show less");
+        assert_eq!(backlink_fold_label(6, BACKLINK_WINDOW, true), "收起");
+        assert_eq!(backlink_fold_label(200, 50, true), "收起");
         assert_eq!(backlink_fold_label(3, 3, true), "");
     }
 
@@ -13693,7 +13771,7 @@ mod tests {
         // the line it was typed into
         assert_eq!(rows.iter().filter(|r| r.text == "Project Atlas").count(), 3);
         assert!(
-            rows.iter().all(|r| r.title == "Untitled" || !r.title.is_empty()),
+            rows.iter().all(|r| r.title == "无标题" || !r.title.is_empty()),
             "a row can always name the page it came from"
         );
 
@@ -13798,10 +13876,10 @@ mod tests {
     #[test]
     fn the_palette_carries_the_navigation_commands() {
         let cmds = mock_commands(&Workspace::sample());
-        for (id, name) in [(CMD_NAV_BACK, "Go Back"), (CMD_NAV_FORWARD, "Go Forward")] {
+        for (id, name) in [(CMD_NAV_BACK, "后退"), (CMD_NAV_FORWARD, "前进")] {
             let row = cmds.iter().find(|c| c.id == id).expect("row present");
             assert_eq!(row.name.as_str(), name);
-            assert_eq!(row.section.as_str(), "Navigate");
+            assert_eq!(row.section.as_str(), "导航");
         }
     }
 
@@ -14229,7 +14307,7 @@ mod tests {
             let att = book.get(&(att_id.as_u64() as i64)).expect("the attachment is known");
             (att.file.clone(), att.name.clone(), att.mime.clone(), att.bytes)
         };
-        assert_eq!(name, "Pasted image");
+        assert_eq!(name, "粘贴的图片");
         assert_eq!((size, mime.as_str()), (png.len() as i64, "image/png"));
         let on_disk = dir.path().join("attachments").join(&stored);
         assert!(on_disk.exists(), "the bytes went beside the library, not into it");
@@ -14336,7 +14414,7 @@ mod tests {
             .expect("a picture block deletes");
         assert_eq!(
             state.reclaim_attachments().unwrap(),
-            "no unused attachments to remove",
+            "没有可移除的未使用附件",
             "the undo step holds the only other pointer to it"
         );
         assert!(attach_dir.join(&pics[1].1).is_file(), "nothing was deleted");
@@ -14379,7 +14457,7 @@ mod tests {
         assert!(state.attachment_cache_bytes.get() > 0);
 
         let notice = state.reclaim_attachments().unwrap();
-        assert!(notice.starts_with("1 unused attachment removed ("), "{notice}");
+        assert!(notice.starts_with("已移除 1 个未使用的附件（"), "{notice}");
         assert!(state.attachments.borrow().contains_key(&pics[0].0), "the live row stays");
         assert!(!state.attachments.borrow().contains_key(&pics[1].0));
         assert!(attach_dir.join(&pics[0].1).is_file(), "and nothing else went");
@@ -14421,7 +14499,7 @@ mod tests {
         state.delete_page(page);
         assert_eq!(
             state.reclaim_attachments().unwrap(),
-            "no unused attachments to remove",
+            "没有可移除的未使用附件",
             "pasting the copied row is still one keystroke away"
         );
         let target = state.start_page().expect("the new page takes a block");
@@ -14447,7 +14525,7 @@ mod tests {
         // the bool is "was the open page among those removed", not "did it work"
         state.delete_page(page);
         let notice = state.reclaim_attachments().unwrap();
-        assert!(notice.starts_with("1 unused attachment removed ("), "{notice}");
+        assert!(notice.starts_with("已移除 1 个未使用的附件（"), "{notice}");
         assert!(!attach_dir.join(&pics[0].1).exists());
         assert_eq!(repo.load_attachments().unwrap().len(), 0, "the row went with the page");
     }
@@ -14488,7 +14566,7 @@ mod tests {
         let state = AppState::new(&plain_args(), Some(repo.clone()));
         let notice = state.reclaim_attachments().unwrap();
         assert!(
-            notice.starts_with("1 unused attachment removed"),
+            notice.starts_with("已移除 1 个未使用的附件"),
             "{notice}"
         );
         assert!(!attach_dir.join(&pics[0].1).exists(), "the block's picture went");
@@ -14501,7 +14579,7 @@ mod tests {
         state.set_page_cover(page, None);
         let notice = state.reclaim_attachments().unwrap();
         assert!(
-            notice.starts_with("1 unused attachment removed"),
+            notice.starts_with("已移除 1 个未使用的附件"),
             "{notice}"
         );
         assert!(
@@ -14530,7 +14608,7 @@ mod tests {
         state.create_page(None);
         state.delete_page(page);
         let notice = state.reclaim_attachments().unwrap();
-        assert!(notice.starts_with("1 unused attachment removed ("), "{notice}");
+        assert!(notice.starts_with("已移除 1 个未使用的附件（"), "{notice}");
         assert!(
             !notice.contains("could not be deleted"),
             "a file that was already gone is not a stuck file: {notice}"
@@ -14545,13 +14623,13 @@ mod tests {
         let state = AppState::new(&plain_args(), None);
         assert_eq!(
             state.reclaim_attachments().unwrap(),
-            "running in memory — nothing to reclaim"
+            "运行于内存模式 — 无需清理"
         );
         let repo = std::sync::Arc::new(crate::storage::SqliteRepository::in_memory().unwrap());
         let state = AppState::new(&plain_args(), Some(repo));
         assert_eq!(
             state.reclaim_attachments().unwrap(),
-            "running in memory — nothing to reclaim"
+            "运行于内存模式 — 无需清理"
         );
     }
 
@@ -14880,7 +14958,7 @@ mod tests {
         state.rename_page(page, "Renamed while locked");
         assert_eq!(
             state.workspace.borrow().title_of(page),
-            Some("Untitled"),
+            Some("无标题"),
             "the title is part of the document, so the lock covers it too"
         );
         assert!(
@@ -14915,8 +14993,8 @@ mod tests {
             .last()
             .cloned()
             .expect("and every one of them said so");
-        assert!(line.contains("locked"), "{line}");
-        assert!(line.contains("Unlock page"), "{line} names the way out");
+        assert!(line.contains("锁定"), "{line}");
+        assert!(line.contains("解锁页面"), "{line} names the way out");
 
         // The switch off, and the same calls land — including the two whose
         // refusal is above, which is what proves those rows were untouched
@@ -15353,7 +15431,7 @@ mod tests {
             .position(|(id, _, _)| *id >= TEMPLATE_SLASH_BASE)
             .expect("one template row survived the filter");
         assert_eq!(rows[picked].1, "Meeting notes");
-        assert_eq!(rows[picked].2, "Template", "a template has no breadcrumb to show");
+        assert_eq!(rows[picked].2, "模板", "a template has no breadcrumb to show");
         assert_eq!(
             state.slash_selected_template(picked as i32),
             Some((meeting, "Meeting notes".into())),
@@ -15378,10 +15456,10 @@ mod tests {
         // works both ways -- it names a block kind and it names no template.
         // ("meet" above matches no kind label, so it proves the tail stands
         // alone but cannot host a kind row.)
-        state.open_slash("tog");
+        state.open_slash("折叠");
         let kind_row = (0..state.slash.row_count())
             .filter_map(|i| state.slash.row_data(i).map(|r| (i, r)))
-            .find(|(_, r)| r.label == "Toggle list")
+            .find(|(_, r)| r.label == "折叠列表")
             .expect("the filter keeps the kinds it matches");
         assert_eq!(
             state.slash_selected_kind(kind_row.0 as i32),
@@ -15630,7 +15708,7 @@ mod tests {
         assert_eq!(words(&state).len(), 2, "and the page did not grow");
         assert!(queued() > quiet, "the refusal was said out loud");
         assert!(
-            state.db_notice.borrow().last().unwrap().contains("locked"),
+            state.db_notice.borrow().last().unwrap().contains("锁定"),
             "and it named the reason"
         );
         state.undo_open_page();
@@ -15815,8 +15893,8 @@ mod tests {
         use crate::testing::ScratchDir;
         let dir = ScratchDir::new("version-label");
         let (state, _repo, page, _path) = version_session(&dir, &["one"]);
-        assert_eq!(state.save_page_version(page, "").unwrap(), "Version 1");
-        assert_eq!(state.save_page_version(page, "   ").unwrap(), "Version 2");
+        assert_eq!(state.save_page_version(page, "").unwrap(), "版本 1");
+        assert_eq!(state.save_page_version(page, "   ").unwrap(), "版本 2");
         // one line, trimmed, and cut where a person can still read it
         assert_eq!(
             state.save_page_version(page, "  spaced\nout  ").unwrap(),
@@ -15973,7 +16051,7 @@ mod tests {
         );
         assert_eq!(
             super::version_diff_note(&lines),
-            "2 lines arrived, 1 went. Restoring puts every one of them back."
+            "新增 2 行，删除 1 行。恢复会把它们全部还原。"
         );
         assert!(
             state.version_diff(page, 999_999).is_err(),
@@ -16058,7 +16136,7 @@ mod tests {
         state.set_page_locked(page, true);
         assert_eq!(
             state.restore_version(page, created),
-            Err("this page is locked".into())
+            Err("此页面已锁定".into())
         );
         assert_eq!(
             lines_of(&state),
@@ -16084,7 +16162,7 @@ mod tests {
 
         assert_eq!(
             state.restore_version(first, created),
-            Err("open that page before restoring its version".into()),
+            Err("请先打开该页面，再恢复它的版本".into()),
             "a row that went stale under a page switch restores nothing"
         );
         assert!(lines_of(&state).is_empty(), "and the open page is untouched");
@@ -16163,7 +16241,7 @@ mod tests {
 
         assert_eq!(
             state.reclaim_attachments().unwrap(),
-            "no unused attachments to remove",
+            "没有可移除的未使用附件",
             "the version holds the pointer, so the bytes are not unused"
         );
         assert!(file.is_file(), "and nothing was deleted");
@@ -16172,7 +16250,7 @@ mod tests {
         assert!(!versions::path_for(&path, page as i64, created).exists());
         let notice = state.reclaim_attachments().unwrap();
         assert!(
-            notice.starts_with("1 unused attachment removed ("),
+            notice.starts_with("已移除 1 个未使用的附件（"),
             "with the version gone the picture is finally orphaned: {notice}"
         );
         assert!(!file.exists(), "and its bytes went with it");
@@ -16188,7 +16266,7 @@ mod tests {
         assert!(page > 0, "the mock session has a page open");
         assert_eq!(
             state.save_page_version(page, "x").unwrap_err(),
-            "this session has no database file, so a version has nowhere to live"
+            "此会话没有数据库文件，版本无处存放"
         );
         assert!(state.page_versions(page).is_empty());
         assert!(state.version_diff(page, 1).is_err());
@@ -16196,7 +16274,7 @@ mod tests {
         assert!(state
             .restore_version(page, 1)
             .unwrap_err()
-            .contains("no database file"));
+            .contains("没有数据库文件"));
     }
 
     #[test]
@@ -16219,10 +16297,10 @@ mod tests {
 
         assert_eq!(
             versions_note(1),
-            format!("1 version of this page. Quire keeps the {} newest and lets the oldest go.", crate::storage::versions::MAX_PER_PAGE)
+            format!("此页面共有{}。Quire 只保留最新的 {} 个，更早的会被丢弃。", "1 个版本", crate::storage::versions::MAX_PER_PAGE)
         );
-        assert!(versions_note(3).starts_with("3 versions"));
-        assert!(versions_note(0).starts_with("0 versions"));
+        assert!(versions_note(3).starts_with("此页面共有3 个版本"));
+        assert!(versions_note(0).starts_with("此页面共有0 个版本"));
         assert_eq!(version_heading("Draft", now - 90), "“Draft” · 1 min ago");
 
         // `fill_versions` is that projection pushed: a session with no window
@@ -17308,8 +17386,8 @@ mod tests {
         let rows = state.db_column_kinds(note);
         assert_eq!(rows.len(), PropertyKind::ALL.len(), "one row per kind");
         for (index, kind) in PropertyKind::ALL.iter().enumerate() {
-            assert_eq!(rows[index].id, kind.index(), "{} at its own index", kind.label());
-            assert_eq!(rows[index].name, kind.label());
+            assert_eq!(rows[index].id, kind.index(), "{} at its own index", super::zh_kind(*kind));
+            assert_eq!(rows[index].name, super::zh_kind(*kind));
         }
         assert_eq!(
             rows.iter().filter(|r| r.chosen).count(),
@@ -17328,7 +17406,7 @@ mod tests {
             vec![(
                 PropertyKind::Title.index(),
                 true,
-                "A database has one title column.".to_string()
+                "一个数据库只有一个标题列。".to_string()
             )],
             "one greyed row, and it is the kind a database cannot have twice"
         );
@@ -17362,7 +17440,7 @@ mod tests {
         assert!(title.iter().all(|r| r.disabled), "the whole menu is closed");
         assert!(title
             .iter()
-            .all(|r| r.note.contains("title column is what its rows are named by")));
+            .all(|r| r.note.contains("标题列决定每一行的名称")));
 
         // A paired relation: ADR-0088's involution is a fact about two columns,
         // and moving one of them under the other breaks it by a side door.
@@ -17373,10 +17451,10 @@ mod tests {
         assert!(paired.iter().all(|r| r.disabled));
         assert!(paired
             .iter()
-            .all(|r| r.note.contains("clear its back-pointer before changing its type")));
+            .all(|r| r.note.contains("清除反向指针")));
         assert_eq!(
             state.db_column_kind_set(tasks, assignee, PropertyKind::Text.index()).unwrap_err(),
-            "This relation is two-way — clear its back-pointer before changing its type.",
+            "此关系是双向的 — 更改其类型前请先清除反向指针。",
             "the menu's sentence and the save's refusal are the same words"
         );
 
@@ -17405,10 +17483,10 @@ mod tests {
 
         let first = state.db_column_add(block, PropertyKind::Text.index()).expect("a column");
         let second = state.db_column_add(block, PropertyKind::Text.index()).expect("a second");
-        assert_eq!(state.db_property_label(first), "Text");
-        assert_eq!(state.db_property_label(second), "Text 2", "the tail counts up");
+        assert_eq!(state.db_property_label(first), super::zh_kind(PropertyKind::Text));
+        assert_eq!(state.db_property_label(second), format!("{} 2", super::zh_kind(PropertyKind::Text)), "the tail counts up");
         let number = state.db_column_add(block, PropertyKind::Number.index()).expect("a number");
-        assert_eq!(state.db_property_label(number), "Number");
+        assert_eq!(state.db_property_label(number), super::zh_kind(PropertyKind::Number));
 
         // A second title is not a thing a schema has a meaning for, and the menu
         // greyed that row for exactly this reason.
@@ -17447,7 +17525,7 @@ mod tests {
             .expect("a plain column may move");
         let notice = state.take_db_notice().expect("the move says what it did");
         assert!(
-            notice.contains("\"Text\" is now \"Number\"") && notice.contains("did not change"),
+            notice.contains("“文本”现在是“数字”") && notice.contains("存储的值没有改变"),
             "{notice}"
         );
         // The bytes are untouched and the *read* is shaped by the kind: a number
@@ -17496,8 +17574,8 @@ mod tests {
             .db_column_kind_set(block, note, PropertyKind::Formula.index())
             .expect("a text column may become a formula");
         let notice = state.take_db_notice().expect("the move says what it did");
-        assert!(notice.contains("until it is defined"), "{notice}");
-        assert!(!notice.contains("did not change"), "{notice}");
+        assert!(notice.contains("定义之前其单元格为空"), "{notice}");
+        assert!(!notice.contains("存储的值没有改变"), "{notice}");
 
         // The same click on the kind a column already has writes nothing at all,
         // which is what keeps a menu that re-draws from costing an undo step.
@@ -17529,7 +17607,7 @@ mod tests {
         assert!(rows.iter().all(|r| !r.disabled), "any database may be pointed at");
         assert_eq!(
             rows.iter().find(|r| r.id == tasks_id).expect("its own database is listed").note,
-            "this database",
+            "当前数据库",
             "and the row says so, because a self-relation is an ordinary answer"
         );
         assert!(rows.iter().all(|r| !r.chosen), "the column has no target yet");
@@ -17562,9 +17640,9 @@ mod tests {
 
         let rows = state.db_relation_mirrors(tasks, assignee, people_id);
         assert_eq!(rows[0].id, -1, "one-way is offered first");
-        assert_eq!(rows[0].name, "No back-pointer");
+        assert_eq!(rows[0].name, "无反向关联");
         assert!(rows[0].chosen, "and it is the answer an unpaired column has");
-        assert!(rows[0].note.contains("one-way"));
+        assert!(rows[0].note.contains("单向"));
         assert!(
             rows.iter().all(|r| r.id != note),
             "a text column has nowhere to store a back-pointer, so it is not a candidate"
@@ -17721,8 +17799,8 @@ mod tests {
         // Panel 2: the target database's columns, each judged by `check_config`.
         let columns = state.db_rollup_columns(assignee, -1);
         assert_eq!(columns[0].id, -1, "`count` reads no column, so that is a choice");
-        assert_eq!(columns[0].name, "No column");
-        assert_eq!(columns[0].note, "count needs no column");
+        assert_eq!(columns[0].name, "无列");
+        assert_eq!(columns[0].note, "计数不需要列");
         let row_of = |property: i32| {
             columns
                 .iter()
@@ -17732,7 +17810,7 @@ mod tests {
         };
         let number = row_of(points);
         assert!(!number.disabled);
-        assert_eq!(number.note, "Number", "a live row says what kind it is");
+        assert_eq!(number.note, "数字", "a live row says what kind it is");
         let relation = row_of(assigned);
         assert!(relation.disabled);
         assert_eq!(
@@ -17750,8 +17828,8 @@ mod tests {
         // Panel 3: the six folds, in the order the editor offers them.
         let aggregates = state.db_rollup_aggregates(2);
         assert_eq!(aggregates.len(), 6);
-        assert_eq!(aggregates[0].name, "None", "and `none` first, the state a new rollup is in");
-        assert_eq!(aggregates[2].name, "Sum");
+        assert_eq!(aggregates[0].name, "无", "and `none` first, the state a new rollup is in");
+        assert_eq!(aggregates[2].name, "求和");
         assert!(aggregates.iter().all(|r| !r.disabled));
         assert!(aggregates.iter().filter(|r| r.chosen).count() == 1);
     }
@@ -17776,7 +17854,7 @@ mod tests {
 
         assert_eq!(
             state.db_rollup_labels(total),
-            ("Not set".into(), "Not set".into(), "None".into()),
+            ("未设置".into(), "未设置".into(), "无".into()),
             "a column nobody has defined yet"
         );
         state
@@ -17787,7 +17865,7 @@ mod tests {
             .expect("a sum over the related points");
         assert_eq!(
             state.db_rollup_labels(total),
-            ("Assignee".into(), "Points".into(), "Sum".into())
+            ("Assignee".into(), "Points".into(), "求和".into())
         );
         assert_eq!(state.db_rollup_config(total), (assignee, points, 2));
 
@@ -17886,12 +17964,12 @@ mod tests {
             assert!(
                 state.db_add_view(block, at as i32),
                 "{} creates",
-                layout.label()
+                super::zh_view(*layout)
             );
             let row = block_row(&state, block);
             assert_eq!(row.db_layout_index, at as i32, "the switch is the number");
-            assert_eq!(row.db_layout, layout.label(), "…and the word is still the word");
-            assert!(row.db_layout_ok, "{} is drawn by this build", layout.label());
+            assert_eq!(row.db_layout, super::zh_view(*layout), "…and the word is still the word");
+            assert!(row.db_layout_ok, "{} is drawn by this build", super::zh_view(*layout));
         }
     }
 
@@ -18015,7 +18093,7 @@ mod tests {
         );
         let (_, rows) = state.db_filter_panel(block);
         assert_eq!(rows.len(), 1, "and the rule it was refused is still there");
-        assert_eq!(rows[0].op_name, "is", "with the comparison it started with");
+        assert_eq!(rows[0].op_name, "是", "with the comparison it started with");
 
         // Out of the list entirely, and out of the clause list: both no-ops.
         let past_the_end = crate::core::database_view::FILTER_OPS.len() + 1;
