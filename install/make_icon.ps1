@@ -1,65 +1,42 @@
-# Quire app icon — drawn here, not hand-made, so the asset is reproducible.
+# Quire app icon — rasterised from the artwork in this folder, not drawn here.
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File install\make_icon.ps1
 #
-# Writes install\quire.ico (the exe/Start-menu icon: 16, 24, 32, 48, 64, 128
-# and 256 px frames in one container) and install\quire.png (the 256 px frame,
-# for Slint's `Window.icon`). Each frame is the same geometry scaled to its
-# size, which is what keeps the ring readable at 16 px.
+# install\icon.svg is the artwork's source and install\icon_master_1024.png is
+# its 1024 px raster: a document glyph on a **transparent** background — only
+# the glyph's own pixels are opaque, so no frame ships a plate behind it. Every
+# size below is that one picture scaled, which is what keeps them agreeing.
 #
-# The picture: the vertical gradient the app's dark theme uses, and a `Q`
-# drawn as a ring plus a tail stroke, so nothing depends on a installed font.
+# Writes:
+#   install\quire.ico      the exe/Start-menu icon: 16, 24, 32, 48, 64, 128 and
+#                          256 px frames in one container. The installer
+#                          (`quire.iss`) and `build.rs` both read this one file,
+#                          so the setup icon and the exe icon cannot drift.
+#   install\quire.png      the 256 px frame. Nothing in the shell reads it —
+#                          Slint 1.18 has no Window::set_icon — but the
+#                          installer check and the docs name it.
 
 Add-Type -AssemblyName System.Drawing
 
-$sizes = 16, 24, 32, 48, 64, 128, 256
-$top = [System.Drawing.Color]::FromArgb(255, 14, 27, 46)      # #0E1B2E
-$bottom = [System.Drawing.Color]::FromArgb(255, 10, 36, 66)   # #0A2442
-$ink = [System.Drawing.Color]::FromArgb(255, 245, 247, 250)   # near white
-$accent = [System.Drawing.Color]::FromArgb(255, 94, 234, 212) # #5EEAD4
+$here = Split-Path -Parent $MyInvocation.MyCommand.Path
 
-function New-FramePng([int]$size) {
+$masterPath = Join-Path $here 'icon_master_1024.png'
+if (-not (Test-Path $masterPath)) { throw "no artwork at $masterPath" }
+$master = [System.Drawing.Bitmap]::FromFile($masterPath)
+
+function New-Canvas([int]$size) {
     $bmp = New-Object System.Drawing.Bitmap $size, $size, ([System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
     $g = [System.Drawing.Graphics]::FromImage($bmp)
-    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
+    $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+    $g.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+    $g.CompositingQuality = [System.Drawing.Drawing2D.CompositingQuality]::HighQuality
+    $g.CompositingMode = [System.Drawing.Drawing2D.CompositingMode]::SourceOver
     $g.Clear([System.Drawing.Color]::Transparent)
+    ,@($bmp, $g)
+}
 
-    # rounded square: 22% corner radius, the same shape at every size
-    $radius = $size * 0.22
-    $path = New-Object System.Drawing.Drawing2D.GraphicsPath
-    $d = $radius * 2
-    $path.AddArc(0, 0, $d, $d, 180, 90)
-    $path.AddArc($size - $d, 0, $d, $d, 270, 90)
-    $path.AddArc($size - $d, $size - $d, $d, $d, 0, 90)
-    $path.AddArc(0, $size - $d, $d, $d, 90, 90)
-    $path.CloseFigure()
-
-    $brush = New-Object System.Drawing.Drawing2D.LinearGradientBrush(
-        (New-Object System.Drawing.RectangleF(0, 0, $size, $size)),
-        $top, $bottom, 90)
-    $g.FillPath($brush, $path)
-    $brush.Dispose(); $path.Dispose()
-
-    # the Q: a ring centred a little high, and the tail through its lower right
-    $stroke = [Math]::Max(1.5, $size * 0.10)
-    $ring = $size * 0.30
-    $cx = $size * 0.5
-    $cy = $size * 0.46
-    $pen = New-Object System.Drawing.Pen($ink, $stroke)
-    $pen.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
-    $pen.EndCap = [System.Drawing.Drawing2D.LineCap]::Round
-    $g.DrawEllipse($pen, ($cx - $ring), ($cy - $ring), ($ring * 2), ($ring * 2))
-
-    $tail = New-Object System.Drawing.Pen($accent, $stroke)
-    $tail.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
-    $tail.EndCap = [System.Drawing.Drawing2D.LineCap]::Round
-    $edge = [Math]::Sqrt(2) / 2
-    $g.DrawLine($tail,
-        ($cx + $ring * $edge * 0.7), ($cy + $ring * $edge * 1.1),
-        ($cx + $ring * $edge * 2.0), ($cy + $ring * $edge * 2.2))
-    $pen.Dispose(); $tail.Dispose()
-
-    $g.Dispose()
+function Save-Png($bmp) {
     $ms = New-Object System.IO.MemoryStream
     $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
     $bytes = $ms.ToArray()
@@ -67,7 +44,18 @@ function New-FramePng([int]$size) {
     ,$bytes
 }
 
-$here = Split-Path -Parent $MyInvocation.MyCommand.Path
+# The frame: the picture, edge to edge, on a transparent square. Windows draws
+# these itself (the shell paints its own tile behind an icon), so nothing is
+# added here but the art.
+function New-FramePng([int]$size) {
+    $c = New-Canvas $size
+    $bmp = $c[0]; $g = $c[1]
+    $g.DrawImage($master, (New-Object System.Drawing.Rectangle 0, 0, $size, $size))
+    $g.Dispose()
+    Save-Png $bmp
+}
+
+$sizes = 16, 24, 32, 48, 64, 128, 256
 $frames = @{}
 foreach ($size in $sizes) {
     $frames[$size] = New-FramePng $size
@@ -106,3 +94,4 @@ $png = Join-Path $here 'quire.png'
 $probe = New-Object System.Drawing.Icon $out, 32, 32
 "icon loads: {0}x{1}" -f $probe.Width, $probe.Height
 $probe.Dispose()
+$master.Dispose()
