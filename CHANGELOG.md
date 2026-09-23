@@ -436,6 +436,41 @@ First functional release: a local, single-file-database notes workspace.
 - GPU rendering (FemtoVG default; Skia / wgpu builds selectable); idle
   CPU ≈ 0, a 10 000-block page costs ≈10 MB over the empty shell
 
+### LAN sync (crate::sync)
+- Two Quire installs on one network keep each other's workspace by exchanging
+  whole snapshots and merging them three ways (aw-server-plus's model, adapted
+  to Quire's integer ids and its change lists). The engine is
+  `src/sync/`: UDP discovery on 46000, a dependency-free HTTP server on 5878
+  (`/sync/info`, `/sync/snapshot` GET and POST, `/sync/attachment/<id>`,
+  `/sync/pair`), a worker thread that runs one pull-merge-push cycle at a time,
+  and a Slint `Timer` on the UI thread that answers every job that has to touch
+  the session — the workspace is `Rc`-bound to that thread, so nothing else may
+- The merge is against a **shadow** (what the two devices last agreed on, one
+  settings row per peer): a row only the other side moved is taken, a row only
+  this side moved is kept, a row both sides edited keeps this device's copy and
+  says so in the log, and a row *neither* side had before — where both minted
+  the same integer id, because ids are per-device `max + 1` — is renumbered
+  against this session's own watermarks and kept alongside, cascading to the
+  pages, blocks, attachments, databases, columns, views, records and cells it
+  carries. First contact between two populated devices runs without a shadow
+  and treats every differing row as a conflict: two workspaces meeting for the
+  first time is one user decision, not one algorithm
+- Pairing is trust-on-first-use: a device found on the wire (or typed in by
+  hand as `ip[:port]`, for networks where the announcement cannot get through)
+  is asked to pair with one POST, and both sides end up in each other's table.
+  Sync then runs on demand (**Sync now**) or on a minute timer while the
+  automatic switch is on; attachment bytes travel over the same protocol
+  (`/sync/attachment/<id>`), pictures re-entering through the ordinary
+  `import_bytes` path so the receiver builds its own preview. The settings
+  dialog's SYNC section lists the devices, their last sync and the two ways in
+- What the snapshot deliberately does not carry: settings rows (device-local by
+  policy — theme, window size and the peers table stay where they were set),
+  named versions, and the `created`/`edited` stamps of database records, which
+  the receiving store stamps for itself
+- Dark is the default theme now (`dark_setting`): a library with no stored
+  `theme` row opens dark, and a stored "light" still wins — the two platforms
+  share that rule
+
 ### Build & test
 - `just check`: `cargo check --all-targets`, the whole test suite, a release
   build. Visual regression and the RAM/CPU scenes run from

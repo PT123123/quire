@@ -12,6 +12,10 @@
 
 pub mod app;
 pub mod platform;
+// LAN sync between installs (desktop ↔ Android): discovery, pairing and the
+// three-way merge. The shell owns the engine; `quire-core`'s store supplies
+// the data through the same Repository seam as everything else.
+pub mod sync;
 
 pub use quire_core::{core, services, storage, testing};
 

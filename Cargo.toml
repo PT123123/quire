@@ -32,6 +32,9 @@ quire-core = { git = "https://github.com/PT123123/quire-core.git", rev = "f3044e
 image = { workspace = true }
 rfd = "0.17.2"
 rusqlite = { workspace = true }
+# The sync snapshot's wire format (crate::sync). Pure Rust, no system deps.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 # Renderer is selected per cargo feature (see [features]); default-features are off so
 # exactly one GPU renderer is compiled per binary, keeping the binary lean.
 slint = { version = "1.18", default-features = false, features = [
