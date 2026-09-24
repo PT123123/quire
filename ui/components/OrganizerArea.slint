@@ -347,7 +347,11 @@ export component OrganizerArea inherits Rectangle {
                 if UIState.org-tab == 0 : ListView {
                     vertical-stretch: 1;
                     for row[idx] in UIState.note-rows : Rectangle {
-                        height: 46px;
+                        // The row is as tall as what it draws: title, excerpt and
+                        // the tags/age line, plus the padding. A fixed 46 px was
+                        // 11 px short of that, and the first full sweep showed it
+                        // as three lines of one note overlapping the next row.
+                        height: 58px;
                         border-radius: Theme.radius-sm;
                         background: row.selected
                             ? Colors.surface-selected
