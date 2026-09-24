@@ -154,15 +154,18 @@ component OrgInput inherits Rectangle {
     in property <length> hint-height: 28px;
     in-out property <string> value;
     // Whether the field takes the row's leftover width. A `Rectangle` has no
-    // preferred width of its own, so an input without this is an input zero pixels
-    // wide — which is exactly what the first render of this pane showed. A row
-    // with controls *after* the field (the deadline's 今天/清除) turns it off and
-    // gives the field its own width instead.
+    // preferred width of its own, so this is min/max *plus* stretch — and **not**
+    // an explicit `width`. An explicit width wins over the stretch, which is what
+    // `width: root.grow ? 0px : root.field-width` did: every growing field in the
+    // detail pane came out zero pixels wide, and the sweep photographed a task
+    // with no title, no tags and no notes. (The fixed-width arm still wants it,
+    // which is why min and max are both set there.)
     in property <bool> grow: true;
     in property <length> field-width: 170px;
     callback edited();
 
-    width: root.grow ? 0px : root.field-width;
+    min-width: root.grow ? 120px : root.field-width;
+    max-width: root.grow ? 100000px : root.field-width;
     horizontal-stretch: root.grow ? 1 : 0;
     height: multiline
         ? max(root.hint-height, inner.preferred-height + 12px)
