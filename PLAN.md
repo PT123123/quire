@@ -664,8 +664,8 @@ instead of silently binding.
   "virtualization ✅" overstates it. §廿六 plain text absent (md only, dialog
   filter `&["md"]`). §廿三 memory attribution absent (2 counters total, and
   the checklist ticks "GPU-side memory separate ✓" with no GPU reading ever
-  taken). §廿七 tray / native menu / startup options / global shortcut: none,
-  and `system-tray` is compiled in unused. §卅一 DPI: 125/150/200% never
+  taken). §廿七 tray 已做（ADR-0096，2026-09-24）；native menu / startup
+  options / global shortcut: still none. §卅一 DPI: 125/150/200% never
   measured. §十三 `composition_state` never named.
 - **Visual gate, and what it exposed** (sweep5 vs the sweep4 baseline, hash
   diff so only moved pixels get re-judged): 32 of 34 scenes byte-identical,

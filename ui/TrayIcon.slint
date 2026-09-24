@@ -1,0 +1,44 @@
+// The system tray icon (SPEC §二十七 「窗口」).
+//
+// A SystemTrayIcon is a *top-level* component: it has no window of its own and
+// the platform tray APIs only bind to a component rooted in one, so this is a
+// sibling of AppWindow rather than a child of it (the compiler rejects the
+// nested spelling). Rust builds the one instance (`app::tray::install`) and
+// holds it for the life of the process — a visible tray icon is one of the two
+// things Slint counts as keeping the event loop alive, which is what lets the
+// app outlive its own window. See ADR-0096.
+//
+// The menu is the native one: Windows pops it up on a right-click and the shell
+// draws it, so nothing here styles it. The entries are the only two things the
+// tray can do — bring the window back, or end the session.
+
+export component AppTray inherits SystemTrayIcon {
+    // The one master artwork, rasterised by `install/make_icon.ps1`; the shell
+    // scales it down to the notification area's own icon size. Transparent
+    // background, like the exe icon — the taskbar paints its own tile behind it.
+    icon: @image-url("../install/quire.png");
+    tooltip: "Quire";
+    // Linux/BSD use this for accessibility and overflow menus; Windows draws
+    // only the icon, so it is inert there.
+    title: "Quire";
+
+    // Wired to the window in Rust (`app::tray::install`).
+    callback show-window();
+    callback quit();
+
+    Menu {
+        MenuItem {
+            title: "显示主界面";
+            activated => {
+                show-window();
+            }
+        }
+        MenuSeparator {}
+        MenuItem {
+            title: "退出";
+            activated => {
+                quit();
+            }
+        }
+    }
+}

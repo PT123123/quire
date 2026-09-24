@@ -125,8 +125,9 @@ invalidate the milestone.
    `platform/`; add a `platform::data_dir()` that feeds the existing pure
    `data_location::decide()`, and make "no per-user directory" a loud error
    instead of a silent in-memory session; fix the Slint feature list per target
-   (Android wants `backend-android-activity-06`; `system-tray` is dead code on
-   desktop too). Acceptance: `cargo check --target x86_64-linux-android
+   (Android wants `backend-android-activity-06`; `system-tray` must stay on
+   desktop, where the tray is real since ADR-0096, and has to come out of the
+   Android build). Acceptance: `cargo check --target x86_64-linux-android
    --all-targets` clears our own crates, not just the graph.
 2. **M9.0 input spike (hardware).** One `TextInput`, one `PopupWindow` beside
    it, on a real device, running `docs/IME_CHECKLIST.md`'s composition section

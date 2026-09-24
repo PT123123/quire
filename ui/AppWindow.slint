@@ -512,6 +512,11 @@ component LinkDialog inherits PopupWindow {
 // Rust-facing names must be re-exported from the entry file (1.18 codegen rule).
 export { UIState, SidebarNode, BlockRow, TextRun, CommandRow, SearchRow, MenuRow, SlashRow, VersionRow, DiffRow } from "Types.slint";
 
+// The system tray (SPEC §二十七). A SystemTrayIcon cannot be a child of this
+// window, so it is a component of its own that Rust builds and holds; naming it
+// here is what makes the codegen emit it (see ADR-0096).
+export { AppTray } from "TrayIcon.slint";
+
 export component AppWindow inherits Window {
     title: "Quire";
     preferred-width: 1280px;
@@ -798,9 +803,11 @@ export component AppWindow inherits Window {
     // geometry mirror for Rust-side popup anchoring
     changed width => {
         UIState.window-w = self.width;
+        UIState.window-resized();
     }
     changed height => {
         UIState.window-h = self.height;
+        UIState.window-resized();
     }
 
     shortcuts := FocusScope {
@@ -865,6 +872,35 @@ export component AppWindow inherits Window {
             keys: @keys(Control + S);
             activated => {
                 UIState.save-requested();
+            }
+        }
+        // Zoom. `Equals` and `Plus` are two rows because they are two key
+        // events: Ctrl+= sends '=' and Ctrl+Shift+= sends '+', and a binding
+        // names one character. Both key names carry Slint's "the shift state
+        // is not part of the match" behavior, so each row covers its own
+        // shifted spelling on layouts that need one (see `ShiftBehavior`).
+        KeyBinding {
+            keys: @keys(Control + Equals);
+            activated => {
+                UIState.zoom-in();
+            }
+        }
+        KeyBinding {
+            keys: @keys(Control + Plus);
+            activated => {
+                UIState.zoom-in();
+            }
+        }
+        KeyBinding {
+            keys: @keys(Control + HyphenMinus);
+            activated => {
+                UIState.zoom-out();
+            }
+        }
+        KeyBinding {
+            keys: @keys(Control + Digit0);
+            activated => {
+                UIState.zoom-reset();
             }
         }
         KeyBinding {

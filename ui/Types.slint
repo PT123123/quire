@@ -708,6 +708,19 @@ export global UIState {
     callback toggle-sidebar();
     callback toggle-theme();
     callback set-dark(bool);
+    // Whole-window zoom (Ctrl + = / Ctrl + +, Ctrl + -, Ctrl + 0). The factor
+    // itself lives in Rust — persisted, and applied by handing the window a new
+    // scale factor, which is the one lever Slint has for this — so the shell
+    // only names the three intents. Chrome and page scale together, because
+    // the scale factor is underneath both.
+    callback zoom-in();
+    callback zoom-out();
+    callback zoom-reset();
+    // Every window resize, mirrored from the root's width/height. Rust reads it
+    // as "the platform may have just re-announced its own scale factor" (a
+    // monitor or display-scaling change throws the zoom away) and puts the zoom
+    // back. See controller::wire.
+    callback window-resized();
     callback move-block(int);
     // drag-reorder (grip handle): Rust packs/unpacks the payload, hovers
     // validate the landing, drops commit one MoveBlockTo command

@@ -6,14 +6,15 @@
 // 'static callbacks capture a Weak and upgrade() it at fire time.
 
 use crate::app::state::{
-    core_page_id, kind_from_int, palette_action, AppState, PaletteAction, PAGE_GETTING_STARTED,
-    ROW_NEW_PAGE,
+    core_page_id, kind_from_int, palette_action, zoom_step, AppState, PaletteAction,
+    PAGE_GETTING_STARTED, ROW_NEW_PAGE,
 };
 use crate::core::database::PropertyKind;
 use crate::core::{BlockId, Change, Command, Lang};
 use crate::{AppWindow, UIState};
-use slint::{ComponentHandle, Global, Model};
+use slint::{ComponentHandle, Global, LogicalSize, Model, Timer};
 use std::rc::Rc;
+use std::time::Duration;
 
 /// Y offset of the first tree row inside the window: title bar (40) +
 /// workspace header (36) + search row (28) + settings row (28) + spacer (8).
@@ -31,6 +32,46 @@ fn block_drag_id(data: &slint::DataTransfer) -> Option<i32> {
 
 fn page_drag_id(data: &slint::DataTransfer) -> Option<i32> {
     data.plain_text().ok()?.strip_prefix(PAGE_DRAG_MIME)?.parse().ok()
+}
+
+/// Put `AppState::zoom()` on the window (Ctrl + = / Ctrl + -, Ctrl + 0).
+///
+/// Slint has exactly one lever for this: the window's scale factor, the number
+/// that turns logical pixels into physical ones. So the app's zoom is "pretend
+/// the display is Z times denser", and that is what makes it cover the whole
+/// shell in one move — the token ladder in `Theme`, the literal px in every
+/// component, glyph rasterisation and hit-testing all sit on top of that one
+/// number, so nothing under `ui/` has to know zoom exists. The window's
+/// *physical* size does not move: the layout is handed a smaller logical
+/// viewport, which is what zooming in means for a window that is not a
+/// scrollable document view. `base_scale` is the display's own factor, kept
+/// apart from the zoom so that a zoom of exactly 1 stays a no-op and the
+/// platform's number can be recognised when it comes back (see
+/// `on_window_resized` in `wire`).
+fn apply_zoom(ui: &AppWindow, state: &Rc<AppState>) {
+    let window = ui.window();
+    let target = state.base_scale() * state.zoom();
+    if (window.scale_factor() - target).abs() < 0.001 {
+        return;
+    }
+    window.dispatch_event(slint::platform::WindowEvent::ScaleFactorChanged {
+        scale_factor: target,
+    });
+    // The new factor on its own resizes nothing: the root item still holds the
+    // viewport that was computed with the old one, so re-announce the physical
+    // size and let Slint derive the logical size from the number it now has.
+    // Before the first paint there is no physical size yet and none to
+    // re-derive — the platform's own resize at show time does it with `target`
+    // already in place.
+    let physical = window.size();
+    if physical.width > 0 && physical.height > 0 {
+        window.dispatch_event(slint::platform::WindowEvent::Resized {
+            size: LogicalSize::new(
+                physical.width as f32 / target,
+                physical.height as f32 / target,
+            ),
+        });
+    }
 }
 
 // ─── LAN sync (crate::sync) ─────────────────────────────────────────────────
@@ -54,7 +95,7 @@ fn start_sync(ui: &AppWindow, state: &Rc<AppState>) {
     }
 
     {
-        let gw = ui.global::<UIState>().as_weak();
+        let gw = ui_state_weak(ui);
         let s = state.clone();
         let cmd = cmd_tx.clone();
         ui.global::<UIState>().on_sync_now(move |id| {
@@ -66,7 +107,7 @@ fn start_sync(ui: &AppWindow, state: &Rc<AppState>) {
         });
     }
     {
-        let gw = ui.global::<UIState>().as_weak();
+        let gw = ui_state_weak(ui);
         let s = state.clone();
         let cmd = cmd_tx.clone();
         ui.global::<UIState>().on_sync_pair(move |id| {
@@ -78,7 +119,7 @@ fn start_sync(ui: &AppWindow, state: &Rc<AppState>) {
         });
     }
     {
-        let gw = ui.global::<UIState>().as_weak();
+        let gw = ui_state_weak(ui);
         let s = state.clone();
         ui.global::<UIState>().on_sync_forget(move |id| {
             let g = gw.upgrade().unwrap();
@@ -88,7 +129,7 @@ fn start_sync(ui: &AppWindow, state: &Rc<AppState>) {
         });
     }
     {
-        let gw = ui.global::<UIState>().as_weak();
+        let gw = ui_state_weak(ui);
         let s = state.clone();
         ui.global::<UIState>().on_sync_auto_toggled(move |on| {
             let g = gw.upgrade().unwrap();
@@ -104,7 +145,7 @@ fn start_sync(ui: &AppWindow, state: &Rc<AppState>) {
         });
     }
     {
-        let gw = ui.global::<UIState>().as_weak();
+        let gw = ui_state_weak(ui);
         let cmd = cmd_tx.clone();
         ui.global::<UIState>().on_sync_add(move |text| {
             let g = gw.upgrade().unwrap();
@@ -383,9 +424,22 @@ mod tests {
     }
 }
 
+/// The window's `UIState` as a weak handle.
+///
+/// The plain spelling is `ui.global::<UIState>().as_weak()`, and it no longer
+/// type-checks: Slint implements `Global` once *per component*, and the tray
+/// (ADR-0096) is a second exported component, so `UIState` has two impls.
+/// `as_weak` is a `Global` method whose `Component` parameter `Self` does not
+/// determine — `ui.global::<UIState>()` pins it, but what comes back is only a
+/// `UIState`, so the method call has to guess and cannot. Naming the component
+/// here is what the compiler inferred on its own while there was one impl.
+fn ui_state_weak(ui: &AppWindow) -> slint::Weak<UIState<'static>> {
+    <UIState<'_> as Global<'_, AppWindow>>::as_weak(&ui.global::<UIState>())
+}
+
 pub fn bind(ui: &AppWindow, state: &Rc<AppState>) {
     let g = ui.global::<UIState>();
-    state.set_ui(ui.global::<UIState>().as_weak());
+    state.set_ui(ui_state_weak(ui));
     g.set_sidebar_rows(state.sidebar_model());
     g.set_blocks(state.blocks_model());
     g.set_backlinks(state.backlinks_model());
@@ -414,6 +468,12 @@ pub fn bind(ui: &AppWindow, state: &Rc<AppState>) {
     if let Some(notice) = state.take_db_notice() {
         g.set_db_notice(notice.into());
     }
+    // Zoom: remember the platform's own scale factor before anything touches
+    // it. The zoom is a multiple of *that*, and keeping the two apart is what
+    // lets a later resize tell this app's number from the platform's and put
+    // the zoom back instead of losing it (see the `window-resized` handler).
+    state.set_base_scale(ui.window().scale_factor());
+    apply_zoom(ui, state);
 }
 
 /// Select a find hit: route through the hit block's editing input, which
@@ -481,7 +541,7 @@ fn renderer_name() -> &'static str {
 }
 
 pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
-    let gw = ui.global::<UIState>().as_weak();
+    let gw = ui_state_weak(ui);
     state.set_ui(gw.clone());
 
     // ---- shell ----
@@ -514,6 +574,70 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
             let g = gw.upgrade().unwrap();
             g.set_dark(dark);
             s.set_dark(dark);
+        });
+    }
+
+    // ---- zoom (Ctrl + = / Ctrl + +, Ctrl + -, Ctrl + 0) ----
+    {
+        let ui_w = ui.as_weak();
+        let s = state.clone();
+        ui.global::<UIState>().on_zoom_in(move || {
+            if let Some(ui) = ui_w.upgrade() {
+                s.set_zoom(zoom_step(s.zoom(), 1));
+                apply_zoom(&ui, &s);
+            }
+        });
+    }
+
+    {
+        let ui_w = ui.as_weak();
+        let s = state.clone();
+        ui.global::<UIState>().on_zoom_out(move || {
+            if let Some(ui) = ui_w.upgrade() {
+                s.set_zoom(zoom_step(s.zoom(), -1));
+                apply_zoom(&ui, &s);
+            }
+        });
+    }
+
+    {
+        let ui_w = ui.as_weak();
+        let s = state.clone();
+        ui.global::<UIState>().on_zoom_reset(move || {
+            if let Some(ui) = ui_w.upgrade() {
+                s.set_zoom(1.0);
+                apply_zoom(&ui, &s);
+            }
+        });
+    }
+
+    {
+        let ui_w = ui.as_weak();
+        let s = state.clone();
+        ui.global::<UIState>().on_window_resized(move || {
+            let Some(ui) = ui_w.upgrade() else { return };
+            let actual = ui.window().scale_factor();
+            let expected = s.base_scale() * s.zoom();
+            if (actual - expected).abs() < 0.001 {
+                // an ordinary resize: the number on the window is ours
+                return;
+            }
+            // The platform has re-announced its own scale factor — a monitor
+            // with a different DPI, or a change to the display's scaling — and
+            // that is the one thing that throws the zoom away, because it
+            // arrives by the same door this app uses. So adopt the new number
+            // as the base and put the zoom back. It runs on the next event-loop
+            // turn rather than here: this handler is in the middle of the
+            // resize that carried the change, and `apply_zoom` dispatches
+            // window events of its own.
+            s.set_base_scale(actual);
+            let ui_w = ui.as_weak();
+            let s = s.clone();
+            Timer::single_shot(Duration::ZERO, move || {
+                if let Some(ui) = ui_w.upgrade() {
+                    apply_zoom(&ui, &s);
+                }
+            });
         });
     }
 

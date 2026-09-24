@@ -2,6 +2,126 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0096 · Closing the window hides it; only the tray menu's 「退出」 ends the session
+
+Decision: Quire has a system tray icon — `ui/TrayIcon.slint`, a
+`SystemTrayIcon`-rooted component that `app::tray::install` builds and hands back
+for the caller to hold. The title bar's X hides the window instead of ending the
+session, and the only exit is the tray menu's 「退出」, which calls
+`slint::quit_event_loop()`. The menu's other entry, 「显示主界面」, and the icon's
+own left-click on platforms that report one, clear `minimized` and `show()` the
+window back.
+
+Why almost nothing had to be implemented: Slint 1.18 keeps the event loop alive
+on a counter of *visible things* (`SlintContext`'s keepalive) and counts a
+visible window and a visible tray icon in the same counter. Hiding the window
+decrements it and the tray's presence holds it above zero, so `AppWindow::run()`
+— which is `show()`, `run_event_loop()`, `hide()` — outlives the window it
+showed. "Close is not quit" is therefore not code anywhere: it is what a visible
+tray *means*, and the `on_close_requested` returning `HideWindow` in `main.rs`
+only spells out the answer the unset callback already gave (`Callback::call`
+starts from `Ret::default()`, and `CloseRequestResponse::default()` is
+`HideWindow`) so the two paths — `root.close()` from the X and a platform close —
+cannot drift apart.
+
+Why the tray is a component of its own rather than part of `AppWindow`: the
+compiler requires a `SystemTrayIcon` to be the *root* of an exported component,
+because the platform tray APIs only know how to bind to a top-level one. Nesting
+it in the `Window` is a compile error, so `ui/AppWindow.slint` merely re-exports
+`AppTray` (the 1.18 codegen rule the file already documents for its types) and
+the tray is a sibling instance with its own copy of every global — a consequence
+Slint documents for a second component.
+
+The wart that costs: because `Global` is implemented once *per component*,
+`UIState` now has two impls and `ui.global::<UIState>().as_weak()` stops
+type-checking. `as_weak` is a `Global` method whose `Component` parameter `Self`
+does not determine — `ui.global::<UIState>()` pins it, but what comes back is
+only a `UIState`, so the call has to guess between the two impls and cannot. The
+seven sites in `controller.rs` go through one helper (`ui_state_weak`) that names
+the component. Compiling `ui/TrayIcon.slint` as its own Slint unit — which would
+leave the tray with no globals at all and keep the idiom everywhere — was
+rejected: it means a second `slint_build::compile` plus a hand-written `include!`
+of its output, i.e. changing the build to route around a typing wart.
+
+Consequences:
+
+- **The window has no visible quit affordance.** The X hides; exiting means
+  right-clicking the tray icon. That is the requested behaviour and the Windows
+  convention for this class of app, but it is a real loss of discoverability, and
+  the tray icon is the only sign the app is still running.
+- **A machine with no notification area** (a headless benchmark run, a session
+  with no shell) makes `Shell_NotifyIconW(NIM_ADD)` fail. Slint logs that and
+  carries on, so the app then runs with no tray and no way back to a hidden
+  window. `main.rs` prints one line when `AppTray::new()` itself fails; the
+  deeper failure is only in the log.
+- **The window state is saved at exit, not at close.** `record_window_size` and
+  the flush after `ui.run()` still run on the real quit path, which is what the
+  clean-exit record (ADR-0018) depends on — a session killed from the task
+  manager while hidden is still an unclean exit.
+- **`--auto-exit` quits through the same door the tray uses**, so the benchmark
+  path exercises the exit path rather than a second one.
+- Measured rather than reasoned: with the tray installed the tray backend's
+  message-only window (`SlintSystemTrayWindow`, created immediately before
+  `NIM_ADD` and destroyed again if it fails) is registered with the shell while
+  the app runs, and the app still exits cleanly (`--auto-exit`, exit code 0).
+
+## ADR-0095 · Zoom is the window's scale factor, which is the shell's one lever and not a supported one
+
+Decision: Ctrl + = (or Ctrl + Shift + =) / Ctrl + - change a persisted factor
+(`AppState::zoom`, settings row `ui.zoom`, one of thirteen rungs from 0.5 to 3.0),
+and Ctrl + 0 puts it back to 1. The controller hands that factor to the window as
+a **scale factor** — Slint's number for turning logical into physical pixels — by
+dispatching `WindowEvent::ScaleFactorChanged` and then a `Resized` derived from
+the window's current physical size. The zoom is a multiple of the display's own
+factor, read once at startup and before every apply (`AppState::base_scale`), so a
+zoom of 1 is a no-op and the platform's number stays tellable from this app's.
+
+Why the factor and not the tokens: `Theme` and `Typography` are the shell's
+intended ladder, but 1319 literal `px` values across `ui/`'s 35 files sit outside
+it — every popup's clamp, the tree rows, the gutter widths. Scaling the tokens
+would move the padding of a row that happened to be written with one and leave the
+row written with `8px` alone, which reads as a rendering fault rather than as a
+scale. The scale factor sits underneath both spellings, and underneath
+hit-testing and glyph rasterisation too, so the whole shell follows from one
+number and nothing in `ui/` has to know zoom exists.
+
+Why this is an ADR rather than a footnote: Slint's answer to "how do I zoom" is
+that the app is not supposed to. The maintainers' wording (slint-ui/slint
+discussion #10361) is that dispatching this event works, "but in principle, the
+app is not supposed to do that as this should be done by the platform itself, and
+it will be overwritten when the scale factor actually changes (the user moves the
+window between screen or changes their display settings)". That is a real
+limitation and it is the reason for the second half of the mechanism: the platform
+re-announces its own factor through the same door, so the `window-resized` hook
+compares what the window reports against base × zoom on every resize and puts the
+zoom back when the number is not ours — deferred one event-loop turn, because
+applying it dispatches window events of its own and the resize that carried the
+change is still being processed.
+
+Consequences:
+
+- **The window's physical size never changes**, so `window.w` / `window.h` keep
+  their meaning (they are persisted in physical pixels) and a restart at a
+  different zoom lands in the same window. What shrinks is the *logical* viewport:
+  at 2× the shell lays out for half the pixels and draws each of them twice as
+  large, which is what zooming in means for a window that is not a scrollable
+  document view.
+- **The floor moves the other way.** The backend applies `min-width` once, at
+  creation, with the factor in force then, so the window's minimum in logical
+  pixels is `min-width / zoom` — a zoomed-in window can be dragged narrower than
+  the layout's own minimum. Not fixed: Slint exposes no way for the app to re-apply
+  a minimum size, and a floor that shrinks as you zoom in is at least not a trap.
+- The zoom is persisted like the theme (one batched settings write), which is why
+  it is a settings row and not a session field.
+- Unverified: the hook's behaviour with no resize at all accompanying a scale
+  change. On Windows a monitor change normally carries one (the OS hands the
+  window a new rect), and without one the zoom silently returns to 1 until the
+  next Ctrl + =. Named rather than assumed.
+- Measured rather than reasoned: `just shot` with the factor forced to 1.5 draws
+  the whole shell — chrome, page, icons, wrapping — scaled and reflowed in one
+  pass, and `zoom_step`'s ladder (up then down is the rung it started on, both
+  ends are the clamp) is a unit test in `state.rs`.
+
 ## ADR-0094 · The extracted crate leaves this repository and comes back as a pinned git dependency
 
 Decision: `crates/data/` is deleted here. Its content is now the repository

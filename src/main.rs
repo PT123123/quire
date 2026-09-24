@@ -396,6 +396,25 @@ fn real_main(start: std::time::Instant) -> Result<(), String> {
     controller::wire(&ui, &state);
     mark("bind_wire");
 
+    // The system tray (SPEC §二十七, ADR-0096): closing the window hides it, and
+    // the session ends only through the tray menu's 「退出」. The tray component
+    // is a *visible* Slint element, and a visible tray icon keeps the event loop
+    // alive on its own, so `ui.run()` below outlives the window it shows. `_tray`
+    // must therefore stay bound for the whole run — dropping it removes the icon
+    // and releases the last keepalive.
+    let _tray = match quire::app::tray::install(&ui) {
+        Ok(tray) => Some(tray),
+        Err(e) => {
+            eprintln!("quire: no system tray ({e}); closing the window will not be recoverable");
+            None
+        }
+    };
+    // A close request is a hide, never a quit. This is what the title bar's X
+    // reaches through `root.close()`, and it is also the answer the platform's
+    // own close would get — spelled out so the two cannot drift apart.
+    ui.window()
+        .on_close_requested(|| slint::CloseRequestResponse::HideWindow);
+
     // .md file association: double-clicking a markdown file lands here
     if let Some(path) = launch.open.clone() {
         let g = ui.global::<quire::UIState>();

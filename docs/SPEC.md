@@ -547,7 +547,7 @@ Windows 应用应该考虑：
 * 最大化
 * 关闭
 * window resize
-* system tray 后续可选
+* system tray —— 已做（ADR-0096）：关闭窗口是隐藏到托盘，「退出」只在托盘右键菜单里
 
 但第一版不要花大量时间做 Windows 原生窗口特效。
 
@@ -1578,7 +1578,7 @@ Windows MVP 稳定之后再增加：
 
 * native context menu
 * file association
-* system tray
+* system tray —— 已做（ADR-0096）
 * global-ish shortcut 中可行的部分
 * startup options
 * drag/drop files

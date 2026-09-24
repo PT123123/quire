@@ -118,6 +118,13 @@ pub struct AppState {
     clipboard: RefCell<Option<Block>>,
     /// Persisted settings (theme etc.), loaded from storage at startup.
     settings: RefCell<HashMap<String, String>>,
+    /// The window's own scale factor, as the platform reported it — the number
+    /// the display's DPI produced, with no zoom in it. `ui.zoom` is a multiple
+    /// of *this* one, so remembering it is what lets a resize tell the
+    /// platform's own number apart from the one this app handed the window and
+    /// put the zoom back instead of letting a monitor change swallow it
+    /// (controller::apply_zoom).
+    base_scale: Cell<f32>,
     /// UI weak handle, installed by the controller at wire time — lets the
     /// state push display-only projections (page stats) without a callback.
     ui: RefCell<Option<slint::Weak<crate::UIState<'static>>>>,
@@ -773,6 +780,7 @@ impl AppState {
             version_diff: Rc::new(VecModel::from(Vec::new())),
             clipboard: RefCell::new(None),
             settings: RefCell::new(restored_settings),
+            base_scale: Cell::new(1.0),
             recents_restored: Cell::new(restored_recents),
             ui: RefCell::new(None),
             db_notice: RefCell::new(
@@ -1580,6 +1588,46 @@ impl AppState {
             // both platforms should open in); a stored "light" still wins.
             .map(|v| v != "light")
             .unwrap_or(true)
+    }
+
+    // ---- whole-window zoom (Ctrl + = / Ctrl + -, Ctrl + 0) ----
+
+    /// The zoom factor (settings row `ui.zoom`) — a multiple of the window's
+    /// own scale factor, so 1.0 is "whatever the display's DPI already says"
+    /// and every other rung is that display drawn larger or smaller. The row is
+    /// clamped rather than trusted: it multiplies a number the platform owns,
+    /// and a hand-edited 0 or 400 in it would otherwise be handed straight to
+    /// the renderer.
+    pub fn zoom(&self) -> f32 {
+        self.settings
+            .borrow()
+            .get("ui.zoom")
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|z| z.is_finite())
+            .map(|z| z.clamp(ZOOM_MIN, ZOOM_MAX))
+            .unwrap_or(1.0)
+    }
+
+    /// Persist the zoom (one batched settings write, like the theme).
+    pub fn set_zoom(&self, zoom: f32) {
+        let zoom = if zoom.is_finite() {
+            zoom.clamp(ZOOM_MIN, ZOOM_MAX)
+        } else {
+            1.0
+        };
+        self.record_setting("ui.zoom", &format!("{zoom}"));
+    }
+
+    /// The window's own scale factor, as the platform last reported it — the
+    /// number `zoom()` multiplies. The controller writes it before it applies a
+    /// zoom, and again when a resize shows the platform has re-announced its
+    /// own (a monitor or display-scaling change), so the two can be told apart.
+    pub fn base_scale(&self) -> f32 {
+        self.base_scale.get()
+    }
+
+    pub fn set_base_scale(&self, scale: f32) {
+        self.base_scale.set(scale);
     }
 
     // ---- in-page find (Ctrl+F; data layer = Track B's FindSession) ----
@@ -12587,6 +12635,36 @@ fn sync_block_diff(
     }
 }
 
+// The ladder Ctrl + = / Ctrl + - walk. Rungs rather than a ratio for two
+// reasons: the set a user can land on stays the set this shell draws, and
+// stepping up and back down returns to the factor it started from instead of
+// accumulating float drift. 1.0 is on it (Ctrl + 0 goes there directly), and
+// the two ends are the clamp `AppState::zoom` applies to the settings row.
+const ZOOM_STEPS: [f32; 13] =
+    [0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0];
+const ZOOM_MIN: f32 = 0.5;
+const ZOOM_MAX: f32 = 3.0;
+
+/// One rung up (`step > 0`) or down (`step < 0`) from `zoom`. A factor that is
+/// not on the ladder — a settings row someone edited by hand, or one written
+/// by an older build — moves to the neighbouring rung, which is what a
+/// keystroke should do with a number it did not produce.
+pub fn zoom_step(zoom: f32, step: i32) -> f32 {
+    if step > 0 {
+        ZOOM_STEPS
+            .iter()
+            .copied()
+            .find(|s| *s > zoom + 0.001)
+            .unwrap_or(ZOOM_MAX)
+    } else {
+        ZOOM_STEPS
+            .iter()
+            .rev()
+            .copied()
+            .find(|s| *s < zoom - 0.001)
+            .unwrap_or(ZOOM_MIN)
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::{
@@ -18185,5 +18263,24 @@ mod tests {
             .find(|p| p.id == page)
             .map(|p| p.title.clone());
         assert_eq!(on_a.as_deref(), Some("Renamed on the phone"));
+    }
+    #[test]
+    fn zoom_step_walks_the_ladder_and_stops_at_both_ends() {
+        use super::{zoom_step, ZOOM_MAX, ZOOM_MIN};
+
+        assert_eq!(zoom_step(1.0, 1), 1.1);
+        assert_eq!(zoom_step(1.0, -1), 0.9);
+        assert_eq!(zoom_step(ZOOM_MAX, 1), ZOOM_MAX);
+        assert_eq!(zoom_step(ZOOM_MIN, -1), ZOOM_MIN);
+        // A factor off the ladder (a settings row somebody edited) snaps to the
+        // neighbouring rung instead of being scaled by a fixed ratio, and
+        // 1.02 — which is not a rung — still finds 1.0 going down.
+        assert_eq!(zoom_step(1.02, 1), 1.1);
+        assert_eq!(zoom_step(1.02, -1), 1.0);
+        // Up then down is the rung it started on: the ladder's job is that the
+        // two keys are inverses of each other, not that they approximate one.
+        for rung in [0.5, 0.8, 1.0, 1.25, 2.0] {
+            assert_eq!(zoom_step(zoom_step(rung, 1), -1), rung);
+        }
     }
 }

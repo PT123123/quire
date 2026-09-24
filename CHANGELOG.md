@@ -413,11 +413,31 @@ First functional release: a local, single-file-database notes workspace.
 
 ### Desktop integration
 - Frameless window with custom title bar, light + dark themes (persisted)
+- System tray (ADR-0096): closing the window now hides it instead of ending the
+  session, and the only exit is the tray icon's right-click menu — 「显示主界面」
+  brings the window back (as does a left-click on the icon, on platforms that
+  report one), 「退出」 quits. Nothing intercepts the close: Slint keeps the event
+  loop alive while anything visible is left and counts a visible tray icon the
+  same as a visible window, so the tray existing *is* the behaviour. The icon is
+  the one artwork `install/make_icon.ps1` rasterises, the same picture the exe,
+  the installer and the shortcuts carry, transparency included
 - The light theme's quietest text is measured rather than eyeballed: the third
   text tier (block handles, footer, sidebar, every hint row) went from 2.5–2.7:1
   to 4.1–4.4:1, and the two weakest block colours from 2.81 and 2.48 on their own
   tint to 3.61 and 3.56 — the band the dark theme has always sat in (ADR-0023)
 - Window size remembered; last-opened page restored
+- Whole-window zoom: Ctrl+= (or Ctrl+Shift+=) and Ctrl+- step the shell and the
+  page together, Ctrl+0 resets, and the factor is remembered across restarts
+  (also listed in Settings). Slint's one lever for this is the window's **scale
+  factor** — the number that turns logical into physical pixels — so the zoom
+  is "pretend the display is Z times denser": that single number covers
+  `Theme`'s ladder, every literal px in `ui/`, glyph rasterisation and
+  hit-testing, and the window's physical size never moves (the layout is given
+  a smaller logical viewport, which is what zooming in means for a window that
+  is not a scrollable document view). A monitor or display-scaling change
+  re-announces the platform's own factor through the same door, so what the
+  window reports is compared against `base × zoom` on every resize and the zoom
+  is put back instead of being swallowed
 - Settings: appearance, LAN sharing, the database folder (open it in
   Explorer, take a backup on demand, reclaim unused attachments)
 - Markdown export/import (page level, inline marks round-trip)
