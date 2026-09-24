@@ -2,6 +2,237 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0103 · A note's body is plain text, and v1 renders no Markdown
+
+Decision: `Note.body` is one `TEXT` column holding exactly the characters the
+user typed, newlines included, and the 笔记 pane draws them as they are. No
+Markdown, no second content format, no renderer.
+
+Why: §三十八 already refused a second content format for page *templates*, for
+the reason that applies here twice over — a body that is stored as Markdown *and*
+rendered as Markdown is two owners of one sentence, and nothing can prove which
+one wins. A note is also the one surface where "type words, see words" is the
+whole feature: the editor's budget went into §三十九 and §四十一's structure, not
+into a Markdown round trip whose failure mode is silently dropping an asterisk.
+
+Consequences:
+
+- **A note cannot hold a heading, a list marker, or a link.** It holds text. The
+  page editor is one keystroke away (`active-area` back to `docs`) and is the
+  place structured content belongs.
+- **`body` is stored verbatim**, so a future renderer can be added without a
+  migration — it would be a new way to *paint* the same bytes, and the column
+  would not change. That is the escape hatch this decision deliberately leaves.
+- The task's `notes` field is the same shape for the same reason, and the two
+  share the storage rule (plain text) rather than sharing a type.
+
+## ADR-0102 · The sync snapshot speaks version 2, so an old peer is refused
+
+Decision: `SNAPSHOT_VERSION` goes 1 → 2, and with it a snapshot carries
+`notes` / `tasks` / `lists`. A peer that answers a different version is refused
+at `from_json` — the payload is not read at all.
+
+Why the bump is load-bearing rather than housekeeping: the gate is an exact
+equality, and serde ignores unknown fields. Without the bump a v2 device would
+send its notes to a v1 peer, which would drop them, merge what it understood,
+and answer a snapshot with no notes in it — and the v2 side reads "an id I hold
+that the merged snapshot does not" as **a delete**, because that is how this
+two-way protocol lands removals. The user's brand-new notes would be deleted by
+their own first sync with a device that had not been updated. A version bump
+turns that into one loud refusal.
+
+The three collections deliberately carry **no** `#[serde(default)]` either: a
+payload missing them is not a payload with an empty organizer, and folding
+"absent" into "empty" is the same silent deletion arriving by another door. This
+is the second lock on the same door.
+
+Consequences:
+
+- **Both ends must be updated together.** The desktop shell and the Android shell
+  get their `quire-core` rev bumped in the same delivery, and the pushes are held
+  until both are done — a user with one un-updated device cannot sync at all
+  until they update it, which is the price ADR-0096's sibling decisions in the
+  sync track already accepted once (the version gate was always exact).
+- **The failure is loud and immediate**, at parse time, with the version numbers
+  in the message, rather than a merge that quietly loses the newest content in
+  the library.
+- A future addition to the snapshot has the same choice to make, and this ADR is
+  the precedent: if a *missing* collection would read as a delete, bump.
+
+## ADR-0101 · The inbox is a sentinel, and deleting a list moves its tasks
+
+Decision: `ListId(0)` means "in the inbox" and `task_lists` has no row 0.
+`tasks.list` therefore carries no foreign key, and `Command::DeleteTaskList`
+carries `moved: Vec<(Task, Task)>` — one `(before, after)` per task whose list
+becomes the inbox — so a list's deletion and its tasks' rescue are one change
+batch and one Ctrl+Z.
+
+Why a sentinel: the inbox has nothing to store. No name to rename, no colour to
+pick, no place in the chip order, no row for a merge to disagree about. A row
+would be one more thing a delete, an undo and a remote rename could each be in
+the middle of when the session stops. `0` needs no constraint to mean what it
+means — the same shape `blocks.attachment` already has.
+
+Why the delete does not cascade: "delete my list" must never be a way to lose
+tasks, and a cascade would decide that question inside SQLite, where no undo can
+reach it. The moved rows travel in the command because `plan` has no catalog to
+read them from.
+
+Consequences:
+
+- **A task's list can point at nothing.** A merge landing a list's deletion while
+  a task that named it stays local (the two are separate rows) is a state the
+  app can be in. The read side folds it to the inbox — `org_in_smart_view` and
+  the row's own list chip both ask `catalog.list(...).is_none()` — rather than
+  dropping the task out of every view, because the row is still in the file and
+  the user can still move it.
+- **`ListId(0)` can never be created or deleted**, and both commands refuse it in
+  `plan`: a row at id 0 would turn the sentinel into a list somebody could
+  rename, and deleting it would ask storage for a row that was never written.
+- **The undo is exact**: the list comes back with its name and colour, and every
+  task returns to it in the same step, because the revert is the mirror image of
+  one batch rather than a re-derivation.
+
+## ADR-0100 · A row's tags and checklist are JSON columns, not tables
+
+Decision: `notes.tags` and `tasks.tags` are JSON arrays of strings, and
+`tasks.subtasks` is a JSON array of `{id,title,done}` rows. They live in the row
+that owns them; `storage::organizer_store` is the only place their shape is
+known.
+
+Why: they are only ever read and written *with* their host, have no identity
+anyone references, and are never the subject of a query — "which tasks carry this
+tag" is a scan of a catalog that is already in memory. A table would buy a join
+nobody runs, an index nobody seeks, and two more write paths to keep in step.
+This is the opposite trade from `db_values`, and deliberately so: SQLite
+genuinely filters and sorts on a database cell, so that one is normalized.
+
+Consequences:
+
+- **The wire rows carry them as real arrays**, not as text (`STask.tags:
+  Vec<String>`, `STask.subtasks: Vec<SSubtask>`), so the JSON is a storage
+  detail that stops at the store's edge. Core stores `Vec<String>` and
+  `Vec<Subtask>`; only `organizer_store` knows what the bytes look like.
+- **Anything unreadable is folded, not fatal**: `''` is the column default, and a
+  hand-edited or half-written value costs the row its tags or its checklist, not
+  the whole library — the same fold the load path already makes for a colour
+  string it cannot name. The cost is that a genuinely corrupt checklist reads as
+  an empty one, which the user can see and re-type.
+- **A tag list cannot be queried by SQL.** When "all tasks with tag X" needs to be
+  a query rather than a filter over the loaded catalog, that work starts by
+  promoting tags to their own table — and this ADR is the note that it was a
+  deliberate trade, not an oversight.
+
+## ADR-0099 · The organizer's undo stack is a PageId no page can hold
+
+Decision: `core::types::ORGANIZER_STACK` is `PageId(u64::MAX)`. The area's
+commands are planned with `core::command::exec(doc, hist, ORGANIZER_STACK, cmd)`,
+and its Ctrl+Z is `undo(doc, hist, ORGANIZER_STACK)`. Nothing else changes: no
+second `History`, no flag on the editor's stack, no new module in `core`.
+
+Why it works and why it is the right shape: `History` is already a
+`HashMap<PageId, Stacks>` — one stack per document, because a Ctrl+Z on page B
+must not resurrect an edit made on page A — and the organizer is a place with no
+page. A `PageId` that no page can be is therefore the whole of the separation,
+and it is unreachable by construction: page ids are allocated `max + 1` over the
+ids of a `HashMap<i32, Page>`, so anything above `i32::MAX` cannot come out of
+the allocator.
+
+The alternative considered was sharing the open page's stack, which is what the
+database layer does. It is right for §三十九 — a database block is *in* the page,
+so its rows and the page's blocks are one document's edits — and wrong here,
+where the area is a sibling of the document: a Ctrl+Z in 笔记 that undid a
+paragraph the user cannot see is an undo of something invisible.
+
+Consequences:
+
+- **`Document::apply` treats every organizer change as a no-op**, so an undo of
+  one cannot touch the block tree even in principle. That falls out of the design
+  (`_ => {}` in the document's own match) rather than being enforced here.
+- **`History::referenced_attachments` walks every stack**, including this one, and
+  an organizer entry holds no attachment ids — so the sentinel costs the reclaim
+  sweep nothing.
+- **The chord has to be routed by area.** `on_undo_requested` asks
+  `active-area` and picks the stack, because Slint's `KeyBinding` is global and
+  there is one keyboard. That one branch is the price of two stacks in one
+  window, and both directions are asserted in `state.rs`'s tests.
+- The constant is re-exported from `core` beside `PageId`, for the reason
+  `PAGE_SCHEME` is re-exported beside `page_uri`: both shells must spell the same
+  key, and a magic number in two repositories is what a constant exists to
+  prevent.
+
+## ADR-0098 · The organizer's changes are rows, not fields
+
+Decision: `Change` gains nine variants, each naming a whole row —
+`NoteAdded(Note)` / `NoteUpdated(Note)` / `NoteDeleted { id }`, and the same
+three shapes for `TaskList` and `Task`. One edited field rewrites the row.
+
+Why not the database layer's shape: §三十九's changes are field-level
+(`CellSet`, `PropertyKindSet`, `PageIconSet`…) because the store has to read and
+write single cells of tables SQLite windows over, and because a view can change
+one cell without touching the other thirteen. The organizer is neither. Its
+catalog is loaded whole, so there is no window to keep in step; its merge
+compares rows by `PartialEq`, so one edited field is already a whole-row rewrite
+in the snapshot; and its store's `set_*` writes every column for exactly that
+reason. Row-level changes make the four things that must agree — the change
+stream, the store, the merge and the undo step — describe one event instead of
+four.
+
+Consequences:
+
+- **An update to a field the plan cannot see is impossible to express**, which is
+  why the `before` row travels *in* the command: `plan` has no catalog to read it
+  from, exactly as `Command::InsertImage` carries its attachment id. An update
+  whose rows disagree with the id the command names is refused rather than
+  written.
+- **A commit that changes nothing is not a step** (`before == after` → `None`),
+  and the app-level helper additionally leaves `edited` alone in that case, so
+  blurring out of an untouched title neither pushes history nor makes the row
+  look newer than the last real edit.
+- **The merge's conflict granularity is the row**: two devices editing different
+  fields of one task conflict rather than merging cleanly. That is the honest
+  answer for a four-field record whose row is the unit of comparison, and the
+  user is told which row it was.
+- **`TaskListDeleted` deliberately deletes nothing else** — see ADR-0101 for what
+  happens to the tasks and why it is not a cascade.
+
+## ADR-0097 · Notes and tasks are a second top-level area with entities of its own
+
+Decision: SPEC §四十一's notes and tasks live in a new area beside the document
+editor (`UIState.active-area` = `"docs"` | `"organizer"`), backed by three tables
+of their own in quire-core (`notes`, `task_lists`, `tasks`) reached through the
+same `Repository` change stream as everything else. They are **not** blocks in a
+page and not a new `BlockKind`.
+
+Why not blocks: the editor's model is a tree of blocks inside a page. This area
+has no page, no parent, no caret and no inline marks, and its lists are
+*derived* — inbox, 今天, 最近七天, one user's list — which a `parent` column
+cannot express without a second meaning for it ("this paragraph is a task" is a
+kind; "this task is due today" is a query). Stretching the block tree to hold
+both would put a second semantic on `parent`, `order` and `kind` and would give
+every existing read path a state it must handle for no gain.
+
+Why the area is a sibling rather than a panel of the editor: it must be reachable
+when no page is open (a fresh library has none), and its own undo stack, its own
+sync rows and its own geometry all follow from being its own place. `AppShell`
+mounts exactly one of the two, so a keystroke can only reach what is on screen.
+
+Consequences:
+
+- **The three tables reference no page and no block**, which is what makes them
+  survive `replace_all` (the bulk/repair path) untouched and need no
+  snapshot-and-restore dance like §三十九's layer does. That absence is asserted
+  by a test precisely so nobody adds one.
+- **Ids are per-table watermarks** (ADR-0072's rule), seeded from `MAX(id)` at
+  startup: `next_note_id`, `next_task_id` (which also feeds subtask ids — a
+  subtask's id is scoped to its task) and `next_list_id`.
+- **A failed catalog read degrades to an empty area**, plus one line in the
+  notice band, on the same terms the database layer's read does: an area that
+  draws nothing is recoverable, a library that does not open is not.
+- **Two shells, one area, two copies of the UI.** The Android shell carries its
+  own `OrganizerArea.slint` and its own `state.rs`/`controller.rs`, as it does
+  for every other surface; the shared logic is the crate.
+
 ## ADR-0096 · Closing the window hides it; only the tray menu's 「退出」 ends the session
 
 Decision: Quire has a system tray icon — `ui/TrayIcon.slint`, a

@@ -281,6 +281,37 @@ First functional release: a local, single-file-database notes workspace.
   megabytes) and scrolling inside a window that has not changed recomputes
   nothing
 
+### Notes & tasks (SPEC §四十一)
+- A **second top-level area**, beside the document editor rather than inside it:
+  「笔记」and「任务」rows in the sidebar, two palette commands, and
+  `active-area` decides which of the two `AppShell` mounts (so a keystroke can
+  only reach what is on screen). Opening a page — sidebar, palette, backlink,
+  `Alt+←` — is also *leaving* the area, in one line
+- **Notes**: title, body, pin, tags, and a list that reads by first line and
+  relative age, newest edit first with the pinned ones above.
+- **Tasks**: done, due date, priority, list, tags, notes, a checklist and a
+  repeat rule. Checkbox / priority / list / repeat / due commit immediately;
+  title, body, notes, tags and a checklist line commit on the same 300 ms
+  debounce the prose rows and database cells use, so one burst of typing is one
+  Ctrl+Z rather than one per character. A row that did not change is not a step
+  at all — and does not move its `edited` stamp
+- **One selector, two halves**: 收集箱 / 今天 / 近七天 / 全部 / 已完成 are
+  predicates over the catalog, and the list chips are its other half. Three sort
+  orders (added / priority / due), all derived — nothing about which one is
+  showing reaches the file (ADR-0073), so a restart opens on 笔记 · 收集箱
+- **The area has its own undo stack** (ADR-0099): Ctrl+Z inside it walks the
+  organizer's entries, Ctrl+Z in the editor walks the open page's, and neither
+  can reach the other's. Deleting a list files its tasks in the inbox in the same
+  step, so one Ctrl+Z brings back the list *and* its tasks (ADR-0101). A delete
+  says so in the notice band rather than adding a second, timer-driven surface
+- Three tables in quire-core (schema v24–v26: `notes`, `task_lists`, `tasks`),
+  nine row-level changes, nine commands, and the same LAN sync as everything
+  else — **the snapshot version moves to 2** for it, so both shells must be
+  updated together (ADR-0102)
+- Seven scenes plus their dark arms (`notes`, `notes-detail`, `notes-search`,
+  `tasks`, `tasks-detail`, `tasks-list`, `tasks-overdue`), all in the sweep list
+  and all planted through the real write path
+
 ### Workspace
 - Page tree: create / rename in place / duplicate (nested lists survive) /
   delete with confirmation; favorites; recent pages; last page restored

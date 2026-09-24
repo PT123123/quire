@@ -14,6 +14,8 @@ AppWindow.slint        the only Window; composition + keybindings + popup roots
   │    │    └─ PageTree     ListView over pre-flattened rows → SidebarItem
   │    └─ Editor            ListView over BlockRow → DocumentRow → EditorBlock
   │                         (+ empty state when blocks.length == 0)
+  │        OrganizerArea    SPEC §四十一's area, mounted *instead of* Editor
+  │                         (note rows / task rows + the detail pane)
   └─ popups                 CommandPalette (Ctrl K), SearchPanel (Ctrl P),
                             ContextMenu (sidebar rows + ⋯), ConfirmDialog,
                             SettingsDialog
@@ -38,6 +40,37 @@ Rust owns the models and the truth; the UI only projects it.
 - **Mirrors**: properties Rust must observe (`palette-query`, window
   size) are re-declared in AppWindow with `<=>` and `changed` handlers,
   because `changed` can only watch locally declared properties.
+
+## Areas (SPEC §四十一)
+
+There are **two** top-level areas and they are siblings, not a parent and a
+child: `UIState.active-area` is `"docs"` or `"organizer"`, and `AppShell`
+mounts exactly one of `Editor {}` / `OrganizerArea {}`. Three rules follow, and
+they are the whole of "switching areas":
+
+- **Only what is mounted can be reached.** A key, a click and a Tab order can
+  only touch the component that is in the tree, so no command has to ask which
+  area it is in. The one exception is deliberately named: `on_undo_requested` /
+  `on_redo_requested` branch on `active-area`, because `KeyBinding` is global and
+  the two areas have two undo stacks (ADR-0099).
+- **Leaving is opening.** `show_open_page` sets `active-area` back to `"docs"`,
+  so every way of opening a page — the sidebar, the palette, a backlink, a
+  `quire://page` jump, `Alt+←/→` — leaves the area without another call site
+  remembering to. Entering is `org_open`, which also owns the title bar: the
+  area writes 「笔记」/「任务」 there, and `show_open_page` puts the page's own
+  title back.
+- **Session state, not content.** Which tab, which smart view, which list, the
+  needle, the sort and the selection live in `UIState` and reach no file
+  (ADR-0073). A restart opens on 笔记 · 收集箱, which is the state a user who has
+  never clicked anything is in.
+
+The area's rows are three models built by `AppState::rebuild_organizer` from one
+in-memory catalog, and its text fields are **drafts**: each binds two-way to its
+own `org-*-draft` property and reports the field slot it belongs to, and Rust
+commits 300 ms later — the same rhythm as a prose row and a database cell, so one
+keystroke burst is one undo step. A checklist line cannot share a draft with its
+siblings, so it is text until its row is clicked and only that row renders an
+input (the codebase's one-live-input rule, the same one the database cell keeps).
 
 ## Sidebar projection
 

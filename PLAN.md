@@ -3359,3 +3359,43 @@ E 盘的另一个 home 被兜底规则洗成 `Users\<user>`；`profile_bench.ps1
 那一行源码再 Invoke-Expression** 求值的（不是抄一份），它带着 `<repo>` 且 `exe_bytes` 仍是真实的
 27 847 168。有一处误报要说清：按「账号名作为子串」判会命中 1 行，那是英文单词里偶然含到的三个
 字母，不是路径；所以真正的判据是上面那两条不依赖账号名的（drive 前缀 + `Users\`）。
+
+## M15 · 笔记与任务（SPEC §四十一）——桌面端（2026-09-24，ADR-0097…ADR-0103）
+
+**缘起**：§四十一 要的是一条**与文章并列的第二条路**，不是一个新块类型。把「今天要做的事」塞进
+块树意味着让 `parent` 再背一层含义（"这段是个任务"是 kind，"这条今天到期"是查询），而区域本身还
+得在**没有页**的时候能用——新库一页都没有。于是它有自己的表、自己的撤销栈、自己的入口。
+
+**形状**：数据层在 `quire-core`（独立仓库，先提交推送、两个 shell 再 bump rev）三刀：
+① 实体层 + 九个**行级** `Change` + 九条命令 + 迁移 v24–v26（`notes` / `task_lists` / `tasks`，
+`CURRENT_VERSION` 23 → 26）+ `storage::organizer_store`（唯一知道 tags / subtasks 那两列 JSON
+长什么样的人）；② sync（`SNote`/`STask`/`STaskList` + `MergeCtx` 三个分配器 + `list_map` 重映射，
+**`SNAPSHOT_VERSION` 1 → 2**）；③ `core::ORGANIZER_STACK`——一枚页面不可能持有的 `PageId`，而
+`History` 正是按 `PageId` 分栈的，所以"Ctrl+Z 只撤销你正在看的东西"零新机制。本仓这一片：
+`state.rs`（catalog + 三个水位 + 三个投影 + 九组写入）、`controller.rs`（区域切换、300 ms 草稿提交、
+按区域分派 undo/redo、7 个场景 + `org_scene_seed`）、`ui/components/OrganizerArea.slint`（新组件：
+笔记行 / 任务行 / 详情面板 / 清单 chip / 子任务）、侧边栏两行 + `SidebarPinnedRow.selected`、
+palette 两条命令、`IcNote`、sweep `$all` 十一个场景。
+
+**两个平台无关的规矩**（写进 UI_ARCHITECTURE）：**只挂载得到的东西才够得着**（`active-area` 决定
+`Editor` 与 `OrganizerArea` 谁在树上，所以没有一条命令需要问"我在哪个区域"；唯一的例外是按区域分派
+的 Ctrl+Z，因为 `KeyBinding` 是全局的而两个区域有两个栈）；**离开就是打开**（`show_open_page` 顺手
+把 `active-area` 放回 `"docs"`，于是侧边栏 / palette / 反向链接 / `Alt+←` 四条入口都不用各记一次）。
+
+**门槛**：
+| 门 | 命令 | 结果 |
+|---|---|---|
+| quire-core | 该仓 `cargo check --all-targets` / `cargo test --all-targets` | 0 warning；302 lib + 48 storage + 其余四套全绿（三刀各自提交、各自推送） |
+| check | `cargo check --workspace --all-targets` | exit 0，0 warning |
+| test（本仓） | `cargo test --workspace` | **122 lib + 19 integration passed / 0 failed**（新增 5 条：写入路径穿到 SQLite、两个栈互不干扰、没变的一行不是一步且不动 `edited`、删清单把任务并入收集箱且一次 undo 全回来、五个智能视图是同一个 catalog 上的谓词） |
+| release build | `cargo build --workspace --release` | clean, **0 warning**，7 分 21 秒 |
+| 场景 | `just shot tasks-detail` / `tasks` | 两枚新场景渲染并**人眼看过**：第一版抓到真 bug——基于 `Rectangle` 的输入框没有固有宽度，于是详情面板每一个字段都是 0 px 宽（`grow` / `field-width` 就是为它加的）；第二版又把截止日期那一行的按钮甩到最右，改成不伸长的定宽字段 |
+| 像素全量 | `sweep.ps1 -OutDir .scratch/sweep-m15` | **142 个场景全部渲染**（清单 142 行 = `$all` 的 142 个名字，每个都有 PNG，无 RENDER-FAIL）。这次没有基线可比（`.scratch` 里没有旧 sweep），所以它的结论是"都画得出来"而不是"只动了该动的"。**它抓到第二个真 bug**：笔记行固定 46 px 比它画的东西（标题 + 摘要 + 标签/时间行 + 内边距）矮 11 px，于是三条文字压到下一行上——`notes` 第一版能看出来。已改成 58 px 并重渲 11 个 organizer 场景确认 |
+
+**未验证（诚实）**：① 真键盘输入——中文 IME 在正文多行框里的行为、Tab 在一条任务行内的顺序；
+② 触屏长按与 44 dp 行（Android 镜像还没写）；③ **两端互相同步的实机往返**——`SNAPSHOT_VERSION`
+升到 2 意味着两个 shell 必须一起更新，所以本仓**故意还没有 push**：先镜像 droid，再一起推；
+④ 全量 sweep 的**基线比对**（这次只证明"都画得出来"，没有旧 sweep 可比）。
+
+**这一片顺手抓到的一处旧账：headless 的 dark 场景根本没上色。** 42 个 `dark-*` 场景里 41 个与它们的浅色孪生**逐字节相同**，包括 `dark` 对 `default`（`4835E53D4A0A` 两边一样）。这不是本片、也不是那两枚未提交特性的锅：把仓库回退到两个特性之前最后一枚提交（`7d0873f`）单独建一个 worktree 跑 `quire-shot`，`--scene dark` 与 `--scene default` **依旧**逐字节相同（`9559C78910`）。所以这是**比这两摊改动更早**就存在的问题，最可能落在 `quire-shot` 这条路上（软件渲染 + `MinimalSoftwareWindow`）而不是 `Theme`/`Colors` 的绑定上——它意味着 `sweep.ps1` 的 dark 臂一直以来只证明了"同一个场景画两次一样"。本片**不修**（它不属于 §四十一，而且一个 headless 渲染器的主题问题值得单独一刀加一条对照），但把它记在这里，因为"dark-* 场景绿"这句话在它修好之前不能当证据用。
+
