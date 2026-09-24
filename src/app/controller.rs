@@ -6469,7 +6469,24 @@ fn seed_versions(state: &Rc<AppState>, g: &UIState<'_>, page: i32) -> Vec<(i64, 
     versions
 }
 
+/// Render a named scene (SPEC 搂浜屽崄涓€'s visual regression).
+///
+/// **The scene owns the theme.** A scene called `dark-*` is dark and every other
+/// scene is light, whatever the machine happens to have stored: scenes are
+/// photographs of the shell, and a photograph whose palette depends on a settings
+/// row is one that cannot be compared with last week's. Before this split the
+/// `dark-*` arms leaned on `set_dark(true)` alone, which was a no-op 鈥?a session
+/// with no `theme` row already opens dark (`AppState::dark_setting`) 鈥?so all
+/// forty-two dark arms came out byte-identical to their light twins, and a light
+/// scene was only light by accident.
+///
+/// The body is separate so a `dark-*` arm can render its base scene *without*
+/// re-deciding the theme.
 pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
+    ui.global::<UIState>().set_dark(scene.starts_with("dark"));
+    apply_scene_body(ui, state, scene);
+}
+fn apply_scene_body(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
     let g = ui.global::<UIState>();
     match scene {
         "dark" => g.set_dark(true),
@@ -6516,20 +6533,16 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             }
         }
         "dark-notes" => {
-            g.set_dark(true);
-            apply_scene(ui, state, "notes");
+            apply_scene_body(ui, state, "notes");
         }
         "dark-tasks" => {
-            g.set_dark(true);
-            apply_scene(ui, state, "tasks");
+            apply_scene_body(ui, state, "tasks");
         }
         "dark-notes-detail" => {
-            g.set_dark(true);
-            apply_scene(ui, state, "notes-detail");
+            apply_scene_body(ui, state, "notes-detail");
         }
         "dark-tasks-detail" => {
-            g.set_dark(true);
-            apply_scene(ui, state, "tasks-detail");
+            apply_scene_body(ui, state, "tasks-detail");
         }
         "palette" | "search" | "search-notes" | "menu" | "dialog" | "settings" => {
             apply_scene_overlay(ui, state, scene)
@@ -6552,20 +6565,16 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
         "block-menu" => {}
         "link" => apply_scene_overlay(ui, state, "link-dlg"),
         "dark-slash" => {
-            g.set_dark(true);
-            apply_scene(ui, state, "slash");
+            apply_scene_body(ui, state, "slash");
         }
         "dark-find" => {
-            g.set_dark(true);
-            apply_scene(ui, state, "find");
+            apply_scene_body(ui, state, "find");
         }
         "dark-marks" => {
-            g.set_dark(true);
-            apply_scene(ui, state, "marks");
+            apply_scene_body(ui, state, "marks");
         }
         "dark-code-hl" => {
-            g.set_dark(true);
-            apply_scene(ui, state, "code-hl");
+            apply_scene_body(ui, state, "code-hl");
         }
         "dark-link" => {
             g.set_dark(true);
@@ -6576,107 +6585,83 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             apply_scene_overlay(ui, state, "block-menu");
         }
         "dark-block-colors" => {
-            g.set_dark(true);
-            apply_scene(ui, state, "block-colors");
+            apply_scene_body(ui, state, "block-colors");
         }
         "dark-synced" => {
-            g.set_dark(true);
-            apply_scene(ui, state, "synced");
+            apply_scene_body(ui, state, "synced");
         }
         "dark-synced-source-gone" => {
-            g.set_dark(true);
-            apply_scene(ui, state, "synced-source-gone");
+            apply_scene_body(ui, state, "synced-source-gone");
         }
         "dark-move-to-tall" => {
             g.set_dark(true);
             apply_scene_overlay(ui, state, "move-to-tall");
         }
         "dark-title-edit" => {
-            g.set_dark(true);
-            apply_scene(ui, state, "title-edit");
+            apply_scene_body(ui, state, "title-edit");
         }
         "dark-mention" => {
-            g.set_dark(true);
-            apply_scene(ui, state, "mention");
+            apply_scene_body(ui, state, "mention");
         }
         "dark-date" => {
-            g.set_dark(true);
-            apply_scene(ui, state, "date");
+            apply_scene_body(ui, state, "date");
         }
         "dark-backlinks" => {
-            g.set_dark(true);
-            apply_scene(ui, state, "backlinks");
+            apply_scene_body(ui, state, "backlinks");
         }
         "dark-dangling" => {
-            g.set_dark(true);
-            apply_scene(ui, state, "dangling");
+            apply_scene_body(ui, state, "dangling");
         }
         "dark-database-table" => {
-            g.set_dark(true);
-            apply_scene(ui, state, "database-table");
+            apply_scene_body(ui, state, "database-table");
         }
         "dark-database-filter" => {
-            g.set_dark(true);
-            apply_scene(ui, state, "database-filter");
+            apply_scene_body(ui, state, "database-filter");
         }
         "dark-database-formula" => {
-            g.set_dark(true);
-            apply_scene(ui, state, "database-formula");
+            apply_scene_body(ui, state, "database-formula");
         }
         "dark-database-board" => {
-            g.set_dark(true);
-            apply_scene(ui, state, "database-board");
+            apply_scene_body(ui, state, "database-board");
         }
         "dark-database-list" => {
-            g.set_dark(true);
-            apply_scene(ui, state, "database-list");
+            apply_scene_body(ui, state, "database-list");
         }
         "dark-database-calendar" => {
-            g.set_dark(true);
-            apply_scene(ui, state, "database-calendar");
+            apply_scene_body(ui, state, "database-calendar");
         }
         "dark-database-gallery" => {
-            g.set_dark(true);
-            apply_scene(ui, state, "database-gallery");
+            apply_scene_body(ui, state, "database-gallery");
         }
         "dark-database-timeline" => {
-            g.set_dark(true);
-            apply_scene(ui, state, "database-timeline");
+            apply_scene_body(ui, state, "database-timeline");
         }
         "dark-database-form" => {
-            g.set_dark(true);
-            apply_scene(ui, state, "database-form");
+            apply_scene_body(ui, state, "database-form");
         }
         "dark-database-chart" => {
-            g.set_dark(true);
-            apply_scene(ui, state, "database-chart");
+            apply_scene_body(ui, state, "database-chart");
         }
         "dark-database-search" => {
-            g.set_dark(true);
-            apply_scene(ui, state, "database-search");
+            apply_scene_body(ui, state, "database-search");
         }
         "dark-database-linked" => {
-            g.set_dark(true);
-            apply_scene(ui, state, "database-linked");
+            apply_scene_body(ui, state, "database-linked");
         }
         "dark-database-template" => {
-            g.set_dark(true);
-            apply_scene(ui, state, "database-template");
+            apply_scene_body(ui, state, "database-template");
         }
         // D10's three popups in the dark theme: `accent-text` is a different
         // brush there, and the tick that went unseen in a light shot was drawn
         // from that brush, so the dark picture is the other half of the check.
         "dark-database-kinds" => {
-            g.set_dark(true);
-            apply_scene(ui, state, "database-kinds");
+            apply_scene_body(ui, state, "database-kinds");
         }
         "dark-database-relation" => {
-            g.set_dark(true);
-            apply_scene(ui, state, "database-relation");
+            apply_scene_body(ui, state, "database-relation");
         }
         "dark-database-rollup" => {
-            g.set_dark(true);
-            apply_scene(ui, state, "database-rollup");
+            apply_scene_body(ui, state, "database-rollup");
         }
         "title-edit" => {
             g.set_page_title("Renaming in place…".into());
@@ -7397,8 +7382,7 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             }
         }
         "dark-style-serif" => {
-            g.set_dark(true);
-            apply_scene(ui, state, "style-serif");
+            apply_scene_body(ui, state, "style-serif");
         }
         // The page's emoji in the two places it draws: above its own title and
         // in its sidebar row. Set through the state method the picker calls,
@@ -7408,8 +7392,7 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             state.set_page_icon(state.open_page.get(), "\u{1f680}");
         }
         "dark-page-icon" => {
-            g.set_dark(true);
-            apply_scene(ui, state, "page-icon");
+            apply_scene_body(ui, state, "page-icon");
         }
         // The page's cover (SPEC §三十八, ADR-0047), written through the state
         // method the picker calls. `page-cover-white` is the arithmetic control:
@@ -7431,12 +7414,10 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             }
         }
         "dark-page-cover" => {
-            g.set_dark(true);
-            apply_scene(ui, state, "page-cover");
+            apply_scene_body(ui, state, "page-cover");
         }
         "dark-page-cover-white" => {
-            g.set_dark(true);
-            apply_scene(ui, state, "page-cover-white");
+            apply_scene_body(ui, state, "page-cover-white");
         }
         // The read-only switch (SPEC §三十八, ADR-0048), driven through the same
         // state method the ⋯ menu calls so the shot proves the write too. A
@@ -7474,8 +7455,7 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             }
         }
         "dark-page-lock" => {
-            g.set_dark(true);
-            apply_scene(ui, state, "page-lock");
+            apply_scene_body(ui, state, "page-lock");
         }
         // The three surfaces SPEC §三十八 "模板" adds (ADR-0049). A headless
         // session has no database, and `seed_builtin_templates` refuses to write
@@ -7517,8 +7497,7 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             g.set_slash_open(true);
         }
         "dark-page-templates" => {
-            g.set_dark(true);
-            apply_scene(ui, state, "page-templates");
+            apply_scene_body(ui, state, "page-templates");
         }
         // Version history (SPEC §三十八, ADR-0091): the list, then one of its
         // rows opened into a comparison.
@@ -7575,8 +7554,7 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             );
         }
         "dark-page-versions" => {
-            g.set_dark(true);
-            apply_scene(ui, state, "page-versions");
+            apply_scene_body(ui, state, "page-versions");
         }
         "marks" => {
             // seed inline marks on the first paragraph (visual test only,
