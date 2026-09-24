@@ -9,6 +9,7 @@ import { TopBar } from "./TopBar.slint";
 import { IconButton } from "./IconButton.slint";
 import { Sidebar } from "./Sidebar.slint";
 import { Editor } from "./Editor.slint";
+import { OrganizerArea } from "./OrganizerArea.slint";
 import { UIState } from "../Types.slint";
 
 export component AppShell inherits Rectangle {
@@ -78,7 +79,13 @@ export component AppShell inherits Rectangle {
         }
         HorizontalLayout {
             Sidebar {}
-            Editor {}
+            // SPEC §四十一: the second top-level area. Which one is showing is
+            // `active-area`, and this is the *only* place the two are chosen
+            // between — the editor is not a child of the organizer and neither
+            // is a pane of the editor, so a keystroke can only ever reach the one
+            // that is mounted.
+            if UIState.active-area == "organizer" : OrganizerArea {}
+            if UIState.active-area != "organizer" : Editor {}
         }
     }
 

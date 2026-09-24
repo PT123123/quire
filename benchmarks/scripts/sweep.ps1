@@ -67,7 +67,13 @@ $all = @(
     "dark-database-board", "dark-database-list", "dark-database-calendar",
     "dark-database-gallery", "dark-database-timeline", "dark-database-form",
     "dark-database-chart", "dark-database-kinds", "dark-database-relation",
-    "dark-database-rollup"
+    "dark-database-rollup",
+    # SPEC §四十一 (M15): the organizer's own scenes. Same reason the database
+    # scenes joined the default list: a scene nobody sweeps is a scene nobody
+    # measures.
+    "notes", "notes-detail", "notes-search",
+    "tasks", "tasks-detail", "tasks-list", "tasks-overdue",
+    "dark-notes", "dark-notes-detail", "dark-tasks", "dark-tasks-detail"
 )
 $targets = if ($Scenes -eq "") { $all } else { $Scenes -split ',' }
 
