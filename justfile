@@ -38,15 +38,17 @@ dist:
     cargo build --release
     powershell -NoProfile -ExecutionPolicy Bypass -File benchmarks\scripts\dist.ps1
 
-# release build into the workshop: C:\workshop\quire-<version>\quire.exe. The
-# workshop keeps one folder per release, named <name>-<version> (aura-1.2.6,
-# aw-qtui-0.1.28), holding what that build needs to run; the release exe is
-# self-contained, so its folder is the one file. The version comes from
-# Cargo.toml, so bumping it is what makes the next deploy land in a new folder
-# instead of over the previous build.
-workshop-deploy:
-    cargo build --release
-    powershell -NoProfile -ExecutionPolicy Bypass -File install\workshop-deploy.ps1
+# deploy a release into the workshop: C:\workshop\quire-<version>\quire.exe.
+# The workshop keeps one folder per release, named <name>-<version> (aura-1.2.6,
+# aw-qtui-0.1.36), holding what that build needs to run; the release exe is
+# self-contained, so its folder is the one file. The script bumps [package]
+# version's patch, builds, commits and pushes the bump, then copies — the folder
+# is named after the version, so the bump is what makes each deploy land
+# somewhere new instead of over the previous build, and it has to precede the
+# build because build.rs stamps the exe's version block from that same key.
+# Bump the patch, build, commit and push the bump, then copy into the workshop.
+deploy-workshop:
+    powershell -NoProfile -ExecutionPolicy Bypass -File install\deploy-workshop.ps1
 
 # installer end-to-end regression (D8/A6): build iss, silent install,
 # verify, silent uninstall, residue check (needs Inno Setup)
