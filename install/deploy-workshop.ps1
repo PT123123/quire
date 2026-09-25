@@ -1,4 +1,4 @@
-# Deploy a release into the workshop: C:\workshop\quire-<version>\quire.exe.
+# Deploy a release into the workshop: C:\workshop\quire-desktop-<version>\quire.exe.
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File install\deploy-workshop.ps1
 #
@@ -6,6 +6,13 @@
 # (aura-1.2.6, aw-qtui-0.1.36), filled with what that build needs to run. Quire's
 # release exe is self-contained — dist.ps1 zips the one file and nothing beside
 # it — so its folder is quire.exe alone.
+#
+# The name is `quire-desktop`, not the manifest's `quire`: the workshop is where
+# this drops beside *other* applications, and the two shells this repository has
+# (quire-desktop, quire-droid) are two builds of one application that ship on
+# different days. A bare `quire-<version>` would read as one application in a
+# list that already holds one folder per release of several, with nothing saying
+# which shell made it.
 #
 # `just deploy-workshop` is the entry point, and this script is the whole flow.
 # The steps are ordered so the folder named <version> holds a binary that says
@@ -22,7 +29,8 @@
 #   3. The bump is committed (Cargo.toml + Cargo.lock, nothing else) and pushed,
 #      the way every repository in this workspace is left: the commit is the
 #      record of what each folder in the workshop was built from.
-#   4. target\release\quire.exe is copied to C:\workshop\quire-<version>\quire.exe.
+#   4. target\release\quire.exe is copied to
+#      C:\workshop\quire-desktop-<version>\quire.exe.
 
 $ErrorActionPreference = "Stop"
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -89,7 +97,7 @@ git push
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # ── 4: the deploy ───────────────────────────────────────────────────────────
-$dest = Join-Path 'C:\workshop' "quire-$version"
+$dest = Join-Path 'C:\workshop' "quire-desktop-$version"
 New-Item -ItemType Directory -Force -Path $dest | Out-Null
 $target = Join-Path $dest 'quire.exe'
 Copy-Item $exe $target -Force

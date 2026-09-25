@@ -38,10 +38,12 @@ dist:
     cargo build --release
     powershell -NoProfile -ExecutionPolicy Bypass -File benchmarks\scripts\dist.ps1
 
-# deploy a release into the workshop: C:\workshop\quire-<version>\quire.exe.
+# deploy a release into the workshop: C:\workshop\quire-desktop-<version>\quire.exe.
 # The workshop keeps one folder per release, named <name>-<version> (aura-1.2.6,
 # aw-qtui-0.1.36), holding what that build needs to run; the release exe is
-# self-contained, so its folder is the one file. The script bumps [package]
+# self-contained, so its folder is the one file. The name is `quire-desktop`, the
+# shell — the workshop lists several per release, and a bare `quire-<version>`
+# would not say which of the two shells put it there. The script bumps [package]
 # version's patch, builds, commits and pushes the bump, then copies — the folder
 # is named after the version, so the bump is what makes each deploy land
 # somewhere new instead of over the previous build, and it has to precede the
