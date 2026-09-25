@@ -16,7 +16,7 @@ rusqlite = { version = "0.40.2", features = ["bundled"] }
 
 [package]
 name = "quire"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 description = "A local, GPU-accelerated, Notion-like document app built with Rust + Slint"
 # three binaries exist (quire / quire-shot / quire-typing); this is the app
