@@ -72,8 +72,9 @@ $all = @(
     # scenes joined the default list: a scene nobody sweeps is a scene nobody
     # measures.
     "notes", "notes-detail", "notes-search",
-    "tasks", "tasks-detail", "tasks-list", "tasks-overdue",
-    "dark-notes", "dark-notes-detail", "dark-tasks", "dark-tasks-detail"
+    "tasks", "tasks-detail", "tasks-list", "tasks-overdue", "tasks-board",
+    "dark-notes", "dark-notes-detail", "dark-tasks", "dark-tasks-detail",
+    "dark-tasks-board"
 )
 $targets = if ($Scenes -eq "") { $all } else { $Scenes -split ',' }
 
