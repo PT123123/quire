@@ -45,6 +45,13 @@
 #      fail — a build, a commit, a push — is allowed to happen after it.
 #   5. target\release\quire.exe is copied to the version folder and over the
 #      install.
+#
+# One rule for the text below: every character inside a Write-Output or a throw
+# is ASCII. Windows PowerShell 5.1 reads a BOM-less script as ANSI — this file is
+# UTF-8 like the rest of the repository — so a non-ASCII character in a *string
+# literal* reaches the console as mojibake (measured: an em dash came out as
+# "鈥?", and this machine's codepage is GBK). Comments are free; messages are
+# not, because the one place they are read is a deploy that went wrong.
 
 $ErrorActionPreference = "Stop"
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -68,7 +75,7 @@ $m = [regex]::Match($text, '(?m)^version\s*=\s*"(\d+)\.(\d+)\.(\d+)"')
 if (-not $m.Success) { throw "no [package] version line in Cargo.toml" }
 $deps = $text.IndexOf('[dependencies]')
 if ($deps -ge 0 -and $m.Index -gt $deps) {
-    throw "the first top-level 'version' key sits below [dependencies] — refusing to bump the wrong table"
+    throw "the first top-level 'version' key sits below [dependencies]; refusing to bump the wrong table"
 }
 $version = "{0}.{1}.{2}" -f $m.Groups[1].Value, $m.Groups[2].Value, ([int]$m.Groups[3].Value + 1)
 # splice exactly the three digits — group 1 starts at the major, group 3 ends at
@@ -81,19 +88,21 @@ $utf8 = New-Object System.Text.UTF8Encoding $false
 # read it back before anything expensive happens on top of a bad manifest
 $check = [regex]::Match([System.IO.File]::ReadAllText($manifest), '(?m)^version\s*=\s*"([^"]+)"')
 if (-not $check.Success -or $check.Groups[1].Value -ne $version) {
-    throw ("the bump wrote '{0}', expected '{1}' — aborting before the build" -f `
+    throw ("the bump wrote '{0}', expected '{1}'; aborting before the build" -f `
         $check.Groups[1].Value, $version)
 }
 Write-Output "==> version -> $version"
 
 # ── 2: the build ────────────────────────────────────────────────────────────
 # Default renderer, the same `just build` produces: the workshop gets the exe
-# that ships.
+# that ships. This is the slow step (~2m30s) and it is one crate: the bump
+# invalidated `quire` itself, which is where codegen-units = 1 + thin LTO spends
+# its time (ADR-0024's update, PERFORMANCE.md "Build cost").
 cargo build --release
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 $exe = Join-Path $root 'target\release\quire.exe'
-if (-not (Test-Path $exe)) { throw "no exe at $exe — the build reported success but left nothing" }
+if (-not (Test-Path $exe)) { throw "no exe at $exe; the build reported success but left nothing" }
 
 # The exe is asked to confirm it took the bump, because it is the artifact that
 # will be run from a folder named after the version. A stale one — a build that
@@ -102,7 +111,7 @@ if (-not (Test-Path $exe)) { throw "no exe at $exe — the build reported succes
 # soft miss rather than a failed deploy, the same way build.rs treats it.
 $reported = (Get-Item $exe).VersionInfo.FileVersion
 if ($reported -and $reported -notlike "$version.*") {
-    throw "$exe reports version $reported, expected $version — the build did not take the bump"
+    throw "$exe reports version $reported, expected $version; the build did not take the bump"
 }
 
 # ── 3: the bump goes in as its own commit ───────────────────────────────────
@@ -117,10 +126,10 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # ── 4: the old instance leaves through its own door ─────────────────────────
 # Only the instance sitting on a file this deploy writes is asked, and it is
-# asked, never killed: `--quit` goes through the app's quit channel, which is
-# the same route the tray menu's 「退出」 takes, so its final flush runs and it
-# writes its clean-exit record instead of the next start reporting a crash that
-# never happened (ADR-0105).
+# asked by name, never killed: `--quit` goes through the app's quit channel,
+# which is the same route the tray menu's exit item takes, so its final flush
+# runs and it writes its clean-exit record instead of the next start reporting a
+# crash that never happened (ADR-0105).
 #
 # An instance running out of an older quire-desktop-<version> folder holds
 # nothing here — those folders are the archive and this deploy does not touch
@@ -129,25 +138,30 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 $running = @(Get-Process quire -ErrorAction SilentlyContinue)
 $blocking = @($running | Where-Object { $_.Path -eq $installExe })
 foreach ($p in @($running | Where-Object { $_.Path -ne $installExe })) {
-    Write-Output "==> note: an older release is still running from $($p.Path) — it holds nothing this deploy writes, leaving it alone"
+    Write-Output "==> note: an older release is still running from $($p.Path); it holds nothing this deploy writes, leaving it alone"
 }
 if ($blocking.Count -gt 0) {
     $pids = @($blocking | ForEach-Object { $_.Id })
     Write-Output "==> asking the instance at $installExe (pid $($pids -join ', ')) to quit"
-    & $exe --quit
-    if ($LASTEXITCODE -ne 0) {
-        throw "$installExe is running and would not accept the quit request; end it from its tray icon (右键 → 退出) and run the deploy again"
+    # Start-Process -Wait -PassThru, not `& $exe --quit`: the release exe is a
+    # GUI-subsystem binary (main.rs's windows_subsystem), and PowerShell neither
+    # waits for one of those nor sets $LASTEXITCODE after it — so `&` here would
+    # compare against nothing and report a quit that worked as a failure. The
+    # process object's own exit code is the answer either way.
+    $quit = Start-Process -FilePath $exe -ArgumentList '--quit' -NoNewWindow -Wait -PassThru
+    if ($quit.ExitCode -ne 0) {
+        throw "$installExe is running and did not accept the quit request; end it from its tray icon (right-click, Exit) and run the deploy again"
     }
     # It accepted, so it is on its way out: the flush and the log line happen
-    # after the event loop returns, and the exe stays locked until the process
-    # is really gone. Waiting is what keeps the copy below honest.
+    # after the event loop returns, and the exe stays locked until the process is
+    # really gone. Waiting is what keeps the copy below honest.
     $deadline = (Get-Date).AddSeconds(30)
     while ((Get-Date) -lt $deadline) {
         if (@(Get-Process quire -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $installExe }).Count -eq 0) { break }
         Start-Sleep -Milliseconds 200
     }
     if (@(Get-Process quire -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $installExe }).Count -gt 0) {
-        throw "$installExe accepted the quit request but is still running after 30 s — refusing to overwrite a live exe"
+        throw "$installExe accepted the quit request but is still running after 30 s; refusing to overwrite a live exe"
     }
     Write-Output "==> the old instance exited (pid $($pids -join ', '))"
 }
