@@ -311,6 +311,21 @@ First functional release: a local, single-file-database notes workspace.
 - Seven scenes plus their dark arms (`notes`, `notes-detail`, `notes-search`,
   `tasks`, `tasks-detail`, `tasks-list`, `tasks-overdue`), all in the sweep list
   and all planted through the real write path
+- **The area is one card with three columns** (ADR-0104), the way the reference
+  this page was modelled on draws it: a **nav column** (208 px) of view rows and
+  lists with their counts and 已完成 pinned at the bottom, the **rows** (52 px,
+  round checkbox, tag and list pills, the priority glyph, a due badge, the
+  list's dot, and a ⋯ that opens the shared context menu), and the **detail
+  panel** (340 px, always there) as a form of boxed choice rows. A footer carries
+  the completed switch and 已完成 X / Y. The detail panel no longer slides in from
+  zero width, so selecting a row no longer reflows the list
+- **平铺**: a kanban board, one column per list, with the inbox as a column like
+  any other. Cards drag between columns (the same `DragArea`/`DropArea` pair the
+  page tree uses), a column's ＋ line adds straight into it, and the board's
+  header counts lists rather than rows
+- The 笔记 tab gained the tag column (most-used first) and a header that counts
+  notes; a list's header counts its own 项待办, a board's counts 清单
+- Two scenes join the sweep: `tasks-board` and `dark-tasks-board`
 
 ### Workspace
 - Page tree: create / rename in place / duplicate (nested lists survive) /

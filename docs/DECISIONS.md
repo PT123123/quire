@@ -2,6 +2,48 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0104 · A growing container says min/max *plus* stretch, and the organizer is one card of three columns
+
+Decision: the notes-and-tasks area is **one card** with a 208 px nav column, the
+rows, and a 340 px detail panel that is always there — and everything in it that
+takes the leftover width says `horizontal-stretch: 1; max-width: 100000px;`
+rather than either one alone.
+
+Why, in two parts. The shape first: the area used to be three unrelated panels
+(a chip strip for the views, rows with no surface under them, and a detail pane
+that animated its width from 0), which meant selecting a row reflowed the list
+under the cursor. The reference this page was modelled on — activitywatch's
+`aw-qtui` — draws one card with three columns, and so does this now: the nav is a
+column of rows rather than a chip strip, the rows carry a title *and* a line of
+pills so they are 52 px, and the detail panel is a form of boxed choice rows.
+
+The rule second, because it cost a render to find and will cost another one if it
+is forgotten. `horizontal-stretch: 1` alone does **not** grow a `Rectangle` whose
+content is a layout: such a Rectangle takes its `max-width` from that layout's
+preferred width, so there is no ceiling-free room above it for the stretch factor
+to distribute. The first render of the new layout came out 885 px wide — the sum
+of its own columns — put the 340 px detail panel at x = 677, squeezed the list
+beside it to 239 px, and elided every task title to "今天…". The editor never
+showed the bug because its preferred width is already the width of the window.
+`OrgInput` had already learned the same lesson for its growing fields, and said
+so in a comment this file now points at.
+
+Consequences:
+
+- **The three columns and the card are sized the same way**, so a column added
+  later behaves like the ones beside it. A `Rectangle` around a layout that must
+  grow is the shape to look for when something is narrower than expected.
+- **Pinning both ends is also how a box that holds a scroll area is sized.** The
+  checklist's box takes its minimum height from the list inside it, so a bare
+  `height` is a *preferred* one and the list pushes it back open; it is
+  `min-height` + `max-height` instead.
+- **The area's own width is the window minus the sidebar, and it says so** — but
+  only through the stretch rule above. A future shell that mounts it somewhere
+  else inherits the same behaviour rather than a hard-coded `parent.width`.
+- The board (平铺) is the same decision applied once more: a column is 232 px
+  because three of them plus their gaps fit the list column's 442 px, and a board
+  that always scrolls sideways is a board nobody scans.
+
 ## ADR-0103 · A note's body is plain text, and v1 renders no Markdown
 
 Decision: `Note.body` is one `TEXT` column holding exactly the characters the
