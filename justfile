@@ -38,17 +38,24 @@ dist:
     cargo build --release
     powershell -NoProfile -ExecutionPolicy Bypass -File benchmarks\scripts\dist.ps1
 
-# deploy a release into the workshop: C:\workshop\quire-desktop-<version>\quire.exe.
-# The workshop keeps one folder per release, named <name>-<version> (aura-1.2.6,
-# aw-qtui-0.1.36), holding what that build needs to run; the release exe is
-# self-contained, so its folder is the one file. The name is `quire-desktop`, the
-# shell — the workshop lists several per release, and a bare `quire-<version>`
-# would not say which of the two shells put it there. The script bumps [package]
-# version's patch, builds, commits and pushes the bump, then copies — the folder
-# is named after the version, so the bump is what makes each deploy land
-# somewhere new instead of over the previous build, and it has to precede the
-# build because build.rs stamps the exe's version block from that same key.
-# Bump the patch, build, commit and push the bump, then copy into the workshop.
+# deploy a release into the workshop, in two places: the archive folder
+# C:\workshop\quire-desktop-<version>\quire.exe and the install
+# C:\workshop\quire-desktop\quire.exe — the path the app is *run* from, which
+# every deploy overwrites in place. The name is `quire-desktop`, the shell: the
+# workshop lists one folder per release of several applications, and a bare
+# `quire-<version>` would not say which of the two shells put it there. The
+# script bumps [package] version's patch, builds, commits and pushes the bump,
+# then asks any instance running from the install path to end its own session
+# through the app's quit channel and waits for it — asked, never killed, because
+# a killed session loses the flush and the clean-exit record (ADR-0105) — and
+# only then copies. The bump has to precede the build because build.rs stamps
+# the exe's version block from that same key.
+#
+# The build is ~2m30s, and that is one crate's codegen rather than a cold cache:
+# the bump invalidates the whole `quire` crate, and `[profile.release]`'s
+# `codegen-units = 1` + thin LTO is *both* the audited size choice and the
+# fastest setting for this repeat build (measured 2026-09-25 — PERFORMANCE.md
+# "Build cost", and ADR-0024's update).
 deploy-workshop:
     powershell -NoProfile -ExecutionPolicy Bypass -File install\deploy-workshop.ps1
 

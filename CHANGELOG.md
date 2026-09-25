@@ -467,6 +467,15 @@ First functional release: a local, single-file-database notes workspace.
   same as a visible window, so the tray existing *is* the behaviour. The icon is
   the one artwork `install/make_icon.ps1` rasterises, the same picture the exe,
   the installer and the shortcuts carry, transparency included
+- That exit is reachable from outside the app now (ADR-0105): `quire.exe --quit`
+  asks the *running* instance to end its own session — the same
+  `slint::quit_event_loop()` the tray menu calls, so the final flush and the
+  clean-exit record still happen — and exits 0 only if an instance accepted,
+  non-zero if nothing was listening. It answers before any session of its own
+  starts, so asking is never a second window or a second log line. It exists so
+  a deploy can replace a live exe without killing it: a killed session is
+  missing its end record, which is precisely what the next start reports as a
+  crash that never happened
 - The light theme's quietest text is measured rather than eyeballed: the third
   text tier (block handles, footer, sidebar, every hint row) went from 2.5–2.7:1
   to 4.1–4.4:1, and the two weakest block colours from 2.81 and 2.48 on their own
@@ -548,6 +557,18 @@ First functional release: a local, single-file-database notes workspace.
 - `just check`: `cargo check --all-targets`, the whole test suite, a release
   build. Visual regression and the RAM/CPU scenes run from
   `benchmarks/scripts/` (`sweep.ps1` compares against a manifest of hashes)
+- `just deploy-workshop` writes two places (ADR-0105).
+  `C:\workshop\quire-desktop-<version>\quire.exe` is that release's archive and
+  never moves; `C:\workshop\quire-desktop\quire.exe` is the install — the one
+  path the app is run from, overwritten in place on every deploy, so "the
+  newest" stops being a folder name to remember. The instance living on the
+  install path is asked to quit through the channel above and *waited for*
+  (30 s) before the copy, and the step sits after the build and the push
+  because closing the user's window is the one part of a deploy they can feel;
+  if it accepts and then stays up, the deploy refuses rather than overwriting a
+  live exe. An instance running out of an older version folder holds nothing the
+  deploy writes, so it is named and left alone instead of being closed for
+  nothing
 - The benchmark row writers no longer commit a machine path. ADR-0094 rewrote
   the 22 `benchmarks/results/*.jsonl` files that had one, and the next run would
   have written it straight back: `exe` and `db` are absolute paths at run time.

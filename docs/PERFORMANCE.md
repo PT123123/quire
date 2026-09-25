@@ -372,6 +372,64 @@ or typing CPU by more than the ≈2 MB / ≈3 pp noise floor. None of the four
 §二十四 knobs does, so the audit's answer is "already right", recorded as a
 measured outcome rather than an assumption.
 
+## Build cost (2026-09-25)
+
+What `just deploy-workshop` actually pays, and whether any of it is avoidable.
+The question was raised as "the build takes too long — check it, and turn up
+incremental compilation"; the answer is that the 2m30s is one crate and the
+profile is already the fastest setting for it.
+
+Method: `cargo build --release`, femtovg default, one run per row, on the dev
+desktop (22 logical cores), with the command's output redirected through
+`cmd /c` rather than piped (`powershell -Command` re-encodes a native command's
+stdout and, with `$ErrorActionPreference = 'Stop'`, treats its stderr as a
+failure — both have bitten this repo before). A "touch" is
+`(Get-Item src\main.rs).LastWriteTime = Get-Date`, which is what a source edit
+does to cargo's fingerprint; a version bump invalidates the same unit.
+
+| build | wall | what it is |
+|-------|-----:|------------|
+| `cargo build --release`, nothing changed | 4.4 s | cargo re-checks and exits. The tree is warm — no staleness |
+| `cargo build --release`, one `.rs` touched | **2m 30s** | `quire` alone: one crate's codegen at `codegen-units = 1` + thin LTO, then the link |
+| `cargo build --release`, one `.rs` touched, `codegen-units = 16` | **3m 07s** | the same crate, *slower* — see below |
+| switching `codegen-units` at all (either direction) | 7m 59s | ~240 dependency crates rebuilt: a profile change is not a knob you nudge, it invalidates every unit in the graph |
+| `cargo build` (dev), one `.rs` touched | 1m 08s | the lib plus the test harness, incremental as the dev profile's default |
+
+Reading:
+
+- **The deploy's cost is the version bump, and it is one crate.** A no-op build
+  is 4.4 s, so nothing is rebuilding out of staleness. `[package] version` is
+  part of cargo's fingerprint for the local crate, and `build.rs` stamps that
+  same version into the exe's resource block, so bumping it is an edit to
+  `quire` — and `quire` is where cgu = 1 + thin LTO spends its time. Dependencies
+  are not involved: they are cached and stay cached.
+- **`codegen-units = 16` loses here, and that does not contradict the A3 audit.**
+  A3 measured 1m45s for `cgu16` against 3m10s for the current profile — but that
+  was a **full** build, where the win is parallel codegen spread across many
+  dependency crates. The build a deploy runs recompiles *one* crate, and there
+  the extra CGUs only give ThinLTO more partitions to merge at link time: 3m07s
+  against 2m30s. So the knob ADR-0024 pinned for exe size is also the fast one
+  for the repeat build; there is no trade to make.
+- **`incremental = true` cannot apply at `codegen-units = 1`.** Incremental
+  compilation reuses *codegen units* that did not change; at cgu = 1 the whole
+  crate is one CGU, so any edit re-codegens all of it and the dep-graph
+  bookkeeping is pure overhead. It was not measured to completion, because
+  measuring it is itself a profile change: the switch to `cgu16` above rebuilt
+  ~240 dependency crates in 7m59s, and adopting `incremental = true` pays that
+  same bill before producing a number. The run was abandoned past 7 minutes on
+  that basis, and ADR-0024 carries the conclusion.
+- **Incremental compilation is on where it can work.** The dev/test profiles
+  keep cargo's defaults (`incremental = true`), and the 1m08s row is it working:
+  a source change costs a partial recompile and a relink rather than the whole
+  graph.
+
+What would actually make it faster: nothing inside the profile. The remaining
+levers are structural and were not taken — a faster linker (`lld-link.exe` ships
+in the toolchain at `<sysroot>\lib\rustlib\x86_64-pc-windows-msvc\bin\gcc-ld\`,
+and the measured split between codegen and link was not established), or not
+recompiling a crate to change a number it embeds. Both are bigger than the
+2m30s they would save.
+
 ## M8 · first paint, not window-up (A2, 2026-09-20)
 
 Closes the gap carried in PLAN since M0/M1: *"window startup_ms measures

@@ -1,4 +1,5 @@
-# Deploy a release into the workshop: C:\workshop\quire-desktop-<version>\quire.exe.
+# Deploy a release into the workshop, twice: the version folder is the archive,
+# C:\workshop\quire-desktop\quire.exe is the install.
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File install\deploy-workshop.ps1
 #
@@ -14,13 +15,22 @@
 # list that already holds one folder per release of several, with nothing saying
 # which shell made it.
 #
-# `just deploy-workshop` is the entry point, and this script is the whole flow.
-# The steps are ordered so the folder named <version> holds a binary that says
-# <version>:
+# Two destinations, and they are two different things:
 #
-#   1. [package] version's patch +1 in Cargo.toml. The folder is named after the
-#      version, so this is what makes a deploy *land*: without it a second run
-#      would overwrite the previous build.
+#   * C:\workshop\quire-desktop-<version>\quire.exe — the archive. One folder per
+#     release, never moved, so the workshop can still say what was built when.
+#   * C:\workshop\quire-desktop\quire.exe — the install. This is the path the app
+#     is *run* from, and every deploy overwrites it in place, so "the newest
+#     release" is one path instead of a folder name to remember. Windows will not
+#     replace a running exe, which is why the instance living there has to leave
+#     first (step 4) — through the app's own quit channel, never a kill.
+#
+# `just deploy-workshop` is the entry point, and this script is the whole flow.
+# The steps are ordered so each destination holds a binary that says <version>:
+#
+#   1. [package] version's patch +1 in Cargo.toml. Both destinations are named
+#      after (or checked against) the version, so this is what makes a deploy
+#      *land*: without it the install would be overwritten by the same build.
 #   2. `cargo build --release`. The bump has to come first for more than the
 #      folder name: build.rs generates the exe's version resource block from
 #      CARGO_PKG_VERSION — the number the file properties tab shows — so a build
@@ -29,13 +39,22 @@
 #   3. The bump is committed (Cargo.toml + Cargo.lock, nothing else) and pushed,
 #      the way every repository in this workspace is left: the commit is the
 #      record of what each folder in the workshop was built from.
-#   4. target\release\quire.exe is copied to
-#      C:\workshop\quire-desktop-<version>\quire.exe.
+#   4. The instance running from the install path is asked to end its own
+#      session, and waited for. Deliberately last before the copy: closing the
+#      user's window is the one step here they can feel, so nothing that can
+#      fail — a build, a commit, a push — is allowed to happen after it.
+#   5. target\release\quire.exe is copied to the version folder and over the
+#      install.
 
 $ErrorActionPreference = "Stop"
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $root = Split-Path -Parent $here
 Set-Location $root
+
+# The two destinations are known before anything happens, so a typo fails here
+# rather than after a build and a push.
+$install = Join-Path 'C:\workshop' 'quire-desktop'
+$installExe = Join-Path $install 'quire.exe'
 
 # ── 1: the bump ─────────────────────────────────────────────────────────────
 # The first top-level `version` key in the manifest is [package]'s: the
@@ -96,10 +115,51 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 git push
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-# ── 4: the deploy ───────────────────────────────────────────────────────────
-$dest = Join-Path 'C:\workshop' "quire-desktop-$version"
-New-Item -ItemType Directory -Force -Path $dest | Out-Null
-$target = Join-Path $dest 'quire.exe'
-Copy-Item $exe $target -Force
-Write-Output ("==> deployed v{0} ({1:N1} MiB) -> {2}" -f `
-    $version, ((Get-Item $exe).Length / 1MB), $target)
+# ── 4: the old instance leaves through its own door ─────────────────────────
+# Only the instance sitting on a file this deploy writes is asked, and it is
+# asked, never killed: `--quit` goes through the app's quit channel, which is
+# the same route the tray menu's 「退出」 takes, so its final flush runs and it
+# writes its clean-exit record instead of the next start reporting a crash that
+# never happened (ADR-0105).
+#
+# An instance running out of an older quire-desktop-<version> folder holds
+# nothing here — those folders are the archive and this deploy does not touch
+# them — so it is named and left alone. Quitting one would be closing a window
+# the user still has open for no reason.
+$running = @(Get-Process quire -ErrorAction SilentlyContinue)
+$blocking = @($running | Where-Object { $_.Path -eq $installExe })
+foreach ($p in @($running | Where-Object { $_.Path -ne $installExe })) {
+    Write-Output "==> note: an older release is still running from $($p.Path) — it holds nothing this deploy writes, leaving it alone"
+}
+if ($blocking.Count -gt 0) {
+    $pids = @($blocking | ForEach-Object { $_.Id })
+    Write-Output "==> asking the instance at $installExe (pid $($pids -join ', ')) to quit"
+    & $exe --quit
+    if ($LASTEXITCODE -ne 0) {
+        throw "$installExe is running and would not accept the quit request; end it from its tray icon (右键 → 退出) and run the deploy again"
+    }
+    # It accepted, so it is on its way out: the flush and the log line happen
+    # after the event loop returns, and the exe stays locked until the process
+    # is really gone. Waiting is what keeps the copy below honest.
+    $deadline = (Get-Date).AddSeconds(30)
+    while ((Get-Date) -lt $deadline) {
+        if (@(Get-Process quire -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $installExe }).Count -eq 0) { break }
+        Start-Sleep -Milliseconds 200
+    }
+    if (@(Get-Process quire -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $installExe }).Count -gt 0) {
+        throw "$installExe accepted the quit request but is still running after 30 s — refusing to overwrite a live exe"
+    }
+    Write-Output "==> the old instance exited (pid $($pids -join ', '))"
+}
+
+# ── 5: the deploy ───────────────────────────────────────────────────────────
+# Archive first, install second: if the copy onto the install fails, the release
+# is still in the workshop under its own version rather than nowhere.
+$archive = Join-Path 'C:\workshop' "quire-desktop-$version"
+New-Item -ItemType Directory -Force -Path $archive | Out-Null
+Copy-Item $exe (Join-Path $archive 'quire.exe') -Force
+New-Item -ItemType Directory -Force -Path $install | Out-Null
+Copy-Item $exe $installExe -Force
+Write-Output ("==> archived v{0} ({1:N1} MiB) -> {2}" -f `
+    $version, ((Get-Item $exe).Length / 1MB), (Join-Path $archive 'quire.exe'))
+Write-Output "==> installed in place -> $installExe"

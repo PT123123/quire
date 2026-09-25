@@ -161,6 +161,22 @@ fn leak_timer(t: Timer) {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // `--quit` is not a session. It asks the *running* instance to end its own
+    // — through the same route the tray menu's 「退出」 uses, so that instance's
+    // flush runs and it writes its clean-exit record — and then leaves without
+    // a log line, a database or a window of its own. Answering it here, before
+    // the UI thread exists, is what keeps it from becoming a second session,
+    // and the exit code is the answer a deploy reads: 0 only if an instance
+    // accepted, non-zero if nothing was listening (ADR-0105).
+    if std::env::args().skip(1).any(|a| a == "--quit") {
+        return match quire::platform::quit::request_quit() {
+            Ok(()) => {
+                println!("quire: the running instance accepted the quit request");
+                Ok(())
+            }
+            Err(reason) => Err(reason.into()),
+        };
+    }
     let start = std::time::Instant::now();
     // The UI event loop runs on its own thread with a generous stack:
     // Slint 1.18 evaluates the initial property/layout bindings of the
@@ -594,6 +610,25 @@ fn real_main(start: std::time::Instant) -> Result<(), String> {
     }
 
     mark("pre_event_loop");
+    // The quit channel (ADR-0105) goes up last, immediately before the loop it
+    // has to reach: `invoke_from_event_loop` needs a loop to post to, so a
+    // request that arrives while this window is still being built is answered
+    // `err` rather than queued. Opening it earlier to "catch" that window would
+    // only make the channel claim a quit it could not deliver, and a deploy
+    // acts on that claim by overwriting an exe that is still running.
+    //
+    // Not fatal when it is missing: a second instance cannot own the name, and
+    // refusing to start over that would be a worse answer than running without
+    // a channel (the second-instance limitation is pre-existing — DECISIONS.md).
+    let _quit_channel = quire::platform::quit::serve(|| {
+        slint::invoke_from_event_loop(|| {
+            let _ = slint::quit_event_loop();
+        })
+        .is_ok()
+    });
+    if !_quit_channel {
+        eprintln!("quire: no quit channel (another instance owns the name); --quit will not reach this one");
+    }
     ui.run().map_err(|e| e.to_string())?;
     // remember the window size, then flush dirty state on close (SPEC §十九)
     let size = ui.window().size();

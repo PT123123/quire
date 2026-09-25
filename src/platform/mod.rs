@@ -2,6 +2,7 @@
 // Policy (ADR-0002): never implement TSF/IME ourselves.
 
 pub mod dib;
+pub mod quit;
 
 use std::path::Path;
 

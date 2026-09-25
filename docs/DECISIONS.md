@@ -2,6 +2,86 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0105 · The deploy overwrites the install in place, and the old instance leaves through a quit channel
+
+Decision: `C:\workshop\quire-desktop\quire.exe` is a *path*, not a version
+folder — it is what the app is run from, and every `just deploy-workshop`
+overwrites it in place, while `C:\workshop\quire-desktop-<version>\quire.exe`
+stays as that release's archive folder. Windows will not replace a running exe,
+so before the copy the deploy asks the instance living on that path to end its
+own session: a byte-mode named pipe, `\\.\pipe\quire-desktop-quit`, owned by the
+running instance and answered with `ok` or `err`, whose client half is
+`quire.exe --quit`. It is asked, never killed.
+
+Why the channel had to exist at all. ADR-0096 made the tray menu's 「退出」 the
+one exit — the window's X hides — and nothing outside the process could reach
+that menu. So replacing a running build meant `taskkill`, which skips
+`persistence_force_flush` and `logging::note(END_RECORD)`, and the next start
+then reports an aborted session (ADR-0018 reads the missing record exactly that
+way) for a crash that never happened. A deploy that corrupts the crash-recovery
+evidence every time it runs is worse than one that asks nicely.
+
+Three smaller decisions inside it, each because the alternative costs more:
+
+- **A pipe, not a socket or a mutex.** A loopback TCP channel would need no FFI
+  at all, but every new exe that listens is a firewall prompt, and this app gets
+  a new exe on every deploy. The pipe is exclusive by name
+  (`FILE_FLAG_FIRST_PIPE_INSTANCE`, so the first instance owns it and a second
+  fails to create it rather than quietly becoming another instance of the same
+  name), needs no crate, and opens no listening socket.
+- **The client is std only.** A named pipe is openable as a file on Windows, so
+  `OpenOptions::open(r"\\.\pipe\quire-desktop-quit")` *is* `CreateFileW`; only
+  the server needs `CreateNamedPipeW` and `ConnectNamedPipe`. Two hand-declared
+  `extern "system"` functions and no `windows` crate — the same rule the
+  clipboard FFI states (ADR-0025), and kernel32 is already linked.
+- **The answer is part of the protocol.** The server replies `ok` only after the
+  exit was actually scheduled, `err` if it could not be; a caller that gets no
+  answer must not assume the app is going away, because the deploy acts on that
+  assumption by overwriting an exe.
+
+Two placements are load-bearing rather than incidental. `--quit` is answered in
+`main`, before `parse_launch_args` reaches the session: a client that opened the
+database, the log and a window would *be* a second session, which is the one
+thing this invocation must not become. And the server goes up immediately before
+`ui.run()`, not at the tray install: `invoke_from_event_loop` needs a loop to
+post to, so a channel opened earlier could accept a request it had no way to
+deliver — and accepting is what the deploy trusts.
+
+Who gets asked, and who does not. Only the instance running from the install
+path is asked, because it is the only one holding a file the deploy writes. An
+instance running out of an older `quire-desktop-<version>` folder holds nothing
+here — those folders are the archive and this deploy does not touch them — so
+the script names it and leaves it alone; closing a window the user still has open
+for no reason is not the same act as ending a session that is being replaced.
+Instances built before this ADR have no channel at all and `--quit` cannot reach
+them; the deploy reports that and carries on, which is safe precisely because the
+builds that predate the channel are all in archive folders. The install path is
+first written by the deploy that introduced the channel, so the first build to
+live there already has one.
+
+Consequences:
+
+- **There is still one exit route, not two.** `--quit` schedules
+  `slint::quit_event_loop()` — the tray's own call — so the flush, the window
+  size and the clean-exit record keep one implementation and cannot drift.
+- **A deploy closes a window, and that is the one step the user can feel.** It
+  is therefore last: after the build, the commit and the push, so nothing that
+  can fail is allowed to happen after it. It waits for the process with a
+  deadline, and if the instance accepts the quit and then stays up, the deploy
+  refuses and says so rather than overwriting a live exe.
+- **The legacy gap is one request wide and closes itself**: only a
+  pre-ADR-0105 build run from the install path would be unreachable, and no such
+  build can be there.
+- **No single-instance guard was added**, so the known limitation stands: a
+  second instance runs, and it is the one without a channel — the pipe says
+  which instance owns it, and nothing more. The pipe is also not a lock in
+  another sense: a fresh instance is created per conversation, so the name is
+  unowned for the instant between two of them.
+- **A client that connects and never writes wedges the channel** (the server
+  blocks in `read_line`, and there is one instance). Only this app's own
+  `--quit` connects, so a wedge means a crash mid-exchange; the fix then is the
+  window's own tray menu, which is where this started.
+
 ## ADR-0104 · A growing container says min/max *plus* stretch, and the organizer is one card of three columns
 
 Decision: the notes-and-tasks area is **one card** with a 208 px nav column, the
@@ -2533,6 +2613,37 @@ beyond ≈2 MB / ≈3 pp of the measured noise floor; re-run
 `benchmarks/scripts/profile_bench.ps1` per profile before believing any
 single-run delta (the audit caught a parallel-build-polluted batch that
 looked like a 20 % win and was not).
+
+Update (2026-09-25, build time, not runtime): the deploy's build was re-examined
+because it *feels* long — `just deploy-workshop` spends ~2m30s building — and
+the question was whether incremental compilation could be turned up to fix it.
+It cannot, and the profile is also already the fast one. Measured on this
+machine, `femtovg` default, each row one run, method in PERFORMANCE.md
+"Build cost":
+
+- A no-op `cargo build --release` is **4.4 s**. The tree is warm; nothing is
+  rebuilding out of staleness.
+- Touching one `.rs` (or bumping `[package] version`, which is the same
+  invalidation — the version is in cargo's fingerprint, and build.rs stamps it
+  into the exe) costs **2m30s**. That is the deploy's whole build, and it is one
+  crate: `quire` itself, at `codegen-units = 1` + thin LTO.
+- `codegen-units = 16` costs **3m07s** for that same repeat build — *slower*,
+  not faster. More CGUs means more ThinLTO to merge at link time, so the knob
+  the A3 audit rejected for size also loses on the rebuild the deploy actually
+  pays for. This does not conflict with A3's 1m45s: that number was a **full**
+  build, where the win is parallel codegen across many dependency crates, and it
+  is not the build a deploy runs.
+- `incremental = true` was not worth measuring to completion: at
+  `codegen-units = 1` there is a single CGU, so any edit re-codegens the entire
+  crate and there is nothing for the reuse to hit — and *trying* it is itself
+  expensive, because any profile change invalidates every unit in the graph
+  (measured: switching `codegen-units` rebuilt ~240 dependency crates in
+  **7m59s**). The run was abandoned past 7 minutes on that basis.
+
+So `[profile.release]` is unchanged, and now for a second reason: it is not
+merely what ships, it is the fastest setting for the build that ships it.
+`just deploy-workshop` carries the measurement so the next person to feel the
+2m30s finds the answer before re-running the experiment.
 
 ## ADR-0023 · The ⋮⋮ menu gets Notion's remaining items; block color crosses the persistence contract
 Decision: the block handle menu carries Copy link to block, Move to, and
