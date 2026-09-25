@@ -17,6 +17,9 @@ just build                    # cargo build --release (default FemtoVG renderer)
 just run                      # cargo run (debug)
 just check                    # local CI replacement: check + test + release
 just shot menu                # headless visual shot (scene name optional)
+just dist                     # package the release exe into dist/quire-windows-x64.zip
+just deploy-workshop          # bump the patch, build, deploy into C:\workshop
+just release-publish          # bump the patch, build, publish on GitHub (installer + zip)
 just clean                    # cargo clean + remove skia/wgpu benchmark target dirs
 ```
 

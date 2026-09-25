@@ -59,6 +59,26 @@ dist:
 deploy-workshop:
     powershell -NoProfile -ExecutionPolicy Bypass -File install\deploy-workshop.ps1
 
+# publish a release: bump the patch, build the release exe, and attach two files
+# to a GitHub release — Quire-<version>-windows-x64-setup.exe (install\
+# build-installer.ps1's Inno Setup program, per-user and no elevation) and
+# Quire-<version>-windows-x64.zip (the same single exe `just dist` packages, for
+# someone who would rather not install anything).
+#
+# This is the shell's *delivery*; `deploy-workshop` above is the other door a
+# release leaves by, and it advances the version too. Neither replaces the other:
+# a release that only went to the workshop is a folder on this machine, and one
+# that was only published is a file in a browser's downloads folder.
+#
+# The three steps that matter are ordered the way the Android shells' publish
+# orders them: the bump precedes the build (build.rs stamps the exe's version
+# resource, and quire.iss reads AppVersion out of it), the assets are built
+# before the push so an Inno Setup that is not installed fails before anything
+# leaves the machine, and the bump lands as its own commit before the tag that
+# names it. The version comes from Cargo.toml, so nothing here is bumped by hand.
+release-publish:
+    powershell -NoProfile -ExecutionPolicy Bypass -File install\release-publish.ps1
+
 # installer end-to-end regression (D8/A6): build iss, silent install,
 # verify, silent uninstall, residue check (needs Inno Setup)
 # --portable end-to-end regression (A1 follow-up): 24 checks over the

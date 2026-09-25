@@ -2,6 +2,63 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0106 · The desktop's delivery is a GitHub release of the installer and the portable zip
+
+Decision: `install\release-publish.ps1` (`just release-publish`) bumps
+`[package] version`'s patch, builds the release exe, builds the two artifacts that
+one exe can be delivered as — `Quire-<version>-windows-x64-setup.exe` from
+`install\build-installer.ps1 -SkipBuild`, and the portable
+`Quire-<version>-windows-x64.zip` from `benchmarks\scripts\dist.ps1` — commits and
+pushes the bump as its own commit, and creates `v<version>` on `master` with both
+files attached. Re-running after a failed publish re-uploads over the existing tag
+rather than erroring out.
+
+Why now, and why this shape. `v0.1.0-rc1` was this repository's only tag and it had
+no release at all: its whole delivery was `C:\workshop` (ADR-0105), which is one
+machine. A release is what makes a build reachable without that machine, and both
+Android shells have had exactly this script since their first milestone — bump the
+patch, build, land the bump as its own commit, attach the artifact to a tag that
+names the version. This is that decision in this repository's vocabulary, which is
+why the order is the Android order: the bump precedes the build because build.rs
+generates the exe's version resource from `CARGO_PKG_VERSION` and `quire.iss` reads
+`AppVersion` out of that resource, and the bump lands as its own commit before the
+tag that names it.
+
+Two assets rather than one, because both doors this app can be installed through
+are already built here and neither substitutes for the other: the setup program is
+the install anybody would use (per-user, no elevation, uninstall leaves the library
+alone — ADR-0017), and the zip is the self-contained single file for someone who
+would rather not install anything. Both are made from the one exe, so the two
+cannot disagree about what they are.
+
+Why the deploy and the publish are two acts rather than one. They deliver to two
+different places and both advance the version, exactly as on the Android side: an
+install of this app is updated by running the deploy on the machine that has one
+(ADR-0105), while a release is a file in someone's downloads folder. A release that
+only went to the workshop, and a workshop folder that was never published, are both
+ordinary states here, and neither is an error.
+
+Consequences:
+
+- The assets are built **before** the push, and the installer before the zip. The
+  one failure here that has nothing to do with this repository is Inno Setup not
+  being installed, so it has to fail before the bump has left the machine rather
+  than after.
+- Both asset names carry the version, so a downloaded copy still says which release
+  it came from. The zip is renamed rather than `dist.ps1` being changed: `just dist`
+  is a documented recipe of its own with its own output name (`dist/quire-windows-x64.zip`),
+  and the publish copies what it made.
+- The exe is asked to confirm it took the bump before anything is built from it —
+  the check the deploy makes (ADR-0105) — so the installer's `AppVersion` and the
+  tag cannot name different versions.
+- The installer's end-to-end regression (`just verify-install`) is **not** run by
+  the publish, and neither is the test suite: that is the user's own gate, and the
+  Android publishes do not run one either. A release whose installer was never
+  installed has that much less evidence behind it, which is stated rather than
+  papered over.
+- Nothing here bumps a version by hand: `Cargo.toml` is the only place a version is
+  written, `build.rs` stamps it into the exe, and `quire.iss` reads it back out.
+
 ## ADR-0105 · The deploy overwrites the install in place, and the old instance leaves through a quit channel
 
 Decision: `C:\workshop\quire-desktop\quire.exe` is a *path*, not a version

@@ -568,7 +568,17 @@ First functional release: a local, single-file-database notes workspace.
   if it accepts and then stays up, the deploy refuses rather than overwriting a
   live exe. An instance running out of an older version folder holds nothing the
   deploy writes, so it is named and left alone instead of being closed for
-  nothing
+   nothing
+- `just release-publish` is the other door a release leaves by (ADR-0106): it
+  bumps the patch, builds the exe, wraps it twice —
+  `build-installer.ps1 -SkipBuild` for `Quire-<version>-windows-x64-setup.exe` and
+  `dist.ps1` for the portable `Quire-<version>-windows-x64.zip` — commits and
+  pushes the bump, and attaches both to `v<version>` on `master`. The version is
+  read out of `Cargo.toml` and into the exe's version resource, which `quire.iss`
+  reads `AppVersion` from, so nothing is typed twice; the assets are built before
+  the push, so an Inno Setup that is not installed fails before anything leaves
+  the machine. `just verify-install` stays the user's own gate and is not run by
+  the publish
 - The benchmark row writers no longer commit a machine path. ADR-0094 rewrote
   the 22 `benchmarks/results/*.jsonl` files that had one, and the next run would
   have written it straight back: `exe` and `db` are absolute paths at run time.
