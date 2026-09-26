@@ -473,12 +473,13 @@ export struct TaskListRow {
     smart: bool,          // true for the inbox: the chip the *view* half owns
 }
 
-// One tag the notes carry, as the 笔记 tab's nav column lists it. The name *is*
-// the filter — a note's tags are free strings, not rows, so there is nothing to
-// point at.
+// One tag the notes carry, as the 笔记 tab's nav column lists it. `name` is the
+// last segment — what a row shows — and `path` is the whole thing (`项目/工作`),
+// which is the filter: a tag is a **path**, and the column shows one level of it.
 export struct TagRow {
     name: string,
     count: int,
+    path: string,
 }
 
 // One task: the list row and the detail panel's row again. `priority` and
@@ -1238,9 +1239,14 @@ export global UIState {
     in-out property <[TaskListRow]> task-list-rows;
     in-out property <[BoardColumn]> org-board;
     // The 笔记 tab's tag column and its filter. `org-tag` is "" for 全部笔记;
-    // a tag is a free string on the note, so the filter compares it as one.
+    // a tag is a **path** (`项目/工作`), so the filter keeps the whole subtree under
+    // it and the column shows the level below. `org-tag-label` is that path as a
+    // breadcrumb (`项目 / 工作`) and `org-tag-parent` is where ↑ goes — both from
+    // Rust, because segmenting a path is model work and the UI only paints it.
     in-out property <[TagRow]> org-tag-rows;
     in-out property <string> org-tag: "";
+    in-out property <string> org-tag-label: "";
+    in-out property <string> org-tag-parent: "";
     // The selected row's *whole* self, so the detail panel binds fields instead
     // of looking a row up in a model: `id` is -1 when nothing is selected, and
     // every other field is then whatever the empty row says.
@@ -1289,6 +1295,8 @@ export global UIState {
     callback org-note-pin-toggled(int);
     callback org-note-tags-set(int, string);
     callback org-note-deleted(int);
+    // 转为待办: the note becomes a task and the note goes
+    callback org-note-to-task(int);
     // the 笔记 tab's tag column: "" is 全部笔记
     callback org-tag-picked(string);
     // tasks: the row's own switches are immediate, the text fields commit on blur

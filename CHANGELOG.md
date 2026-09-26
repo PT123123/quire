@@ -325,6 +325,22 @@ First functional release: a local, single-file-database notes workspace.
   header counts lists rather than rows
 - The 笔记 tab gained the tag column (most-used first) and a header that counts
   notes; a list's header counts its own 项待办, a board's counts 清单
+- **A tag is a path** (ADR-0107). `项目/工作` is one tag, the filter keeps the whole
+  **subtree** on segment boundaries — `项目` keeps `项目` and `项目/工作` and drops
+  `项目2`, which a plain prefix test would keep — and the 笔记 tab's tag column shows
+  **one level**: the children of the filter, each carrying the number of notes at or
+  under it, counted once per note however many of its tags pass through it. An
+  **↑ 上级** row and the breadcrumb above the column are the way back. The Compose
+  shell keeps the same three rules in `OrgModel`, so both platforms segment a tag
+  identically
+- **转为待办**: the note detail's ✓ button turns the note into a 收集箱 task — titled
+  by the note's own title or its first line with the opening markdown stripped, its
+  body as 备注 and its tags carried — and removes the note, with the notice band as
+  the way back. The Compose shell applies the same rule, so a note converted on
+  either device makes the same task
+- The tag pills on task rows and board cards draw a path as `#项目 / 工作`. The tags
+  *input* still edits the flat comma-separated form: `NoteRow.tags` is the display
+  line now, so the draft asks the catalog for the raw tags instead
 - Two scenes join the sweep: `tasks-board` and `dark-tasks-board`
 
 ### Workspace

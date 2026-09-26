@@ -6868,7 +6868,7 @@ impl AppState {
             let title = if tag.is_empty() {
                 "全部笔记".to_string()
             } else {
-                tag.clone()
+                tag_breadcrumb(&tag)
             };
             (title, format!("{} 条笔记", notes.len()))
         } else if mode == 1 {
@@ -6894,7 +6894,7 @@ impl AppState {
         self.task_list_rows.set_vec(self.org_lists(view, list as i64));
         self.org_board
             .set_vec(self.org_board_rows(&query, sort, &dates));
-        self.org_tag_rows.set_vec(self.org_tag_rows_of());
+        self.org_tag_rows.set_vec(self.org_tag_rows_of(&tag));
         self.org_smart_counts
             .set_vec(self.org_smart_counts_of(&query, &dates).to_vec());
         let (view_title, view_count_label) = header;
@@ -6905,6 +6905,10 @@ impl AppState {
             g.set_task_list_rows(self.task_list_rows_model());
             g.set_org_board(self.org_board_model());
             g.set_org_tag_rows(self.org_tag_rows_model());
+            // The column's heading and its ↑ row: segmenting a path is model work,
+            // so the UI is handed the two strings rather than the split.
+            g.set_org_tag_label(tag_breadcrumb(&tag).into());
+            g.set_org_tag_parent(tag_parent(&tag).unwrap_or_default().into());
             g.set_org_smart_counts(self.org_smart_counts_model());
             g.set_org_view_title(view_title.into());
             g.set_org_view_count_label(view_count_label.into());
@@ -7040,27 +7044,42 @@ impl AppState {
             .collect()
     }
 
-    /// The 笔记 tab's tag column. A note's tags are free strings, so the column is
-    /// a fold of the notes rather than a table: the count is how many notes carry
-    /// the word, and there is nothing to rename or delete.
-    fn org_tag_rows_of(&self) -> Vec<TagRow> {
+    /// The 笔记 tab's tag column: the direct children of the filter path — the top
+    /// level when nothing is filtered — each with the number of notes at or under
+    /// it, most used first.
+    ///
+    /// A tag is a **path** (`项目/工作`), so this is one level of a tree and the
+    /// count is a **subtree** count: a row has to say how many notes tapping it
+    /// would leave on screen. A note counts once per prefix however many of its tags
+    /// pass through it — two tags under `项目` are still one note under `项目`.
+    fn org_tag_rows_of(&self, path: &str) -> Vec<TagRow> {
         let catalog = self.organizer.borrow();
         let mut counts: BTreeMap<String, i32> = BTreeMap::new();
         for note in catalog.notes.iter() {
+            let mut prefixes: BTreeSet<String> = BTreeSet::new();
             for tag in note.tags.iter() {
-                *counts.entry(tag.clone()).or_insert(0) += 1;
+                let segments = tag_segments(tag);
+                for end in 1..=segments.len() {
+                    prefixes.insert(segments[..end].join("/"));
+                }
+            }
+            for prefix in prefixes {
+                *counts.entry(prefix).or_insert(0) += 1;
             }
         }
         let mut rows: Vec<TagRow> = counts
             .into_iter()
-            .map(|(name, count)| TagRow {
-                name: name.into(),
+            .filter(|(full, _)| tag_parent(full).unwrap_or_default() == path)
+            .map(|(full, count)| TagRow {
+                // The row shows the *next* segment — the path is the heading above it.
+                name: tag_segments(&full).last().copied().unwrap_or_default().into(),
                 count,
+                path: full.into(),
             })
             .collect();
-        // most-used first, then by name: a tag column is read by "what do I keep
+        // most-used first, then by path: a tag column is read by "what do I keep
         // writing about", not alphabetically
-        rows.sort_by(|a, b| b.count.cmp(&a.count).then(a.name.cmp(&b.name)));
+        rows.sort_by(|a, b| b.count.cmp(&a.count).then(a.path.cmp(&b.path)));
         rows
     }
 
@@ -7080,7 +7099,7 @@ impl AppState {
             body: note.body.clone().into(),
             excerpt: excerpt.into(),
             pinned: note.pinned,
-            tags: tags_text(&note.tags).into(),
+            tags: tags_label(&note.tags).into(),
             when: org_when(note.edited).into(),
             selected,
         }
@@ -7093,7 +7112,7 @@ impl AppState {
             .notes
             .iter()
             .filter(|n| org_note_matches(n, &needle))
-            .filter(|n| tag.is_empty() || n.tags.iter().any(|t| t == tag))
+            .filter(|n| tag.is_empty() || n.tags.iter().any(|t| tag_matches(t, tag)))
             .collect();
         // Pinned first, then most recently edited: the order a quick-note list
         // is read in, and the one every note app opens on.
@@ -7311,6 +7330,52 @@ impl AppState {
             note.title.clone()
         };
         self.exec_org(Command::DeleteNote { note })?;
+        Some(title)
+    }
+
+    /// One note's tags as the **editable** form's text — `parse_tags`'s inverse. A
+    /// row's own `tags` is the *display* line (`#项目 / 工作`), which the input
+    /// cannot read back as tags, so the draft asks the catalog instead.
+    pub fn org_note_tags_text(&self, id: i64) -> String {
+        self.organizer
+            .borrow()
+            .note(NoteId(id.max(0) as u64))
+            .map(|n| tags_text(&n.tags))
+            .unwrap_or_default()
+    }
+
+    /// The same, for a task's tags input.
+    pub fn org_task_tags_text(&self, id: i64) -> String {
+        self.organizer
+            .borrow()
+            .tasks
+            .iter()
+            .find(|t| t.id.0 as i64 == id)
+            .map(|t| tags_text(&t.tags))
+            .unwrap_or_default()
+    }
+
+    /// 转为待办: the note becomes a task and the note goes — the reference app's own
+    /// migration, and its no-dialog rule: the notice band is the way back.
+    ///
+    /// The title is the note's own title, or its first line with the markdown that
+    /// opens it stripped (`org_convert_title`); the body travels whole as 备注, the
+    /// tags come along, and it lands in 收集箱. The Compose shell applies the same
+    /// rule, so a note converted on either device makes the same task.
+    pub fn org_note_to_task(&self, id: i64) -> Option<String> {
+        let note = self.organizer.borrow().note(NoteId(id.max(0) as u64))?.clone();
+        let title = org_convert_title(&note);
+        let new_id = self.org_create_task(-1)?;
+        self.org_task_title(new_id, title.clone());
+        if !note.tags.is_empty() {
+            self.org_task_tags(new_id, note.tags.join(", "));
+        }
+        // The body is what the note *was*: it is carried over rather than repeated
+        // as the title.
+        if !note.body.is_empty() && note.body != title {
+            self.org_task_notes(new_id, note.body);
+        }
+        self.org_delete_note(id)?;
         Some(title)
     }
 
@@ -13929,11 +13994,12 @@ fn sort_tasks(tasks: &mut [&Task], sort: i32) {
 
 /// A row's tags as one pill per tag, for the delegates that draw a pill and not a
 /// joined string. Rust does the split because a delegate does no string work in
-/// this codebase.
+/// this codebase — and it does the *breadcrumb* too, because a tag is a path and a
+/// pill shows `#项目 / 工作` rather than the raw `项目/工作`.
 fn tag_list_model(tags: &[String]) -> ModelRc<slint::SharedString> {
     ModelRc::from(Rc::new(VecModel::from(
         tags.iter()
-            .map(|t| slint::SharedString::from(t.as_str()))
+            .map(|t| slint::SharedString::from(format!("#{}", tag_breadcrumb(t))))
             .collect::<Vec<_>>(),
     )))
 }
@@ -13979,7 +14045,7 @@ fn org_task_row(
         list: task.list.0 as i32,
         list_name: list_name.into(),
         list_color,
-        tags: tags_text(&task.tags).into(),
+        tags: tags_label(&task.tags).into(),
         tag_list: tag_list_model(&task.tags),
         notes: task.notes.clone().into(),
         repeat: task.repeat.slot(),
@@ -14088,6 +14154,83 @@ fn parse_tags(input: &str) -> Vec<String> {
 /// initial value.
 fn tags_text(tags: &[String]) -> String {
     tags.join(", ")
+}
+
+// ─── a tag is a path ────────────────────────────────────────────────────────
+//
+// The reference app's 层级标签: a tag may be `项目/工作/ActivityWatch`, and every
+// projection that shows or filters one has to agree on what its segments are. The
+// Compose shell keeps the same rules in `OrgModel`.
+
+/// A tag as its segments: `项目/工作` → [项目, 工作]. Empty segments are dropped.
+fn tag_segments(tag: &str) -> Vec<&str> {
+    tag.split('/').map(str::trim).filter(|s| !s.is_empty()).collect()
+}
+
+/// The parent path of a hierarchical tag; `None` for a single-segment one.
+fn tag_parent(tag: &str) -> Option<String> {
+    let segments = tag_segments(tag);
+    if segments.len() <= 1 {
+        None
+    } else {
+        Some(segments[..segments.len() - 1].join("/"))
+    }
+}
+
+/// A tag's breadcrumb: `项目/工作` → `项目 / 工作`.
+fn tag_breadcrumb(tag: &str) -> String {
+    tag_segments(tag).join(" / ")
+}
+
+/// Whether a tag sits at or under a filter path, on **segment boundaries**: `项目`
+/// keeps `项目` and `项目/工作` and drops `项目2`, which a plain prefix test keeps.
+/// An empty path is no filter and keeps everything.
+fn tag_matches(candidate: &str, path: &str) -> bool {
+    path.is_empty() || candidate == path || candidate.starts_with(&format!("{path}/"))
+}
+
+/// A note's tags as one display line: `#项目 / 工作  #idea` — the `#` only on the
+/// front of each, because the segments of one path are one word to the eye.
+fn tags_label(tags: &[String]) -> String {
+    tags.iter()
+        .map(|t| format!("#{}", tag_breadcrumb(t)))
+        .collect::<Vec<_>>()
+        .join("  ")
+}
+
+/// A note's title when it is turned into a task (转为待办): the note's own title, or
+/// its first non-empty line with the markdown that opens it stripped, cut to a
+/// length a task row can show. A title that is a heading marker is not a title.
+fn org_convert_title(note: &Note) -> String {
+    let title = note.title.trim();
+    if !title.is_empty() {
+        return title.chars().take(50).collect();
+    }
+    note.body
+        .lines()
+        .map(org_strip_lead)
+        .find(|line| !line.is_empty())
+        .map(|line| line.chars().take(50).collect())
+        .unwrap_or_default()
+}
+
+/// A line with the markdown that opens it taken off: `## 会议` → `会议`.
+fn org_strip_lead(line: &str) -> String {
+    let mut text = line.trim();
+    while let Some(rest) = ["#", ">", "-", "*", "+"]
+        .iter()
+        .find_map(|marker| text.strip_prefix(marker))
+    {
+        text = rest;
+    }
+    let text = text.trim_start();
+    match text.find(|c: char| !c.is_ascii_digit()) {
+        Some(at) if at > 0 => text[at..]
+            .trim_start_matches(|c| matches!(c, '.' | ')' | '、' | ' '))
+            .trim()
+            .to_string(),
+        _ => text.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -20060,5 +20203,124 @@ mod tests {
         assert_eq!(lists[0].count, 6);
         assert_eq!(lists[1].name, "工作");
         assert_eq!(lists[1].count, 1);
+    }
+
+    /// A tag is a **path**, and the two projections have to agree about it: the
+    /// filter keeps a whole subtree on segment boundaries, and the column shows one
+    /// level with the subtree count.
+    #[test]
+    fn a_tag_is_a_path_in_the_filter_and_in_the_column() {
+        let (state, _repo) = org_session();
+        let note = |tags: &str| {
+            let id = state.org_create_note().unwrap();
+            state.org_note_tags(id, tags.into());
+        };
+        note("项目/工作");
+        note("项目/生活");
+        note("项目");
+        note("项目2");
+
+        // `项目` is a subtree — the tag itself and everything under it — while `项目2`
+        // is a different tag that only *looks* nested.
+        assert_eq!(state.org_notes("", "项目", -1).len(), 3);
+        assert_eq!(state.org_notes("", "项目/工作", -1).len(), 1);
+        assert_eq!(state.org_notes("", "项目2", -1).len(), 1);
+        assert_eq!(state.org_notes("", "", -1).len(), 4, "the empty path is no filter");
+
+        // The column starts at the top level…
+        assert_eq!(
+            state
+                .org_tag_rows_of("")
+                .into_iter()
+                .map(|r| (r.name.to_string(), r.count, r.path.to_string()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("项目".to_string(), 3, "项目".to_string()),
+                ("项目2".to_string(), 1, "项目2".to_string()),
+            ],
+        );
+        // …and one level down it is the *next* segment, each counting its subtree.
+        assert_eq!(
+            state
+                .org_tag_rows_of("项目")
+                .into_iter()
+                .map(|r| (r.name.to_string(), r.count, r.path.to_string()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("工作".to_string(), 1, "项目/工作".to_string()),
+                ("生活".to_string(), 1, "项目/生活".to_string()),
+            ],
+        );
+    }
+
+    /// Two tags under one parent are still **one** note under that parent: a chip has
+    /// to say how many notes tapping it would leave on screen, not how many tags
+    /// pass through it.
+    #[test]
+    fn a_subtree_count_counts_a_note_once_per_prefix() {
+        let (state, _repo) = org_session();
+        let id = state.org_create_note().unwrap();
+        state.org_note_tags(id, "项目/工作, 项目/生活".into());
+        let second = state.org_create_note().unwrap();
+        state.org_note_tags(second, "项目/工作".into());
+
+        let rows = state.org_tag_rows_of("");
+        assert_eq!(rows.len(), 1);
+        assert_eq!((rows[0].name.to_string(), rows[0].count), ("项目".to_string(), 2));
+    }
+
+    /// 转为待办: the note becomes a task and the note goes, carrying its body and its
+    /// tags — the same rule the Compose shell applies, so a note converted on either
+    /// device makes the same task.
+    #[test]
+    fn a_note_can_be_turned_into_a_task_and_the_note_goes() {
+        use crate::core::organizer::{ListId, NoteId};
+
+        let (state, _repo) = org_session();
+        let note = state.org_create_note().unwrap();
+        state.org_note_body(note, "# 买牛奶\n还有鸡蛋".into());
+        state.org_note_tags(note, "生活".into());
+
+        let title = state.org_note_to_task(note).unwrap();
+        assert_eq!(title, "买牛奶", "the markdown that opens the line is not the title");
+        assert!(
+            state.organizer().note(NoteId(note as u64)).is_none(),
+            "the note is gone"
+        );
+
+        let catalog = state.organizer();
+        let made = catalog
+            .tasks
+            .iter()
+            .find(|t| t.title == "买牛奶")
+            .expect("the task was made");
+        assert_eq!(made.notes, "# 买牛奶\n还有鸡蛋", "the body travels whole");
+        assert_eq!(made.tags, vec!["生活".to_string()]);
+        assert_eq!(made.list, ListId::INBOX, "it lands in 收集箱");
+        assert!(!made.done);
+    }
+
+    /// A note with a title and no first line worth reading: the title is the task's
+    /// title, and a note that is only whitespace gives an empty one rather than a
+    /// heading marker.
+    #[test]
+    fn the_task_a_note_becomes_is_titled_by_the_note() {
+        use crate::core::organizer::Note;
+
+        let bare = |title: &str, body: &str| Note {
+            id: crate::core::organizer::NoteId(1),
+            title: title.into(),
+            body: body.into(),
+            pinned: false,
+            tags: Vec::new(),
+            created: 0,
+            edited: 0,
+        };
+        assert_eq!(super::org_convert_title(&bare("会议", "# 别的")), "会议");
+        assert_eq!(super::org_convert_title(&bare("", "\n  买了牛奶\n还有鸡蛋")), "买了牛奶");
+        assert_eq!(super::org_convert_title(&bare("", "## 会议纪要")), "会议纪要");
+        assert_eq!(super::org_convert_title(&bare("", "- 第一件事")), "第一件事");
+        assert_eq!(super::org_convert_title(&bare("", "2. 第二步")), "第二步");
+        assert_eq!(super::org_convert_title(&bare("", "   \n  ")), "");
     }
 }

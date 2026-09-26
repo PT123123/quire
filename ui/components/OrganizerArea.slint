@@ -818,7 +818,7 @@ export component OrganizerArea inherits Rectangle {
 
                         Rectangle { height: 6px; }
 
-                        // ── 笔记: 全部, then the tags the notes carry ────────
+                        // ── 笔记: 全部, then the level the filter is on ──────
                         if UIState.org-tab == 0 : VerticalLayout {
                             spacing: 1px;
                             OrgNavRow {
@@ -827,21 +827,41 @@ export component OrganizerArea inherits Rectangle {
                                 selected: UIState.org-tag == "";
                                 clicked => { UIState.org-tag-picked(""); }
                             }
+                            // The way back up a level, and the path being filtered.
+                            // A tag is a path, so the column shows one level at a
+                            // time: 项目 → 工作 → ActivityWatch is three taps and this
+                            // row is the way out of a wrong one.
+                            if UIState.org-tag != "" : OrgNavRow {
+                                label: "↑ 上级";
+                                count: -1;
+                                clicked => { UIState.org-tag-picked(UIState.org-tag-parent); }
+                            }
                             Rectangle { height: 8px; }
-                            Text {
-                                text: "标签";
+                            // The path being filtered, as a breadcrumb. Wrapped in a
+                            // plate because a width inside the layout would be a
+                            // binding loop, and an elided path needs one.
+                            Rectangle {
                                 height: 22px;
-                                font-family: Typography.ui-font;
-                                font-size: Typography.size-caption;
-                                color: Colors.text-muted;
-                                vertical-alignment: center;
-                                x: 13px;
+                                Text {
+                                    x: 13px;
+                                    width: parent.width - 26px;
+                                    height: parent.height;
+                                    text: UIState.org-tag == "" ? "标签" : UIState.org-tag-label;
+                                    font-family: Typography.ui-font;
+                                    font-size: Typography.size-caption;
+                                    color: Colors.text-muted;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
                             }
                             for tag[i] in UIState.org-tag-rows : OrgNavRow {
                                 label: tag.name;
                                 count: tag.count;
-                                selected: UIState.org-tag == tag.name;
-                                clicked => { UIState.org-tag-picked(tag.name); }
+                                // A chip shows the level *below* the filter, so it is
+                                // never the selected one — the row above it says where
+                                // the filter is.
+                                selected: false;
+                                clicked => { UIState.org-tag-picked(tag.path); }
                             }
                         }
 
@@ -1120,6 +1140,14 @@ export component OrganizerArea inherits Rectangle {
                                         ? Colors.accent-text
                                         : Colors.text-muted;
                                     clicked => { UIState.org-note-pin-toggled(UIState.org-note-detail.id); }
+                                }
+                                // 转为待办: the note becomes a task and the note goes —
+                                // no dialog, because the notice band is the way back.
+                                IconButton {
+                                    icon-name: "todo-check";
+                                    icon-color: Colors.text-muted;
+                                    hover-color: Colors.accent-text;
+                                    clicked => { UIState.org-note-to-task(UIState.org-note-detail.id); }
                                 }
                                 IconButton {
                                     icon-name: "trash";

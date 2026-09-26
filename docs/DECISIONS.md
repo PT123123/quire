@@ -2,6 +2,60 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0107 · A tag is a path, and 转为待办 turns a note into a task
+
+Decision: two things the reference app does that this shell did not.
+
+**A tag is a path.** `项目/工作/ActivityWatch` is one tag, and three rules follow
+from it, kept in `state.rs` as `tag_segments` / `tag_parent` / `tag_breadcrumb` /
+`tag_matches` (the Compose shell keeps the identical rules in `OrgModel`, so both
+platforms segment a tag the same way):
+
+- the filter is a **segment-boundary prefix**, so `项目` keeps `项目` and
+  `项目/工作` and drops `项目2`, which a plain `starts_with` would keep;
+- the 笔记 tab's tag column shows **one level** — the direct children of the filter,
+  each with the number of notes at or under it. A note counts **once per prefix**
+  however many of its tags pass through it: two tags under `项目` are still one note
+  under `项目`, and a chip has to say how many notes tapping it would leave on
+  screen;
+- the column carries an **↑ 上级** row and the path above it as a breadcrumb
+  (`org-tag-label` / `org-tag-parent`, both from Rust — segmenting a path is model
+  work, and the UI only paints it).
+
+**转为待办.** The note detail's ✓ (`org-note-to-task`) creates a 收集箱 task and
+deletes the note: the title is the note's own title, or its first line with the
+markdown that opens it stripped (`org_convert_title`), the body travels whole as
+备注, and the tags come along. No dialog — the notice band is the way back.
+
+Why: the reference app (`aw-android-native`, and `aw-qtui`'s own `InboxPage`) has
+both, the Compose shell landed them in its ADR-0018, and a platform that segments a
+tag differently from its sibling reads the same library two ways.
+
+Consequences:
+
+- **No core change and no rev bump.** The hierarchy is a string convention inside the
+  existing `tags` column, so the rows, the wire snapshot and the merge are untouched.
+- The column's numbers are **derived**, like everything else the area shows, so
+  nothing about which level is showing reaches the file (ADR-0073's rule): a restart
+  opens on 笔记 · 全部笔记.
+- **A row's `tags` is the display line now** (`#项目 / 工作`, via `tags_label` /
+  `tag_list_model`), so it can no longer be read back as an input value. The tags
+  *draft* asks the catalog instead (`org_note_tags_text` / `org_task_tags_text`), and
+  a test pins both halves. This is the one trap in the change: the pill and the input
+  used to be the same string.
+- At the root level with flat tags the column paints exactly as it did before — the
+  chips are the same names with the same counts — but the note and task rows now
+  spell a path as `#a / b`, so the sweep's `notes`/`tasks` scenes move by that much.
+  Every displaced box is this decision.
+- 转为待办 is **five steps on the organizer's stack** (create, title, tags, notes,
+  delete) rather than one, because `quire-core` has no command that does the whole
+  conversion. `Ctrl+Z` walks back one step at a time, which is what the Compose
+  shell's two commands also leave behind.
+- **Still not here**: 引用/评论, a note detail *page*, an undo bar in place of the
+  notice band, multi-select, a persistent 回收站, 笔记历史, and a note body that
+  renders its markdown. The first four are the Compose shell's M2.5 pass, which this
+  shell has never had.
+
 ## ADR-0106 · The desktop's delivery is a GitHub release of the installer and the portable zip
 
 Decision: `install\release-publish.ps1` (`just release-publish`) bumps

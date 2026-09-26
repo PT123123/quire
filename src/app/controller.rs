@@ -4307,6 +4307,22 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
     {
         let gw = gw.clone();
         let s = state.clone();
+        ui.global::<UIState>().on_org_note_to_task(move |id| {
+            let g = gw.upgrade().unwrap();
+            org_commit_field(&g, &s);
+            if let Some(title) = s.org_note_to_task(id as i64) {
+                g.set_org_selected_note(-1);
+                org_refresh(&g, &s);
+                org_load_drafts(&g, &s);
+                // The note is gone and a task is in 收集箱; the band says what
+                // happened, because the note was the thing on screen a moment ago.
+                g.set_db_notice(format!("笔记「{title}」已转为待办。").into());
+            }
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
         ui.global::<UIState>().on_org_note_deleted(move |id| {
             let g = gw.upgrade().unwrap();
             org_commit_field(&g, &s);
@@ -4732,7 +4748,7 @@ fn org_load_drafts(g: &UIState<'_>, state: &Rc<AppState>) {
     if note.id >= 0 {
         g.set_org_note_title_draft(note.title);
         g.set_org_note_body_draft(note.body);
-        g.set_org_note_tags_draft(note.tags);
+        g.set_org_note_tags_draft(state.org_note_tags_text(note.id as i64).into());
     } else {
         g.set_org_note_title_draft("".into());
         g.set_org_note_body_draft("".into());
@@ -4742,7 +4758,7 @@ fn org_load_drafts(g: &UIState<'_>, state: &Rc<AppState>) {
     if task.id >= 0 {
         g.set_org_task_title_draft(task.title);
         g.set_org_task_notes_draft(task.notes);
-        g.set_org_task_tags_draft(task.tags);
+        g.set_org_task_tags_draft(state.org_task_tags_text(task.id as i64).into());
     } else {
         g.set_org_task_title_draft("".into());
         g.set_org_task_notes_draft("".into());
