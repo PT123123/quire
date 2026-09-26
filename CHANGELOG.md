@@ -302,8 +302,8 @@ First functional release: a local, single-file-database notes workspace.
 - **The area has its own undo stack** (ADR-0099): Ctrl+Z inside it walks the
   organizer's entries, Ctrl+Z in the editor walks the open page's, and neither
   can reach the other's. Deleting a list files its tasks in the inbox in the same
-  step, so one Ctrl+Z brings back the list *and* its tasks (ADR-0101). A delete
-  says so in the notice band rather than adding a second, timer-driven surface
+  step, so one Ctrl+Z brings back the list *and* its tasks (ADR-0101). A row
+  delete no longer lands there at all — see the undo bar below (ADR-0108)
 - Three tables in quire-core (schema v24–v26: `notes`, `task_lists`, `tasks`),
   nine row-level changes, nine commands, and the same LAN sync as everything
   else — **the snapshot version moves to 2** for it, so both shells must be
@@ -342,6 +342,139 @@ First functional release: a local, single-file-database notes workspace.
   *input* still edits the flat comma-separated form: `NoteRow.tags` is the display
   line now, so the draft asks the catalog for the raw tags instead
 - Two scenes join the sweep: `tasks-board` and `dark-tasks-board`
+- **A delete waits behind an undo bar** (ADR-0108). 🗑, the ⋯ menu's 删除 and the note
+  转为待办 all *hide* their rows for three seconds instead of writing:
+  `org_defer_delete` / `org_undo_pending` / `org_commit_pending(token)` are the whole
+  API, and only the third one reaches a command. So 撤销 writes nothing and puts
+  nothing on the stack — the Ctrl+Z the notice band used to lean on is not needed,
+  and after the bar expires the delete is a step: **one per bar**, since ADR-0111
+  routed the commit through `exec_all`, so a batch that came from one gesture goes
+  back with one Ctrl+Z. One slot and one timer, so
+  a second delete **commits** the first rather than queueing behind it, and the token
+  is what makes the superseded timer find nothing to do
+- The hiding is in **every projection** — note rows, the tag column, task rows, the
+  smart-view counts, the view header, the footer progress, the board, and the list
+  chips — so no number on screen ever counts a row the pixels dropped
+- The bar itself is `AppShell`'s, not the area's, and it floats bottom-right (380×46,
+  24 px in) rather than sitting in the layout: a pending delete outlives the area it
+  was asked from, and a band that pushed the three columns around would move the
+  whole page for a 380 px pill. A long note title elides; 撤销 keeps its own width
+- **转为待办 now makes the task and hands the note to that bar**, so it is four steps
+  on the organizer's stack instead of five, and 撤销 on its bar brings the note back
+  while the task stays. Closing the app inside the three seconds drops the delete:
+  the row simply comes back
+- `undo-bar` and `dark-undo-bar` join the sweep, deferred but not timed — a capture
+  that waited past the expiry would photograph "deleted", not "pending"
+- **The note page gained 详细信息** (ADR-0109): a `▸` disclosure *below* the body with
+  six read-only rows — 编号 / 创建 / 修改 / 标签 / 长度 / 置顶 — and the reference's own
+  honest line that there is no version history to restore from. Below rather than in a
+  sheet because Slint has no sheet and a popup for six rows is a window inside a window,
+  and above the body it would shove the field being typed into every time it opened
+- Its dates are `2026-09-26 · 刚刚`, not the reference's `yyyy-MM-dd HH:mm`: this shell
+  keeps no timezone, so a minute would be either UTC (wrong to the reader) or a
+  conversion nobody owns — the same call `core::date::today_iso` makes. Past thirty days
+  the age *is* the date, so it prints once
+- 长度 counts **characters**, not bytes, and measures the body or the title when there is
+  no body. All six values are Rust's text: `org_note_details` is a projection like every
+  other number on the screen
+- The detail pane's own `修改 刚刚` line is **gone** — 详细信息 owns that fact now, the
+  list row already carries the age, and the reference's note page has no such line
+- `notes-info` and `dark-notes-info` join the sweep. The first version of the scene arm
+  forgot `org_load_drafts` and photographed a page with an empty title, empty tags and an
+  empty body beside a correct 详细信息 — the block was right and the scene was lying
+- **收件箱 is home** (ADR-0110). The back stack holds `NavStop`s — a page or the
+  organizer on a tab — instead of page ids, which is what let `Alt+←` from 笔记 *jump
+  over* the area and repaint a document under it. A back step with nothing behind it
+  lands on 笔记 and parks the stop being left on the forward stack, so the walk down
+  into 收件箱 is reversible and only home itself ends it
+- What reaches the file is one meta row: `current-area` beside the `current-page` it
+  sits next to, so a library last read in the area opens there. Which tab and which
+  filter were open still do not (ADR-0073), and the write rides the persistence funnel
+  rather than the undo history — walking into an area is not a step `Ctrl+Z` can take
+  back. A meta row is not a schema change: no `user_version` move, no other shell locked out
+- `org_open` split into the move and the paint (`org_show`), and `nav_here` is derived
+  from the two facts the window paints from, so no path can change the area and leave
+  the history pointing somewhere else. A benchmark fixture is not a session: with
+  `--blocks` the landing stays on its document, which is where every sweep arm starts
+- **多选** (ADR-0111): a picking mode over both halves of the area. The header's 多选
+  button, or a task row's ⋯ → 多选 (which enters with that row already picked — what a
+  long press means on the reference shells), and once inside a row tap picks instead of
+  opening, through the same callbacks, so a pick cannot move the detail pane. The box in
+  front of a task row becomes the pick and the note row grew one — an overlay at the row's
+  top-right, so the title's line gains 22 px of right padding while picking and its
+  ellipsis stops 30 px short of the box instead of running under it. The header is replaced
+  by `已选 N 项 · 全选/取消全选 · 复制|完成 · 删除 · ✕`
+- The picked ids live in Rust as one set **tagged with the half of the area they belong
+  to**, because note 3 and task 3 are both `3`: the reference's single shared set lights
+  the *other* kind's rows after a tab switch, and 删除 then acts on rows nobody picked.
+  Moving between tabs or into the area ends the mode, so no path leaves a set behind
+- **全选 and the count read the projected models**, not a second copy of the filters:
+  "what is showing" *is* those two `VecModel`s, which is also why a row a filter hid — or
+  a row sitting behind the undo bar — is not lit, not counted, and not in the batch
+- **The bar's ✕ was invisible, and is now drawn** (`OrgButton.icon-name` → the `x` icon).
+  The button held its slot at the header's right edge with every pixel of it `FFFFFF`:
+  `✕` is U+2715, Dingbats, and no face in this app's font chain carries it — the exact
+  failure `DatabaseFilterPopup` already documents for its own delete button. It is worse
+  here than there because the mode binds no Escape, so an invisible ✕ is an invisible
+  *only* door. The sweep's `notes` arm moved by 0 px, which is why the render caught it and
+  the code did not. `☑` (U+2611) was checked the same way and **does** draw (ink at
+  x 563–577 in `tasks`) — a gap this slice had to close first, since no arm had ever drawn
+  a row with subtasks
+- **A batch costs one undo step.** `exec_all` plans every command against the same
+  pre-state and pushes one history entry, so batch 完成 and the bar's batch delete each
+  take one Ctrl+Z to reverse; the reference sends N single-row writes there and needs N.
+  `exec_org_all` is the same call on `ORGANIZER_STACK`, so a batch lands on the area's
+  stack and not the page's
+- **复制 writes nothing at all**: the picked notes as their bodies (a note with no body
+  says its title), joined by a blank line, in the order the page drew them
+- No core change and no rev bump — `exec_all` and `ORGANIZER_STACK` both exist at the
+  pinned rev, which is why this slice ships ahead of the 引用/评论 bump the other two
+  shells have to make together. Nothing about the mode reaches the file, the schema or
+  the LAN snapshot: a selection is a session fact
+- `notes-select`, `tasks-select` and their dark arms join the sweep. Fifteen of the
+  seventeen organizer arms moved by exactly the ink of the new header button's two
+  characters (188 px light / 185 px dark, in a 22×12 box); the two board arms and the
+  other 133 scenes are byte-identical
+
+### Notes & tasks — 标签在右、反向筛选、指令 (ADR-0112)
+
+- **The tag column moved to the right** of the card: the order is now
+  `[list] │ [detail] │ [nav]`, with the card's rounded corner following the nav. The
+  reference puts the filter on the right, and that is the side a pointer reaches without
+  crossing the rows it filters
+- **反向筛选**: a tag path can be *hidden* as well as *shown*. Each tag row carries a
+  drawn ⊖ control; hidden paths render muted with the control lit, the column prints one
+  `排除 #项目 #工作` line, and a `清除筛选` row clears both halves. `AppState.org_excluded`
+  is a `BTreeSet<String>` in Rust — the rows *are* the projection — and the two halves
+  are kept from contradicting each other: hiding the path 仅显示 names drops the include,
+  and picking a hidden path un-hides it
+- A hidden path takes its **subtree** and leaves its lookalike: hiding `项目` hides
+  `项目/工作` and leaves `项目2` alone — `tag_matches` with the answer turned around
+- **The tasks' half filters by tag too**, which it never did: one `OrgTagColumn`
+  component under the 清单 section, one include path and one excluded set over whichever
+  half is on screen. Switching tabs clears both (a note's path is not a task's)
+- **指令**: the door an AI's answer comes back through. `复制` now carries each row's
+  **唯一 ID** (`ID: <uuid>`, or `local:<id>` for a row an older peer sent), which is what
+  lets a batch name the rows it means — an integer id would name a different row after a
+  sync had renumbered it. The dialog takes the same `{"operations":[…]}` payload the
+  reference server does, with a **复制示例** button that hands over a worked template
+  covering every accepted action
+- Actions: `create / update / delete / add_tags / remove_tags / set_tags / comment` for
+  notes; those plus `set_completed / move / set_priority / set_due / add_subtask /
+  set_subtask / remove_subtask` for tasks. `add_tags` and `remove_tags` are **increments**
+  — the AI never has to know what a row already carries. An action the half cannot take
+  is refused **by name** (`笔记不支持动作 set_completed`) and counted, never skipped.
+  `restore` is refused too: this build's delete is final, and there is no 回收站 to
+  restore from
+- One batch is **one undo step**, and its operations **see each other**: the parser
+  simulates the batch on a copy of the catalog, so `add_tags` followed by `update` keeps
+  the tag and `create` followed by an operation naming the new uuid works
+- **Replies are real**: `comment` writes a note whose `ref_note` names its target (core
+  ADR-0001, which the bumped `rev` brings), the note list and the tag column skip replies,
+  and the detail pane shows them under the body as `评论 N`
+- 详细信息 gains the **唯一 ID** row, and the pin now bumps `quire-core` to
+  `4899857` — the rev that carries both the 唯一 ID (core ADR-0002) and the 引用
+- `notes-filter`, `notes-commands` and their dark arms join the sweep
 
 ### Workspace
 - Page tree: create / rename in place / duplicate (nested lists survive) /

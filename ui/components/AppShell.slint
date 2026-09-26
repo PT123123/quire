@@ -1,6 +1,7 @@
 // Composition of the whole window body: title bar on top, sidebar + editor
-// below, plus the scrim behind overlays. No business logic here — state flows
-// through the UIState global, actions flow to the Rust controller.
+// below, plus the scrim behind overlays and the delete's 撤销 bar. No business
+// logic here — state flows through the UIState global, actions flow to the Rust
+// controller.
 
 import { Theme } from "../Theme.slint";
 import { Colors } from "../Colors.slint";
@@ -10,6 +11,7 @@ import { IconButton } from "./IconButton.slint";
 import { Sidebar } from "./Sidebar.slint";
 import { Editor } from "./Editor.slint";
 import { OrganizerArea } from "./OrganizerArea.slint";
+import { Button } from "./Button.slint";
 import { UIState } from "../Types.slint";
 
 export component AppShell inherits Rectangle {
@@ -86,6 +88,58 @@ export component AppShell inherits Rectangle {
             // that is mounted.
             if UIState.active-area == "organizer" : OrganizerArea {}
             if UIState.active-area != "organizer" : Editor {}
+        }
+    }
+
+    // The 撤销 bar of a deferred delete (ADR-0108). Window-level rather than a
+    // child of `OrganizerArea`, because the pending delete outlives the area it
+    // was asked from: leave for the editor and the rows are still waiting behind
+    // this bar, which is the only way back to them.
+    //
+    // Floating at the bottom rather than a band in the vertical layout, because a
+    // band would push the area's three columns around every time a delete is
+    // asked for, and a delete is not worth moving the window's content over.
+    //
+    // The width is a constant rather than `preferred-width` arithmetic because a
+    // `HorizontalLayout` carries no background, so the pill has to be a Rectangle
+    // that spells its own size. A definite width is what lets the layout inside
+    // give the text the slack (`horizontal-stretch`) and the button its preferred
+    // width — and a long note title elides instead of pushing 撤销 off the window.
+    Rectangle {
+        x: parent.width - self.width - Theme.spacing-xl;
+        y: parent.height - self.height - Theme.spacing-xl;
+        visible: UIState.org-undo-text != "";
+        width: 380px;
+        height: 46px;
+        border-radius: Theme.radius-md;
+        border-width: 1px;
+        border-color: Colors.border-strong;
+        background: Colors.surface-overlay;
+        HorizontalLayout {
+            padding-left: Theme.spacing-lg;
+            padding-right: Theme.spacing-sm;
+            spacing: Theme.spacing-md;
+            Text {
+                horizontal-stretch: 1;
+                vertical-alignment: center;
+                text: UIState.org-undo-text;
+                font-family: Typography.ui-font;
+                font-size: Typography.size-ui;
+                color: Colors.text-primary;
+                overflow: elide;
+            }
+            Button {
+                vertical-stretch: 0;
+                cross-axis-self-alignment: center;
+                // Enabled by the same test that shows the pill, so a hidden bar
+                // cannot hold a live TouchArea over the bottom-right of the window.
+                enabled: UIState.org-undo-text != "";
+                text: "撤销";
+                primary: true;
+                clicked => {
+                    UIState.org-undo-delete();
+                }
+            }
         }
     }
 

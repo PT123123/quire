@@ -71,10 +71,19 @@ $all = @(
     # SPEC §四十一 (M15): the organizer's own scenes. Same reason the database
     # scenes joined the default list: a scene nobody sweeps is a scene nobody
     # measures.
-    "notes", "notes-detail", "notes-search",
+    "notes", "notes-detail", "notes-info", "notes-search", "notes-select",
+    "notes-filter", "notes-commands",
     "tasks", "tasks-detail", "tasks-list", "tasks-overdue", "tasks-board",
-    "dark-notes", "dark-notes-detail", "dark-tasks", "dark-tasks-detail",
-    "dark-tasks-board"
+    "tasks-select", "undo-bar",
+    "dark-notes", "dark-notes-detail", "dark-notes-info", "dark-tasks", "dark-tasks-detail",
+    "dark-tasks-board", "dark-undo-bar",
+    # ADR-0111: selection mode is a whole different header and a different row
+    # glyph, so it is a scene of its own rather than a variant of "notes".
+    "dark-notes-select", "dark-tasks-select",
+    # ADR-0112: 反向筛选 draws a control and a marked row the plain list has not
+    # got, and the 指令 dialog is a whole card over the area — both are shapes, not
+    # states of "notes".
+    "dark-notes-filter", "dark-notes-commands"
 )
 $targets = if ($Scenes -eq "") { $all } else { $Scenes -split ',' }
 

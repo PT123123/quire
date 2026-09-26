@@ -40,7 +40,7 @@ use crate::services::search_service::SearchService;
 use crate::storage::search_index::SearchRequest;
 use crate::storage::SqliteRepository;
 use crate::storage::versions;
-use crate::{BacklinkRow, BlockRow, BoardCard, BoardColumn, ColumnBox, ColumnItem, CommandRow, DbCell, DbColumn, DbOption, DbRow, DbViewTab, DiffRow, MenuRow, NoteRow, SearchRow, SidebarNode, SlashRow, SubtaskRow, TableCell, TagRow, TaskListRow, TaskRow, TextRun, TocEntry, VersionRow};
+use crate::{BacklinkRow, BlockRow, BoardCard, BoardColumn, ColumnBox, ColumnItem, CommandRow, DbCell, DbColumn, DbOption, DbRow, DbViewTab, DiffRow, MenuRow, NoteDetails, NoteRow, SearchRow, SidebarNode, SlashRow, SubtaskRow, TableCell, TagRow, TaskListRow, TaskRow, TextRun, TocEntry, VersionRow};
 use slint::{Model, ModelRc, VecModel};
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -142,6 +142,9 @@ pub struct AppState {
     /// Go Back / Go Forward stacks (SPEC §十六). Session-only: a restart
     /// starts with no history.
     nav: RefCell<NavHistory>,
+    /// The stop the first frame shows (ADR-0110). `bind` asks this once, when
+    /// the window's own two facts have not been painted yet.
+    nav_start: NavStop,
     /// Page awaiting delete confirmation.
     pub pending_delete: Cell<Option<i32>>,
     /// Benchmark scroll bookkeeping (scene F): last viewport-y seen.
@@ -299,12 +302,77 @@ pub struct AppState {
     /// `VecModel` of cards — because that is what makes a card *move* between
     /// columns on a drop instead of the whole board being rebuilt.
     org_board: Rc<VecModel<BoardColumn>>,
-    /// The 笔记 tab's tag column, folded from the notes themselves.
+    /// The 笔记 tab's tag column, folded from the notes themselves — and from the
+    /// tasks when the 任务 tab is showing, because a tag filter is the same
+    /// question asked of the other half.
     org_tag_rows: Rc<VecModel<TagRow>>,
+    /// The selected note's 引用 (SPEC §四十一, core ADR-0001): the notes that name
+    /// it. A model of its own rather than a field on `org-note-detail`, because it
+    /// is a *list* and the detail row is one row — the same reason the task's
+    /// checklist is not a string.
+    org_note_replies: Rc<VecModel<NoteRow>>,
+    /// The tag paths the user has **hidden** (SPEC §四十一's 反向筛选): a note or
+    /// task carrying a tag at or under one of these is not drawn.
+    ///
+    /// Rust-owned like the picked set beside it, and for the same reason: the
+    /// pixels style what Rust decided, so a row cannot be painted excluded by one
+    /// rule and filtered by another. Session state (ADR-0073), like the include
+    /// path it mirrors — a filter is how the user is looking, not what they wrote.
+    org_excluded: RefCell<BTreeSet<String>>,
     /// The nav column's five counts, in the smart views' own slot order. A model
     /// rather than a plain array property because Slint reads it per frame and a
     /// rebuild must not reallocate the list the nav is bound to.
     org_smart_counts: Rc<VecModel<i32>>,
+    /// The one delete the user has asked for and not yet committed (ADR-0108),
+    /// and the counter that numbers them. See [`OrgPendingDelete`].
+    org_pending: RefCell<Option<OrgPendingDelete>>,
+    org_delete_token: Cell<u64>,
+    /// The rows 多选 has picked (SPEC §四十一, ADR-0111) — **ids**, never rows, so
+    /// a filter that hides a picked row does not un-pick it, and `ids` that the
+    /// file no longer has simply paint nothing.
+    ///
+    /// `is_task` says which half of the area the ids belong to. The reference
+    /// keeps one untagged `Set<Long>` and a single mode flag, and note 3 and task
+    /// 3 are both `3`: switch tabs while selecting there and the other kind's row
+    /// number 3 lights up. Two kinds in one set is not a shape worth copying, so
+    /// the set carries its kind and every reader refuses the wrong half.
+    org_selection: RefCell<OrgSelection>,
+}
+
+/// The picked rows and which kind they are (ADR-0111). Empty is not a state: the
+/// mode itself lives on `UIState.org-selecting`, because that is the flag the
+/// header and every row read, and a second copy here would be one more thing to
+/// keep in step with the pixels.
+#[derive(Default, Clone, Debug)]
+struct OrgSelection {
+    ids: BTreeSet<i64>,
+    is_task: bool,
+}
+
+/// A delete that is *on screen* but not yet *in the store* (ADR-0108).
+///
+/// The reference app's rule, which the Compose shell already follows: a delete
+/// hides its rows and hands the user a 撤销 bar; the write happens when the bar
+/// goes away, or never, if they take the offer. That inverts what the undo stack
+/// is for here — the way back is the bar, not Ctrl+Z — and the three fields are
+/// what makes the inversion safe:
+///
+/// * `ids` is a batch because one bar can stand in front of a multi-select delete
+///   as easily as in front of a single row;
+/// * `token` is why the bar needs no clock of its own: the only timer is the one
+///   the controller armed with this token, and a bar that a newer delete replaced
+///   finds its own timer arriving to find nothing to commit;
+/// * the whole struct is **one** slot, so "one bar at a time" is structural
+///   rather than a rule anyone has to remember.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OrgPendingDelete {
+    pub token: u64,
+    pub ids: Vec<i64>,
+    pub is_task: bool,
+    /// The bar's own line, decided by whoever asked (`已删除笔记「…」` for one row,
+    /// `已删除 3 条笔记` for a batch, `笔记「…」已转为待办` for a conversion) — the
+    /// state layer does not know what the user just did, only what to hand back.
+    pub message: String,
 }
 
 /// One decoded picture plus what it costs to keep it decoded.
@@ -324,23 +392,52 @@ struct CachedImage {
 /// hundred screenshots.
 const MAX_ATTACHMENT_CACHE_BYTES: usize = 32 * 1024 * 1024;
 
+/// One place the back stack can hold you (SPEC §四十一, ADR-0110). The
+/// desktop has two top-level areas, and a history that only knew about pages
+/// was a Go Back that jumped *over* the organizer — the area you had just
+/// left vanished instead of being retraced.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NavStop {
+    /// A document. `0` is the "nothing is open" id the workspace already uses.
+    Page(i32),
+    /// The organizer, on the given tab (0 笔记, 1 任务).
+    Org(i32),
+}
+
+impl NavStop {
+    /// 收件箱: the organizer's 笔记 tab. Home, and the bottom of the stack.
+    fn home() -> NavStop {
+        NavStop::Org(0)
+    }
+
+    /// Whether anything is standing here. The very first move of a session has
+    /// no `from`, and recording `Page(0)` would put a page that does not exist
+    /// at the bottom of the stack.
+    fn is_open(self) -> bool {
+        match self {
+            NavStop::Page(id) => id > 0,
+            NavStop::Org(_) => true,
+        }
+    }
+}
+
 /// Go Back / Go Forward stacks (SPEC §十六), newest entry last. Kept as a
 /// plain struct with no Slint or database in it so the stepping rules —
 /// which are the whole feature — are unit-testable.
 #[derive(Default)]
 struct NavHistory {
-    back: Vec<i32>,
-    forward: Vec<i32>,
+    back: Vec<NavStop>,
+    forward: Vec<NavStop>,
 }
 
 /// How far back Go Back reaches before it starts dropping entries.
 const NAV_MAX: usize = 50;
 
 impl NavHistory {
-    /// A user-initiated move from one page to another. A new navigation
-    /// drops the forward branch, the way a browser does.
-    fn record(&mut self, from: i32, to: i32) {
-        if from > 0 && from != to {
+    /// A user-initiated move from one stop to another. A new navigation drops
+    /// the forward branch, the way a browser does.
+    fn record(&mut self, from: NavStop, to: NavStop) {
+        if from.is_open() && from != to {
             self.back.push(from);
             if self.back.len() > NAV_MAX {
                 self.back.remove(0);
@@ -349,10 +446,10 @@ impl NavHistory {
         self.forward.clear();
     }
 
-    /// Step one page back (or forward), skipping pages deleted since they
-    /// were recorded, and push `current` onto the opposite stack. `live`
-    /// answers "does this page still exist?".
-    fn step(&mut self, forward: bool, current: i32, live: impl Fn(i32) -> bool) -> Option<i32> {
+    /// Step one stop back (or forward), skipping pages deleted since they were
+    /// recorded, and push `current` onto the opposite stack. `live` answers
+    /// "does this page still exist?" — an organizer stop always does.
+    fn step(&mut self, forward: bool, current: NavStop, live: impl Fn(i32) -> bool) -> Option<NavStop> {
         let (from, to) = if forward {
             (&mut self.forward, &mut self.back)
         } else {
@@ -360,15 +457,53 @@ impl NavHistory {
         };
         let target = loop {
             match from.pop() {
-                Some(id) if live(id) => break id,
+                Some(stop) if stop_alive(stop, &live) => break stop,
                 Some(_) => continue,
                 None => return None,
             }
         };
-        if current > 0 && live(current) && to.last() != Some(&current) {
+        if current.is_open() && stop_alive(current, live) && to.last() != Some(&current) {
             to.push(current);
         }
         Some(target)
+    }
+
+    /// Go Back. What makes 收件箱 a home is the last arm: with nothing left
+    /// behind, the gesture lands on 收件箱 rather than going nowhere, and the
+    /// page you were on goes onto the forward stack so the step is reversible.
+    /// Nothing lies behind home — and a window with no stop open at all has no
+    /// floor either, because the first frame is what decides where it stands.
+    fn back(&mut self, current: NavStop, live: impl Fn(i32) -> bool) -> Option<NavStop> {
+        match self.step(false, current, &live) {
+            Some(stop) => Some(stop),
+            None if current == NavStop::home() || !current.is_open() => None,
+            None => {
+                if !self.forward.contains(&current) {
+                    self.forward.push(current);
+                }
+                Some(NavStop::home())
+            }
+        }
+    }
+}
+
+fn stop_alive(stop: NavStop, live: impl Fn(i32) -> bool) -> bool {
+    match stop {
+        NavStop::Page(id) => live(id),
+        NavStop::Org(_) => true,
+    }
+}
+
+/// Where a new session stands (ADR-0110). A session that ended in 收件箱
+/// reopens there; one that ended in a document reopens that document, because
+/// that is what it was reading. A benchmark run always opens its fixture page:
+/// the sweep photographs a document, and a window that opened on the organizer
+/// would photograph the wrong area for every one of its arms.
+fn start_stop(bench_page: bool, ended_home: bool, page: i32) -> NavStop {
+    if ended_home && !bench_page {
+        NavStop::home()
+    } else {
+        NavStop::Page(page)
     }
 }
 
@@ -595,6 +730,7 @@ impl AppState {
         let mut restored_settings: HashMap<String, String> = HashMap::new();
         let mut restored_recents: Vec<i32> = Vec::new();
         let mut restored_current: Option<i32> = None;
+        let mut restored_home = false;
         if let Some(state0) = &persisted {
             restored_settings = state0
                 .settings
@@ -610,6 +746,11 @@ impl AppState {
                 .meta
                 .get("current-page")
                 .and_then(|v| v.parse::<i32>().ok());
+            // ADR-0110: 收件箱 is home, and a session that ended there reopens
+            // there. Anything else — including a file written before this key
+            // existed — lands on the document, which is what the last session
+            // was reading.
+            restored_home = state0.meta.get("current-area").map(|v| v.as_str()) == Some("organizer");
         }
 
         let (workspace, mut doc, page_order, seed) = match &persisted {
@@ -779,8 +920,8 @@ impl AppState {
                 .filter(|id| workspace.contains(*id))
                 .unwrap_or(PAGE_GETTING_STARTED)
         };
-        let all_commands = mock_commands(&workspace);
-        // The database layer's schema and its four id watermarks (ADR-0067 /
+        let nav_start = start_stop(args.blocks > 0, restored_home, open);
+        let all_commands = mock_commands(&workspace);        // The database layer's schema and its four id watermarks (ADR-0067 /
         // ADR-0072). A session with no file has no databases — and a file whose
         // read fails says so once, in the notice line, rather than refusing to
         // start: a database layer that cannot be read is a page that draws no
@@ -885,6 +1026,7 @@ impl AppState {
             flush_hook: RefCell::new(None),
             open_page: Cell::new(0),
             nav: RefCell::new(NavHistory::default()),
+            nav_start,
             pending_delete: Cell::new(None),
             last_scroll_y: Cell::new(0.0),
             template_pick: Cell::new(0),
@@ -914,7 +1056,12 @@ impl AppState {
             task_list_rows: Rc::new(VecModel::from(Vec::new())),
             org_board: Rc::new(VecModel::from(Vec::new())),
             org_tag_rows: Rc::new(VecModel::from(Vec::new())),
+            org_note_replies: Rc::new(VecModel::from(Vec::new())),
+            org_excluded: RefCell::new(BTreeSet::new()),
             org_smart_counts: Rc::new(VecModel::from(vec![0; 5])),
+            org_pending: RefCell::new(None),
+            org_delete_token: Cell::new(0),
+            org_selection: RefCell::new(OrgSelection::default()),
         };
         // restore persisted recents before the first open marks its page
         let state = Rc::new(state);
@@ -1069,23 +1216,56 @@ impl AppState {
 
     // ---- operations (called by the controller) ----
 
-    /// Record that the user is moving from the page they had open to another
-    /// one, so Go Back can retrace it (SPEC §十六).
-    pub fn nav_record(&self, from: i32, to: i32) {
+    /// The stop the first frame shows. `bind` asks this once.
+    pub fn nav_start(&self) -> NavStop {
+        self.nav_start
+    }
+
+    /// Where the window is standing right now, as a history stop. Derived from
+    /// the two facts the window paints from rather than kept beside them, so a
+    /// path that changes the area without saying so cannot leave the stack
+    /// pointing somewhere else.
+    pub fn nav_here(&self) -> NavStop {
+        if let Some(g) = self.ui.borrow().clone().and_then(|u| u.upgrade()) {
+            if g.get_active_area() == "organizer" {
+                return NavStop::Org(g.get_org_tab());
+            }
+        }
+        NavStop::Page(self.open_page.get())
+    }
+
+    /// Record that the user is moving from where they stand to another stop,
+    /// so Go Back can retrace it (SPEC §十六). Call this **before** the move:
+    /// `nav_here` is the place being left.
+    pub fn nav_record(&self, to: NavStop) {
+        let from = self.nav_here();
         self.nav.borrow_mut().record(from, to);
     }
 
-    /// The page to navigate to, stepping back (or forward) through the
-    /// session history; `None` when that direction is empty. `open_page` is
-    /// still the page being left when this is called, which is what makes it
-    /// the entry pushed onto the opposite stack.
-    pub fn nav_step(&self, forward: bool) -> Option<i32> {
-        let current = self.open_page.get();
-        self.nav
-            .borrow_mut()
-            .step(forward, current, |id| {
-                self.workspace.borrow().contains(id)
-            })
+    /// The stop to navigate to, stepping back (or forward) through the
+    /// session history; `None` when that direction is empty, which after a
+    /// back step means one thing only: already home. `nav_here` is still the
+    /// stop being left when this is called, which is what makes it the entry
+    /// pushed onto the opposite stack.
+    pub fn nav_step(&self, forward: bool) -> Option<NavStop> {
+        let current = self.nav_here();
+        let mut nav = self.nav.borrow_mut();
+        if forward {
+            nav.step(true, current, |id| self.workspace.borrow().contains(id))
+        } else {
+            nav.back(current, |id| self.workspace.borrow().contains(id))
+        }
+    }
+
+    /// Note that the session is now standing on 收件箱, which is the one fact
+    /// about the organizer that outlives the session. Which tab and which
+    /// filter were open do not (ADR-0073: a restart opens on 笔记 · 收集箱),
+    /// so this writes the area and nothing else.
+    pub fn mark_home_area(&self) {
+        self.record(vec![Change::MetaSet {
+            key: "current-area".into(),
+            value: "organizer".into(),
+        }]);
     }
 
     pub fn open_page(&self, id: i32) {
@@ -1106,10 +1286,19 @@ impl AppState {
             ws.expand_ancestors(id);
         }
         // persist the recent list + last-opened page
-        self.record(vec![Change::MetaSet {
-            key: "current-page".into(),
-            value: id.to_string(),
-        }]);
+        self.record(vec![
+            Change::MetaSet {
+                key: "current-page".into(),
+                value: id.to_string(),
+            },
+            // ADR-0110: which *area* was showing when the session ended, so a
+            // library last read in 收件箱 opens there. The page above is still
+            // the page to return to when the last session ended in a document.
+            Change::MetaSet {
+                key: "current-area".into(),
+                value: "docs".into(),
+            },
+        ]);
         let recents = self.workspace.borrow().recents_ids();
         self.record(vec![Change::MetaSet {
             key: "recents".into(),
@@ -3096,11 +3285,11 @@ impl AppState {
             locked: false,
             template: false,
         })]);
-        let from = self.open_page.get();
-        self.open_page(id);
         // creating a page navigates to it, so Go Back returns where the user
-        // was (SPEC §十六)
-        self.nav.borrow_mut().record(from, id);
+        // was (SPEC §十六). Recorded first, because `nav_record` reads the stop
+        // being left off the state `open_page` is about to move.
+        self.nav_record(NavStop::Page(id));
+        self.open_page(id);
         id
     }
 
@@ -5079,6 +5268,10 @@ pub const MENU_ORG_DONE: i32 = 41;
 pub const MENU_ORG_UNDONE: i32 = 42;
 pub const MENU_ORG_TO_INBOX: i32 = 43;
 pub const MENU_ORG_DELETE: i32 = 44;
+/// 多选 on the row the ⋯ was opened for: the mode starts with that row already
+/// picked, which is what a long press means on the reference shells and the
+/// gesture this window has no.
+pub const MENU_ORG_SELECT: i32 = 45;
 /// A move-to row's action is this plus the target list's id. Task-list ids are
 /// row ids and the page menu's ids are all below 100, so the two ranges do not
 /// meet; the remainder *is* the list, which is why there is no second lookup.
@@ -6778,6 +6971,23 @@ impl AppState {
         Some(changes)
     }
 
+    /// The same for a **batch**: every command is planned against the state before
+    /// any of them, applied together, and pushed as **one** history entry — so
+    /// one gesture on several rows (`多选` → 完成, one row or forty) is one Ctrl+Z.
+    /// Commands here must be independent of each other, which is what makes the
+    /// organizer's row commands a safe caller: each carries its own `before`/`after`
+    /// row and reads no other row's result.
+    fn exec_org_all(&self, cmds: Vec<Command>) -> Option<Vec<Change>> {
+        let changes = crate::core::command::exec_all(
+            &mut self.doc.borrow_mut(),
+            &mut self.history.borrow_mut(),
+            ORGANIZER_STACK,
+            cmds,
+        )?;
+        self.record(changes.clone());
+        Some(changes)
+    }
+
     pub fn undo_org(&self) -> Option<Vec<Change>> {
         let applied = crate::core::undo(
             &mut self.doc.borrow_mut(),
@@ -6814,6 +7024,39 @@ impl AppState {
     }
     pub fn org_tag_rows_model(&self) -> ModelRc<TagRow> {
         ModelRc::from(self.org_tag_rows.clone())
+    }
+
+    pub fn org_note_replies_model(&self) -> ModelRc<NoteRow> {
+        ModelRc::from(self.org_note_replies.clone())
+    }
+
+    // ── the tag filter: what to show and what to hide (SPEC §四十一) ──────────
+
+    /// The paths the user has hidden, for the projections that filter and style by
+    /// them. A copy rather than a borrow: every caller holds it across a rebuild
+    /// that borrows the same cell.
+    pub fn org_excluded(&self) -> BTreeSet<String> {
+        self.org_excluded.borrow().clone()
+    }
+
+    /// Add or remove one path from the hidden set; answers whether it is hidden
+    /// now. The *include* path lives on the window, so the controller is what
+    /// keeps the two halves from contradicting each other.
+    pub fn org_exclude_toggled(&self, path: &str) -> bool {
+        let mut set = self.org_excluded.borrow_mut();
+        if set.contains(path) {
+            set.remove(path);
+            false
+        } else {
+            set.insert(path.to_string());
+            true
+        }
+    }
+
+    /// The one button that clears both halves of the filter. Session state, so
+    /// this writes nothing and records nothing (ADR-0073).
+    pub fn org_filters_clear(&self) {
+        self.org_excluded.borrow_mut().clear();
     }
     pub fn org_smart_counts_model(&self) -> ModelRc<i32> {
         ModelRc::from(self.org_smart_counts.clone())
@@ -6860,7 +7103,10 @@ impl AppState {
             None => (-1, -1),
         };
         let dates = OrgDates::now();
-        let notes = self.org_notes(&query, &tag, note_id as i64);
+        // The 反向筛选 set, read once so every projection below filters and styles
+        // by one snapshot of it (and so the borrow is not held across a rebuild).
+        let excluded = self.org_excluded();
+        let mut notes = self.org_notes(&query, &tag, &excluded, note_id as i64);
         // The header is the *tab's* header: the notes count notes, and a board
         // counts lists — one line reading "2 项待办" over a list of notes would
         // be the window describing something it is not showing.
@@ -6881,8 +7127,7 @@ impl AppState {
         } else {
             self.org_view_header(view, list as i64, &query, &dates)
         };
-        self.note_rows.set_vec(notes);
-        self.task_rows.set_vec(self.org_tasks(
+        let mut tasks = self.org_tasks(
             view,
             list as i64,
             &query,
@@ -6890,11 +7135,33 @@ impl AppState {
             &dates,
             task_id as i64,
             show_done,
-        ));
+            &tag,
+            &excluded,
+        );
+        // 多选 is a flag the rows carry, not a filter they answer to: a picked row
+        // that a filter hides stays picked (the set holds ids, not rows), so the
+        // only place that can light it is the projection that knows what is being
+        // drawn. `picking` is the mode read off the window rather than assumed:
+        // leaving 多选 must take the ticks off the pixels even if a set survived.
+        let picking = match &ui {
+            Some(g) => g.get_org_selecting(),
+            None => false,
+        };
+        for row in notes.iter_mut() {
+            row.picked = picking && self.org_picked(row.id as i64, false);
+        }
+        for row in tasks.iter_mut() {
+            row.picked = picking && self.org_picked(row.id as i64, true);
+        }
+        self.note_rows.set_vec(notes);
+        self.task_rows.set_vec(tasks);
         self.task_list_rows.set_vec(self.org_lists(view, list as i64));
         self.org_board
             .set_vec(self.org_board_rows(&query, sort, &dates));
-        self.org_tag_rows.set_vec(self.org_tag_rows_of(&tag));
+        self.org_tag_rows
+            .set_vec(self.org_tag_rows_of(&tag, tab == 1, &excluded));
+        self.org_note_replies
+            .set_vec(self.org_note_replies(note_id as i64));
         self.org_smart_counts
             .set_vec(self.org_smart_counts_of(&query, &dates).to_vec());
         let (view_title, view_count_label) = header;
@@ -6905,16 +7172,25 @@ impl AppState {
             g.set_task_list_rows(self.task_list_rows_model());
             g.set_org_board(self.org_board_model());
             g.set_org_tag_rows(self.org_tag_rows_model());
+            g.set_org_note_replies(self.org_note_replies_model());
             // The column's heading and its ↑ row: segmenting a path is model work,
             // so the UI is handed the two strings rather than the split.
             g.set_org_tag_label(tag_breadcrumb(&tag).into());
             g.set_org_tag_parent(tag_parent(&tag).unwrap_or_default().into());
+            // The excluded set's own line, next to the include's breadcrumb: the
+            // column shows one level of a path, so "what am I hiding" needs a
+            // sentence of its own rather than being read off the rows.
+            g.set_org_excluded_label(org_excluded_label(&excluded).into());
             g.set_org_smart_counts(self.org_smart_counts_model());
             g.set_org_view_title(view_title.into());
             g.set_org_view_count_label(view_count_label.into());
             g.set_org_done_count(done);
             g.set_org_total_count(total);
+            // The bar's own number, and it is a projection like every other count
+            // on this screen: the set lives in Rust, the pixels read what Rust said.
+            g.set_org_selection_count(self.org_selection_count(tab == 1));
             g.set_org_note_detail(self.org_note_detail(note_id as i64));
+            g.set_org_note_details(self.org_note_details(note_id as i64));
             g.set_org_task_detail(self.org_task_detail(task_id as i64, &dates));
         }
     }
@@ -6926,6 +7202,7 @@ impl AppState {
     /// count.
     fn org_smart_counts_of(&self, query: &str, dates: &OrgDates) -> [i32; 5] {
         let needle = query.trim().to_lowercase();
+        let hidden = self.org_pending_ids(true);
         let catalog = self.organizer.borrow();
         let count = |slot: i32| -> i32 {
             catalog
@@ -6933,7 +7210,8 @@ impl AppState {
                 .iter()
                 .filter(|t| {
                     let wanted = slot == SMART_DONE;
-                    t.done == wanted
+                    !hidden.contains(&(t.id.0 as i64))
+                        && t.done == wanted
                         && org_in_smart_view(&catalog, t, slot, dates)
                         && org_task_matches(t, &needle)
                 })
@@ -6959,6 +7237,7 @@ impl AppState {
         dates: &OrgDates,
     ) -> (String, String) {
         let needle = query.trim().to_lowercase();
+        let hidden = self.org_pending_ids(true);
         let catalog = self.organizer.borrow();
         let title = match catalog.list(ListId(list.max(0) as u64)) {
             Some(l) if list >= 0 => l.name.clone(),
@@ -6973,7 +7252,10 @@ impl AppState {
                 } else {
                     org_in_smart_view(&catalog, t, view, dates)
                 };
-                bucket && t.done == (view == SMART_DONE) && org_task_matches(t, &needle)
+                !hidden.contains(&(t.id.0 as i64))
+                    && bucket
+                    && t.done == (view == SMART_DONE)
+                    && org_task_matches(t, &needle)
             })
             .count();
         (title, format!("{count} 项待办"))
@@ -6981,11 +7263,19 @@ impl AppState {
 
     /// 已完成 X / Y over the whole area, not over the filtered view: a progress
     /// line that moved when the user typed a search would be answering a
-    /// different question from the one it looks like it answers.
+    /// different question from the one it looks like it answers. A pending delete
+    /// *does* come out of it, because the row is no longer on screen: a footer
+    /// still counting it would be the window disagreeing with itself.
     fn org_progress(&self) -> (i32, i32) {
+        let hidden = self.org_pending_ids(true);
         let catalog = self.organizer.borrow();
-        let total = catalog.tasks.len() as i32;
-        let done = catalog.tasks.iter().filter(|t| t.done).count() as i32;
+        let live: Vec<&Task> = catalog
+            .tasks
+            .iter()
+            .filter(|t| !hidden.contains(&(t.id.0 as i64)))
+            .collect();
+        let total = live.len() as i32;
+        let done = live.iter().filter(|t| t.done).count() as i32;
         (done, total)
     }
 
@@ -6994,6 +7284,7 @@ impl AppState {
     /// ones have a column of their own in the list view.
     fn org_board_rows(&self, query: &str, sort: i32, dates: &OrgDates) -> Vec<BoardColumn> {
         let needle = query.trim().to_lowercase();
+        let hidden = self.org_pending_ids(true);
         let catalog = self.organizer.borrow();
         let mut heads: Vec<(i64, String, i32)> =
             vec![(-1, "收集箱".to_string(), ColorKind::Default.slot())];
@@ -7014,7 +7305,8 @@ impl AppState {
                         } else {
                             t.list.0 as i64 == id
                         };
-                        bucket && !t.done && org_task_matches(t, &needle)
+                        bucket && !t.done && !hidden.contains(&(t.id.0 as i64))
+                            && org_task_matches(t, &needle)
                     })
                     .collect();
                 sort_tasks(&mut tasks, sort);
@@ -7052,12 +7344,34 @@ impl AppState {
     /// count is a **subtree** count: a row has to say how many notes tapping it
     /// would leave on screen. A note counts once per prefix however many of its tags
     /// pass through it — two tags under `项目` are still one note under `项目`.
-    fn org_tag_rows_of(&self, path: &str) -> Vec<TagRow> {
+    fn org_tag_rows_of(
+        &self,
+        path: &str,
+        is_task: bool,
+        excluded: &BTreeSet<String>,
+    ) -> Vec<TagRow> {
+        let hidden = self.org_pending_ids(is_task);
         let catalog = self.organizer.borrow();
         let mut counts: BTreeMap<String, i32> = BTreeMap::new();
-        for note in catalog.notes.iter() {
+        // Which half of the area is showing decides whose tags the column folds:
+        // the 任务 tab's tag filter is the same question asked of the other list,
+        // and one column that answered about notes while tasks were on screen
+        // would be a filter for rows that are not there.
+        let sources = catalog
+            .notes
+            .iter()
+            .filter(|n| !is_task && n.ref_note.is_none() && !hidden.contains(&(n.id.0 as i64)))
+            .map(|n| &n.tags)
+            .chain(
+                catalog
+                    .tasks
+                    .iter()
+                    .filter(|t| is_task && !hidden.contains(&(t.id.0 as i64)))
+                    .map(|t| &t.tags),
+            );
+        for tags in sources {
             let mut prefixes: BTreeSet<String> = BTreeSet::new();
-            for tag in note.tags.iter() {
+            for tag in tags.iter() {
                 let segments = tag_segments(tag);
                 for end in 1..=segments.len() {
                     prefixes.insert(segments[..end].join("/"));
@@ -7074,6 +7388,7 @@ impl AppState {
                 // The row shows the *next* segment — the path is the heading above it.
                 name: tag_segments(&full).last().copied().unwrap_or_default().into(),
                 count,
+                excluded: excluded.contains(&full),
                 path: full.into(),
             })
             .collect();
@@ -7102,17 +7417,36 @@ impl AppState {
             tags: tags_label(&note.tags).into(),
             when: org_when(note.edited).into(),
             selected,
+            // `rebuild_organizer` lights the picks after the rows exist
+            picked: false,
         }
     }
 
-    fn org_notes(&self, query: &str, tag: &str, selected: i64) -> Vec<NoteRow> {
+    fn org_notes(
+        &self,
+        query: &str,
+        tag: &str,
+        excluded: &BTreeSet<String>,
+        selected: i64,
+    ) -> Vec<NoteRow> {
         let needle = query.trim().to_lowercase();
+        let hidden = self.org_pending_ids(false);
         let catalog = self.organizer.borrow();
         let mut notes: Vec<&Note> = catalog
             .notes
             .iter()
+            .filter(|n| !hidden.contains(&(n.id.0 as i64)))
+            // A reply is not a row of the list — it is shown on the note it
+            // answers (`org_note_replies`). The reference keeps them apart the
+            // same way, and a comment listed among the notes is a comment the
+            // reader cannot tell from a note.
+            .filter(|n| n.ref_note.is_none())
             .filter(|n| org_note_matches(n, &needle))
             .filter(|n| tag.is_empty() || n.tags.iter().any(|t| tag_matches(t, tag)))
+            // 反向筛选: a note carrying a tag at or under an excluded path is not
+            // drawn. Applied *after* the include, so the two read the way the
+            // reference's toolbar reads: 仅显示 narrows, 排除 removes.
+            .filter(|n| !tag_excluded(&n.tags, excluded))
             .collect();
         // Pinned first, then most recently edited: the order a quick-note list
         // is read in, and the one every note app opens on.
@@ -7128,6 +7462,27 @@ impl AppState {
             .collect()
     }
 
+    /// The replies the given note holds (SPEC §四十一's 引用, core ADR-0001): the
+    /// rows whose `ref_note` is this note, newest last — the order a thread is
+    /// read in. Projected off the catalog like every other list here, so a comment
+    /// 指令 added a moment ago is on screen as soon as the panel is repainted.
+    fn org_note_replies(&self, note: i64) -> Vec<NoteRow> {
+        if note < 0 {
+            return Vec::new();
+        }
+        let target = NoteId(note as u64);
+        let catalog = self.organizer.borrow();
+        let mut rows: Vec<&Note> = catalog
+            .notes
+            .iter()
+            .filter(|n| n.ref_note == Some(target))
+            .collect();
+        rows.sort_by(|a, b| a.created.cmp(&b.created).then(a.id.cmp(&b.id)));
+        rows.into_iter()
+            .map(|n| Self::org_note_row(n, false))
+            .collect()
+    }
+
     fn org_note_detail(&self, selected: i64) -> NoteRow {
         let catalog = self.organizer.borrow();
         match catalog.note(NoteId(selected.max(0) as u64)) {
@@ -7139,6 +7494,42 @@ impl AppState {
         }
     }
 
+    /// 详细信息: the six facts the store holds about the selected note.
+    ///
+    /// A projection off the catalog, like every other number on the screen, and
+    /// every value arrives as text: the block's two dates need a clock, and its
+    /// length needs counting in **characters** — a byte count would tell a
+    /// Chinese reader their three-character note is nine words long.
+    fn org_note_details(&self, selected: i64) -> NoteDetails {
+        let catalog = self.organizer.borrow();
+        let Some(note) = catalog.note(NoteId(selected.max(0) as u64)) else {
+            return NoteDetails {
+                id: "—".into(),
+                ..NoteDetails::default()
+            };
+        };
+        // The reference counts the body, falling back to the title for a note
+        // that is only a title — the same rule that decides what a row shows.
+        let counted = if note.body.is_empty() {
+            &note.title
+        } else {
+            &note.body
+        };
+        NoteDetails {
+            id: note.id.0.to_string().into(),
+            uuid: org_uid(&note.uuid, note.id.0).into(),
+            created: org_day_and_age(note.created).into(),
+            edited: org_day_and_age(note.edited).into(),
+            tags: if note.tags.is_empty() {
+                "无".into()
+            } else {
+                tags_label(&note.tags).into()
+            },
+            length: format!("{} 字", counted.chars().count()).into(),
+            pinned: if note.pinned { "是" } else { "否" }.into(),
+        }
+    }
+
     /// The chip row: the inbox first, then the stored lists in their own order.
     ///
     /// The inbox's chip is the *view* half of the selector, which is why it is
@@ -7147,6 +7538,7 @@ impl AppState {
     /// and building it beside the lists is what keeps "which chip is lit" one
     /// comparison instead of a special case in the delegate.
     fn org_lists(&self, view: i32, list: i64) -> Vec<TaskListRow> {
+        let hidden = self.org_pending_ids(true);
         let catalog = self.organizer.borrow();
         let mut rows = vec![TaskListRow {
             id: -1,
@@ -7158,6 +7550,7 @@ impl AppState {
             count: catalog
                 .tasks
                 .iter()
+                .filter(|t| !hidden.contains(&(t.id.0 as i64)))
                 .filter(|t| catalog.list(t.list).is_none())
                 .count() as i32,
             selected: list < 0 && view == SMART_INBOX,
@@ -7170,7 +7563,10 @@ impl AppState {
                 id: l.id.0 as i32,
                 name: l.name.clone().into(),
                 color: l.color.slot(),
-                count: catalog.tasks_in(l.id).count() as i32,
+                count: catalog
+                    .tasks_in(l.id)
+                    .filter(|t| !hidden.contains(&(t.id.0 as i64)))
+                    .count() as i32,
                 selected: list >= 0 && l.id.0 as i64 == list,
                 smart: false,
             });
@@ -7188,8 +7584,11 @@ impl AppState {
         dates: &OrgDates,
         selected: i64,
         show_done: bool,
+        tag: &str,
+        excluded: &BTreeSet<String>,
     ) -> Vec<TaskRow> {
         let needle = query.trim().to_lowercase();
+        let hidden = self.org_pending_ids(true);
         let catalog = self.organizer.borrow();
         // 已完成 is the one view whose answer *is* the finished ones; everywhere
         // else they are hidden until the footer's switch says otherwise, which is
@@ -7199,6 +7598,7 @@ impl AppState {
         let mut tasks: Vec<&Task> = catalog
             .tasks
             .iter()
+            .filter(|t| !hidden.contains(&(t.id.0 as i64)))
             .filter(|t| {
                 // One selector with two halves: a stored list id, or a smart
                 // view slot (`org-list` < 0 means "the chip decides").
@@ -7209,6 +7609,10 @@ impl AppState {
                 let finished = if view == SMART_DONE { t.done } else { !t.done || keep_done };
                 bucket && finished && org_task_matches(t, &needle)
             })
+            // The tag filter, the same two halves the notes' list has: 仅显示 by a
+            // path and its subtree, then 排除 by a path and its subtree.
+            .filter(|t| tag.is_empty() || t.tags.iter().any(|x| tag_matches(x, tag)))
+            .filter(|t| !tag_excluded(&t.tags, excluded))
             .collect();
         sort_tasks(&mut tasks, sort);
         tasks
@@ -7289,12 +7693,19 @@ impl AppState {
         self.exec_org(Command::CreateNote {
             note: Note {
                 id: NoteId(id),
+                // The 唯一 ID, minted here and never again: an edit carries the
+                // whole row (`UpdateNote`), so the identity travels with it.
+                uuid: crate::core::organizer::new_uuid(),
                 title: String::new(),
                 body: String::new(),
                 pinned: false,
                 tags: Vec::new(),
                 created: now,
                 edited: now,
+                // A note the user makes from the ＋ is never a reply. 引用 is the
+                // model's (`ref_note`), and 指令's `comment` is the only thing in
+                // this shell that sets one.
+                ref_note: None,
             },
         })?;
         self.next_note_id.set(id + 1);
@@ -7355,8 +7766,50 @@ impl AppState {
             .unwrap_or_default()
     }
 
-    /// 转为待办: the note becomes a task and the note goes — the reference app's own
-    /// migration, and its no-dialog rule: the notice band is the way back.
+    /// The name one of the area's rows goes by in a notice: its title, or 无标题
+    /// when nobody has typed one yet.
+    ///
+    /// Reads the catalog rather than `org-*-detail`, because a row deleted from the
+    /// ⋯ menu is not necessarily the selected one, and the Slint properties only
+    /// know about the selection.
+    pub fn org_row_label(&self, id: i64, is_task: bool) -> String {
+        let raw = if is_task {
+            self.organizer
+                .borrow()
+                .task(TaskId(id.max(0) as u64))
+                .map(|t| t.title.clone())
+        } else {
+            self.organizer
+                .borrow()
+                .note(NoteId(id.max(0) as u64))
+                .map(|n| n.title.clone())
+        };
+        match raw {
+            Some(title) if !title.trim().is_empty() => title,
+            _ => "无标题".to_string(),
+        }
+    }
+
+    /// The label of a batch on a delete's line: one row names itself, several count
+    /// themselves. A pending delete has to say what it is holding back before any
+    /// of them is looked up, and 「a」「b」 is not a sentence that fits the pill.
+    pub fn org_batch_label(&self, ids: &[i64], is_task: bool) -> String {
+        let noun = if is_task { "任务" } else { "笔记" };
+        match ids.len() {
+            0 => String::new(),
+            1 => format!("{noun}「{}」", self.org_row_label(ids[0], is_task)),
+            n => format!("{n} 条{noun}"),
+        }
+    }
+
+    /// 转为待办: the note becomes a task — the reference app's own migration, and
+    /// its no-dialog rule.
+    ///
+    /// **This call does not delete the note**; ADR-0108 moved that to the 撤销 bar,
+    /// so the caller hands `id` to `org_defer_delete` and the user gets three
+    /// seconds back for the note they just converted. Undoing *that* bar restores
+    /// the note and leaves the task standing, which is the honest reading of 撤销
+    /// here: the thing being taken back is the disappearance, not the conversion.
     ///
     /// The title is the note's own title, or its first line with the markdown that
     /// opens it stripped (`org_convert_title`); the body travels whole as 备注, the
@@ -7375,7 +7828,6 @@ impl AppState {
         if !note.body.is_empty() && note.body != title {
             self.org_task_notes(new_id, note.body);
         }
-        self.org_delete_note(id)?;
         Some(title)
     }
 
@@ -7394,6 +7846,7 @@ impl AppState {
         self.exec_org(Command::CreateTask {
             task: Task {
                 id: TaskId(id),
+                uuid: crate::core::organizer::new_uuid(),
                 list: if list >= 0 { ListId(list as u64) } else { ListId::INBOX },
                 title: String::new(),
                 notes: String::new(),
@@ -7492,6 +7945,11 @@ impl AppState {
             return;
         };
         let mut rows = vec![row(MENU_ORG_OPEN, "打开详情", "page", false)];
+        // The reference's long press, in the one place this window has a per-row
+        // menu: picking 多选 here starts the mode with *this* row already lit.
+        // the reference's long press, in the one place this window has a per-row
+        // menu: the mode starts with *this* row already picked
+        rows.push(row(MENU_ORG_SELECT, "多选", "todo-check", false));
         rows.push(if current.done {
             row(MENU_ORG_UNDONE, "标记为未完成", "todo-check", false)
         } else {
@@ -7642,6 +8100,759 @@ impl AppState {
         let count = moved.len();
         self.exec_org(Command::DeleteTaskList { list, moved })?;
         Some(count)
+    }
+
+    // ---- the deferred delete (ADR-0108) ----
+    //
+    // Three calls, and the split between them is the whole design: `org_defer_delete`
+    // hides rows and writes nothing, `org_undo_pending` unhides them and writes
+    // nothing, and only `org_commit_pending` reaches the command system. That is
+    // why the area's undo stack stays clean across a delete the user took back —
+    // a pending delete is not a step, so there is nothing for Ctrl+Z to unwind.
+
+    /// The batch currently waiting behind the 撤销 bar, if any.
+    pub fn org_pending(&self) -> Option<OrgPendingDelete> {
+        self.org_pending.borrow().clone()
+    }
+
+    /// The ids one half of the area is hiding right now. Every projection asks this
+    /// once and tests per row, which is why it is a set and not the `Vec` the
+    /// batch carries: a bulk delete over a list of hundreds of rows would otherwise
+    /// scan that batch per row.
+    fn org_pending_ids(&self, is_task: bool) -> BTreeSet<i64> {
+        match self.org_pending.borrow().as_ref() {
+            Some(p) if p.is_task == is_task => p.ids.iter().copied().collect(),
+            _ => BTreeSet::new(),
+        }
+    }
+
+    /// Ask for a delete: hide `ids`, put `message` on the bar, and hand back the
+    /// token the caller's timer must carry.
+    ///
+    /// A second delete **commits the first** rather than queueing behind it — two
+    /// pending batches would need two bars, and one bar can only stand in front of
+    /// one thing. This is also what makes the token load-bearing: the superseded
+    /// bar's timer is still armed, and it must find nothing to do.
+    pub fn org_defer_delete(&self, ids: Vec<i64>, is_task: bool, message: String) -> u64 {
+        // Bound and cloned *before* the `if`, on purpose: an `if let` keeps the
+        // temporary `Ref` alive for the whole block, and the block calls
+        // `org_commit_pending`, which needs to `borrow_mut` the same cell. The
+        // second delete in a session would have panicked without this.
+        let previous = self.org_pending.borrow().clone();
+        if let Some(previous) = previous {
+            self.org_commit_pending(previous.token);
+        }
+        let token = self.org_delete_token.get() + 1;
+        self.org_delete_token.set(token);
+        *self.org_pending.borrow_mut() = Some(OrgPendingDelete {
+            token,
+            ids,
+            is_task,
+            message,
+        });
+        token
+    }
+
+    /// Take the offer down: the rows come back and **no command was ever made**,
+    /// so the area's undo stack is exactly as long as it was before the delete.
+    pub fn org_undo_pending(&self) -> bool {
+        self.org_pending.borrow_mut().take().is_some()
+    }
+
+    /// The bar's expiry: perform the delete for real. `false` means the batch is
+    /// gone — taken back, or superseded by a delete whose own timer is the live
+    /// one — and a stale timer committing a batch it never showed would be the
+    /// user's row vanishing behind their back.
+    pub fn org_commit_pending(&self, token: u64) -> bool {
+        if self.org_pending.borrow().as_ref().map(|p| p.token) != Some(token) {
+            return false;
+        }
+        // Cleared *before* the writes: each of them rebuilds nothing itself, but a
+        // caller that projects afterwards must see the row gone for the real
+        // reason, not because a set happened to still name it.
+        let Some(pending) = self.org_pending.borrow_mut().take() else {
+            return false;
+        };
+        // The whole batch is **one** step. `exec_all` plans every command against
+        // the same pre-state and pushes one history entry, and a delete of N rows
+        // is one row each with no cross-row state to sequence — so N rows of the
+        // user's single gesture take back with a single Ctrl+Z. (The reference
+        // shells are N steps there; this shell has the batch path, so it does not
+        // inherit that cost.)
+        let cmds: Vec<Command> = {
+            let catalog = self.organizer.borrow();
+            pending
+                .ids
+                .iter()
+                .filter_map(|&id| {
+                    if pending.is_task {
+                        catalog
+                            .task(TaskId(id.max(0) as u64))
+                            .cloned()
+                            .map(|task| Command::DeleteTask { task })
+                    } else {
+                        catalog
+                            .note(NoteId(id.max(0) as u64))
+                            .cloned()
+                            .map(|note| Command::DeleteNote { note })
+                    }
+                })
+                .collect()
+        };
+        self.exec_org_all(cmds);
+        true
+    }
+
+    // ---- 多选 (SPEC §四十一, ADR-0111) ----
+
+    /// Whether one row is lit by the selection. `is_task` is the caller's own tab,
+    /// and a set belonging to the other kind answers "no" for every row: note 3
+    /// and task 3 are both `3`, which is exactly why the set carries its kind
+    /// instead of holding whatever number a row happens to have.
+    fn org_picked(&self, id: i64, is_task: bool) -> bool {
+        let selection = self.org_selection.borrow();
+        selection.is_task == is_task && selection.ids.contains(&id)
+    }
+
+    /// How many rows are picked **and on screen** — the header's `已选 N 项`. The
+    /// intersection is the whole point: a set that held a row a filter dropped
+    /// would print a number above rows the user cannot see, and the number is what
+    /// the bar's 全选/取消全选 label measures itself against.
+    pub fn org_selection_count(&self, is_task: bool) -> i32 {
+        let n = self.org_selection_ids(is_task).len();
+        i32::try_from(n).unwrap_or(i32::MAX)
+    }
+
+    /// The picked ids, in the order the page draws them.
+    pub fn org_selection_ids(&self, is_task: bool) -> Vec<i64> {
+        self.org_shown_ids(is_task)
+            .into_iter()
+            .filter(|id| self.org_picked(*id, is_task))
+            .collect()
+    }
+
+    /// Tap a row while the area is picking: it joins the set, or leaves it. A pick
+    /// that starts on the other half's rows replaces that batch rather than
+    /// merging into it — one set with two kinds in it has no meaning to give the
+    /// verbs, and a row of the wrong kind can only mean the tab moved under a
+    /// selection that outlived it.
+    pub fn org_selection_toggle(&self, id: i64, is_task: bool) {
+        let mut selection = self.org_selection.borrow_mut();
+        if selection.is_task != is_task {
+            selection.ids.clear();
+            selection.is_task = is_task;
+        }
+        if !selection.ids.insert(id) {
+            selection.ids.remove(&id);
+        }
+    }
+
+    /// 全选 / 取消全选: the set becomes exactly `ids`, or empties when it already
+    /// was. `ids` is what the page is showing — see [`Self::org_shown_ids`].
+    pub fn org_selection_set_all(&self, ids: &[i64], is_task: bool) {
+        let all = self.org_selection_ids(is_task);
+        if all == ids {
+            self.org_selection.borrow_mut().ids.clear();
+            return;
+        }
+        let mut selection = self.org_selection.borrow_mut();
+        selection.ids = ids.iter().copied().collect();
+        selection.is_task = is_task;
+    }
+
+    /// Open the mode on one half of the area: an empty set that already knows
+    /// which kind it holds, so a pick on the wrong tab can never be merged into
+    /// it by accident.
+    pub fn org_selection_enter(&self, is_task: bool) {
+        let mut selection = self.org_selection.borrow_mut();
+        selection.ids.clear();
+        selection.is_task = is_task;
+    }
+
+    /// Leave 多选. The picked ids go with it: a set that survived an exit would
+    /// light the same row numbers the next time the mode opened, and the user
+    /// would be deleting rows they never picked.
+    pub fn org_selection_clear(&self) {
+        self.org_selection.borrow_mut().ids.clear();
+    }
+
+    /// The rows the area is drawing, in draw order, a pending delete's rows
+    /// already left out — which is what 全选 must cover. Read off the projected
+    /// models rather than recomputed from the catalog: "what is showing" *is*
+    /// those models, and a second copy of the filter would be a second answer to
+    /// the same question, free to disagree with the pixels.
+    pub fn org_shown_ids(&self, is_task: bool) -> Vec<i64> {
+        if is_task {
+            (0..self.task_rows.row_count())
+                .filter_map(|i| self.task_rows.row_data(i).map(|r| r.id as i64))
+                .collect()
+        } else {
+            (0..self.note_rows.row_count())
+                .filter_map(|i| self.note_rows.row_data(i).map(|r| r.id as i64))
+                .collect()
+        }
+    }
+
+    /// The picked notes as clipboard text, in the order the page draws them, with
+    /// a blank line between. A note's text is its **body**, falling back to its
+    /// title when there is no body — the row shows the first body line and the
+    /// body is what the user wrote; a title-only note has nothing but its title.
+    ///
+    /// **Each note carries its 唯一 ID** on a line of its own, which is what makes
+    /// the text an *instruction* rather than a copy: an AI asked to read these
+    /// answers with operations that name the rows, and the name it can use is the
+    /// uuid (SPEC §四十一) — an integer id would name a different row after a sync
+    /// had renumbered it. A row an older peer sent without one falls back to
+    /// `local:<id>`, the reference shells' own spelling.
+    pub fn org_note_copy_text(&self, ids: &[i64]) -> String {
+        let catalog = self.organizer.borrow();
+        ids.iter()
+            .filter_map(|id| catalog.note(NoteId(*id as u64)))
+            .map(|note| {
+                let text = if note.body.trim().is_empty() {
+                    note.title.clone()
+                } else {
+                    note.body.clone()
+                };
+                format!("{text}\nID: {}", org_uid(&note.uuid, note.id.0))
+            })
+            .filter(|text| !text.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
+    /// The picked tasks as clipboard text — the tasks' half of the 复制 verb, and
+    /// the same shape: a title, its 备注, then the 唯一 ID. `无标题` for a row with
+    /// no title, because a blank first line would read as an empty entry.
+    pub fn org_task_copy_text(&self, ids: &[i64]) -> String {
+        let catalog = self.organizer.borrow();
+        ids.iter()
+            .filter_map(|id| catalog.task(TaskId(*id as u64)))
+            .map(|task| {
+                let title = if task.title.trim().is_empty() {
+                    "无标题".to_string()
+                } else {
+                    task.title.clone()
+                };
+                let text = if task.notes.trim().is_empty() {
+                    title
+                } else {
+                    format!("{title}\n\n{}", task.notes)
+                };
+                format!("{text}\n\nID: {}", org_uid(&task.uuid, task.id.0))
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
+    // ── 指令: a batch of AI instructions (SPEC §四十一) ───────────────────────
+    //
+    // The workflow the area is built for: 复制 hands an AI the rows *with their 唯一
+    // IDs*, and what comes back is a JSON batch that names those IDs again. The
+    // shape is the reference server's (`{"operations":[…]}` with an `action` per
+    // operation), kept verbatim so one prompt works against either end — the
+    // difference is that a shell applies it locally instead of POSTing it, because
+    // this app's organizer has no server: the store is the file beside it.
+    //
+    // Three rules, all of them the reference's and all of them load-bearing:
+    //
+    // * **An unsupported action is refused with a word, never skipped.** A task
+    //   action sent to a note answers `笔记不支持动作 set_completed`; silence would
+    //   let an AI believe an edit landed.
+    // * **`add_tags` / `remove_tags` are increments.** The AI does not have to know
+    //   what a row's tags already are, which is what makes "add 重要 to these"
+    //   safe against clobbering the tags it was never shown.
+    // * **The whole batch is one undo step.** The applied operations go through
+    //   `exec_org_all`, so one Ctrl+Z takes the batch back — more than the
+    //   reference shells offer, which send N writes and need N.
+
+    /// Apply one batch of instructions to the half of the area named by `is_task`.
+    /// `Ok` is the line the notice band shows; `Err` is a payload that could not be
+    /// read at all (a batch whose *operations* fail is a success with failures,
+    /// which is what the count is for).
+    pub fn org_apply_commands(&self, is_task: bool, json: &str) -> Result<String, String> {
+        let payload: serde_json::Value =
+            serde_json::from_str(json).map_err(|e| format!("JSON 解析失败：{e}"))?;
+        let ops = payload
+            .get("operations")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| "缺少 operations 数组".to_string())?;
+        if ops.is_empty() {
+            return Err("operations 是空的".to_string());
+        }
+        let now = now_secs();
+        // A batch is applied **in order**, so an operation sees what the ones before
+        // it did: `add_tags` followed by `update` must not lose the tag, and two
+        // updates to one row must land as the second one describes it. That is what
+        // the simulation below is for — a copy of the catalog the batch mutates as
+        // it reads, while `exec_all` still pushes the whole thing as one history
+        // entry. Each command's `before` is the row the *previous* operation left,
+        // so the batch's own reverts walk back through every step and one Ctrl+Z
+        // restores the original.
+        let mut sim = self.organizer();
+        let mut next_note = self.next_note_id.get();
+        let mut next_task = self.next_task_id.get();
+        let mut commands: Vec<Command> = Vec::new();
+        let mut refused: Vec<String> = Vec::new();
+        for op in ops {
+            match self.org_command_of(
+                is_task,
+                &mut sim,
+                op,
+                now,
+                &mut next_note,
+                &mut next_task,
+            ) {
+                Ok(cmd) => commands.push(cmd),
+                Err(e) => refused.push(e),
+            }
+        }
+        let applied = if commands.is_empty() {
+            0
+        } else {
+            let n = commands.len();
+            // `exec_all` plans every command against the state before the batch and
+            // pushes one history entry; `None` is "not one of them changed
+            // anything", which is not a failure but is not a landing either.
+            match self.exec_org_all(commands) {
+                Some(_) => {
+                    // Only a batch that *landed* may spend ids: a create that the
+                    // plan refused must not burn one.
+                    self.next_note_id.set(next_note);
+                    self.next_task_id.set(next_task);
+                    n
+                }
+                None => 0,
+            }
+        };
+        let failed = refused.len();
+        let mut line = format!("指令完成：成功 {applied} / 失败 {failed}");
+        // The first refusal, because "1 failed" with no reason is a dead end for
+        // whoever has to fix the JSON.
+        if let Some(first) = refused.first() {
+            line.push_str(&format!("（{first}）"));
+        }
+        Ok(line)
+    }
+
+    /// One operation as the command it means, or the reason it cannot be one. The
+    /// action is compared as a *string* rather than deserialised into an enum, so a
+    /// payload with an action this build has never heard of is refused with its own
+    /// name instead of failing the whole batch at parse time.
+    fn org_command_of(
+        &self,
+        is_task: bool,
+        sim: &mut OrganizerCatalog,
+        op: &serde_json::Value,
+        now: i64,
+        next_note: &mut u64,
+        next_task: &mut u64,
+    ) -> Result<Command, String> {
+        let action = op
+            .get("action")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "缺少 action 字段".to_string())?;
+        if is_task {
+            self.task_command_of(sim, action, op, now, next_task)
+        } else {
+            self.note_command_of(sim, action, op, now, next_note)
+        }
+    }
+
+    fn note_command_of(
+        &self,
+        sim: &mut OrganizerCatalog,
+        action: &str,
+        op: &serde_json::Value,
+        now: i64,
+        next: &mut u64,
+    ) -> Result<Command, String> {
+        if action == "create" {
+            let note = Note {
+                id: NoteId(*next),
+                uuid: crate::core::organizer::new_uuid(),
+                title: op_string(op, "title").unwrap_or_default(),
+                body: op_string(op, "content").unwrap_or_default(),
+                pinned: op_bool(op, "pinned").unwrap_or(false),
+                tags: op_tags(op),
+                created: now,
+                edited: now,
+                ref_note: None,
+            };
+            *next += 1;
+            // Visible to the rest of the batch at once, so a `create` followed by an
+            // operation naming the uuid it just minted is one coherent batch and not
+            // a second, surprising failure.
+            sim.notes.push(note.clone());
+            return Ok(Command::CreateNote { note });
+        }
+        let id = Self::resolve_note(sim, op)?;
+        let before = sim
+            .note(id)
+            .cloned()
+            .ok_or_else(|| "笔记不存在".to_string())?;
+        // Every edit below is an ordinary whole-row `UpdateNote`: the store has no
+        // field-level change, and one row per command is what keeps a batch
+        // independently plannable.
+        let mut after = before.clone();
+        after.edited = now;
+        let cmd = match action {
+            "update" => {
+                if let Some(v) = op_string(op, "title") {
+                    after.title = v;
+                }
+                if let Some(v) = op_string(op, "content") {
+                    after.body = v;
+                }
+                if let Some(v) = op_bool(op, "pinned") {
+                    after.pinned = v;
+                }
+                if op.get("tags").is_some() {
+                    after.tags = op_tags(op);
+                }
+                Command::UpdateNote { id, before, after: after.clone() }
+            }
+            // The increments: add/remove against what the row already holds, so the
+            // AI never has to be told the current tags to change one.
+            "add_tags" => {
+                after.tags = merge_tags(&before.tags, &op_tags(op));
+                Command::UpdateNote { id, before, after: after.clone() }
+            }
+            "remove_tags" => {
+                after.tags = subtract_tags(&before.tags, &op_tags(op));
+                Command::UpdateNote { id, before, after: after.clone() }
+            }
+            "set_tags" => {
+                after.tags = op_tags(op);
+                Command::UpdateNote { id, before, after: after.clone() }
+            }
+            // A comment is a note that references this one (core ADR-0001): the
+            // model needed no new command, only a `ref_note`.
+            "comment" => {
+                let comment = Note {
+                    id: NoteId(*next),
+                    uuid: crate::core::organizer::new_uuid(),
+                    title: String::new(),
+                    body: op_string(op, "content").unwrap_or_default(),
+                    pinned: false,
+                    tags: op_tags(op),
+                    created: now,
+                    edited: now,
+                    ref_note: Some(id),
+                };
+                *next += 1;
+                sim.notes.push(comment.clone());
+                return Ok(Command::CreateNote { note: comment });
+            }
+            "delete" => {
+                sim.notes.retain(|n| n.id != id);
+                return Ok(Command::DeleteNote { note: before });
+            }
+            other => return Err(format!("笔记不支持动作 {other}")),
+        };
+        // The row the *next* operation of the batch will read.
+        if let Some(slot) = sim.notes.iter_mut().find(|n| n.id == id) {
+            *slot = after;
+        }
+        Ok(cmd)
+    }
+
+    fn task_command_of(
+        &self,
+        sim: &mut OrganizerCatalog,
+        action: &str,
+        op: &serde_json::Value,
+        now: i64,
+        next: &mut u64,
+    ) -> Result<Command, String> {
+        if action == "create" {
+            let title = op_string(op, "title").ok_or_else(|| "创建任务需要 title".to_string())?;
+            // A named list that matches nothing is an error even here: a task
+            // silently filed in the inbox is a task the instruction did not ask
+            // for. No list field at all is the inbox, which is what a bare create
+            // means.
+            let list = if op.get("list_id").is_some() || op.get("list_name").is_some() {
+                Self::resolve_list(sim, op)?
+            } else {
+                ListId::INBOX
+            };
+            let last = sim.tasks_in(list).map(|t| t.ord).max();
+            let ord = OrderKey::between(last, None)
+                .ok_or_else(|| "清单里的顺序键用完了".to_string())?;
+            let done = op_bool(op, "completed").unwrap_or(false);
+            let task = Task {
+                id: TaskId(*next),
+                uuid: crate::core::organizer::new_uuid(),
+                list,
+                title,
+                notes: op_string(op, "content").unwrap_or_default(),
+                priority: op_priority(op).unwrap_or(Priority::None),
+                due: op_due(op),
+                repeat: Repeat::None,
+                done,
+                completed_at: done.then_some(now),
+                tags: op_tags(op),
+                subtasks: Vec::new(),
+                created: now,
+                edited: now,
+                ord,
+            };
+            *next += 1;
+            sim.tasks.push(task.clone());
+            return Ok(Command::CreateTask { task });
+        }
+        let id = Self::resolve_task(sim, op)?;
+        let before = sim
+            .task(id)
+            .cloned()
+            .ok_or_else(|| "任务不存在".to_string())?;
+        if action == "delete" {
+            sim.tasks.retain(|t| t.id != id);
+            return Ok(Command::DeleteTask { task: before });
+        }
+        let mut after = before.clone();
+        after.edited = now;
+        let cmd = match action {
+            "update" => {
+                if let Some(v) = op_string(op, "title") {
+                    after.title = v;
+                }
+                if let Some(v) = op_string(op, "content") {
+                    after.notes = v;
+                }
+                if let Some(v) = op_bool(op, "completed") {
+                    set_task_done(&mut after, v, now);
+                }
+                if let Some(p) = op_priority(op) {
+                    after.priority = p;
+                }
+                if op.get("clear_due").is_some() || op.get("due_date").is_some() {
+                    after.due = op_due(op);
+                }
+                if op.get("tags").is_some() {
+                    after.tags = op_tags(op);
+                }
+                if op.get("list_id").is_some() || op.get("list_name").is_some() {
+                    after.list = Self::resolve_list(sim, op)?;
+                }
+                Command::UpdateTask { id, before, after: after.clone() }
+            }
+            "add_tags" => {
+                after.tags = merge_tags(&before.tags, &op_tags(op));
+                Command::UpdateTask { id, before, after: after.clone() }
+            }
+            "remove_tags" => {
+                after.tags = subtract_tags(&before.tags, &op_tags(op));
+                Command::UpdateTask { id, before, after: after.clone() }
+            }
+            "set_tags" => {
+                after.tags = op_tags(op);
+                Command::UpdateTask { id, before, after: after.clone() }
+            }
+            "set_completed" => {
+                let done = op_bool(op, "completed")
+                    .ok_or_else(|| "set_completed 需要 completed 字段".to_string())?;
+                set_task_done(&mut after, done, now);
+                Command::UpdateTask { id, before, after: after.clone() }
+            }
+            "move" => {
+                after.list = Self::resolve_list(sim, op)?;
+                Command::UpdateTask { id, before, after: after.clone() }
+            }
+            "set_priority" => {
+                let p = op_priority(op).ok_or_else(|| {
+                    "set_priority 需要 priority 字段（0 无 / 1 低 / 2 中 / 3 高）".to_string()
+                })?;
+                after.priority = p;
+                Command::UpdateTask { id, before, after: after.clone() }
+            }
+            "set_due" => {
+                if op_bool(op, "clear_due") == Some(true) {
+                    after.due = None;
+                } else if op.get("due_date").is_some() {
+                    after.due = op_due(op);
+                } else {
+                    return Err("set_due 需要 due_date 或 clear_due".to_string());
+                }
+                Command::UpdateTask { id, before, after: after.clone() }
+            }
+            "add_subtask" => {
+                // The next id is the row's own watermark, which is the reference's
+                // "id 自动 +1": a subtask is scoped to its task, so the two never
+                // have to agree with anyone else's counter.
+                let sub_id = after.subtasks.iter().map(|s| s.id).max().unwrap_or(0) + 1;
+                after.subtasks.push(Subtask {
+                    id: sub_id,
+                    title: op_string(op, "title").unwrap_or_default(),
+                    done: false,
+                });
+                Command::UpdateTask { id, before, after: after.clone() }
+            }
+            "set_subtask" => {
+                let sub_id = op
+                    .get("subtask_id")
+                    .and_then(|v| v.as_u64())
+                    .ok_or_else(|| "set_subtask 需要 subtask_id".to_string())?;
+                let sub = after
+                    .subtasks
+                    .iter_mut()
+                    .find(|s| s.id == sub_id)
+                    .ok_or_else(|| format!("子任务不存在：{sub_id}"))?;
+                if let Some(v) = op_bool(op, "completed") {
+                    sub.done = v;
+                }
+                if let Some(v) = op_string(op, "title") {
+                    sub.title = v;
+                }
+                Command::UpdateTask { id, before, after: after.clone() }
+            }
+            "remove_subtask" => {
+                let sub_id = op
+                    .get("subtask_id")
+                    .and_then(|v| v.as_u64())
+                    .ok_or_else(|| "remove_subtask 需要 subtask_id".to_string())?;
+                after.subtasks.retain(|s| s.id != sub_id);
+                Command::UpdateTask { id, before, after: after.clone() }
+            }
+            // A task's comment appends to its 备注: a task has no second row to
+            // hang a reply on, and the reference's `comment` is exactly this.
+            "comment" => {
+                let text = op_string(op, "content").unwrap_or_default();
+                after.notes = if after.notes.trim().is_empty() {
+                    text
+                } else {
+                    format!("{}\n\n{}", after.notes, text)
+                };
+                Command::UpdateTask { id, before, after: after.clone() }
+            }
+            other => return Err(format!("任务不支持动作 {other}")),
+        };
+        // The row the *next* operation of the batch will read.
+        if let Some(slot) = sim.tasks.iter_mut().find(|t| t.id == id) {
+            *slot = after;
+        }
+        Ok(cmd)
+    }
+
+    /// The note one instruction names: its `uuid` first — what the clipboard hands
+    /// out, and the only name a sync cannot renumber — then `local:<id>` for a row
+    /// an older peer sent without one, then a bare `id`.
+    fn resolve_note(sim: &OrganizerCatalog, op: &serde_json::Value) -> Result<NoteId, String> {
+        let catalog = sim;
+        if let Some(name) = op
+            .get("uuid")
+            .and_then(|v| v.as_str())
+            .filter(|u| !u.is_empty())
+        {
+            if let Some(rest) = name.strip_prefix("local:") {
+                if let Ok(raw) = rest.parse::<u64>() {
+                    if let Some(note) = catalog.note(NoteId(raw)) {
+                        return Ok(note.id);
+                    }
+                }
+            }
+            if let Some(note) = catalog.notes.iter().find(|n| n.uuid == name) {
+                return Ok(note.id);
+            }
+        }
+        if let Some(raw) = op.get("id").and_then(|v| v.as_i64()) {
+            if let Some(note) = catalog.note(NoteId(raw.max(0) as u64)) {
+                return Ok(note.id);
+            }
+        }
+        Err("需要提供 id 或 uuid 定位笔记".to_string())
+    }
+
+    /// The task one instruction names, by the same three names a note takes.
+    fn resolve_task(sim: &OrganizerCatalog, op: &serde_json::Value) -> Result<TaskId, String> {
+        let catalog = sim;
+        if let Some(name) = op
+            .get("uuid")
+            .and_then(|v| v.as_str())
+            .filter(|u| !u.is_empty())
+        {
+            if let Some(rest) = name.strip_prefix("local:") {
+                if let Ok(raw) = rest.parse::<u64>() {
+                    if let Some(task) = catalog.task(TaskId(raw)) {
+                        return Ok(task.id);
+                    }
+                }
+            }
+            if let Some(task) = catalog.tasks.iter().find(|t| t.uuid == name) {
+                return Ok(task.id);
+            }
+        }
+        if let Some(raw) = op.get("id").and_then(|v| v.as_i64()) {
+            if let Some(task) = catalog.task(TaskId(raw.max(0) as u64)) {
+                return Ok(task.id);
+            }
+        }
+        Err("需要提供 id 或 uuid 定位任务".to_string())
+    }
+
+    /// The list an instruction files a task into: `list_id` (`0` is 收集箱, the
+    /// sentinel) first, then an exact `list_name`. A name that matches no list is
+    /// an error that says which name, because "moved nowhere" must not read as
+    /// "moved".
+    fn resolve_list(sim: &OrganizerCatalog, op: &serde_json::Value) -> Result<ListId, String> {
+        let catalog = sim;
+        if let Some(raw) = op.get("list_id").and_then(|v| v.as_i64()) {
+            let id = raw.max(0) as u64;
+            if id == 0 {
+                return Ok(ListId::INBOX);
+            }
+            return catalog
+                .list(ListId(id))
+                .map(|l| l.id)
+                .ok_or_else(|| format!("清单不存在: {id}"));
+        }
+        if let Some(name) = op.get("list_name").and_then(|v| v.as_str()) {
+            if name == "收集箱" {
+                return Ok(ListId::INBOX);
+            }
+            return catalog
+                .lists
+                .iter()
+                .find(|l| l.name == name)
+                .map(|l| l.id)
+                .ok_or_else(|| format!("清单不存在: {name}"));
+        }
+        Err("move 需要 list_id 或 list_name".to_string())
+    }
+
+    /// 完成 on the selection: every picked task ticked as **one** undo step, which
+    /// is the shape the reference shells do not have (they send N writes and N
+    /// Ctrl+Z undoes one row at a time). Already-done rows are not in the batch:
+    /// `exec_all` skips a command that planned to `None`, and a no-op row must not
+    /// be a reason for the whole step to look like a change.
+    pub fn org_complete_ids(&self, ids: &[i64]) -> usize {
+        let now = now_secs();
+        let cmds: Vec<Command> = {
+            let catalog = self.organizer.borrow();
+            ids.iter()
+                .filter_map(|id| {
+                    let before = catalog.task(TaskId(*id as u64))?.clone();
+                    if before.done {
+                        return None;
+                    }
+                    let mut after = before.clone();
+                    after.done = true;
+                    after.completed_at = Some(now);
+                    after.edited = now;
+                    Some(Command::UpdateTask {
+                        id: after.id,
+                        before,
+                        after,
+                    })
+                })
+                .collect()
+        };
+        let n = cmds.len();
+        if n == 0 {
+            return 0;
+        }
+        self.exec_org_all(cmds);
+        n
     }
 
     /// Recompute one block's window from its reported geometry, and re-read when
@@ -13241,6 +14452,11 @@ impl AppState {
             list_cell.set(v + 1);
             v
         };
+        // A row whose uuid arrived blank — a peer at the rev before the column —
+        // is named here, so no note or task can reach this device's file without
+        // an identity. The session owns the mint for the same reason it owns the
+        // id allocators above.
+        let mut new_uuid = || crate::core::organizer::new_uuid();
         let mut ctx = crate::services::sync::merge::MergeCtx {
             next_page: &mut next_page,
             next_block: &mut next_block,
@@ -13252,6 +14468,7 @@ impl AppState {
             next_note: &mut next_note,
             next_task: &mut next_task,
             next_list: &mut next_list,
+            new_uuid: &mut new_uuid,
         };
         let outcome = crate::services::sync::merge::merge(&local, shadow.as_ref(), remote, &peer_name, &mut ctx);
         let conflicts = outcome.conflicts.clone();
@@ -14063,6 +15280,7 @@ fn org_task_row(
         subtasks_total: task.subtasks.len() as i32,
         when: org_when(task.edited).into(),
         selected,
+        picked: false,
     }
 }
 
@@ -14129,6 +15347,29 @@ fn org_when(secs: i64) -> String {
     }
 }
 
+/// An instant as the day *and* the age (`2026-09-21 · 5 天前`), which is what
+/// 详细信息 can stand behind.
+///
+/// The reference shows `yyyy-MM-dd HH:mm` there. A clock time is the one thing
+/// this shell cannot do honestly, for the reason `org_when` gives: nothing here
+/// keeps a zone, so `HH:mm` would be either UTC (wrong to the reader) or a
+/// conversion nobody owns. The day it can vouch for, plus the same age the row
+/// already prints, means the two surfaces cannot disagree about how fresh a note
+/// is — and a note the user made a minute ago says 刚刚, not a wrong hour.
+///
+/// Past thirty days `org_when` runs out of coarse units and answers with the day
+/// itself, which is the same string the front half would print — so the age is
+/// dropped there rather than shown twice.
+fn org_day_and_age(secs: i64) -> String {
+    let day = crate::core::date::to_iso(secs.div_euclid(86_400));
+    let age = org_when(secs);
+    if age == day {
+        day
+    } else {
+        format!("{day} · {age}")
+    }
+}
+
 /// A comma-separated tag input as the list a row stores: trimmed, empties
 /// dropped, duplicates dropped in first-seen order. One place decides what the
 /// input means, so the row a typed string produces and the string it renders
@@ -14189,6 +15430,120 @@ fn tag_matches(candidate: &str, path: &str) -> bool {
     path.is_empty() || candidate == path || candidate.starts_with(&format!("{path}/"))
 }
 
+/// Whether a tag of the row sits at or under any excluded path — `tag_matches`
+/// with the answer turned around, so hiding `项目` hides `项目` and `项目/工作`
+/// and leaves `项目2` alone, exactly as 仅显示 does in the other direction.
+///
+/// An empty `excluded` hides nothing: no set is no filter, the same way an empty
+/// include path is no filter.
+fn tag_excluded(tags: &[String], excluded: &BTreeSet<String>) -> bool {
+    excluded
+        .iter()
+        .any(|path| tags.iter().any(|tag| tag_matches(tag, path)))
+}
+
+/// The hidden set as the column's own line — `排除 ⊘#项目 ⊘#项目/工作` — or "" when
+/// nothing is hidden. The reference's spelling, kept because the two shells' text
+/// should be the same text.
+fn org_excluded_label(excluded: &BTreeSet<String>) -> String {
+    if excluded.is_empty() {
+        return String::new();
+    }
+    let marked: Vec<String> = excluded
+        .iter()
+        .map(|path| format!("⊘#{}", tag_breadcrumb(path)))
+        .collect();
+    format!("排除 {}", marked.join(" "))
+}
+/// A row's 唯一 ID as the clipboard and the detail rows spell it: the stored
+/// uuid, or `local:<id>` for a row an older peer sent without one (core ADR-0002).
+/// Never empty, so a batch instruction always has something to name.
+fn org_uid(uuid: &str, id: u64) -> String {
+    if uuid.is_empty() {
+        format!("local:{id}")
+    } else {
+        uuid.to_string()
+    }
+}
+
+/// One string field of an instruction, or `None` when it is absent or not a
+/// string. Absent and empty are deliberately different: an omitted `content` must
+/// not blank a note's body, which is what `update`'s "only what was sent" rule
+/// reads.
+fn op_string(op: &serde_json::Value, key: &str) -> Option<String> {
+    op.get(key).and_then(|v| v.as_str()).map(|s| s.to_string())
+}
+
+fn op_bool(op: &serde_json::Value, key: &str) -> Option<bool> {
+    op.get(key).and_then(|v| v.as_bool())
+}
+
+/// An instruction's `tags`: the array of strings, or none. A tag is a path
+/// (`项目/工作`), so no segmentation happens here — the filter is where that
+/// matters, not the write.
+fn op_tags(op: &serde_json::Value) -> Vec<String> {
+    op.get("tags")
+        .and_then(|v| v.as_array())
+        .map(|list| {
+            list.iter()
+                .filter_map(|t| t.as_str())
+                .map(|s| s.to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// An instruction's `priority` as the picker's own slot (0 无 / 1 低 / 2 中 / 3 高),
+/// which is the numbering the reference sends. An out-of-range number folds to 无
+/// rather than refusing the operation — `Priority::from_slot`'s rule.
+fn op_priority(op: &serde_json::Value) -> Option<Priority> {
+    op.get("priority")
+        .and_then(|v| v.as_i64())
+        .map(|p| Priority::from_slot(p as i32))
+}
+
+/// A deadline as `YYYY-MM-DD`, which is what a task stores. The reference's
+/// templates send an RFC 3339 instant (`2026-10-01T00:00:00Z`), so the date is
+/// taken off the front: the two spellings agree on a leading day, and parsing the
+/// whole instant would need a calendar this app deliberately does not own.
+fn op_due(op: &serde_json::Value) -> Option<String> {
+    let raw = op.get("due_date").and_then(|v| v.as_str())?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    Some(raw.chars().take(10).collect())
+}
+
+/// `add_tags`: the union, in the row's own order first, so adding a tag never
+/// reorders the ones already there and adding one twice is adding it once.
+fn merge_tags(existing: &[String], incoming: &[String]) -> Vec<String> {
+    let mut out = existing.to_vec();
+    for tag in incoming {
+        if !out.iter().any(|t| t == tag) {
+            out.push(tag.clone());
+        }
+    }
+    out
+}
+
+/// `remove_tags`: the difference, by whole tag — `项目` does not remove `项目/工作`,
+/// because the increment names tags and not subtrees (the *filter* is the half
+/// that reads a path).
+fn subtract_tags(existing: &[String], incoming: &[String]) -> Vec<String> {
+    existing
+        .iter()
+        .filter(|tag| !incoming.iter().any(|x| &x == tag))
+        .cloned()
+        .collect()
+}
+
+/// Tick or untick a task: `completed_at` is cleared on untick rather than left
+/// behind, so the two fields cannot disagree about the same fact.
+fn set_task_done(task: &mut Task, done: bool, now: i64) {
+    task.done = done;
+    task.completed_at = done.then_some(now);
+}
+
 /// A note's tags as one display line: `#项目 / 工作  #idea` — the `#` only on the
 /// front of each, because the segments of one path are one word to the eye.
 fn tags_label(tags: &[String]) -> String {
@@ -14236,11 +15591,12 @@ fn org_strip_lead(line: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        mock_commands, palette_action, FindHits, Lang, NavHistory, CMD_NAV_BACK,
-        CMD_NAV_FORWARD, CMD_PAGE_BASE, NAV_MAX, PaletteAction,
+        mock_commands, palette_action, start_stop, FindHits, Lang, NavHistory, NavStop,
+        CMD_NAV_BACK, CMD_NAV_FORWARD, CMD_PAGE_BASE, NAV_MAX, PaletteAction,
     };
     use crate::app::workspace::Workspace;
     use crate::core::persistence::Change;
+    use std::collections::BTreeSet;
 
     /// A block in display order, page 1, no marks — the shape the projections
     /// below read.
@@ -15584,49 +16940,156 @@ mod tests {
     #[test]
     fn back_retraces_and_forward_rewinds() {
         let mut nav = NavHistory::default();
-        nav.record(1, 2);
-        nav.record(2, 3);
-        assert_eq!(nav.step(false, 3, live), Some(2));
-        assert_eq!(nav.step(false, 2, live), Some(1));
-        // nothing left behind the first page
-        assert_eq!(nav.step(false, 1, live), None);
-        assert_eq!(nav.step(true, 1, live), Some(2));
+        nav.record(p(1), p(2));
+        nav.record(p(2), p(3));
+        assert_eq!(nav.back(p(3), live), Some(p(2)));
+        assert_eq!(nav.back(p(2), live), Some(p(1)));
+        // nothing left behind the first page — but the page itself is not home,
+        // so the walk ends on 收件箱 rather than stopping here (see the test below)
+        assert_eq!(nav.back(p(1), live), Some(NavStop::home()));
+        assert_eq!(nav.step(true, NavStop::home(), live), Some(p(1)));
     }
 
     #[test]
     fn a_new_navigation_drops_the_forward_branch() {
         let mut nav = NavHistory::default();
-        nav.record(1, 2);
-        assert_eq!(nav.step(false, 2, live), Some(1));
-        nav.record(1, 9);
-        assert_eq!(nav.step(true, 9, live), None);
+        nav.record(p(1), p(2));
+        assert_eq!(nav.back(p(2), live), Some(p(1)));
+        nav.record(p(1), p(9));
+        assert_eq!(nav.step(true, p(9), live), None);
     }
 
     #[test]
     fn deleted_pages_are_skipped_not_opened() {
         let mut nav = NavHistory::default();
-        nav.record(1, 2);
+        nav.record(p(1), p(2));
         // 99 sat in the history and has since been deleted
-        nav.record(99, 3);
-        assert_eq!(nav.step(false, 3, live), Some(1));
+        nav.record(p(99), p(3));
+        assert_eq!(nav.back(p(3), live), Some(p(1)));
         // the page that was left stays reachable in the direction it came from
-        assert_eq!(nav.step(true, 1, live), Some(3));
+        assert_eq!(nav.step(true, p(1), live), Some(p(3)));
     }
 
     #[test]
     fn the_first_open_records_nothing_and_the_stack_stays_bounded() {
         let mut nav = NavHistory::default();
-        nav.record(0, 1);
-        assert_eq!(nav.step(false, 1, live), None);
+        nav.record(p(0), p(1));
+        // the bottom of an empty stack is home, and home answers to nothing
+        assert_eq!(nav.back(p(0), live), None);
+        assert_eq!(nav.back(p(1), live), Some(NavStop::home()));
 
         for i in 0..(NAV_MAX + 20) {
-            nav.record((i % 9 + 1) as i32, (i % 9 + 2) as i32);
+            nav.record(p((i % 9 + 1) as i32), p((i % 9 + 2) as i32));
         }
         assert_eq!(nav.back.len(), NAV_MAX);
         for _ in 0..NAV_MAX {
-            assert!(nav.step(false, 0, live).is_some());
+            assert!(nav.back(p(0), live).is_some());
         }
-        assert_eq!(nav.step(false, 0, live), None);
+        assert_eq!(nav.back(p(0), live), None);
+    }
+
+    /// ADR-0110: the organizer is a place the back gesture can be *at*, so it
+    /// goes on the same stack as the pages — a Go Back that jumped over the
+    /// area was a door the user had just walked through vanishing behind them.
+    #[test]
+    fn the_organizer_is_a_stop_the_back_gesture_retraces() {
+        let mut nav = NavHistory::default();
+        nav.record(p(4), NavStop::Org(0));
+        nav.record(NavStop::Org(0), p(5));
+        assert_eq!(nav.back(p(5), live), Some(NavStop::Org(0)));
+        assert_eq!(nav.back(NavStop::Org(0), live), Some(p(4)));
+        assert_eq!(nav.step(true, p(4), live), Some(NavStop::Org(0)));
+        assert_eq!(nav.step(true, NavStop::Org(0), live), Some(p(5)));
+    }
+
+    /// Switching the area's own tab is a move, so back returns to the tab it
+    /// came from. The two tabs are one door in the sidebar but two places.
+    #[test]
+    fn a_tab_switch_inside_the_area_is_a_stop() {
+        let mut nav = NavHistory::default();
+        nav.record(NavStop::Org(0), NavStop::Org(1));
+        assert_eq!(nav.back(NavStop::Org(1), live), Some(NavStop::Org(0)));
+        // and re-entering the same tab records nothing, the way a page that is
+        // already open does: a row that did not move is not a step
+        nav.record(NavStop::Org(0), NavStop::Org(0));
+        assert!(nav.back(NavStop::Org(0), live).is_none());
+    }
+
+    /// 收件箱 is the bottom of the stack: the walk ends there rather than
+    /// running out, and it is reversible, which is what makes it a place and
+    /// not an escape hatch. Nothing lies behind it.
+    #[test]
+    fn home_is_the_bottom_of_the_stack() {
+        let mut nav = NavHistory::default();
+        assert_eq!(nav.back(p(3), live), Some(NavStop::home()));
+        // the page left behind is on the forward stack, so the step is undoable
+        assert_eq!(nav.step(true, NavStop::home(), live), Some(p(3)));
+        assert_eq!(nav.back(p(3), live), Some(NavStop::home()));
+        assert_eq!(nav.back(NavStop::home(), live), None);
+        // …and a recorded 笔记-tab stop *is* home: one place, one name
+        let mut walked = NavHistory::default();
+        walked.record(NavStop::home(), p(3));
+        assert_eq!(walked.back(p(3), live), Some(NavStop::home()));
+        assert_eq!(walked.back(NavStop::home(), live), None);
+    }
+
+    /// Where a new session stands. A file written before `current-area`
+    /// existed has no such row, and the reading of "no row" is the one that
+    /// keeps a library carried in from another shell on its document.
+    #[test]
+    fn a_session_reopens_where_the_last_one_stood() {
+        assert_eq!(start_stop(false, true, 4), NavStop::home());
+        assert_eq!(start_stop(false, false, 4), p(4));
+        // a benchmark fixture is not a session: every sweep arm photographs a
+        // document, so the landing must stay on the page the arms expect
+        assert_eq!(start_stop(true, true, 4), p(4));
+    }
+
+    /// The landing is a fact about the file, so the file is where it is
+    /// checked: a session that ends in 收件箱 writes the area, flushes, and the
+    /// next `AppState::new` over the same library reads it back as home
+    /// (ADR-0110). The `start_stop` table above only proves the rule; this
+    /// proves the row reaches SQLite and comes back out.
+    #[test]
+    fn a_library_left_in_the_area_opens_there_again() {
+        use super::{AppState, HandleArgs};
+        use crate::testing::ScratchDir;
+
+        let dir = ScratchDir::new("home-area");
+        let db = dir.path().join("library.db");
+        let args = HandleArgs {
+            blocks: 0,
+            auto_exit_secs: 0.0,
+            bench_pages: 0,
+            pictures: 0,
+            marks: 0,
+            code: 0,
+        };
+        let repo = || Some(std::sync::Arc::new(crate::storage::SqliteRepository::open(&db).unwrap()));
+
+        let first = AppState::new(&args, repo());
+        let page = first.open_page.get();
+        assert!(
+            page > 0,
+            "control: a seeded library opens on a document, so the assertion below is about the area"
+        );
+        assert_eq!(first.nav_start(), p(page), "a file with no such row is not home");
+
+        first.mark_home_area();
+        first.persistence_force_flush();
+        drop(first);
+
+        let second = AppState::new(&args, repo());
+        assert_eq!(second.nav_start(), NavStop::home(), "the area the session stood in came back from the file");
+        assert_eq!(
+            second.open_page.get(),
+            page,
+            "…and the document is still parked behind it, so leaving the area has somewhere to leave"
+        );
+    }
+
+    fn p(id: i32) -> NavStop {
+        NavStop::Page(id)
     }
 
     /// §二十二's promise in one number: a page of photographs must not cost
@@ -20117,7 +21580,9 @@ mod tests {
         // finished ones used to be folded into the view predicates, and are now
         // one switch the projection applies once.
         let view =
-            |v: i32, l: i64, sort: i32, show: bool| state.org_tasks(v, l, "", sort, &dates, -1, show);
+            |v: i32, l: i64, sort: i32, show: bool| {
+                state.org_tasks(v, l, "", sort, &dates, -1, show, "", &BTreeSet::new())
+            };
         let all = |v: i32, l: i64, sort: i32| view(v, l, sort, true);
         let open = |v: i32, l: i64, sort: i32| view(v, l, sort, false);
         state.rebuild_organizer();
@@ -20188,14 +21653,14 @@ mod tests {
         state.org_note_title(note, "会议记录".into());
         state.org_note_body(note, "关于同步".into());
         state.org_note_tags(note, "会议, 核心".into());
-        let found = state.org_notes("同步", "", -1);
+        let found = state.org_notes("同步", "", &BTreeSet::new(), -1);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].id, note as i32);
-        assert_eq!(state.org_notes("这个词不存在", "", -1).len(), 0);
+        assert_eq!(state.org_notes("这个词不存在", "", &BTreeSet::new(), -1).len(), 0);
         // the tag column's filter is the other needle: a note is found by a tag
         // it carries, and only by that tag
-        assert_eq!(state.org_notes("", "会议", -1).len(), 1);
-        assert_eq!(state.org_notes("", "不存在的标签", -1).len(), 0);
+        assert_eq!(state.org_notes("", "会议", &BTreeSet::new(), -1).len(), 1);
+        assert_eq!(state.org_notes("", "不存在的标签", &BTreeSet::new(), -1).len(), 0);
         // and the chip row's own counts, which the inbox one folds a dangling
         // list into
         let lists = state.org_lists(0, -1);
@@ -20222,15 +21687,15 @@ mod tests {
 
         // `项目` is a subtree — the tag itself and everything under it — while `项目2`
         // is a different tag that only *looks* nested.
-        assert_eq!(state.org_notes("", "项目", -1).len(), 3);
-        assert_eq!(state.org_notes("", "项目/工作", -1).len(), 1);
-        assert_eq!(state.org_notes("", "项目2", -1).len(), 1);
-        assert_eq!(state.org_notes("", "", -1).len(), 4, "the empty path is no filter");
+        assert_eq!(state.org_notes("", "项目", &BTreeSet::new(), -1).len(), 3);
+        assert_eq!(state.org_notes("", "项目/工作", &BTreeSet::new(), -1).len(), 1);
+        assert_eq!(state.org_notes("", "项目2", &BTreeSet::new(), -1).len(), 1);
+        assert_eq!(state.org_notes("", "", &BTreeSet::new(), -1).len(), 4, "the empty path is no filter");
 
         // The column starts at the top level…
         assert_eq!(
             state
-                .org_tag_rows_of("")
+                .org_tag_rows_of("", false, &BTreeSet::new())
                 .into_iter()
                 .map(|r| (r.name.to_string(), r.count, r.path.to_string()))
                 .collect::<Vec<_>>(),
@@ -20242,7 +21707,7 @@ mod tests {
         // …and one level down it is the *next* segment, each counting its subtree.
         assert_eq!(
             state
-                .org_tag_rows_of("项目")
+                .org_tag_rows_of("项目", false, &BTreeSet::new())
                 .into_iter()
                 .map(|r| (r.name.to_string(), r.count, r.path.to_string()))
                 .collect::<Vec<_>>(),
@@ -20264,16 +21729,17 @@ mod tests {
         let second = state.org_create_note().unwrap();
         state.org_note_tags(second, "项目/工作".into());
 
-        let rows = state.org_tag_rows_of("");
+        let rows = state.org_tag_rows_of("", false, &BTreeSet::new());
         assert_eq!(rows.len(), 1);
         assert_eq!((rows[0].name.to_string(), rows[0].count), ("项目".to_string(), 2));
     }
 
-    /// 转为待办: the note becomes a task and the note goes, carrying its body and its
-    /// tags — the same rule the Compose shell applies, so a note converted on either
-    /// device makes the same task.
+    /// 转为待办: the note becomes a task, carrying its body and its tags — the same
+    /// rule the Compose shell applies, so a note converted on either device makes
+    /// the same task. The note itself is **not** deleted here (ADR-0108): that is
+    /// the 撤销 bar's to do, which is what gives the user three seconds back.
     #[test]
-    fn a_note_can_be_turned_into_a_task_and_the_note_goes() {
+    fn a_note_becomes_a_task_and_its_note_waits_behind_the_bar() {
         use crate::core::organizer::{ListId, NoteId};
 
         let (state, _repo) = org_session();
@@ -20284,8 +21750,8 @@ mod tests {
         let title = state.org_note_to_task(note).unwrap();
         assert_eq!(title, "买牛奶", "the markdown that opens the line is not the title");
         assert!(
-            state.organizer().note(NoteId(note as u64)).is_none(),
-            "the note is gone"
+            state.organizer().note(NoteId(note as u64)).is_some(),
+            "the conversion leaves the note standing; only the bar's clock deletes it"
         );
 
         let catalog = state.organizer();
@@ -20309,12 +21775,14 @@ mod tests {
 
         let bare = |title: &str, body: &str| Note {
             id: crate::core::organizer::NoteId(1),
+            uuid: String::new(),
             title: title.into(),
             body: body.into(),
             pinned: false,
             tags: Vec::new(),
             created: 0,
             edited: 0,
+            ref_note: None,
         };
         assert_eq!(super::org_convert_title(&bare("会议", "# 别的")), "会议");
         assert_eq!(super::org_convert_title(&bare("", "\n  买了牛奶\n还有鸡蛋")), "买了牛奶");
@@ -20322,5 +21790,670 @@ mod tests {
         assert_eq!(super::org_convert_title(&bare("", "- 第一件事")), "第一件事");
         assert_eq!(super::org_convert_title(&bare("", "2. 第二步")), "第二步");
         assert_eq!(super::org_convert_title(&bare("", "   \n  ")), "");
+    }
+
+    // ---- the deferred delete (ADR-0108) ----
+    //
+    // What these tests are built to catch is the one thing the design risks: a
+    // delete that is *half* deferred. A row the catalog still has but a projection
+    // forgot to hide is a row that repaints itself back onto screen on the next
+    // keystroke; a row the projections hide and the undo stack records is a step
+    // the user never took, and Ctrl+Z would spend itself on it. So each test looks
+    // at both readers at once — the catalog, and the file behind it.
+
+    /// A pending delete hides the row from the list and leaves it in the catalog —
+    /// and, crucially, puts nothing on the undo stack: the first `undo_org()` after
+    /// a deferral is the title edit typed *before* it, not a phantom delete.
+    #[test]
+    fn a_pending_delete_hides_the_row_without_adding_a_step() {
+        use crate::core::organizer::NoteId;
+
+        let (state, _repo) = org_session();
+        let note = state.org_create_note().unwrap();
+        state.org_note_title(note, "会议记录".into());
+        assert_eq!(state.org_notes("", "", &BTreeSet::new(), -1).len(), 1);
+
+        state.org_defer_delete(vec![note], false, "已删除笔记「会议记录」".into());
+        assert!(state.org_notes("", "", &BTreeSet::new(), -1).is_empty(), "the row is off screen");
+        assert!(
+            state.organizer().note(NoteId(note as u64)).is_some(),
+            "the row is still in the catalog — that is what makes it undoable for free"
+        );
+
+        // The step the user took last is the title, so that is what undo spends.
+        assert!(state.undo_org().is_some());
+        assert_eq!(
+            state.organizer().note(NoteId(note as u64)).unwrap().title,
+            "",
+            "the delete added no step: undo walked back the title, not a deletion"
+        );
+    }
+
+    /// 撤销 writes nothing at all — not to the catalog, not to the file, not to the
+    /// undo stack. The rows simply stop being hidden.
+    #[test]
+    fn undoing_a_pending_delete_writes_nothing() {
+        use crate::core::organizer::NoteId;
+
+        let (state, repo) = org_session();
+        let keep = state.org_create_note().unwrap();
+        state.org_note_title(keep, "留下".into());
+        let gone = state.org_create_note().unwrap();
+        state.org_note_title(gone, "删掉".into());
+        state.persistence_force_flush();
+        assert_eq!(repo.load_organizer().unwrap().notes.len(), 2);
+
+        state.org_defer_delete(vec![gone], false, "已删除笔记「删掉」".into());
+        assert_eq!(state.org_notes("", "", &BTreeSet::new(), -1).len(), 1);
+        assert!(state.org_undo_pending());
+        assert!(
+            !state.org_undo_pending(),
+            "one bar, one take-back: the second click has nothing left to undo"
+        );
+
+        let rows = state.org_notes("", "", &BTreeSet::new(), -1);
+        assert_eq!(rows.len(), 2, "both rows are back on screen");
+        assert!(rows.iter().any(|r| r.id == gone as i32));
+        state.persistence_force_flush();
+        assert_eq!(
+            repo.load_organizer().unwrap().notes.len(),
+            2,
+            "and the file never heard about it: a take-back is not a write"
+        );
+        assert_eq!(
+            state.organizer().note(NoteId(gone as u64)).unwrap().title,
+            "删掉",
+            "the row comes back exactly as it was, title and all"
+        );
+    }
+
+    /// The bar's expiry is the only thing that reaches the command system — and a
+    /// token that no longer names the live batch commits nothing, which is what
+    /// keeps a superseded timer from deleting behind the user's back.
+    #[test]
+    fn only_the_bar_expiring_performs_the_delete() {
+        use crate::core::organizer::NoteId;
+
+        let (state, repo) = org_session();
+        let first = state.org_create_note().unwrap();
+        state.org_note_title(first, "第一条".into());
+        let second = state.org_create_note().unwrap();
+        state.org_note_title(second, "第二条".into());
+
+        let token = state.org_defer_delete(vec![first], false, "已删除笔记「第一条」".into());
+        // A second delete *commits* the first rather than queueing behind it,
+        // because one bar can only stand in front of one thing.
+        let next = state.org_defer_delete(vec![second], false, "已删除笔记「第二条」".into());
+        assert_ne!(token, next, "each batch gets its own token");
+        assert!(
+            state.organizer().note(NoteId(first as u64)).is_none(),
+            "the superseded delete landed the moment the new one was asked for"
+        );
+
+        // …and the old timer, still armed, must now find nothing to do.
+        assert!(!state.org_commit_pending(token));
+        assert!(!state.org_commit_pending(token), "a commit is one-shot");
+        assert!(state.org_commit_pending(next), "the live token commits");
+        assert!(state.organizer().note(NoteId(second as u64)).is_none());
+        assert!(state.org_pending().is_none(), "and the bar is empty afterwards");
+
+        state.persistence_force_flush();
+        assert!(repo.load_organizer().unwrap().notes.is_empty());
+        // Both deletes are steps now — which is the documented downside of the
+        // bar: after the window closes, taking them back is two Ctrl+Zs.
+        assert!(state.undo_org().is_some());
+        assert!(state.undo_org().is_some());
+        assert_eq!(state.org_notes("", "", &BTreeSet::new(), -1).len(), 2);
+    }
+
+    /// Every projection answers to the same hidden set. A number that counts a row
+    /// the pixels dropped is the window disagreeing with itself, so this walks all
+    /// eight with one pending task and one pending note.
+    #[test]
+    fn every_projection_excludes_a_pending_row() {
+        let (state, _repo) = org_session();
+        let list = state.org_create_list("工作".into()).unwrap();
+        let hidden_task = state.org_create_task(list).unwrap();
+        state.org_task_title(hidden_task, "要删的".into());
+        state.org_task_due(hidden_task, crate::core::today_iso());
+        let other_task = state.org_create_task(list).unwrap();
+        state.org_task_title(other_task, "留下的".into());
+        let hidden_note = state.org_create_note().unwrap();
+        state.org_note_title(hidden_note, "要删的笔记".into());
+        state.org_note_tags(hidden_note, "项目/工作".into());
+        // A second tagged note, so the 项目 chip still exists when the first is
+        // hidden — a tag is a projection over notes, and dropping its only note
+        // drops the row, which is a different fact from the count moving.
+        let other_note = state.org_create_note().unwrap();
+        state.org_note_title(other_note, "另一条".into());
+        state.org_note_tags(other_note, "项目/生活".into());
+
+        let dates = super::OrgDates::now();
+        let tasks = |s: &super::AppState| {
+            s.org_tasks(3, list, "", 0, &dates, -1, true, "", &BTreeSet::new())
+                .iter()
+                .map(|r| r.id)
+                .collect::<Vec<_>>()
+        };
+        let chips = |s: &super::AppState| {
+            s.org_lists(0, list)
+                .into_iter()
+                .map(|r| (r.id, r.count))
+                .collect::<Vec<_>>()
+        };
+        let board = |s: &super::AppState| {
+            s.org_board_rows("", 0, &dates)
+                .iter()
+                .map(|c| (c.id, c.count))
+                .collect::<Vec<_>>()
+        };
+        let tags = |s: &super::AppState| {
+            s.org_tag_rows_of("", false, &BTreeSet::new())
+                .into_iter()
+                .map(|r| (r.name.to_string(), r.count))
+                .collect::<Vec<_>>()
+        };
+
+        // Nothing pending: every count says two, one, one…
+        assert_eq!(tasks(&state).len(), 2);
+        assert!(tasks(&state).contains(&(hidden_task as i32)));
+        assert_eq!(chips(&state), vec![(-1, 0), (list as i32, 2)]);
+        assert_eq!(board(&state), vec![(-1, 0), (list as i32, 2)]);
+        assert_eq!(state.org_smart_counts_of("", &dates), [0, 1, 0, 2, 0]);
+        assert_eq!(state.org_view_header(3, list, "", &dates).1, "2 项待办");
+        assert_eq!(state.org_progress(), (0, 2));
+        assert_eq!(state.org_notes("", "", &BTreeSet::new(), -1).len(), 2);
+        assert_eq!(tags(&state), vec![("项目".to_string(), 2)]);
+
+        // A task pending: all six task-side answers drop it together.
+        state.org_defer_delete(vec![hidden_task], true, "已删除任务「要删的」".into());
+        assert_eq!(tasks(&state), vec![other_task as i32]);
+        assert_eq!(chips(&state), vec![(-1, 0), (list as i32, 1)]);
+        assert_eq!(board(&state), vec![(-1, 0), (list as i32, 1)]);
+        assert_eq!(state.org_smart_counts_of("", &dates), [0, 0, 0, 1, 0]);
+        assert_eq!(state.org_view_header(3, list, "", &dates).1, "1 项待办");
+        assert_eq!(state.org_progress(), (0, 1));
+        assert_eq!(
+            state.org_notes("", "", &BTreeSet::new(), -1).len(),
+            2,
+            "the note half is untouched by a task batch"
+        );
+        state.org_undo_pending();
+
+        // A note pending: the list and the tag subtree drop it the same way.
+        state.org_defer_delete(vec![hidden_note], false, "已删除笔记「要删的笔记」".into());
+        assert_eq!(
+            state.org_notes("", "", &BTreeSet::new(), -1)
+                .iter()
+                .map(|r| r.id)
+                .collect::<Vec<_>>(),
+            vec![other_note as i32]
+        );
+        assert_eq!(tags(&state), vec![("项目".to_string(), 1)]);
+        assert_eq!(tasks(&state).len(), 2, "and the tasks never noticed");
+    }
+
+    // ---- 详细信息 ----
+    //
+    // The block is six strings Rust decided, so the tests are about the deciding:
+    // a length counted in **characters** (a byte count would tell a Chinese
+    // reader their four-character note is twelve words long), the day the store
+    // actually holds rather than the one the panel would rather show, and an age
+    // that stops being printed twice once it has run out of coarse units.
+
+    #[test]
+    fn the_details_block_says_what_the_store_holds() {
+        use crate::core::organizer::NoteId;
+
+        let (state, _repo) = org_session();
+        let note = state.org_create_note().unwrap();
+        state.org_note_title(note, "读书笔记".into());
+        state.org_note_body(note, "买了牛奶".into());
+        state.org_note_tags(note, "会议, 项目/工作".into());
+        state.org_note_pinned(note, true);
+
+        let details = state.org_note_details(note);
+        assert_eq!(details.id, note.to_string());
+        assert_eq!(details.pinned, "是");
+        assert_eq!(details.length, "4 字", "four characters, not twelve bytes");
+        assert_eq!(details.tags, "#会议  #项目 / 工作");
+
+        // The two dates name the day the row was stamped on. Written seconds ago,
+        // so the age half is 刚刚 or a minute or two old — the day is the claim.
+        let created = state.organizer().note(NoteId(note as u64)).unwrap().created;
+        let today = crate::core::date::to_iso(crate::app::state::now_secs().div_euclid(86_400));
+        assert!(
+            details.created.starts_with(&today),
+            "创建 reads {details_created}",
+            details_created = details.created
+        );
+        assert!(details.edited.starts_with(&today));
+        // Both stamps are the instant this test just wrote, so the two rows agree:
+        // the store being truthful, not the panel repeating itself.
+        assert_eq!(
+            details.created,
+            super::org_day_and_age(created),
+            "创建 is the stored created, not the stored edited"
+        );
+    }
+
+    #[test]
+    fn a_note_with_no_body_is_measured_by_its_title() {
+        let (state, _repo) = org_session();
+        let titled = state.org_create_note().unwrap();
+        state.org_note_title(titled, "会议记录".into());
+        assert_eq!(state.org_note_details(titled).length, "4 字");
+
+        let blank = state.org_create_note().unwrap();
+        assert_eq!(state.org_note_details(blank).length, "0 字");
+        assert_eq!(state.org_note_details(blank).tags, "无");
+        assert_eq!(state.org_note_details(blank).pinned, "否");
+        assert_eq!(state.org_note_details(-1).id, "—", "nothing selected");
+    }
+
+    #[test]
+    fn an_instant_prints_its_day_and_its_age_once() {
+        let day = |offset: i64| {
+            super::org_day_and_age(crate::app::state::now_secs() - offset * 86_400)
+        };
+        let iso = |offset: i64| {
+            crate::core::date::to_iso((crate::app::state::now_secs() - offset * 86_400).div_euclid(86_400))
+        };
+        assert_eq!(day(5), format!("{} · 5 天前", iso(5)));
+        assert_eq!(day(0), format!("{} · 刚刚", iso(0)));
+        // Past thirty days `org_when` has no coarse unit left and answers with the
+        // day itself. Concatenating that blindly would print the same date twice.
+        assert_eq!(
+            day(40),
+            iso(40),
+            "an age that is only a date says it once"
+        );
+    }
+
+    // ─── SPEC §四十一 / ADR-0111: 多选 ───────────────────────────────────────
+    //
+    // The picked set lives in Rust and the rows carry the tick, so what these test
+    // is the two things the pixels cannot settle by themselves: which ids the bar
+    // is standing over, and how many undo steps a batch costs.
+
+    /// Project the area the way `org_refresh` does. With no window
+    /// `rebuild_organizer` reads the default filters — 全部 / 收集箱 / no query —
+    /// which is the view these tests want, and it is what fills the two models
+    /// `org_shown_ids` answers from.
+    fn org_project(state: &super::AppState) {
+        state.rebuild_organizer();
+    }
+
+    /// Three rows, one 删除, one Ctrl+Z. The batch is one history entry because
+    /// `exec_all` plans every command against the same pre-state — a batch that
+    /// pushed a step per row would hand back a single note here and leave the
+    /// other two gone.
+    #[test]
+    fn a_batched_delete_costs_one_step_and_one_undo_returns_every_row() {
+        use crate::core::organizer::NoteId;
+
+        let (state, repo) = org_session();
+        let mut ids = Vec::new();
+        for title in ["第一条", "第二条", "第三条"] {
+            let note = state.org_create_note().unwrap();
+            state.org_note_title(note, title.into());
+            ids.push(note);
+        }
+        state.persistence_force_flush();
+        assert_eq!(repo.load_organizer().unwrap().notes.len(), 3);
+
+        let token = state.org_defer_delete(ids.clone(), false, "已删除3 条笔记".into());
+        org_project(&state);
+        assert!(
+            state.org_notes("", "", &BTreeSet::new(), -1).is_empty(),
+            "one bar covers all three rows"
+        );
+        assert!(state.org_commit_pending(token));
+        state.persistence_force_flush();
+        assert!(repo.load_organizer().unwrap().notes.is_empty(), "the file agrees");
+
+        assert!(state.undo_org().is_some());
+        assert_eq!(state.org_notes("", "", &BTreeSet::new(), -1).len(), 3, "one undo returned the batch");
+        let catalog = state.organizer();
+        for (id, title) in ids.iter().zip(["第一条", "第二条", "第三条"]) {
+            let note = catalog
+                .note(NoteId(*id as u64))
+                .expect("the row came back with its title, not as an empty shell");
+            assert_eq!(note.title, title);
+        }
+    }
+
+    /// 完成 on a batch: every open row ticked in one step, a row that was already
+    /// done left out of the batch rather than restamped, and a batch with nothing
+    /// in it costs no step at all.
+    #[test]
+    fn completing_a_batch_ticks_every_row_as_one_step() {
+        use crate::core::organizer::{NoteId, TaskId};
+
+        let (state, _repo) = org_session();
+        let a = state.org_create_task(-1).unwrap();
+        let b = state.org_create_task(-1).unwrap();
+        let c = state.org_create_task(-1).unwrap();
+        state.org_task_title(a, "第一件".into());
+        state.org_task_title(b, "第二件".into());
+        state.org_task_title(c, "第三件".into());
+        state.org_task_done(c, true);
+
+        assert_eq!(
+            state.org_complete_ids(&[a, b, c]),
+            2,
+            "the row that was already done is not in the batch"
+        );
+        let done = state.organizer();
+        for id in [a, b, c] {
+            assert!(done.task(TaskId(id as u64)).unwrap().done);
+        }
+        drop(done);
+
+        assert!(state.undo_org().is_some());
+        let back = state.organizer();
+        assert!(!back.task(TaskId(a as u64)).unwrap().done, "the first row undid");
+        assert!(!back.task(TaskId(b as u64)).unwrap().done, "…and the second, same step");
+        assert!(
+            back.task(TaskId(c as u64)).unwrap().done,
+            "the row the batch never touched stayed done"
+        );
+        drop(back);
+
+        // A no-op batch writes nothing, so it cannot spend a step either: undo
+        // still walks back the edit the user actually made.
+        assert_eq!(state.org_complete_ids(&[]), 0, "nothing to tick");
+        let note = state.org_create_note().unwrap();
+        state.org_note_title(note, "标题".into());
+        assert_eq!(state.org_complete_ids(&[999_999, 1_000_000]), 0, "no such task");
+        assert!(state.undo_org().is_some());
+        assert_eq!(
+            state.organizer().note(NoteId(note as u64)).unwrap().title,
+            "",
+            "undo spent the title, not a phantom batch"
+        );
+    }
+
+    /// The mode is a session fact, not a write: picking rows touches no row, and
+    /// leaving it drops the ids so the next entry cannot light numbers nobody
+    /// picked this time.
+    #[test]
+    fn picking_rows_fills_the_set_and_writes_nothing() {
+        let (state, repo) = org_session();
+        let a = state.org_create_note().unwrap();
+        state.org_note_title(a, "第一条".into());
+        let b = state.org_create_note().unwrap();
+        state.org_note_title(b, "第二条".into());
+        state.persistence_force_flush();
+
+        org_project(&state);
+        state.org_selection_enter(false);
+        let drawn = state.org_shown_ids(false);
+        assert_eq!(drawn.len(), 2);
+        for id in &drawn {
+            state.org_selection_toggle(*id, false);
+        }
+        assert_eq!(state.org_selection_count(false), 2);
+        assert_eq!(
+            state.org_selection_ids(false),
+            drawn,
+            "the batch is in the order the page draws it"
+        );
+
+        state.persistence_force_flush();
+        let stored = repo.load_organizer().unwrap();
+        assert_eq!(stored.notes.len(), 2, "picking deleted nothing");
+        assert_eq!(stored.notes.iter().filter(|n| n.title.is_empty()).count(), 0);
+        assert!(stored.notes.iter().any(|n| n.title == "第一条"));
+
+        // 撤销 on the bar the toggle would produce, if it were a delete
+        assert!(state.org_pending().is_none(), "the set is not a delete offer");
+        state.org_selection_clear();
+        assert_eq!(state.org_selection_count(false), 0);
+        assert!(state.org_selection_ids(false).is_empty());
+    }
+
+    /// 全选 answers to the rows on screen, which is why it reads the projected
+    /// models: a row behind the 撤销 bar is not lit, is not counted, and is not
+    /// in the batch the verb runs.
+    #[test]
+    fn select_all_covers_the_rows_showing_and_not_the_one_behind_the_bar() {
+        let (state, _repo) = org_session();
+        for title in ["甲", "乙", "丙"] {
+            let note = state.org_create_note().unwrap();
+            state.org_note_title(note, title.into());
+        }
+        org_project(&state);
+        let all = state.org_shown_ids(false);
+        assert_eq!(all.len(), 3);
+
+        let hidden = all[1];
+        state.org_defer_delete(vec![hidden], false, "已删除笔记「乙」".into());
+        org_project(&state);
+        let shown = state.org_shown_ids(false);
+        assert_eq!(shown.len(), 2, "the projection dropped it");
+
+        state.org_selection_enter(false);
+        state.org_selection_set_all(&shown, false);
+        assert_eq!(state.org_selection_count(false), 2);
+        assert_eq!(state.org_selection_ids(false), shown, "全选 stopped at the screen");
+
+        // The bar comes back: the count was never going to include the row that
+        // was hidden, and once it is drawn again 全选 grows over it.
+        assert!(state.org_undo_pending());
+        org_project(&state);
+        let back = state.org_shown_ids(false);
+        assert_eq!(back.len(), 3);
+        state.org_selection_set_all(&back, false);
+        assert_eq!(state.org_selection_count(false), 3);
+
+        // the same call on a full selection is 取消全选 — the button's label and
+        // its number read the same two counts, so they cannot disagree
+        state.org_selection_set_all(&back, false);
+        assert_eq!(state.org_selection_count(false), 0);
+    }
+
+    /// Note 3 and task 3 are both `3`. The set carries which kind it holds, so a
+    /// pick can never reach across the tab — and a set on one half reads as
+    /// nothing picked on the other.
+    #[test]
+    fn a_pick_never_crosses_from_notes_into_tasks() {
+        let (state, _repo) = org_session();
+        let note = state.org_create_note().unwrap();
+        state.org_note_title(note, "一条笔记".into());
+        let task = state.org_create_task(-1).unwrap();
+        state.org_task_title(task, "一个任务".into());
+        org_project(&state);
+
+        state.org_selection_enter(false);
+        state.org_selection_toggle(note, false);
+        assert_eq!(state.org_selection_count(false), 1);
+        assert_eq!(state.org_selection_count(true), 0, "a note set lights no task");
+
+        state.org_selection_toggle(task, true);
+        assert_eq!(state.org_selection_count(true), 1);
+        assert_eq!(state.org_selection_count(false), 0, "…and no longer the note");
+        assert!(state.org_selection_ids(false).is_empty());
+    }
+
+    /// 复制: bodies in draw order, a body-less note saying its title instead, and a
+    /// blank line between rows rather than one for every row.
+    #[test]
+    fn copied_text_is_the_bodies_in_the_order_the_page_drew_them() {
+        let (state, _repo) = org_session();
+        let long = state.org_create_note().unwrap();
+        state.org_note_title(long, "有正文".into());
+        state.org_note_body(long, "甲的第一行\n甲的第二行".into());
+        let titled = state.org_create_note().unwrap();
+        state.org_note_title(titled, "只有标题".into());
+        let blank = state.org_create_note().unwrap();
+        state.org_note_title(blank, "空格算没有正文".into());
+        state.org_note_body(blank, "   ".into());
+        org_project(&state);
+
+        let ids = state.org_shown_ids(false);
+        assert_eq!(ids.len(), 3);
+        state.org_selection_enter(false);
+        state.org_selection_set_all(&ids, false);
+        let text = state.org_note_copy_text(&state.org_selection_ids(false));
+
+        let marker = |id: i64| -> &'static str {
+            if id == long {
+                "甲"
+            } else if id == titled {
+                "只有标题"
+            } else {
+                "空格算没有正文"
+            }
+        };
+        let at: Vec<usize> = ids
+            .iter()
+            .map(|id| {
+                text.find(marker(*id))
+                    .expect("every note in the batch is in the text")
+            })
+            .collect();
+        assert!(
+            at.windows(2).all(|w| w[0] < w[1]),
+            "the text follows the rows, not the ids"
+        );
+        assert!(text.contains("甲的第二行"), "a body travels whole");
+        assert_eq!(
+            text.matches("\n\n").count(),
+            ids.len() - 1,
+            "one blank line between rows, none extra"
+        );
+        assert_eq!(state.org_note_copy_text(&[]), "", "nothing picked copies nothing");
+    }
+
+    /// 复制 carries each row's 唯一 ID (SPEC §四十一): the text's whole purpose is
+    /// that an AI can answer with operations that name the rows, and only the uuid
+    /// survives a sync — an integer id would name a different row on the phone.
+    #[test]
+    fn the_copied_text_names_every_row_by_its_unique_id() {
+        use crate::core::organizer::TaskId;
+
+        let (state, _repo) = org_session();
+        let a = state.org_create_note().unwrap();
+        state.org_note_body(a, "第一条".into());
+        let b = state.org_create_note().unwrap();
+        state.org_note_title(b, "第二条".into());
+
+        let uuids: Vec<String> = state
+            .organizer()
+            .notes
+            .iter()
+            .map(|n| n.uuid.clone())
+            .collect();
+        assert_eq!(uuids.len(), 2);
+        for uuid in &uuids {
+            assert_eq!(uuid.len(), 32, "{uuid:?} is 32 hex characters");
+        }
+        let text = state.org_note_copy_text(&[a, b]);
+        for uuid in &uuids {
+            assert!(text.contains(&format!("ID: {uuid}")), "{text}");
+        }
+
+        // The tasks' half is the same shape: title, 备注, then the ID.
+        let t = state.org_create_task(-1).unwrap();
+        state.org_task_title(t, "任务".into());
+        state.org_task_notes(t, "备注".into());
+        let task_uuid = state.organizer().task(TaskId(t as u64)).unwrap().uuid.clone();
+        let task_text = state.org_task_copy_text(&[t]);
+        assert!(task_text.contains("任务\n\n备注"), "{task_text}");
+        assert!(task_text.ends_with(&format!("ID: {task_uuid}")), "{task_text}");
+    }
+
+    /// 反向筛选 (SPEC §四十一): a hidden path takes itself **and its subtree** out,
+    /// exactly as 仅显示 keeps that subtree — while a tag that merely looks nested
+    /// (`项目2`) is untouched in either direction.
+    #[test]
+    fn a_hidden_tag_removes_its_subtree_and_leaves_its_lookalike() {
+        let (state, _repo) = org_session();
+        let child = state.org_create_note().unwrap();
+        state.org_note_tags(child, "项目/工作".into());
+        let grandchild = state.org_create_note().unwrap();
+        state.org_note_tags(grandchild, "项目/工作/子项目".into());
+        let parent = state.org_create_note().unwrap();
+        state.org_note_tags(parent, "项目".into());
+        let lookalike = state.org_create_note().unwrap();
+        state.org_note_tags(lookalike, "项目2".into());
+
+        let hidden = |path: &str| {
+            let set: BTreeSet<String> = [path.to_string()].into_iter().collect();
+            state.org_notes("", "", &set, -1).len()
+        };
+        assert_eq!(state.org_notes("", "", &BTreeSet::new(), -1).len(), 4);
+        assert_eq!(hidden("项目"), 1, "the parent takes its whole subtree");
+        assert_eq!(hidden("项目/工作"), 2, "…and a child takes only its own");
+        assert_eq!(hidden("项目2"), 3, "项目2 is a different tag, not a subtree");
+
+        // The columns say so, and the set itself is Rust's — the row is a
+        // projection of it, never a second copy.
+        let set: BTreeSet<String> = ["项目".to_string()].into_iter().collect();
+        let rows = state.org_tag_rows_of("", false, &set);
+        assert!(
+            rows.iter().any(|r| r.path == "项目" && r.excluded),
+            "the column paints the hidden path"
+        );
+        assert!(state.org_exclude_toggled("项目"));
+        assert!(state.org_excluded().contains("项目"));
+        assert!(!state.org_exclude_toggled("项目"));
+        assert!(state.org_excluded().is_empty(), "toggling twice is toggling zero");
+
+        // The tasks' half answers to the same set: a tag filter is one question
+        // asked of whichever half is on screen.
+        let dates = super::OrgDates::now();
+        let t = state.org_create_task(-1).unwrap();
+        state.org_task_tags(t, "项目/工作".into());
+        let set: BTreeSet<String> = ["项目/工作".to_string()].into_iter().collect();
+        assert_eq!(
+            state.org_tasks(0, -1, "", 0, &dates, -1, true, "", &set).len(),
+            0,
+            "the task's tag is hidden too"
+        );
+        assert_eq!(
+            state.org_tasks(0, -1, "", 0, &dates, -1, true, "", &BTreeSet::new()).len(),
+            1
+        );
+    }
+
+    /// 指令 (SPEC §四十一): the operations of one batch see each other, the batch is
+    /// **one** undo step, and an action the half cannot take is refused by name
+    /// rather than silently skipped.
+    #[test]
+    fn a_batch_of_instructions_composes_and_costs_one_step() {
+        use crate::core::organizer::NoteId;
+
+        let (state, _repo) = org_session();
+        let a = state.org_create_note().unwrap();
+        state.org_note_body(a, "第一条".into());
+        state.org_note_tags(a, "原有".into());
+        let uuid = state.organizer().note(NoteId(a as u64)).unwrap().uuid.clone();
+
+        let json = format!(
+            r#"{{"operations":[
+                {{"action":"add_tags","uuid":"{uuid}","tags":["重要"]}},
+                {{"action":"update","uuid":"{uuid}","content":"改过了"}},
+                {{"action":"set_completed","uuid":"{uuid}"}},
+                {{"action":"update","uuid":"没有这条笔记","content":"x"}}
+            ]}}"#
+        );
+        let line = state.org_apply_commands(false, &json).expect("the payload parses");
+        assert!(line.starts_with("指令完成：成功 2 / 失败 2"), "{line}");
+        assert!(line.contains("笔记不支持动作 set_completed"), "{line}");
+
+        let note = state.organizer().note(NoteId(a as u64)).unwrap().clone();
+        assert_eq!(note.body, "改过了", "the second operation saw the first");
+        assert_eq!(
+            note.tags,
+            vec!["原有".to_string(), "重要".to_string()],
+            "add_tags is an increment, not a replacement"
+        );
+
+        assert!(state.undo_org().is_some());
+        let back = state.organizer().note(NoteId(a as u64)).unwrap().clone();
+        assert_eq!(back.body, "第一条", "one Ctrl+Z took the whole batch back");
+        assert_eq!(back.tags, vec!["原有".to_string()]);
     }
 }

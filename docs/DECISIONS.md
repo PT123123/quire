@@ -2,6 +2,347 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0112 · The tag column moves right, a tag can be hidden, and an AI's batch lands as one step
+
+Decision: 标签 becomes the card's **last** column; a tag path can be **excluded** as well as
+included (`AppState.org_excluded`, a `BTreeSet<String>` in Rust, with one drawn ⊖ per row
+and a `清除筛选` row); the tasks' half gains the same include/exclude filter; `复制` carries
+each row's **唯一 ID**; and a new `指令` dialog takes the reference server's
+`{"operations":[…]}` payload and applies it through `exec_all` — **one undo step** — over
+the rows named by uuid. The pinned `quire-core` `rev` moves to `4899857`, which carries the
+core's own 唯一 ID (ADR-0002) and its 引用 (`ref_note`, core ADR-0001).
+
+Why the column moves: the reference puts 标签 on the right, and so does the ask — "标签侧边栏
+不要放在左边，要放在右边". A tag column is a *filter over the list beside it*, and the right
+edge is the side a pointer reaches without crossing the rows it is about to hide. It also
+settles which column is which: the list is what is being read, the detail is what is
+selected, and the nav is the lens.
+
+Why exclusion: "不只是筛选，还有反向筛选 — 当前界面不想看到某些 tag". 仅显示 and 排除 are two
+answers to one question, which is why the reference keeps them in one toolbar. They are
+kept from contradicting each other at the control that asks — picking a hidden path
+un-hides it, hiding the included path drops the include — because a filter that hides what
+it shows is a list that is empty for no visible reason. `tag_matches` with the answer
+turned around is the whole of it, so hiding `项目` hides its subtree and leaves `项目2`.
+
+Why the tasks' half too: a task carries tags exactly as a note does, and the reference
+filters both. The two halves share **one** `OrgTagColumn` component, one include path and
+one excluded set — a second column would be a second set of rules about the same question —
+and a tab switch clears both, because a note's path is not a task's.
+
+Why `复制` carries the uuid: the workflow is 复制 → an AI → a batch of instructions back, and
+an instruction has to name a row that means the same thing on the device that answers. `id`
+does not (core ADR-0002): it is a per-device watermark the merge renumbers. A row an older
+peer sent without one still has a name — `local:<id>`, the reference shells' own spelling —
+so no row is ever anonymous.
+
+Why the dialog is a card inside the area: the window has no text-entry overlay to reuse
+(the delete confirmation is one line of message; this is a page of JSON), and what it acts
+on is *these* rows. Being the area's last child puts it above the three columns without a
+second scrim in `AppWindow`, and its own `TouchArea` is what makes the rows behind it
+unclickable while a batch is being pasted.
+
+Why `restore` is refused rather than omitted from the parser: the reference's delete is
+soft and this build's is final, so there is nothing to restore *from*. Leaving it out of
+the template while refusing it **by name** in the payload is the honest pair — the count
+means the same thing either way, and the failure is legible.
+
+Consequences:
+
+- **A batch's operations see each other.** `exec_all` plans every command against the same
+  pre-state, which a whole-row `Update` cannot tolerate twice: the parser therefore
+  simulates the batch on a **copy of the catalog**, so `add_tags` followed by `update`
+  keeps the tag and a `create`'s uuid is addressable later in the same batch. Each
+  command's `before` is the row the previous operation left, so the batch's own reverts
+  walk back through every step and one Ctrl+Z restores the original.
+- **Replies are visible now**, because the bumped rev brings `ref_note`: the note list and
+  the tag column skip replies and the detail pane shows them under the body. Without that a
+  `comment` instruction would have created a note indistinguishable from an ordinary one.
+  Writing a reply from the UI (a reply box) is still not here.
+- The bump carries 引用's own follow-ups: `org_create_note` and 指令's `create` write
+  `ref_note: None`, and the reference's reply affordances are recorded as not-in-this-slice
+  in `SPEC.md` §四十一.
+- `notes-filter`, `notes-commands` and their dark arms join the sweep. Every other
+  organizer arm moves, because the card's three columns did: the nav's 208 px now sit at
+  the right edge and the list takes the space it used to share with it.
+
+## ADR-0111 · 多选 is a set that carries its own kind, and a batch costs one undo step
+
+Decision: the area gains a picking mode. The picked ids live in `AppState` as one
+`BTreeSet<i64>` **tagged with the half of the area it belongs to**; the mode is a flag on
+the window; and every batch write — 完成, and the 删除 the bar performs — is planned by
+`core::command::exec_all`, so **one Ctrl+Z takes the whole batch back**.
+
+Why: the reference shells open multi-select with a long press and hold a single
+`Set<Long>` for notes and tasks together. Neither transfers cleanly. A desktop window has
+no long press to port, and one numeric set for two kinds is a bug the reference carries
+quietly: note 3 and task 3 are both `3`, so a set that survives a tab switch lights the
+*other* kind's rows by row number, and 删除 then acts on rows nobody picked. Kind-tagging
+the set is cheaper than policing it, and it is the only shape in which "已选 N 项" can be
+true while both halves exist.
+
+Consequences:
+
+- **Three doors, one mode**: the header's 多选 button (the notes tab always, the tasks tab
+  in list mode), a task row's ⋯ → 多选 (which enters *with that row already picked* — what
+  a long press means on the reference), and the four scenes. Once inside, a row tap picks
+  rather than opens through the *same* callbacks (`org-note-selected`, `org-task-selected`,
+  `org-task-done-toggled`), so the detail pane cannot be moved by a pick.
+- **One control, two meanings, decided in Rust**: the box in front of a task row is the
+  pick while 多选 is on and the done state otherwise (`OrgCheck` draws `task.picked`, and
+  the round shape goes square). The note row had no box at all, so 多选 grew one — drawn
+  last among the row's children so its own `TouchArea` is the one that answers.
+- That note box is an **overlay at the row's top-right**, so the title's line yields to it:
+  `padding-right: 22px` on the title row while 多选 is on, and 0 otherwise. Measured in
+  `notes-select` with a title long enough to elide: its last ink ends at x 853 and the box's
+  border starts at x 883, 30 px of clean background between them. Without the padding the
+  text region runs to the row's own right padding (~x 902) — straight under an 18 px box
+  whose interior is transparent while unpicked, which would have drawn a border through the
+  ellipsis. The excerpt line below needs nothing: the box ends above it.
+- The header is **replaced**, not appended to: `已选 N 项 · 全选/取消全选 · 复制|完成 · 删除 · ✕`.
+  A view title while picking is the window answering a question nobody is asking.
+- **`org_shown_ids` reads the projected `VecModel`s**, never the catalog. "What is showing"
+  *is* those models — a second copy of the filters would be a second answer, free to
+  disagree with the pixels. This is what makes 全选 honest about the two things that remove
+  a row from the screen: a filter, and the 撤销 bar (ADR-0108). A row behind the bar is not
+  lit, not counted, and not in the batch.
+- **The count is an intersection** (`org_selection_ids` ∩ shown), for the same reason: the
+  label 全选/取消全选 and the number are both read off those two counts, so a set still
+  holding a row the screen dropped cannot promise a bigger batch than the verb delivers.
+- Moving ends the mode. `org_show` — the paint every tab change and every entry into the
+  area goes through — clears the flag and the ids before it draws, so no path can leave a
+  set behind a tab switch. Leaving by ✕ is the same call.
+- **The ✕ is drawn, not typed** (`OrgButton.icon-name`, measured after the fact). The first
+  build's bar had an invisible exit: the button occupied its slot (x 884–902, the same slot
+  the header's 多选 button uses) and every pixel of it was `FFFFFF`, because `✕` is U+2715 —
+  Dingbats, and no face in this app's font chain carries it. `DatabaseFilterPopup` documents
+  exactly this failure ("a blank box whose TouchArea still deleted the rule"), and the bar
+  repeated it. It matters more here than there because ADR-0111 binds no Escape: an
+  invisible ✕ is an invisible *only* door. `☑` (U+2611) was suspected of the same and is
+  **not** — it has ink in `tasks` (x 563–577, y 198–204), which is why the sweep now seeds
+  the subtasks onto the inbox row: no arm had ever drawn that counter, so the glyph had no
+  photograph either way. Font tables predicted the wrong answer for both; only the render
+  settled them.
+- **No Escape binding, deliberately.** The reference's bars close on the back gesture; here
+  `AppWindow.slint` binds no Escape at all, and adding one would take the key from the
+  editor and from every `TextInput` that already uses it. ✕ is the door.
+- **A batch is one step**, which is more than the reference gives: its 完成 calls the
+  single-row write N times, so N Ctrl+Zs undo one row at a time. `exec_all` plans every
+  command against the same pre-state and pushes one history entry, so `org_complete_ids`
+  and the batch delete each cost one. `exec_org_all` is the same call on
+  `ORGANIZER_STACK`, so the batch lands on the area's stack and not the page's.
+- That upgrade is not only for 多选: `org_commit_pending` now sends **its whole pending
+  batch** through the same path, so the bar's 删除 is one step per bar rather than per row.
+- **No core change and no rev bump**, and that is load-bearing for the round's order:
+  `exec_all` and `ORGANIZER_STACK` both exist at the pinned rev `d43b095`, so this ships
+  ahead of S3, whose `Note.ref_note` requires the three shells to move together.
+- **Session-only in every direction**: no `Change` variant, no `user_version` move, nothing
+  in `SyncSnapshot`. A library this shell writes opens in the other two unchanged, and a
+  peer cannot be sent a selection it did not make.
+- **复制** writes nothing at all: the picked notes as their bodies (a note with no body says
+  its title), joined by a blank line **in the order the page drew them** — the ids come from
+  the intersection above, so the clipboard text and the ticks agree.
+- Six tests (`state.rs`): a batch delete costing one step and returning every row with
+  its title, a batch 完成 that leaves an already-done row out of the step, picking writing
+  nothing, 全选 stopping at the screen and growing when the bar comes back, the set never
+  crossing kinds, and the copied text's order and separators.
+- The sweep gains four scenes (`notes-select`, `tasks-select` and their dark arms), and
+  fifteen of the seventeen organizer arms it already had move — the header grew a 多选
+  button. Each one moves by **188 px (light) / 185 px (dark) inside a 22×12 box at y 73–84**:
+  the ink of those two characters, and nothing else, because a non-danger `OrgButton` draws
+  no background and no border. The two board arms stay byte-identical, which is the control
+  for the `org-tab == 0 || org-mode == 0` gate on the button.
+
+## ADR-0110 · 收件箱 is home: the back stack has two kinds of place, and the area the session stood in reaches the file
+
+Decision: 收件箱 is the window's floor. The Go Back stack stops storing page ids and stores
+**stops** — a document, or the organizer on one of its two tabs — so a back step can be *at*
+the area, retrace into it, and retrace out of it; with nothing left behind, a back step
+lands on 笔记 (home) rather than going nowhere; and the one fact about the area that
+outlives the session is *which area the session ended in*, kept as a `current-area` meta
+row beside the `current-page` row it sits next to.
+
+Why: ADR-0015's home is two things on a phone — a landing, and a floor for the back
+gesture. The desktop had neither, and for the same reason: `NavHistory` was a
+`Vec<i32>` of pages, which is a stack that cannot represent where the window actually is
+when the organizer is showing. So `Alt+←` from 笔记 did not leave the area, it *jumped
+over* it and painted a document under a window that had just been showing one — a door the
+user walked through vanishing behind them. The fix is not a new button: it is that the
+stack had one kind of entry and the window has two areas.
+
+Consequences:
+
+- `NavStop` is `Page(i32) | Org(i32)`, and `Org(0)` is home. `record`/`step` keep their
+  rules exactly as they were (a move to where you already stand is not a step; deleted
+  pages are skipped, not opened; the stack is bounded), so the four stepping tests
+  unchanged in meaning.
+- **`back` is not `step`.** With the stack empty, `back` pushes the stop being left onto
+  the *forward* stack and answers home, which is what makes the walk down reversible —
+  `Alt+→` from home returns the document you came from. Nothing lies behind home, and
+  behind a window with no stop open at all (id 0) either: the first frame decides that one.
+- `nav_here()` is **derived** from the two facts the window paints from
+  (`active-area`, `org-tab`) rather than kept as a third copy. A path that changed the area
+  without telling the history would otherwise leave the stack pointing somewhere else, and
+  there is no second place to keep in agreement.
+- `org_open` split in two: `org_open` is the *move* (it records), `org_show` is the paint
+  (it does not). A step the stack has already paid for must not buy the ticket twice —
+  which is why `navigate` and the startup landing call `org_show`.
+- **A back step is a door out of the area**, so it inherits that door's rule: the
+  organizer's pending 300 ms draft is committed before the move. `navigate` now calls
+  `org_commit_field`, and so does `open`, which until now relied on the debounce timer
+  firing *after* the switch (the data was safe either way; what was not safe was the
+  rule the sidebar's own comment claims).
+- **Home is the 笔记 tab, not 笔记 *plus* 收集箱.** Which tab and which filter were open
+  stay session state that never reaches the file (ADR-0073), so a session that ended on
+  任务 filtered by a tag reopens on 笔记 · 收集箱: the defaults are what a fresh process
+  has, so at startup home really *is* the inbox. Within a session, back-to-home is the tab
+  with the filter you last picked, because that is what a back step means.
+- The meta write rides `record`, i.e. the persistence funnel, not the undo history:
+  entering the area is not a step `Ctrl+Z` can take back. It is a meta *row*, not a schema
+  change — no `user_version` move, so a library this shell writes opens in the other two
+  shells unchanged (an older shell ignores a key it does not know). And meta does not
+  travel: `SyncSnapshot` has no meta collection at all, so "where the window stands" is a
+  per-device fact, and a peer pulling this library cannot be sent a floor it did not walk.
+- A benchmark fixture is not a session: `start_stop` refuses home when `--blocks` is set,
+  so every sweep arm still starts on its document. The sweep against the ADR-0109 baseline
+  is expected to move **no pixels at all** — this slice changes where a window stands when
+  it opens, not what any scene draws.
+- **Deliberately not ported**: the reference's other two back steps (close the capture
+  overlay, leave a row's form) have no desktop analogue — the area here is a list-and-detail
+  split with nothing modal to dismiss, so the walk is destination → home. And no new
+  shortcut: the desktop's back gesture already exists as `Alt+←`, and the sidebar's 笔记 row
+  is the one-press door, so an `Alt+Home` would be a second door to a place the first
+  already reaches. The drawer bug ADR-0015 had to fix (`onOpen` opened a page behind a 收件箱
+  that stayed on screen) is already correct here — `show_open_page` owns the area switch for
+  every way into a document (SPEC §四十一).
+
+## ADR-0109 · 详细信息 is a disclosure under the note's body, and its dates are days
+
+Decision: the note's column grows a `详细信息` block — six read-only rows (编号 / 创建 /
+修改 / 标签 / 长度 / 置顶) and one sentence about what the store does *not* hold — opened
+by a `▸` header **below** the body field, with every value handed over as text by Rust.
+
+Why: the reference puts these facts in a bottom sheet on a phone. Slint has no sheet, and
+a `PopupWindow` for six read-only rows is a window inside a window; and the block cannot
+go *above* the body, because opening it would shove down the field the user is typing
+into. Below the body, the disclosure costs the page nothing when closed and moves nothing
+when opened.
+
+The dates are the part that differs from the reference on purpose. It shows
+`yyyy-MM-dd HH:mm`; this shell shows `2026-09-26 · 刚刚`. `org_when`'s own comment is the
+rule: a clock time here would be either UTC — wrong to the reader — or a zone conversion
+nothing in the app keeps, and `core::date::today_iso` made the same call for the same
+reason. Minute precision would need a zone source the shell does not have: the SQLite
+connection that could answer that question sits behind the repository layer, and a
+`chrono`/`time` dependency for one row is the tail wagging the dog. So the block shows the
+day it can vouch for plus the age the rows already print, which has the extra virtue that
+the panel and the list cannot disagree about how fresh a note is.
+
+Consequences:
+
+- `NoteDetails` (six strings) and `org-note-details-open` are `UIState` properties. The
+  flag is state rather than component-local **so a sweep scene can photograph the block
+  open** — a block no scene shows is a block no sweep measures, which is the lesson the
+  `dark-*` arms already taught.
+- Past thirty days `org_when` runs out of coarse units and answers with the day itself, so
+  a naive `format!("{day} · {age}")` printed the same date twice. The age is dropped when
+  it *is* the date, and `an_instant_prints_its_day_and_its_age_once` pins that.
+- 长度 counts **characters** (`chars().count()`), and measures the body falling back to the
+  title, like the reference. A byte count would tell a Chinese reader that their
+  four-character note is twelve words long.
+- The disclosure's header is a `Rectangle` with a `TouchArea` under its text: a layout child
+  that is only a row of text leaves the rest of the column's width unclickable.
+- **The note pane still has no scroll view.** At 1280×800 the block fits below a 300 px body
+  with room to spare, but a long body already grows past the clipped column — with or
+  without this block. That is debt this slice names rather than fixes: the fix is wrapping
+  the pane in a `ScrollView`, which moves the pixels of every existing note scene and wants
+  its own measurement.
+- Scenes `notes-info` / `dark-notes-info`. The first version of the arm called
+  `org_refresh` without `org_load_drafts`, and the sweep photographed a note page with an
+  empty title, empty tags and an empty body — every field bound to a draft nobody had
+  loaded, while 详细信息 correctly reported `#会议 #核心`. The block was fine; the scene was
+  lying, which is the reason the scenes seed through the real write path.
+- Three tests (`the_details_block_says_what_the_store_holds`,
+  `a_note_with_no_body_is_measured_by_its_title`,
+  `an_instant_prints_its_day_and_its_age_once`).
+- **No core change and no rev bump**: `Note.created` / `Note.edited` were already in the
+  catalog at the pinned rev; nothing about this block reaches the file or the wire.
+- **Still not here**: the reference's 评论 and 引用 rows (both need `Note.ref_note`, which
+  is the next slice's core bump), 详细信息 for *tasks*, and the note page's own scroll.
+
+## ADR-0108 · A delete waits behind an undo bar, and the bar belongs to the window
+
+Decision: 删除 stops writing when it is asked for.
+
+- Three calls own the whole thing. `AppState::org_defer_delete(ids, is_task, message)`
+  hides the rows and returns a token; `org_undo_pending()` un-hides them and writes
+  nothing; only `org_commit_pending(token)` — the bar's expiry, 3000 ms — reaches the
+  command system. One slot, one token counter, and **one** leaked `slint::Timer`,
+  armed by the four places that ask: the note's 🗑, the task's 🗑, the ⋯ menu's 删除,
+  and 转为待办.
+- A second delete **commits the first** rather than queueing behind it — two pending
+  batches would need two bars, and one bar can only stand in front of one thing. The
+  token exists so the superseded bar's still-armed timer finds nothing to do.
+- Hiding happens in **all eight projections** (note rows, the tag subtree, task rows,
+  the smart-view counts, the view header, the footer progress, the board, the list
+  chips), because a chip that still counts a row the pixels dropped is the window
+  disagreeing with itself. The Compose shell's version does *not* filter its nav
+  counts; that asymmetry is deliberately not copied.
+- The bar is `AppShell`'s, not `OrganizerArea`'s, and `org-undo-text` is a `UIState`
+  property: a pending delete outlives the area it was asked from, and the bar is the
+  only way back to those rows once the user has left for the editor.
+- 转为待办 is now "the task is made **now**, the note's delete is deferred", and the
+  bar says so. Undoing *that* bar returns the note and leaves the task standing,
+  which is the honest reading of 撤销 here: what is being taken back is the
+  disappearance, not the conversion.
+
+Why: the reference app deletes this way, and so does the Compose shell's M2.5 pass.
+SPEC §四十一 used to rule it out for this shell on the grounds that it has no
+transient toast — the band is persistent and shared with the database layer's startup
+line, so reusing it beat inventing a timer. That argument was about a *notice*; an
+offer is a different thing. A persistent band cannot say "three seconds", and a
+Ctrl+Z that unwinds a delete the user thought they had taken back is a step on a
+stack they never pushed.
+
+Consequences:
+
+- **No core change and no rev bump.** A pending delete is a `RefCell` in `AppState`,
+  session state in ADR-0073's sense: nothing about it can reach the file or the wire.
+- Taking a delete back costs nothing on the undo stack, because it never added
+  anything. This is the whole point, and `a_pending_delete_hides_the_row_without_adding_a_step`
+  and `undoing_a_pending_delete_writes_nothing` are the two halves of it.
+- **The documented downside**: after the window closes, the delete is real and it is
+  *N* steps — one per row — so a bulk delete that expired takes N Ctrl+Zs to walk
+  back. Deferred batches are one step each only while the bar is up.
+- Ctrl+Z still undoes a committed delete, so the band's old copy
+  (`已删除「…」 — Ctrl+Z 可撤销。`) is simply gone from those three sites. It stays for
+  删清单, which really is an immediate step and moves tasks rather than dropping rows.
+- Closing the app inside the three seconds drops the delete: the row comes back on
+  the next start. The safe direction — nothing was destroyed.
+- Neither the expiry nor 撤销 reloads the drafts. `org_load_drafts` resets `org-field`
+  and rewrites every draft off its row, so running it while a keystroke is live in the
+  detail pane loses the user's characters; committing the field *before* deferring is
+  what makes the rest of the order safe.
+- The pill is 380×46, 24 px from the bottom-right, with a **constant** width: a
+  `HorizontalLayout` carries no `background`, so the pill has to be a `Rectangle` that
+  spells its own size, and a definite width is what lets the layout inside give the
+  text the slack and 撤销 its preferred width. A long note title elides rather than
+  pushing the button off the window. 撤销 is also `enabled:` by the same test that
+  shows the pill: hiding a subtree with `visible: false` is documented, but whether
+  its `TouchArea` still eats a click is not something to bet the window's
+  bottom-right corner on, and the guard costs one line.
+- A `if let Some(previous) = self.org_pending.borrow().clone()` keeps that `Ref` alive
+  for the whole block, and the block calls `org_commit_pending`, which needs
+  `borrow_mut` — so the **second** delete in a session panicked. The test wrote itself
+  once the first one passed; the binding is now a statement of its own.
+- Scenes `undo-bar` / `dark-undo-bar`, which defer without arming the timer: a capture
+  that waited past the expiry would photograph "deleted", not "pending".
+- **Amends ADR-0107**: 转为待办 is four steps (create, title, tags, notes), not five,
+  and its note delete is this ADR's to defer.
+- **Still not here**: 引用/评论, a note detail *page*, multi-select and 收件箱为家 —
+  the other four pieces of the same M2.5 pass, and the next slices — plus a
+  persistent 回收站, 笔记历史, and a note body that renders its markdown.
+
 ## ADR-0107 · A tag is a path, and 转为待办 turns a note into a task
 
 Decision: two things the reference app does that this shell did not.
@@ -26,6 +367,8 @@ platforms segment a tag the same way):
 deletes the note: the title is the note's own title, or its first line with the
 markdown that opens it stripped (`org_convert_title`), the body travels whole as
 备注, and the tags come along. No dialog — the notice band is the way back.
+*(ADR-0108: the note's delete is now deferred to the undo bar, so
+`org_note_to_task` only makes the task, and the band is gone.)*
 
 Why: the reference app (`aw-android-native`, and `aw-qtui`'s own `InboxPage`) has
 both, the Compose shell landed them in its ADR-0018, and a platform that segments a
@@ -50,7 +393,8 @@ Consequences:
 - 转为待办 is **five steps on the organizer's stack** (create, title, tags, notes,
   delete) rather than one, because `quire-core` has no command that does the whole
   conversion. `Ctrl+Z` walks back one step at a time, which is what the Compose
-  shell's two commands also leave behind.
+  shell's two commands also leave behind. *(Four since ADR-0108: the delete left the
+  stack and joined the undo bar.)*
 - **Still not here**: 引用/评论, a note detail *page*, an undo bar in place of the
   notice band, multi-select, a persistent 回收站, 笔记历史, and a note body that
   renders its markdown. The first four are the Compose shell's M2.5 pass, which this

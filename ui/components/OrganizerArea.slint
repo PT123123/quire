@@ -1,12 +1,18 @@
 // SPEC §四十一's second top-level area: 笔记 and 任务.
 //
 // The shape is activitywatch's task page, ported: **one card**, and inside it
-// three columns — a nav column of views and lists, the rows themselves, and the
-// selected row's *self* on the right. The card is the page: a nav column that
-// floated on the window background, a list that had no surface, and a detail
-// panel that slid in and out made three unrelated panels out of one screen. The
-// two 1px separators are drawn inset rather than bordered, because a border on a
-// column would draw a line on all four of its sides.
+// three columns — the rows themselves, the selected row's *self*, and the nav
+// column of views and tags on the **right**. The card is the page: a nav column
+// that floated on the window background, a list that had no surface, and a
+// detail panel that slid in and out made three unrelated panels out of one
+// screen. The two 1px separators are drawn inset rather than bordered, because a
+// border on a column would draw a line on all four of its sides.
+//
+// The nav is the card's *last* column (ADR-0112): 标签 in this area is a filter
+// over the list beside it, and the reference puts the filter on the right — the
+// side a right-handed pointer reaches without crossing the rows it is filtering.
+// The order in this file is the order on screen, which is why the nav block sits
+// at the bottom of the layout below.
 //
 // The rows are Rust's projections (`UIState.note-rows` / `task-rows` /
 // `task-list-rows` / `org-board` / `org-tag-rows`) and the panes only place what
@@ -63,11 +69,16 @@ component OrgButton inherits Rectangle {
     // reads as an action and not as the row's current state.
     in property <bool> danger: false;
     in property <int> color-slot: -1;   // >= 0 draws a palette dot before the label
+    // A drawn glyph instead of the label. `✕` (U+2715) is Dingbats and Segoe UI has
+    // no glyph for it, so a Text of it is an invisible control whose TouchArea still
+    // answers — the exact bug `DatabaseFilterPopup` documents for its delete button.
+    in property <string> icon-name: "";
     in property <length> font-size: Typography.size-ui;
     callback clicked();
 
     height: 26px;
-    width: label-text.preferred-width + (color-slot >= 0 ? 30px : 18px);
+    width: icon-name != "" ? 30px
+        : label-text.preferred-width + (color-slot >= 0 ? 30px : 18px);
     border-radius: Theme.radius-sm;
     border-width: root.danger ? 1px : 0px;
     border-color: Colors.danger;
@@ -89,6 +100,7 @@ component OrgButton inherits Rectangle {
         width: parent.width - self.x - 9px;
         height: parent.height;
         text: root.label;
+        visible: root.icon-name == "";
         font-family: Typography.ui-font;
         font-size: root.font-size;
         horizontal-alignment: center;
@@ -97,6 +109,15 @@ component OrgButton inherits Rectangle {
             : (root.selected ? Colors.text-primary
             : (root.accent ? Colors.accent-text : Colors.text-secondary));
         overflow: elide;
+    }
+    if root.icon-name != "" : Icon {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 13px;
+        height: 13px;
+        size: 13px;
+        name: root.icon-name;
+        color: Colors.text-secondary;
     }
     ta := TouchArea {
         mouse-cursor: MouseCursor.pointer;
@@ -115,17 +136,48 @@ component OrgField inherits Text {
     overflow: elide;
 }
 
+// One row of 详细信息. The label is the reference's word and the value is text
+// Rust already decided, so this row never computes anything — it places two
+// strings and elides the one that can be long (a note's tag list).
+component OrgDetailRow inherits HorizontalLayout {
+    in property <string> label;
+    in property <string> value;
+    height: 22px;
+    spacing: 8px;
+    cross-axis-alignment: center;
+    OrgField { name: root.label; width: 40px; }
+    Text {
+        text: root.value;
+        font-family: Typography.ui-font;
+        font-size: Typography.size-ui;
+        color: Colors.text-primary;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+}
+
 // One row of the nav column: the icon-less view rows, and the lists below them.
 // 34 px rather than the page's list height — a nav is scanned, not read, and a
 // selected row says so three ways (fill, left bar, weight) so no one cue has to
 // carry it alone.
+//
+// A **tag** row is also the 反向筛选 control: the circled slash at its right edge
+// hides this path — and everything under it — or stops hiding it. Drawn and not
+// typed, because `⊘` is not in this app's font chain (the trap the bar's `✕`
+// fell into): a `Text` of a glyph no face carries is an invisible control whose
+// `TouchArea` still answers. The slash is two `Rectangle`s, so it renders
+// whatever the machine's fonts are.
 component OrgNavRow inherits Rectangle {
     in property <string> label;
     in property <int> count: -1;        // < 0 paints no count
     in property <int> color-slot: -1;   // >= 0 draws the list's dot
     in property <bool> selected: false;
     in property <bool> accent: false;
+    // This row is a tag path that can be hidden, and whether it is hidden now.
+    in property <bool> excludable: false;
+    in property <bool> excluded: false;
     callback clicked();
+    callback exclude-toggled();
 
     height: 32px;
     border-radius: Theme.radius-sm;
@@ -133,6 +185,12 @@ component OrgNavRow inherits Rectangle {
         ? Colors.surface-selected
         : (ta.has-hover ? Colors.hover-fill : transparent);
     animate background { duration: Theme.duration-instant; }
+
+    // What the text must leave room for: the count, then the exclude control.
+    // One property rather than two subtractions, because a `Text`'s width is a
+    // `length` and nesting the arithmetic inside it is how a row elides to "…".
+    private property <length> right-inset:
+        (count > 0 ? count-text.preferred-width + 16px : 13px) + (excludable ? 24px : 0px);
 
     if selected : Rectangle {
         x: 0;
@@ -152,19 +210,20 @@ component OrgNavRow inherits Rectangle {
     }
     nav-text := Text {
         x: color-slot >= 0 ? 29px : 13px;
-        width: parent.width - self.x - (count-text.visible ? count-text.width + 16px : 13px);
+        width: parent.width - self.x - root.right-inset;
         height: parent.height;
         text: root.label;
         font-family: Typography.ui-font;
         font-size: Typography.size-ui;
         font-weight: root.selected ? Typography.weight-semibold : Typography.weight-regular;
-        color: root.accent ? Colors.accent-text
-            : (root.selected ? Colors.text-primary : Colors.text-secondary);
+        color: root.excluded ? Colors.text-muted
+            : (root.accent ? Colors.accent-text
+            : (root.selected ? Colors.text-primary : Colors.text-secondary));
         vertical-alignment: center;
         overflow: elide;
     }
     count-text := Text {
-        x: parent.width - count-text.width - 12px;
+        x: parent.width - count-text.width - (root.excludable ? 26px : 12px);
         y: 0;
         width: self.preferred-width;
         height: parent.height;
@@ -179,6 +238,106 @@ component OrgNavRow inherits Rectangle {
     ta := TouchArea {
         mouse-cursor: MouseCursor.pointer;
         clicked => { root.clicked(); }
+    }
+    // Last, so it is *above* `ta`: a control under the row's own hit area is a
+    // control that cannot be clicked.
+    //
+    // A circled bar rather than the reference's `⊘`: this build's Slint has no
+    // `rotation-angle` on a `Rectangle`, so a slashed circle would have to be a
+    // rotated rectangle it cannot draw or a `Text` of a glyph this font chain does
+    // not carry. 减 is the same idea in a shape that renders everywhere.
+    if root.excludable : Rectangle {
+        x: parent.width - 21px;
+        y: (parent.height - 17px) / 2;
+        width: 17px;
+        height: 17px;
+        border-radius: 8.5px;
+        border-width: 1px;
+        border-color: root.excluded ? Colors.danger : Colors.border-strong;
+        background: root.excluded ? Colors.danger.with-alpha(0.12)
+            : (excl-ta.has-hover ? Colors.hover-fill : transparent);
+        Rectangle {
+            x: (parent.width - 9px) / 2;
+            y: (parent.height - 1.5px) / 2;
+            width: 9px;
+            height: 1.5px;
+            background: root.excluded ? Colors.danger : Colors.text-muted;
+        }
+        excl-ta := TouchArea {
+            mouse-cursor: MouseCursor.pointer;
+            clicked => { root.exclude-toggled(); }
+        }
+    }
+}
+
+// The tag column's whole content, so the two tabs share one implementation: the
+// filter is the same question asked of whichever half is showing (the notes'
+// tags or the tasks'), and a second copy of this would be a second set of rules
+// about include, exclude and 清除筛选.
+//
+// 全部笔记 is deliberately *not* here — the 笔记 tab's own row above says it, and
+// the tasks' smart views are where "everything" lives for that half.
+component OrgTagColumn inherits VerticalLayout {
+    spacing: 1px;
+
+    // The way back up a level, and the path being filtered. A tag is a path, so
+    // the column shows one level at a time: 项目 → 工作 → ActivityWatch is three
+    // taps and this row is the way out of a wrong one.
+    if UIState.org-tag != "" : OrgNavRow {
+        label: "↑ 上级";
+        count: -1;
+        clicked => { UIState.org-tag-picked(UIState.org-tag-parent); }
+    }
+    Rectangle { height: 8px; }
+    // The path being filtered, as a breadcrumb, and — under it — the paths being
+    // *hidden*. Wrapped in a plate because a width inside the layout would be a
+    // binding loop, and an elided path needs one.
+    Rectangle {
+        height: 22px;
+        Text {
+            x: 13px;
+            width: parent.width - 26px;
+            height: parent.height;
+            text: UIState.org-tag == "" ? "标签" : UIState.org-tag-label;
+            font-family: Typography.ui-font;
+            font-size: Typography.size-caption;
+            color: Colors.text-muted;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+    if UIState.org-excluded-label != "" : Rectangle {
+        height: 22px;
+        Text {
+            x: 13px;
+            width: parent.width - 26px;
+            height: parent.height;
+            text: UIState.org-excluded-label;
+            font-family: Typography.ui-font;
+            font-size: Typography.size-caption;
+            color: Colors.danger;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+    // One door out of both halves of the filter, and it exists only when there is
+    // something to clear: a "clear" that clears nothing is noise in a nav.
+    if UIState.org-tag != "" || UIState.org-excluded-label != "" : OrgNavRow {
+        label: "清除筛选";
+        count: -1;
+        accent: true;
+        clicked => { UIState.org-filters-cleared(); }
+    }
+    for tag[i] in UIState.org-tag-rows : OrgNavRow {
+        label: tag.name;
+        count: tag.count;
+        excludable: true;
+        excluded: tag.excluded;
+        // A chip shows the level *below* the filter, so it is never the selected
+        // one — the row above it says where the filter is.
+        selected: false;
+        clicked => { UIState.org-tag-picked(tag.path); }
+        exclude-toggled => { UIState.org-tag-excluded(tag.path); }
     }
 }
 
@@ -343,7 +502,7 @@ component OrgTaskRow inherits Rectangle {
 
     height: 52px;
     border-radius: Theme.radius-md;
-    background: task.selected
+    background: task.selected || task.picked
         ? Colors.surface-selected
         : (ta.has-hover ? Colors.hover-fill : transparent);
     animate background { duration: Theme.duration-instant; }
@@ -355,9 +514,13 @@ component OrgTaskRow inherits Rectangle {
         cross-axis-alignment: center;
 
         OrgCheck {
-            checked: task.done;
+            // One box, two meanings: the row's done state normally, and the pick
+            // while 多选 is on (ADR-0111) — the same box the reference swaps in
+            // front of the same row. Which of the two a click means is Rust's
+            // decision, so the callback is the one `toggled` already is.
+            checked: UIState.org-selecting ? task.picked : task.done;
             box-size: 18px;
-            round: true;
+            round: !UIState.org-selecting;
             toggled => { root.toggled(); }
         }
         VerticalLayout {
@@ -416,6 +579,10 @@ component OrgTaskRow inherits Rectangle {
             icon-name: "dots-horizontal";
             icon-color: Colors.text-muted;
             size: 24px;
+            // Gone while picking: every action it offers is one the bar has, and
+            // a row menu over a row that is already a checkbox is two answers to
+            // the same question.
+            visible: !UIState.org-selecting;
             opacity: ta.has-hover || task.selected ? 1 : 0;
             clicked => {
                 root.menu-requested(self.absolute-position.x, self.absolute-position.y);
@@ -758,165 +925,6 @@ export component OrganizerArea inherits Rectangle {
             HorizontalLayout {
                 spacing: 0px;
 
-                // ── the nav column ─────────────────────────────────────────
-                Rectangle {
-                    // min *and* max, not `width`: in a layout an explicit width
-                    // is only the *preferred* one, and Slint raises it to
-                    // whatever the content says it needs. The detail column's
-                    // own content asked for 545 px, which is how a 340 px panel
-                    // took the width out of the list beside it.
-                    min-width: 208px;
-                    max-width: 208px;
-                    background: Colors.sidebar;
-                    border-top-left-radius: Theme.radius-lg;
-                    border-bottom-left-radius: Theme.radius-lg;
-
-                    VerticalLayout {
-                        padding: 10px;
-                        spacing: 1px;
-
-                        // the two tabs, and the one "+" that creates in whichever
-                        // tab is showing (a note in 笔记, a task in 任务)
-                        HorizontalLayout {
-                            height: 30px;
-                            spacing: 2px;
-                            OrgButton {
-                                label: "笔记";
-                                selected: UIState.org-tab == 0;
-                                clicked => { UIState.org-open-requested(0); }
-                            }
-                            OrgButton {
-                                label: "任务";
-                                selected: UIState.org-tab == 1;
-                                clicked => { UIState.org-open-requested(1); }
-                            }
-                            Rectangle { horizontal-stretch: 1; }
-                            IconButton {
-                                icon-name: "plus";
-                                size: 26px;
-                                clicked => {
-                                    if (UIState.org-tab == 0) {
-                                        UIState.org-note-create();
-                                    } else {
-                                        UIState.org-task-create();
-                                    }
-                                }
-                            }
-                        }
-
-                        Rectangle { height: 6px; }
-
-                        // one needle for the tab that is showing: the two lists
-                        // are never on screen together, so a second box would be
-                        // a second thing to clear
-                        OrgInput {
-                            hint-height: 30px;
-                            placeholder: UIState.org-tab == 0 ? "搜索笔记" : "搜索任务";
-                            value <=> UIState.org-query;
-                            edited => { UIState.org-query-changed(); }
-                        }
-
-                        Rectangle { height: 6px; }
-
-                        // ── 笔记: 全部, then the level the filter is on ──────
-                        if UIState.org-tab == 0 : VerticalLayout {
-                            spacing: 1px;
-                            OrgNavRow {
-                                label: "全部笔记";
-                                count: UIState.note-rows.length;
-                                selected: UIState.org-tag == "";
-                                clicked => { UIState.org-tag-picked(""); }
-                            }
-                            // The way back up a level, and the path being filtered.
-                            // A tag is a path, so the column shows one level at a
-                            // time: 项目 → 工作 → ActivityWatch is three taps and this
-                            // row is the way out of a wrong one.
-                            if UIState.org-tag != "" : OrgNavRow {
-                                label: "↑ 上级";
-                                count: -1;
-                                clicked => { UIState.org-tag-picked(UIState.org-tag-parent); }
-                            }
-                            Rectangle { height: 8px; }
-                            // The path being filtered, as a breadcrumb. Wrapped in a
-                            // plate because a width inside the layout would be a
-                            // binding loop, and an elided path needs one.
-                            Rectangle {
-                                height: 22px;
-                                Text {
-                                    x: 13px;
-                                    width: parent.width - 26px;
-                                    height: parent.height;
-                                    text: UIState.org-tag == "" ? "标签" : UIState.org-tag-label;
-                                    font-family: Typography.ui-font;
-                                    font-size: Typography.size-caption;
-                                    color: Colors.text-muted;
-                                    vertical-alignment: center;
-                                    overflow: elide;
-                                }
-                            }
-                            for tag[i] in UIState.org-tag-rows : OrgNavRow {
-                                label: tag.name;
-                                count: tag.count;
-                                // A chip shows the level *below* the filter, so it is
-                                // never the selected one — the row above it says where
-                                // the filter is.
-                                selected: false;
-                                clicked => { UIState.org-tag-picked(tag.path); }
-                            }
-                        }
-
-                        // ── 任务: the smart views, then the lists ───────────
-                        if UIState.org-tab == 1 : VerticalLayout {
-                            spacing: 1px;
-                            for name[i] in root.smart-names : OrgNavRow {
-                                label: name;
-                                count: UIState.org-smart-counts[i];
-                                selected: UIState.org-list < 0 && UIState.org-view == i;
-                                clicked => { UIState.org-view-picked(i); }
-                            }
-                            Rectangle { height: 8px; }
-                            Text {
-                                text: "清单";
-                                height: 22px;
-                                font-family: Typography.ui-font;
-                                font-size: Typography.size-caption;
-                                color: Colors.text-muted;
-                                vertical-alignment: center;
-                                x: 13px;
-                            }
-                            for entry[i] in UIState.task-list-rows : OrgNavRow {
-                                label: entry.name;
-                                count: entry.count;
-                                color-slot: entry.smart ? -1 : entry.color;
-                                selected: entry.smart
-                                    ? UIState.org-list < 0 && UIState.org-view == 0
-                                    : UIState.org-list == entry.id;
-                                clicked => { UIState.org-list-picked(entry.id); }
-                            }
-                            OrgNavRow {
-                                label: "＋ 新建清单";
-                                accent: true;
-                                clicked => { UIState.org-list-created(); }
-                            }
-                        }
-
-                        Rectangle { vertical-stretch: 1; min-height: 8px; }
-
-                        // the finished ones are a view like any other, so they
-                        // sit where a nav puts the thing you go to last
-                        if UIState.org-tab == 1 : OrgNavRow {
-                            label: "已完成";
-                            count: UIState.org-smart-counts[4];
-                            selected: UIState.org-list < 0 && UIState.org-view == 4;
-                            clicked => { UIState.org-view-picked(4); }
-                        }
-                    }
-                }
-
-                // the two columns' own edges, drawn rather than bordered: a
-                // border would put a line on all four sides of each column
-                Rectangle { width: 1px; background: Colors.divider; }
-
                 // ── the list column (or the board) ──────────────────────────
                 Rectangle {
                     horizontal-stretch: 1;
@@ -931,8 +939,11 @@ export component OrganizerArea inherits Rectangle {
                         spacing: 10px;
 
                         // the header: what is showing, how many, and the two
-                        // ways of looking at it
-                        HorizontalLayout {
+                        // ways of looking at it. While 多选 is on, the bar in
+                        // SPEC §四十一 / ADR-0111 replaces this row entirely — the
+                        // view's title and its counts are not the question being
+                        // asked any more.
+                        if !UIState.org-selecting : HorizontalLayout {
                             height: 30px;
                             spacing: 8px;
                             Text {
@@ -951,9 +962,81 @@ export component OrganizerArea inherits Rectangle {
                                 vertical-alignment: center;
                             }
                             Rectangle { horizontal-stretch: 1; }
+                            // 指令: the door an AI's answer comes back through. Next
+                            // to 多选 because they are the two ways this page is
+                            // written to in bulk — one by hand, one by pasting what
+                            // 复制 sent out. Both tabs have it: the batches differ but
+                            // the door does not.
+                            if UIState.org-tab == 0 || UIState.org-mode == 0 : OrgButton {
+                                label: "指令…";
+                                font-size: Typography.size-caption;
+                                clicked => { UIState.org-command-opened(UIState.org-tab); }
+                            }
+                            // The door to 多选. The reference opens it with a long
+                            // press, which this window has no gesture for; a
+                            // button is the desktop's answer, and it is also the
+                            // only door the 笔记 tab has — a note row has no ⋯.
+                            if UIState.org-tab == 0 || UIState.org-mode == 0 : OrgButton {
+                                label: "多选";
+                                font-size: Typography.size-caption;
+                                clicked => { UIState.org-select-entered(UIState.org-tab); }
+                            }
                             if UIState.org-tab == 1 : OrgSeg {
                                 selected: UIState.org-mode;
                                 picked(m) => { UIState.org-mode-picked(m); }
+                            }
+                        }
+
+                        if UIState.org-selecting : HorizontalLayout {
+                            height: 30px;
+                            spacing: 8px;
+                            // The count first, and it is one line rather than the
+                            // view's title: while picking, "how many have I got"
+                            // is the only heading that means anything.
+                            Text {
+                                text: "已选 " + UIState.org-selection-count + " 项";
+                                font-family: Typography.ui-font;
+                                font-size: Typography.size-ui-lg;
+                                font-weight: Typography.weight-semibold;
+                                color: Colors.text-primary;
+                                vertical-alignment: center;
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                            // 全选 or 取消全选, read off the two numbers the models
+                            // already carry: the set's size against the rows on
+                            // screen. Which of the two this is stays Rust's call.
+                            OrgButton {
+                                label: UIState.org-selection-count > 0
+                                    && UIState.org-selection-count >= (UIState.org-tab == 0
+                                        ? UIState.note-rows.length
+                                        : UIState.task-rows.length)
+                                    ? "取消全选" : "全选";
+                                font-size: Typography.size-caption;
+                                clicked => { UIState.org-select-all-toggled(); }
+                            }
+                            // 复制 is both halves': the notes send their bodies with
+                            // their 唯一 IDs, the tasks their titles and 备注 with the
+                            // same — the ID is what lets the answer name the row.
+                            OrgButton {
+                                label: "复制";
+                                font-size: Typography.size-caption;
+                                clicked => { UIState.org-selection-verbed(0); }
+                            }
+                            if UIState.org-tab == 1 : OrgButton {
+                                label: "完成";
+                                font-size: Typography.size-caption;
+                                clicked => { UIState.org-selection-verbed(1); }
+                            }
+                            OrgButton {
+                                label: "删除";
+                                font-size: Typography.size-caption;
+                                danger: true;
+                                clicked => { UIState.org-selection-verbed(2); }
+                            }
+                            OrgButton {
+                                // Drawn, not typed: see OrgButton's `icon-name`.
+                                icon-name: "x";
+                                clicked => { UIState.org-select-stopped(); }
                             }
                         }
 
@@ -1048,7 +1131,7 @@ export component OrganizerArea inherits Rectangle {
                                 // three lines of one note overlapping the next.
                                 height: 62px;
                                 border-radius: Theme.radius-md;
-                                background: row.selected
+                                background: row.selected || row.picked
                                     ? Colors.surface-selected
                                     : (note-ta.has-hover ? Colors.hover-fill : transparent);
 
@@ -1058,6 +1141,13 @@ export component OrganizerArea inherits Rectangle {
                                     HorizontalLayout {
                                         height: 18px;
                                         spacing: 6px;
+                                        // The pick is an overlay on the row's top-right, so the
+                                        // title's line has to stop short of it: the box starts
+                                        // 28 px in from the row's edge and this line's parent
+                                        // already pads 8, so 20 px is the least that clears and
+                                        // two more keep the last glyph off the box. The excerpt
+                                        // line below it needs nothing: the box ends above it.
+                                        padding-right: UIState.org-selecting ? 22px : 0px;
                                         if row.pinned : Icon {
                                             width: 12px;
                                             height: 12px;
@@ -1088,6 +1178,18 @@ export component OrganizerArea inherits Rectangle {
                                     mouse-cursor: MouseCursor.pointer;
                                     clicked => { UIState.org-note-selected(row.id); }
                                 }
+                                // The box a long press would have shown on the
+                                // reference's row (ADR-0111). Last among the row's
+                                // children so it sits above `note-ta`, and clicking
+                                // it goes through the same route as clicking the
+                                // row: while picking, both mean "this one".
+                                if UIState.org-selecting : OrgCheck {
+                                    x: parent.width - self.width - 10px;
+                                    y: 8px;
+                                    checked: row.picked;
+                                    box-size: 18px;
+                                    toggled => { UIState.org-note-selected(row.id); }
+                                }
                             }
                         }
                     }
@@ -1108,8 +1210,6 @@ export component OrganizerArea inherits Rectangle {
                     max-width: 340px;
                     clip: true;
                     background: Colors.background;
-                    border-top-right-radius: Theme.radius-lg;
-                    border-bottom-right-radius: Theme.radius-lg;
 
                     if UIState.org-tab == 0 : VerticalLayout {
                         padding: 16px;
@@ -1168,19 +1268,115 @@ export component OrganizerArea inherits Rectangle {
                                 }
                             }
 
-                            HorizontalLayout {
-                                height: 26px;
-                                spacing: 8px;
-                                OrgField { name: "修改"; width: 40px; }
-                                OrgField { name: UIState.org-note-detail.when; }
-                            }
-
+                            // No 修改 row here. The age a note was last written on
+                            // is 详细信息's business (and the list row already says
+                            // it); a second copy an inch above the block was this
+                            // shell's own invention, and the reference has no such
+                            // line — its page is title, body, tags, replies.
                             OrgInput {
                                 placeholder: "正文";
                                 multiline: true;
                                 hint-height: 300px;
                                 value <=> UIState.org-note-body-draft;
                                 edited => { UIState.org-field-edited(2); }
+                            }
+
+                            // 引用 (SPEC §四十一): the notes that answer this one.
+                            // Read-only — a reply is written by 指令's `comment` or by
+                            // the reference's own reply box, which this build has no
+                            // field for — so a row is its text and its age.
+                            if UIState.org-note-replies.length > 0 : VerticalLayout {
+                                spacing: 4px;
+                                OrgField {
+                                    name: "评论 " + UIState.org-note-replies.length;
+                                    height: 18px;
+                                }
+                                for reply[i] in UIState.org-note-replies : Rectangle {
+                                    background: Colors.hover-fill;
+                                    border-radius: Theme.radius-sm;
+                                    VerticalLayout {
+                                        padding: 8px;
+                                        spacing: 2px;
+                                        Text {
+                                            text: reply.body != "" ? reply.body : reply.title;
+                                            font-family: Typography.ui-font;
+                                            font-size: Typography.size-ui;
+                                            color: Colors.text-primary;
+                                            wrap: word-wrap;
+                                        }
+                                        OrgMeta { tags: reply.tags; when: reply.when; height: 14px; }
+                                    }
+                                }
+                            }
+
+                            // 详细信息: what the store holds about this note, and
+                            // the one thing it does not hold.
+                            //
+                            // A disclosure **below** the body rather than the
+                            // reference's bottom sheet, for two reasons. Slint has
+                            // no sheet, and a popup window for six read-only rows
+                            // is a window inside a window; and opening it must not
+                            // move the field the user is typing into — above the
+                            // body it would shove 正文 down every time.
+                            //
+                            // The header is a Rectangle with a TouchArea under its
+                            // text: a layout child that is only a row of text has
+                            // nothing to click on for the empty part of the column.
+                            Rectangle {
+                                height: 24px;
+                                details-ta := TouchArea {
+                                    mouse-cursor: MouseCursor.pointer;
+                                    clicked => {
+                                        UIState.org-note-details-open = !UIState.org-note-details-open;
+                                    }
+                                }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    cross-axis-alignment: center;
+                                    Icon {
+                                        width: 14px;
+                                        height: 14px;
+                                        name: UIState.org-note-details-open
+                                            ? "chevron-down"
+                                            : "chevron-right";
+                                        size: 14px;
+                                        color: Colors.text-muted;
+                                    }
+                                    Text {
+                                        text: "详细信息";
+                                        font-family: Typography.ui-font;
+                                        font-size: Typography.size-caption;
+                                        color: Colors.text-muted;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+
+                            if UIState.org-note-details-open : VerticalLayout {
+                                spacing: 2px;
+                                OrgDetailRow { label: "编号"; value: UIState.org-note-details.id; }
+                                // SPEC §四十一's 唯一 ID: what 复制 hands an AI and
+                                // what a batch instruction names this note by. Next to
+                                // 编号 because they are both "which note", and only one
+                                // of them survives a sync.
+                                OrgDetailRow { label: "唯一 ID"; value: UIState.org-note-details.uuid; }
+                                OrgDetailRow { label: "创建"; value: UIState.org-note-details.created; }
+                                OrgDetailRow { label: "修改"; value: UIState.org-note-details.edited; }
+                                OrgDetailRow { label: "标签"; value: UIState.org-note-details.tags; }
+                                OrgDetailRow { label: "长度"; value: UIState.org-note-details.length; }
+                                OrgDetailRow { label: "置顶"; value: UIState.org-note-details.pinned; }
+                                // The reference says this out loud instead of
+                                // painting an empty 历史 list: `quire-core` keeps
+                                // one copy of a note, so there is no version to
+                                // restore to — 撤销 walks an edit back, and that
+                                // is all there is.
+                                Text {
+                                    text: "没有历史版本：资料库只保存当前这一份，撤销可以回退编辑，但没有按时间恢复的版本。";
+                                    wrap: word-wrap;
+                                    font-family: Typography.ui-font;
+                                    font-size: Typography.size-caption;
+                                    color: Colors.text-muted;
+                                }
                             }
                         }
                     }
@@ -1487,6 +1683,251 @@ export component OrganizerArea inherits Rectangle {
                                 }
                             }
                         }
+                    }
+                }
+
+                // ── the nav column ─────────────────────────────────────────
+                Rectangle {
+                    // min *and* max, not `width`: in a layout an explicit width
+                    // is only the *preferred* one, and Slint raises it to
+                    // whatever the content says it needs. The detail column's
+                    // own content asked for 545 px, which is how a 340 px panel
+                    // took the width out of the list beside it.
+                    min-width: 208px;
+                    max-width: 208px;
+                    background: Colors.sidebar;
+                    // The card's right edge, because this column is the card's
+                    // last one: the tag sidebar sits on the *right* (ADR-0112),
+                    // which is the side the reference puts it on and the side a
+                    // right-handed pointer reaches without crossing the rows.
+                    border-top-right-radius: Theme.radius-lg;
+                    border-bottom-right-radius: Theme.radius-lg;
+
+                    VerticalLayout {
+                        padding: 10px;
+                        spacing: 1px;
+
+                        // the two tabs, and the one "+" that creates in whichever
+                        // tab is showing (a note in 笔记, a task in 任务)
+                        HorizontalLayout {
+                            height: 30px;
+                            spacing: 2px;
+                            OrgButton {
+                                label: "笔记";
+                                selected: UIState.org-tab == 0;
+                                clicked => { UIState.org-open-requested(0); }
+                            }
+                            OrgButton {
+                                label: "任务";
+                                selected: UIState.org-tab == 1;
+                                clicked => { UIState.org-open-requested(1); }
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                            IconButton {
+                                icon-name: "plus";
+                                size: 26px;
+                                clicked => {
+                                    if (UIState.org-tab == 0) {
+                                        UIState.org-note-create();
+                                    } else {
+                                        UIState.org-task-create();
+                                    }
+                                }
+                            }
+                        }
+
+                        Rectangle { height: 6px; }
+
+                        // one needle for the tab that is showing: the two lists
+                        // are never on screen together, so a second box would be
+                        // a second thing to clear
+                        OrgInput {
+                            hint-height: 30px;
+                            placeholder: UIState.org-tab == 0 ? "搜索笔记" : "搜索任务";
+                            value <=> UIState.org-query;
+                            edited => { UIState.org-query-changed(); }
+                        }
+
+                        Rectangle { height: 6px; }
+
+                        // ── 笔记: 全部, then the level the filter is on ──────
+                        if UIState.org-tab == 0 : VerticalLayout {
+                            spacing: 1px;
+                            OrgNavRow {
+                                label: "全部笔记";
+                                count: UIState.note-rows.length;
+                                selected: UIState.org-tag == "";
+                                clicked => { UIState.org-tag-picked(""); }
+                            }
+                            // The tag column, shared with the 任务 tab: the filter
+                            // is the same question asked of whichever half is
+                            // showing, so it is one component and not two.
+                            OrgTagColumn { }
+                        }
+
+                        // ── 任务: the smart views, then the lists ───────────
+                        if UIState.org-tab == 1 : VerticalLayout {
+                            spacing: 1px;
+                            for name[i] in root.smart-names : OrgNavRow {
+                                label: name;
+                                count: UIState.org-smart-counts[i];
+                                selected: UIState.org-list < 0 && UIState.org-view == i;
+                                clicked => { UIState.org-view-picked(i); }
+                            }
+                            Rectangle { height: 8px; }
+                            Text {
+                                text: "清单";
+                                height: 22px;
+                                font-family: Typography.ui-font;
+                                font-size: Typography.size-caption;
+                                color: Colors.text-muted;
+                                vertical-alignment: center;
+                                x: 13px;
+                            }
+                            for entry[i] in UIState.task-list-rows : OrgNavRow {
+                                label: entry.name;
+                                count: entry.count;
+                                color-slot: entry.smart ? -1 : entry.color;
+                                selected: entry.smart
+                                    ? UIState.org-list < 0 && UIState.org-view == 0
+                                    : UIState.org-list == entry.id;
+                                clicked => { UIState.org-list-picked(entry.id); }
+                            }
+                            OrgNavRow {
+                                label: "＋ 新建清单";
+                                accent: true;
+                                clicked => { UIState.org-list-created(); }
+                            }
+                            // The 任务 tab's tag filter, below the lists: a task
+                            // carries tags exactly as a note does, and 反向筛选 is
+                            // the same two halves here as there.
+                            Rectangle { height: 10px; }
+                            OrgTagColumn { }
+                        }
+
+                        Rectangle { vertical-stretch: 1; min-height: 8px; }
+
+                        // the finished ones are a view like any other, so they
+                        // sit where a nav puts the thing you go to last
+                        if UIState.org-tab == 1 : OrgNavRow {
+                            label: "已完成";
+                            count: UIState.org-smart-counts[4];
+                            selected: UIState.org-list < 0 && UIState.org-view == 4;
+                            clicked => { UIState.org-view-picked(4); }
+                        }
+                    }
+                }
+
+                // the two columns' own edges, drawn rather than bordered: a
+                // border would put a line on all four sides of each column
+                Rectangle { width: 1px; background: Colors.divider; }
+            }
+        }
+    }
+
+    // ── 指令 (SPEC §四十一): the batch dialog ────────────────────────────────
+    //
+    // A card over the area rather than a window-level popup, because what it acts
+    // on is *these* rows and the window has no text-entry overlay to reuse: the
+    // delete confirmation is one line of message, and this is a page of JSON. Being
+    // the last child of the area is what puts it above the three columns without a
+    // second scrim in `AppWindow` — and the `TouchArea` is what makes the rows
+    // behind it unclickable while a batch is being pasted.
+    if UIState.org-cmd-open : Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: Colors.scrim;
+        TouchArea { }
+
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            // Bounded on both axes: a card that grew with its text would push its
+            // own buttons off a short window, and the paste box is the one thing
+            // that should scroll.
+            width: min(parent.width - 60px, 680px);
+            height: min(parent.height - 60px, 470px);
+            background: Colors.surface-overlay;
+            border-radius: Theme.radius-lg;
+            border-width: 1px;
+            border-color: Colors.border-strong;
+
+            VerticalLayout {
+                padding: 18px;
+                spacing: 10px;
+
+                Text {
+                    height: 24px;
+                    text: UIState.org-cmd-tab == 1 ? "批量操作指令（任务）" : "批量操作指令（笔记）";
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-ui-lg;
+                    font-weight: Typography.weight-semibold;
+                    color: Colors.text-primary;
+                    vertical-alignment: center;
+                }
+                // The actions, spelled out: the same list the template carries, so
+                // the box does not have to be read off the example. `restore` is
+                // absent because this build has no 回收站, and it is refused by name
+                // rather than silently skipped.
+                Text {
+                    height: 30px;
+                    text: UIState.org-cmd-tab == 1
+                        ? "粘贴 AI 返回的 JSON（{\"operations\":[…] }）。可用 action：create / update / delete / add_tags / remove_tags / set_tags / set_completed / move / set_priority / set_due / add_subtask / set_subtask / remove_subtask / comment。目标用 uuid（推荐，跨设备唯一）或 id。"
+                        : "粘贴 AI 返回的 JSON（{\"operations\":[…] }）。可用 action：create / update / delete / add_tags / remove_tags / set_tags / comment。目标用 uuid（推荐，跨设备唯一）或 id。";
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-caption;
+                    color: Colors.text-muted;
+                    wrap: word-wrap;
+                }
+                Rectangle {
+                    vertical-stretch: 1;
+                    border-radius: Theme.radius-sm;
+                    border-width: 1px;
+                    border-color: cmd-input.has-focus ? Colors.border-strong : Colors.border;
+                    background: Colors.background;
+                    cmd-input := TextInput {
+                        x: 8px;
+                        y: 6px;
+                        width: parent.width - 16px;
+                        height: parent.height - 12px;
+                        text <=> UIState.org-cmd-text;
+                        wrap: word-wrap;
+                        font-family: Typography.mono-font;
+                        font-size: Typography.size-caption;
+                        color: Colors.text-primary;
+                        selection-foreground-color: Colors.text-on-accent;
+                        selection-background-color: Colors.selection;
+                    }
+                    if UIState.org-cmd-text == "" : Text {
+                        x: 10px;
+                        y: 8px;
+                        width: parent.width - 20px;
+                        text: "在此粘贴 JSON…";
+                        font-family: Typography.ui-font;
+                        font-size: Typography.size-caption;
+                        color: Colors.text-muted;
+                    }
+                }
+                HorizontalLayout {
+                    height: 30px;
+                    spacing: 8px;
+                    OrgButton {
+                        label: "复制示例";
+                        font-size: Typography.size-caption;
+                        clicked => { UIState.org-command-example(); }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    OrgButton {
+                        label: "取消";
+                        font-size: Typography.size-caption;
+                        clicked => { UIState.org-command-closed(); }
+                    }
+                    OrgButton {
+                        label: "执行";
+                        font-size: Typography.size-caption;
+                        selected: true;
+                        accent: true;
+                        clicked => { UIState.org-command-run(); }
                     }
                 }
             }

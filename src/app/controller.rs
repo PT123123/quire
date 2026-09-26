@@ -6,7 +6,7 @@
 // 'static callbacks capture a Weak and upgrade() it at fire time.
 
 use crate::app::state::{
-    core_page_id, kind_from_int, palette_action, zoom_step, AppState, PaletteAction,
+    core_page_id, kind_from_int, palette_action, zoom_step, AppState, NavStop, PaletteAction,
     PAGE_GETTING_STARTED, ROW_NEW_PAGE,
 };
 use crate::core::database::PropertyKind;
@@ -561,6 +561,14 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
     let gw = ui_state_weak(ui);
     state.set_ui(gw.clone());
 
+    // The one clock a deferred delete runs on (ADR-0108). Leaked like every other
+    // timer here, and declared at the top of `wire` rather than next to the area's
+    // other handlers because *four* places arm it — the two delete buttons, the ⋯
+    // menu's 删除, and 转为待办 — and one delete must be one timer: a second bar
+    // that keeps its own clock would commit the first one's rows early.
+    let org_delete_timer: &'static slint::Timer =
+        Box::leak(Box::new(slint::Timer::default()));
+
     // ---- shell ----
     {
         let gw = gw.clone();
@@ -828,12 +836,25 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                         s.org_task_list(task, -1);
                     }
                     crate::app::state::MENU_ORG_DELETE => {
-                        if let Some(title) = s.org_delete_task(task) {
-                            g.set_org_selected_task(-1);
-                            g.set_db_notice(
-                                format!("已删除任务「{title}」 — Ctrl+Z 可撤销。").into(),
-                            );
-                        }
+                        // Deferred like the 🗑 button's own delete: the ⋯ menu and
+                        // the detail pane are two ways of asking for the same
+                        // thing, and two ways of *undoing* it would be a lie.
+                        org_deferred_delete(
+                            org_delete_timer,
+                            &g,
+                            &gw,
+                            &s,
+                            vec![task],
+                            true,
+                            None,
+                        );
+                    }
+                    crate::app::state::MENU_ORG_SELECT => {
+                        // 多选 from a row's ⋯: the mode, with *this* row already
+                        // picked — what a long press means on the reference
+                        // shells, through the door this window has.
+                        org_start_selecting(&g, &s, true);
+                        s.org_selection_toggle(task, true);
                     }
                     _ if action >= crate::app::state::MENU_ORG_MOVE_BASE => {
                         s.org_task_list(
@@ -4266,8 +4287,11 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         let s = state.clone();
         ui.global::<UIState>().on_org_close_requested(move || {
             let g = gw.upgrade().unwrap();
+            // back to the document the user was reading, through `open` so the
+            // move is on the history like any other (ADR-0110)
             org_commit_field(&g, &s);
-            show_open_page(&g, &s);
+            let page = s.open_page.get();
+            open(&g, &s, page);
         });
     }
     {
@@ -4289,6 +4313,13 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         ui.global::<UIState>().on_org_note_selected(move |id| {
             let g = gw.upgrade().unwrap();
             org_commit_field(&g, &s);
+            // While 多选 is on, a tap picks rather than opens (ADR-0111) — the
+            // same route on purpose, so the detail pane cannot be moved by a pick.
+            if g.get_org_selecting() {
+                s.org_selection_toggle(id as i64, false);
+                org_refresh(&g, &s);
+                return;
+            }
             g.set_org_selected_note(id);
             org_refresh(&g, &s);
             org_load_drafts(&g, &s);
@@ -4309,14 +4340,19 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         let s = state.clone();
         ui.global::<UIState>().on_org_note_to_task(move |id| {
             let g = gw.upgrade().unwrap();
-            org_commit_field(&g, &s);
             if let Some(title) = s.org_note_to_task(id as i64) {
-                g.set_org_selected_note(-1);
-                org_refresh(&g, &s);
-                org_load_drafts(&g, &s);
-                // The note is gone and a task is in 收集箱; the band says what
-                // happened, because the note was the thing on screen a moment ago.
-                g.set_db_notice(format!("笔记「{title}」已转为待办。").into());
+                // The task is created *now* and the note's delete waits behind the
+                // bar (ADR-0108): the conversion is the useful half, and the only
+                // thing the user might take back is the disappearance.
+                org_deferred_delete(
+                    org_delete_timer,
+                    &g,
+                    &gw,
+                    &s,
+                    vec![id as i64],
+                    false,
+                    Some(format!("笔记「{title}」已转为待办")),
+                );
             }
         });
     }
@@ -4325,13 +4361,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         let s = state.clone();
         ui.global::<UIState>().on_org_note_deleted(move |id| {
             let g = gw.upgrade().unwrap();
-            org_commit_field(&g, &s);
-            if let Some(title) = s.org_delete_note(id as i64) {
-                g.set_org_selected_note(-1);
-                org_refresh(&g, &s);
-                org_load_drafts(&g, &s);
-                g.set_db_notice(format!("已删除笔记「{title}」 — Ctrl+Z 可撤销。").into());
-            }
+            org_deferred_delete(org_delete_timer, &g, &gw, &s, vec![id as i64], false, None);
         });
     }
     {
@@ -4357,6 +4387,11 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         ui.global::<UIState>().on_org_task_selected(move |id| {
             let g = gw.upgrade().unwrap();
             org_commit_field(&g, &s);
+            if g.get_org_selecting() {
+                s.org_selection_toggle(id as i64, true);
+                org_refresh(&g, &s);
+                return;
+            }
             g.set_org_selected_task(id);
             org_refresh(&g, &s);
             org_load_drafts(&g, &s);
@@ -4367,6 +4402,14 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         let s = state.clone();
         ui.global::<UIState>().on_org_task_done_toggled(move |id| {
             let g = gw.upgrade().unwrap();
+            // The box in front of a row is the pick while 多选 is on and the done
+            // state otherwise — one control, two meanings, decided here rather
+            // than in the delegate, which only draws what `task.picked` says.
+            if g.get_org_selecting() {
+                s.org_selection_toggle(id as i64, true);
+                org_refresh(&g, &s);
+                return;
+            }
             let done = !g.get_org_task_detail().done;
             s.org_task_done(id as i64, done);
             org_refresh(&g, &s);
@@ -4419,13 +4462,15 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         let s = state.clone();
         ui.global::<UIState>().on_org_task_deleted(move |id| {
             let g = gw.upgrade().unwrap();
-            org_commit_field(&g, &s);
-            if let Some(title) = s.org_delete_task(id as i64) {
-                g.set_org_selected_task(-1);
-                org_refresh(&g, &s);
-                org_load_drafts(&g, &s);
-                g.set_db_notice(format!("已删除任务「{title}」 — Ctrl+Z 可撤销。").into());
-            }
+            org_deferred_delete(org_delete_timer, &g, &gw, &s, vec![id as i64], true, None);
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_org_undo_delete(move || {
+            let g = gw.upgrade().unwrap();
+            org_undo_delete(org_delete_timer, &g, &s);
         });
     }
     {
@@ -4560,8 +4605,107 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         ui.global::<UIState>().on_org_tag_picked(move |tag| {
             let g = gw.upgrade().unwrap();
             org_commit_field(&g, &s);
-            g.set_org_tag(tag);
+            let tag = tag.to_string();
+            // A path can be shown or hidden, not both: picking one that is hidden
+            // un-hides it. The reference shells keep this rule at the control that
+            // asks; kept here so both controls answer to one place.
+            if s.org_excluded().contains(&tag) {
+                s.org_exclude_toggled(&tag);
+            }
+            g.set_org_tag(tag.into());
             org_refresh(&g, &s);
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_org_tag_excluded(move |path| {
+            let g = gw.upgrade().unwrap();
+            org_commit_field(&g, &s);
+            let path = path.to_string();
+            let hidden = s.org_exclude_toggled(&path);
+            // 仅显示 and 排除 are two answers to one question, so hiding the path
+            // the include names drops the include: a filter that hides what it
+            // shows is a list that is empty for no visible reason.
+            if hidden && g.get_org_tag() == path {
+                g.set_org_tag("".into());
+            }
+            org_refresh(&g, &s);
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_org_filters_cleared(move || {
+            let g = gw.upgrade().unwrap();
+            org_commit_field(&g, &s);
+            s.org_filters_clear();
+            g.set_org_tag("".into());
+            org_refresh(&g, &s);
+        });
+    }
+    // ── 指令 (SPEC §四十一) ───────────────────────────────────────────────────
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_org_command_opened(move |tab| {
+            let g = gw.upgrade().unwrap();
+            org_commit_field(&g, &s);
+            // Which half the batch names is decided when the dialog opens, not
+            // when it runs: the two halves take different actions, so the
+            // template and the parser both have to know before the paste.
+            g.set_org_cmd_tab(tab);
+            g.set_org_cmd_text("".into());
+            g.set_org_cmd_open(true);
+        });
+    }
+    {
+        let gw = gw.clone();
+        ui.global::<UIState>().on_org_command_closed(move || {
+            let g = gw.upgrade().unwrap();
+            g.set_org_cmd_open(false);
+        });
+    }
+    {
+        let gw = gw.clone();
+        ui.global::<UIState>().on_org_command_example(move || {
+            let g = gw.upgrade().unwrap();
+            // 复制示例 hands over the *worked* template for the half the dialog
+            // was opened on, and does not close the dialog: the point is to paste
+            // it into an AI and paste the answer back into this same box.
+            let example = if g.get_org_cmd_tab() == 1 {
+                TASK_COMMAND_EXAMPLE
+            } else {
+                NOTE_COMMAND_EXAMPLE
+            };
+            crate::platform::copy_to_clipboard(example);
+            g.set_db_notice("示例已复制到剪贴板".into());
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_org_command_run(move || {
+            let g = gw.upgrade().unwrap();
+            let text = g.get_org_cmd_text().to_string();
+            if text.trim().is_empty() {
+                g.set_db_notice("指令是空的 — 点「复制示例」拿一份模板。".into());
+                return;
+            }
+            match s.org_apply_commands(g.get_org_cmd_tab() == 1, &text) {
+                Ok(line) => {
+                    g.set_org_cmd_open(false);
+                    g.set_org_cmd_text("".into());
+                    // The applied operations went through `exec_org_all`, so they
+                    // are one entry on the *area's* stack: repaint, and Ctrl+Z
+                    // takes the whole batch back.
+                    org_refresh(&g, &s);
+                    g.set_db_notice(line.into());
+                }
+                // A payload that could not be read at all: said out loud, with the
+                // dialog left open so the text is not lost.
+                Err(e) => g.set_db_notice(e.into()),
+            }
         });
     }
     {
@@ -4639,6 +4783,49 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
             org_load_drafts(&g, &s);
         });
     }
+    // ── 多选 (SPEC §四十一, ADR-0111) ────────────────────────────────────────
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        // The header's 多选 button, and a tab's own door into the mode.
+        ui.global::<UIState>().on_org_select_entered(move |tab| {
+            let g = gw.upgrade().unwrap();
+            org_commit_field(&g, &s);
+            org_start_selecting(&g, &s, tab == 1);
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_org_select_stopped(move || {
+            let g = gw.upgrade().unwrap();
+            org_stop_selecting(&g, &s);
+            org_refresh(&g, &s);
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_org_select_all_toggled(move || {
+            let g = gw.upgrade().unwrap();
+            org_commit_field(&g, &s);
+            let is_task = g.get_org_tab() == 1;
+            // 全选 covers what is showing, and `org_shown_ids` is the model the
+            // delegate is drawing — so a row a filter hid is not silently
+            // included, and a row behind the 撤销 bar is not either.
+            let shown = s.org_shown_ids(is_task);
+            s.org_selection_set_all(&shown, is_task);
+            org_refresh(&g, &s);
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_org_selection_verbed(move |verb| {
+            let g = gw.upgrade().unwrap();
+            org_selection_verb(org_delete_timer, &g, &gw, &s, verb);
+        });
+    }
     {
         ui.global::<UIState>().on_org_card_payload(|id| {
             let mut data = slint::DataTransfer::default();
@@ -4695,6 +4882,13 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
     // The area's models start empty (`bind` runs before the callbacks exist), so
     // the first projection happens here — once, with every filter in place.
     org_refresh(&ui.global::<UIState>(), state);
+
+    // …and if this session *starts* in the area (ADR-0110: a library last read
+    // in 收件箱 opens there), this is the one moment the landing can be applied
+    // — after the projection that fills the rows, before the first frame.
+    if let NavStop::Org(tab) = state.nav_start() {
+        org_show(&ui.global::<UIState>(), state, tab);
+    }
 }
 
 /// The two halves of the area's one selector, as Rust numbers them (`state.rs`'s
@@ -4713,21 +4907,50 @@ const ORG_FIELD_TASK_TAGS: i32 = 6;
 const ORG_FIELD_SUBTASK_TITLE: i32 = 7;
 const ORG_FIELD_TASK_DUE: i32 = 8;
 
-/// Open one of the area's two tabs: the switch itself, then the projection.
+/// Open one of the area's two tabs as a *move*: the step the user asked for, so
+/// it goes on the history like any other (ADR-0110).
+fn org_open(g: &UIState<'_>, state: &Rc<AppState>, tab: i32) {
+    state.nav_record(NavStop::Org(tab));
+    org_show(g, state, tab);
+}
+
+/// Paint the area on `tab`, writing no history. `org_open` is a move to here;
+/// this is also where a back or forward step lands, and a stop the stack has
+/// already paid for must not be recorded a second time.
 ///
 /// The title bar says where the user is, because it always does — `page-title` is
 /// the one line at the top of the window, and an area that left it reading the
 /// document it is covering would be the window lying about itself.
 /// `show_open_page` puts the document's title back, so the two are one mechanism
 /// read in both directions.
-fn org_open(g: &UIState<'_>, state: &Rc<AppState>, tab: i32) {
+fn org_show(g: &UIState<'_>, state: &Rc<AppState>, tab: i32) {
+    // Moving — between tabs or into the area at all — ends 多选 (ADR-0111): the
+    // picked set belongs to one half of the area, and a selection that survived
+    // the tab change would light the *other* kind's rows by row number.
+    if g.get_org_selecting() {
+        g.set_org_selecting(false);
+        state.org_selection_clear();
+    }
     g.set_active_area("organizer".into());
+    // A tag filter belongs to the half of the area it was asked of: the notes'
+    // tags are not the tasks' tags, so carrying `项目` across a tab switch would
+    // filter the other list by a path the user can no longer see the source of —
+    // and the 反向筛选 set goes with it, for the same reason. Cleared only on a
+    // real tab change, so a back/forward step that lands on 笔记 leaves a filter
+    // the user set there alone.
+    if g.get_org_tab() != tab {
+        g.set_org_tag("".into());
+        state.org_filters_clear();
+    }
     g.set_org_tab(tab);
     g.set_page_title(if tab == 0 { "笔记" } else { "任务" }.into());
     g.set_page_breadcrumb("".into());
     // no *page* is showing, so the tree's highlight goes: a sidebar row that
     // stays lit while the page it names is covered is the same lie one row down
     g.set_sidebar_selected_id(0);
+    // 收件箱 is home: the area remembers itself as where the session stands, so
+    // a restart opens here rather than on the document last read
+    state.mark_home_area();
     org_refresh(g, state);
     org_load_drafts(g, state);
 }
@@ -4738,6 +4961,116 @@ fn org_open(g: &UIState<'_>, state: &Rc<AppState>, tab: i32) {
 fn org_refresh(g: &UIState<'_>, state: &Rc<AppState>) {
     g.set_org_today(crate::core::today_iso().into());
     state.rebuild_organizer();
+}
+
+/// Enter 多选 on the half of the area that is showing (SPEC §四十一, ADR-0111).
+/// The mode is a flag on the window because the header, the rows and the bar all
+/// read it; the picked ids stay in `AppState`, because "which of these are on
+/// screen" is a projection question and only Rust can answer it.
+fn org_start_selecting(g: &UIState<'_>, state: &Rc<AppState>, is_task: bool) {
+    state.org_selection_enter(is_task);
+    g.set_org_selecting(true);
+    g.set_org_selection_count(0);
+    org_refresh(g, state);
+}
+
+/// Leave it, ids and all. `org_show` has its own two lines for the same rule
+/// because it is the paint that must not re-enter here — but both go through
+/// `org_selection_clear`, which is the half that actually matters.
+fn org_stop_selecting(g: &UIState<'_>, state: &Rc<AppState>) {
+    if !g.get_org_selecting() {
+        return;
+    }
+    g.set_org_selecting(false);
+    g.set_org_selection_count(0);
+    state.org_selection_clear();
+}
+
+/// The 指令 dialog's two templates (SPEC §四十一). Every action this build
+/// accepts is present, each naming a row with a placeholder — so 复制示例 hands
+/// over a document an AI can *edit* rather than a description of one, which is
+/// the whole reason the button exists.
+///
+/// `restore` is deliberately absent from both: the reference server soft-deletes,
+/// so it has a 回收站 to restore from, while this app's delete is final. A batch
+/// that asks for it anyway is refused by name (`笔记不支持动作 restore`) rather
+/// than being silently skipped, which is the rule that makes the counts mean
+/// something.
+const NOTE_COMMAND_EXAMPLE: &str = r#"{
+  "operations": [
+    {"action": "create", "title": "新笔记", "content": "正文 #项目/工作", "tags": ["项目/工作"]},
+    {"action": "update", "uuid": "在此填笔记ID", "title": "改后标题", "content": "改后的正文", "tags": ["项目"]},
+    {"action": "add_tags", "uuid": "在此填笔记ID", "tags": ["重要", "待办"]},
+    {"action": "remove_tags", "uuid": "在此填笔记ID", "tags": ["待办"]},
+    {"action": "set_tags", "uuid": "在此填笔记ID", "tags": ["项目/工作", "重要"]},
+    {"action": "comment", "uuid": "在此填笔记ID", "content": "给这条笔记加一条评论"},
+    {"action": "delete", "uuid": "在此填笔记ID"}
+  ]
+}"#;
+
+const TASK_COMMAND_EXAMPLE: &str = r#"{
+  "operations": [
+    {"action": "create", "title": "新任务", "content": "备注", "tags": ["项目/工作"], "priority": 2, "due_date": "2026-10-01T00:00:00Z", "list_id": 0},
+    {"action": "update", "uuid": "在此填任务ID", "title": "改后标题", "content": "改后备注"},
+    {"action": "add_tags", "uuid": "在此填任务ID", "tags": ["重要"]},
+    {"action": "remove_tags", "uuid": "在此填任务ID", "tags": ["重要"]},
+    {"action": "set_tags", "uuid": "在此填任务ID", "tags": ["项目/工作", "重要"]},
+    {"action": "set_completed", "uuid": "在此填任务ID", "completed": true},
+    {"action": "move", "uuid": "在此填任务ID", "list_name": "工作"},
+    {"action": "set_priority", "uuid": "在此填任务ID", "priority": 3},
+    {"action": "set_due", "uuid": "在此填任务ID", "due_date": "2026-10-01T00:00:00Z"},
+    {"action": "set_due", "uuid": "在此填任务ID", "clear_due": true},
+    {"action": "add_subtask", "uuid": "在此填任务ID", "title": "子任务 1"},
+    {"action": "set_subtask", "uuid": "在此填任务ID", "subtask_id": 1, "completed": true},
+    {"action": "remove_subtask", "uuid": "在此填任务ID", "subtask_id": 1},
+    {"action": "comment", "uuid": "在此填任务ID", "content": "追加到任务备注的评论"},
+    {"action": "delete", "uuid": "在此填任务ID"}
+  ]
+}"#;
+
+/// The bar's verbs: 0 复制, 1 完成, 2 删除. The ids are read *before* the mode
+/// closes, because the button was clicked against those rows; and the mode closes
+/// first, because a row still lit after its batch went through is an offer to do
+/// it twice.
+fn org_selection_verb(
+    t: &'static slint::Timer,
+    g: &UIState<'_>,
+    gw: &slint::Weak<UIState<'static>>,
+    state: &Rc<AppState>,
+    verb: i32,
+) {
+    org_commit_field(g, state);
+    let is_task = g.get_org_tab() == 1;
+    let ids = state.org_selection_ids(is_task);
+    if ids.is_empty() {
+        return;
+    }
+    org_stop_selecting(g, state);
+    match verb {
+        // 复制 writes nothing at all: the rows are read in the order they were
+        // drawn — with their 唯一 IDs, so the text can come back as a batch of
+        // 指令 — and the text goes to the clipboard.
+        0 => {
+            let text = if is_task {
+                state.org_task_copy_text(&ids)
+            } else {
+                state.org_note_copy_text(&ids)
+            };
+            if !text.is_empty() {
+                crate::platform::copy_to_clipboard(&text);
+            }
+        }
+        // 完成 is one command for the whole batch, so one Ctrl+Z takes the batch
+        // back — which is more than the reference shells give here, and is the
+        // reason `exec_org_all` exists.
+        1 => {
+            state.org_complete_ids(&ids);
+            org_refresh(g, state);
+        }
+        // 删除 is the bar's, unchanged from a single row: hide now, write in
+        // three seconds (ADR-0108), and a batch is one bar rather than N.
+        _ => org_deferred_delete(t, g, gw, state, ids, is_task, None),
+    }
 }
 
 /// Load the detail pane's drafts from the selected rows. Called when the
@@ -4829,6 +5162,86 @@ fn org_commit_field(g: &UIState<'_>, state: &Rc<AppState>) {
         }
         _ => {}
     }
+}
+
+/// How long a delete stays undoable (ADR-0108). The same three seconds the
+/// Compose shell's bar runs on, so a delete asks for the same grace period on
+/// both platforms — and one clock, here, rather than the bar counting down on
+/// its own and the state deciding later.
+const ORG_DELETE_UNDO_MS: u64 = 3_000;
+
+/// Ask for a delete the way ADR-0108 wants it: the rows go, the write waits.
+///
+/// The order of the four steps is the design. Commit the live field first, so a
+/// title half typed is not orphaned by a 🗑 clicked while the caret was in it.
+/// Then hand the ids to `AppState`, which hides them from every projection and
+/// makes **no command**. Then put the line on the bar. Then arm the one clock,
+/// carrying the token — because a second delete commits the first and re-arms
+/// this same timer, and a superseded bar's timer firing must find nothing to do.
+///
+/// `message` is what the bar says; `None` builds 已删除笔记「title」 from the
+/// batch, which is every plain delete. 转为待办 passes its own line, because the
+/// note it hides is a different event from the task it just made.
+fn org_deferred_delete(
+    t: &'static slint::Timer,
+    g: &UIState<'_>,
+    gw: &slint::Weak<UIState<'static>>,
+    s: &Rc<AppState>,
+    ids: Vec<i64>,
+    is_task: bool,
+    message: Option<String>,
+) {
+    org_commit_field(g, s);
+    let message =
+        message.unwrap_or_else(|| format!("已删除{}", s.org_batch_label(&ids, is_task)));
+    let token = s.org_defer_delete(ids, is_task, message.clone());
+    // The row the detail pane was showing is hidden from every projection now,
+    // so the selection goes with it and the drafts reload to the empty row.
+    if is_task {
+        g.set_org_selected_task(-1);
+    } else {
+        g.set_org_selected_note(-1);
+    }
+    g.set_org_undo_text(message.into());
+    org_refresh(g, s);
+    org_load_drafts(g, s);
+    let gw = gw.clone();
+    let s = s.clone();
+    t.start(
+        slint::TimerMode::SingleShot,
+        std::time::Duration::from_millis(ORG_DELETE_UNDO_MS),
+        move || {
+            let Some(g) = gw.upgrade() else { return };
+            // `false` means the batch was taken back or superseded: the bar on
+            // screen belongs to another token, and committing *that* one early
+            // would be the user's row vanishing behind their back.
+            if s.org_commit_pending(token) {
+                g.set_org_undo_text("".into());
+                // `org_refresh` only, deliberately: no drafts are reloaded, since
+                // a keystroke may well be live in the detail pane while this fires
+                // and `org_load_drafts` would rewrite it from the row.
+                org_refresh(&g, &s);
+            }
+        },
+    );
+}
+
+/// 撤销 on the bar: the offer is withdrawn, and because no command was ever made
+/// the area's undo stack is exactly as long as it was before the delete. That is
+/// what the notice band + Ctrl+Z it replaces could not offer — there, undoing a
+/// delete meant walking back a step the user never took.
+fn org_undo_delete(t: &'static slint::Timer, g: &UIState<'_>, s: &Rc<AppState>) {
+    t.stop();
+    g.set_org_undo_text("".into());
+    if !s.org_undo_pending() {
+        // The window closed between the bar painting and the click landing.
+        // Nothing to restore; the line just had to come down.
+        return;
+    }
+    // No `org_load_drafts`: taking a delete back does not move the selection, and
+    // a keystroke that is live in the detail pane must not be rewritten from the
+    // row because a button outside the area was clicked.
+    org_refresh(g, s);
 }
 
 /// Restart the area's 300 ms commit timer — `debounce_arm`'s shape, and its
@@ -4940,22 +5353,6 @@ fn org_scene_seed(state: &Rc<AppState>) -> OrgScene {
         3,
         false,
     ) as i32;
-    state.org_subtask_add(scene.tasks[0] as i64);
-    state.org_subtask_add(scene.tasks[0] as i64);
-    let subs: Vec<i32> = state
-        .organizer()
-        .task(crate::core::organizer::TaskId(scene.tasks[0] as u64))
-        .map(|t| t.subtasks.iter().map(|s| s.id as i32).collect())
-        .unwrap_or_default();
-    if let [first, second] = subs.as_slice() {
-        state.org_subtask_title(scene.tasks[0] as i64, *first as i64, "数据层 + 迁移".into());
-        state.org_subtask_title(
-            scene.tasks[0] as i64,
-            *second as i64,
-            "两个 shell 各写一遍界面".into(),
-        );
-        state.org_subtask_done(scene.tasks[0] as i64, *first as i64, true);
-    }
     state.org_task_notes(
         scene.tasks[0] as i64,
         "先推 quire-core，再 bump 两个壳的 rev。".into(),
@@ -4966,6 +5363,25 @@ fn org_scene_seed(state: &Rc<AppState>) -> OrgScene {
     scene.tasks[3] = task(scene.lists[1], "交电费", Some(iso(-2)), 3, false) as i32;
     scene.tasks[4] = task(0, "买牛奶", None, 1, false) as i32;
     scene.tasks[5] = task(scene.lists[1], "周末爬山", Some(iso(5)), 2, false) as i32;
+
+    // Subtasks on the inbox row, not the 工作 one: the counter they draw (`☑ 1/2`
+    // in the pills line) and the checklist in the detail pane are only photographed
+    // by an arm whose *rows* show the task, and every task arm lists 收集箱 — the
+    // board groups by list but its cards have no counter, and `tasks-list` picks the
+    // other list on purpose.
+    let host = scene.tasks[1] as i64;
+    state.org_subtask_add(host);
+    state.org_subtask_add(host);
+    let subs: Vec<i32> = state
+        .organizer()
+        .task(crate::core::organizer::TaskId(host as u64))
+        .map(|t| t.subtasks.iter().map(|s| s.id as i32).collect())
+        .unwrap_or_default();
+    if let [first, second] = subs.as_slice() {
+        state.org_subtask_title(host, *first as i64, "数据层 + 迁移".into());
+        state.org_subtask_title(host, *second as i64, "两个 shell 各写一遍界面".into());
+        state.org_subtask_done(host, *first as i64, true);
+    }
 
     scene
 }
@@ -6543,23 +6959,37 @@ fn open(g: &UIState<'_>, state: &Rc<AppState>, id: i32) {
         return;
     }
     // the typing flush is debounced 300 ms and resolves against the open
-    // page, so commit it before the page under it changes
+    // page, so commit it before the page under it changes. `org_commit_field`
+    // is the area's twin of that, and this is one of the doors out of the area
+    // (ADR-0110): a keystroke still in its window must not die because the
+    // user left.
     flush_pending_edit(g, state);
-    state.nav_record(state.open_page.get(), id);
+    org_commit_field(g, state);
+    state.nav_record(NavStop::Page(id));
     state.open_page(id);
     show_open_page(g, state);
 }
 
-/// Go Back / Go Forward (SPEC §十六): move along the session's page history.
-/// `nav_step` already parked the page being left onto the opposite stack, so
-/// this must not record again.
+/// Go Back / Go Forward (SPEC §十六): move along the session's history. This
+/// reaches both areas (ADR-0110), and for a back step the history has a floor:
+/// with nothing left behind it answers 收件箱, so the gesture walks *down into*
+/// home instead of stopping short of it. `nav_step` already parked the stop
+/// being left onto the opposite stack, so this must not record again.
 fn navigate(g: &UIState<'_>, state: &Rc<AppState>, forward: bool) {
     flush_pending_edit(g, state);
-    let Some(id) = state.nav_step(forward) else {
+    // the same commit-first rule as `open`: a back step out of the area is one
+    // of the doors out of the area (ADR-0110)
+    org_commit_field(g, state);
+    let Some(stop) = state.nav_step(forward) else {
         return;
     };
-    state.open_page(id);
-    show_open_page(g, state);
+    match stop {
+        NavStop::Page(id) => {
+            state.open_page(id);
+            show_open_page(g, state);
+        }
+        NavStop::Org(tab) => org_show(g, state, tab),
+    }
 }
 
 /// Paint the shell for whatever `state.open_page` now holds.
@@ -6689,11 +7119,22 @@ fn apply_scene_body(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
         // and every one of them goes through the *real* write path
         // (`org_create_*` / `org_*_set`), so a scene cannot photograph a state
         // the commands could not produce.
-        "notes" | "notes-detail" | "notes-search" => {
+        "notes" | "notes-detail" | "notes-search" | "notes-info" => {
             let ids = org_scene_seed(state);
             org_open(&g, state, 0);
             if scene == "notes-detail" {
                 g.set_org_selected_note(ids.notes[1]);
+                org_refresh(&g, state);
+                org_load_drafts(&g, state);
+            }
+            if scene == "notes-info" {
+                // The pinned note, because it is the seed with two tags, a
+                // multi-line body and 置顶 = 是: the six rows each have something
+                // to say. Every seeded note was written in this same second, so
+                // 创建 and 修改 both read 刚刚 — what a scene cannot fake, it says
+                // honestly rather than stamps a fake date into the store.
+                g.set_org_selected_note(ids.notes[0]);
+                g.set_org_note_details_open(true);
                 org_refresh(&g, state);
                 org_load_drafts(&g, state);
             }
@@ -6732,6 +7173,106 @@ fn apply_scene_body(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
                 org_load_drafts(&g, state);
             }
         }
+        "undo-bar" => {
+            // ADR-0108: the 撤销 bar over the note list. The scene goes through
+            // `org_defer_delete` — the call the 🗑 button makes — so what is
+            // photographed is a state the app can actually reach: the note is off
+            // screen, the catalog still holds it, and the bar names it.
+            //
+            // It does *not* arm the timer. The bar's three seconds are the one
+            // part of this that a screenshot cannot hold still for: a capture that
+            // waited past the expiry would show the note deleted rather than
+            // pending, which is a different scene and the wrong one to check.
+            let ids = org_scene_seed(state);
+            org_open(&g, state, 0);
+            let note = ids.notes[1] as i64;
+            let line = format!("已删除笔记「{}」", state.org_row_label(note, false));
+            state.org_defer_delete(vec![note], false, line.clone());
+            g.set_org_undo_text(line.as_str().into());
+            org_refresh(&g, state);
+        }
+        "notes-select" | "tasks-select" => {
+            // ADR-0111: 多选 on each half of the area. The scene calls the header
+            // button's own function and then the row tap's, so the photograph is
+            // of a state the shell can reach — and the ticks are the first two
+            // rows the page is *showing*, which is what 已选 2 项 has to agree with.
+            let is_task = scene == "tasks-select";
+            org_scene_seed(state);
+            org_open(&g, state, if is_task { 1 } else { 0 });
+            org_start_selecting(&g, state, is_task);
+            let picked: Vec<i64> = state.org_shown_ids(is_task).into_iter().take(2).collect();
+            for id in &picked {
+                state.org_selection_toggle(*id, is_task);
+            }
+            if !is_task {
+                // One row carries a title long enough to be elided, and it is a row
+                // that is *not* picked on purpose: the picked rows' boxes are a solid
+                // fill, which would hide the overlap this is here to rule out, while
+                // an unpicked row's box is a transparent outline.
+                if let Some(rest) = state
+                    .org_shown_ids(false)
+                    .into_iter()
+                    .find(|id| !picked.contains(id))
+                {
+                    state.org_note_title(
+                        rest,
+                        "把整批笔记一次删掉之前请先看清这一行标题到底有多长会不会顶到右边那个框里去".into(),
+                    );
+                }
+            }
+            org_refresh(&g, state);
+        }
+        "notes-filter" => {
+            // ADR-0112: the tag column, on its new side, with one path hidden.
+            // The path is taken from the column's own first row rather than
+            // hard-coded, so the scene hides something whatever the seed carries —
+            // and it is hidden through the call the ⊖ control makes, so what is
+            // photographed is a state the shell can reach: the rows under that
+            // path are gone, the column paints it marked, the header's count agrees
+            // with the list, and 清除筛选 is offered.
+            org_scene_seed(state);
+            org_open(&g, state, 0);
+            // The first tag the seed actually carries, rather than a hard-coded
+            // path: the scene has to hide *something* to be a photograph of 反向筛选.
+            let first = state
+                .organizer()
+                .notes
+                .iter()
+                .flat_map(|n| n.tags.iter())
+                .next()
+                .cloned();
+            if let Some(path) = first {
+                state.org_exclude_toggled(&path);
+            }
+            org_refresh(&g, state);
+        }
+        "notes-commands" => {
+            // ADR-0112: the 指令 dialog, open with a draft in it. The paste box is
+            // the one surface in this shell that holds a *page* of JSON, so the
+            // scene exists to photograph its geometry — the card's bounds against a
+            // short window, the monospace wrap, and the three buttons under it.
+            org_scene_seed(state);
+            org_open(&g, state, 0);
+            g.set_org_cmd_tab(0);
+            g.set_org_cmd_text(
+                "{\n  \"operations\": [\n    {\"action\": \"add_tags\", \"uuid\": \"在此填笔记ID\", \"tags\": [\"重要\", \"待办\"]},\n    {\"action\": \"comment\", \"uuid\": \"在此填笔记ID\", \"content\": \"给这条笔记加一条评论\"}\n  ]\n}"
+                    .into(),
+            );
+            g.set_org_cmd_open(true);
+            org_refresh(&g, state);
+        }
+        "dark-notes-filter" => {
+            apply_scene_body(ui, state, "notes-filter");
+        }
+        "dark-notes-commands" => {
+            apply_scene_body(ui, state, "notes-commands");
+        }
+        "dark-notes-select" => {
+            apply_scene_body(ui, state, "notes-select");
+        }
+        "dark-tasks-select" => {
+            apply_scene_body(ui, state, "tasks-select");
+        }
         "dark-notes" => {
             apply_scene_body(ui, state, "notes");
         }
@@ -6741,11 +7282,17 @@ fn apply_scene_body(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
         "dark-notes-detail" => {
             apply_scene_body(ui, state, "notes-detail");
         }
+        "dark-notes-info" => {
+            apply_scene_body(ui, state, "notes-info");
+        }
         "dark-tasks-detail" => {
             apply_scene_body(ui, state, "tasks-detail");
         }
         "dark-tasks-board" => {
             apply_scene_body(ui, state, "tasks-board");
+        }
+        "dark-undo-bar" => {
+            apply_scene_body(ui, state, "undo-bar");
         }
         "palette" | "search" | "search-notes" | "menu" | "dialog" | "settings" => {
             apply_scene_overlay(ui, state, scene)

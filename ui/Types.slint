@@ -461,6 +461,27 @@ export struct NoteRow {
     tags: string,         // already joined: a delegate never does string work
     when: string,         // relative age ("3 分钟前")
     selected: bool,
+    // picked by 多选 — a second flag beside `selected` on purpose: one row can be
+    // the one the detail pane is showing *and* a picked one, and the two states
+    // paint differently (a tint versus a tick).
+    picked: bool,
+}
+
+// One note's 详细信息: what the store actually holds about it. Every field is
+// already the text a row shows, for the reason the note row's own `when` is —
+// a day needs a clock and a length needs counting in the units the reader reads
+// (characters, not bytes), and neither belongs in a delegate.
+export struct NoteDetails {
+    id: string,
+    // The 唯一 ID (SPEC §四十一): the name the clipboard hands out and a batch
+    // instruction addresses this note by. Already `local:<id>` when the row has no
+    // uuid yet, so the row is never blank.
+    uuid: string,
+    created: string,      // "2026-09-21 · 5 天前"
+    edited: string,
+    tags: string,         // "#项目 / 工作", or 无
+    length: string,       // "128 字", or 无 for an empty note
+    pinned: string,       // 是 / 否
 }
 
 // One task list as its chip paints it.
@@ -480,6 +501,10 @@ export struct TagRow {
     name: string,
     count: int,
     path: string,
+    // 反向筛选 (SPEC §四十一): this path is one the user has *hidden*, so the row
+    // paints struck-through and its tap removes the exclusion. The badge is the
+    // set, projected — a delegate never holds one.
+    excluded: bool,
 }
 
 // One task: the list row and the detail panel's row again. `priority` and
@@ -505,6 +530,7 @@ export struct TaskRow {
     subtasks-total: int,
     when: string,
     selected: bool,
+    picked: bool,         // 多选, for the same reason as `NoteRow.picked`
 }
 
 // One card of the board (平铺) view. Deliberately *not* a `TaskRow`: a card is
@@ -1235,6 +1261,11 @@ export global UIState {
     // drag-reorder teaches the same lesson: a delegate never parses a payload).
     in-out property <int> org-drop-list: -2;
     in-out property <[NoteRow]> note-rows;
+    // The selected note's 引用 (SPEC §四十一, core ADR-0001): the notes that name
+    // it. A list of its own rather than a second field on the detail row, and
+    // projected exactly like `note-rows` — a comment 指令 added a second ago is on
+    // screen as soon as the panel is repainted.
+    in-out property <[NoteRow]> org-note-replies;
     in-out property <[TaskRow]> task-rows;
     in-out property <[TaskListRow]> task-list-rows;
     in-out property <[BoardColumn]> org-board;
@@ -1247,13 +1278,31 @@ export global UIState {
     in-out property <string> org-tag: "";
     in-out property <string> org-tag-label: "";
     in-out property <string> org-tag-parent: "";
+    // 反向筛选: the paths the user has hidden, as one line (`排除 ⊘#项目 ⊘#工作`).
+    // Empty is "nothing hidden". The set itself lives in Rust — this is the
+    // projection of it, the same way every other count on this screen is.
+    in-out property <string> org-excluded-label: "";
     // The selected row's *whole* self, so the detail panel binds fields instead
     // of looking a row up in a model: `id` is -1 when nothing is selected, and
     // every other field is then whatever the empty row says.
     in-out property <NoteRow> org-note-detail;
+    // The note page's 详细信息 block: the six read-only rows, and whether they
+    // are open at all. The flag is state rather than a component-local property
+    // so a sweep scene can photograph the block open — a block no scene shows is
+    // a block no sweep measures.
+    in-out property <NoteDetails> org-note-details;
+    in-out property <bool> org-note-details-open: false;
     in-out property <TaskRow> org-task-detail;
     in-out property <int> org-selected-note: -1;
     in-out property <int> org-selected-task: -1;
+    // ── 多选 (SPEC §四十一, ADR-0111) ────────────────────────────────────────
+    // Whether the page is *picking* rows rather than showing them. A flag on the
+    // window and not inside the area: the header that swaps, the rows that light
+    // and the bar's verbs all read the same one, and the picked ids themselves
+    // stay in Rust — the count below is projected from them, the same way every
+    // other number on this screen is.
+    in-out property <bool> org-selecting: false;
+    in-out property <int> org-selection-count: 0;
     // The list a new task lands in, and the draft of a list name being typed.
     in-out property <int> org-new-list-color: 0;
     in-out property <string> org-new-list-name: "";
@@ -1262,6 +1311,11 @@ export global UIState {
     // have to mean the same day, and there is exactly one place that decides
     // which day that is.
     in-out property <string> org-today: "";
+    // The 撤销 bar's line (ADR-0108): non-empty means a delete is waiting behind
+    // it. Window-level rather than a property of the area, because the bar outlives
+    // the area it was asked from — leaving for the document must not silently
+    // commit a delete the user had not finished looking at.
+    in-out property <string> org-undo-text: "";
 
     // ── the drafts ──
     // One property per editable field of the detail pane, bound two-way by the
@@ -1295,10 +1349,36 @@ export global UIState {
     callback org-note-pin-toggled(int);
     callback org-note-tags-set(int, string);
     callback org-note-deleted(int);
+    // 撤销 on the bar: the batch it was standing in front of is forgotten, and
+    // because the delete was deferred nothing has been written to undo.
+    callback org-undo-delete();
     // 转为待办: the note becomes a task and the note goes
     callback org-note-to-task(int);
     // the 笔记 tab's tag column: "" is 全部笔记
     callback org-tag-picked(string);
+    // 反向筛选 (SPEC §四十一): hide this path and its subtree, or stop hiding it.
+    // One callback for both directions, because which one it is is decided by the
+    // set Rust holds — the UI is looking at a projection of it, not at the set.
+    callback org-tag-excluded(string);
+    // 清除筛选: drop the include path *and* every exclusion. Session state, so it
+    // writes nothing.
+    callback org-filters-cleared();
+    // ── 指令 (SPEC §四十一): a batch of AI instructions ──────────────────────
+    // The dialog's own state. `org-cmd-text` is the pasted JSON and is a two-way
+    // draft like every other field here; `org-cmd-tab` is which half of the area
+    // the instructions name, decided when the dialog opens (a batch of task
+    // actions pasted on the 笔记 tab is refused action by action, not silently
+    // half-applied).
+    in-out property <bool> org-cmd-open: false;
+    in-out property <string> org-cmd-text: "";
+    in-out property <int> org-cmd-tab: 0;
+    callback org-command-opened(int);
+    callback org-command-run();
+    // 复制示例: the button that hands the whole template to the clipboard without
+    // closing the dialog, so it can be pasted into an AI and the answer pasted
+    // back into the same box.
+    callback org-command-example();
+    callback org-command-closed();
     // tasks: the row's own switches are immediate, the text fields commit on blur
     callback org-task-create();
     callback org-task-selected(int);
@@ -1314,6 +1394,18 @@ export global UIState {
     // the row's ⋯: the task, and where the pointer was, so the shared context
     // menu can be anchored the way the page tree's is
     callback org-task-menu-requested(int, length, length);
+    // ── 多选 (SPEC §四十一, ADR-0111) ────────────────────────────────────────
+    // Enter the mode for the tab named (0 笔记, 1 任务) with nothing picked yet.
+    // A row's ⋯ → 多选 is the same call with that row already picked, so it does
+    // not need its own callback: the menu action carries the id.
+    callback org-select-entered(int);
+    // ✕, and the Escape that stands in for the reference's back gesture.
+    callback org-select-stopped();
+    // 全选 / 取消全选 — one callback, because which of the two it is is decided by
+    // the set and the rows showing, neither of which the UI holds.
+    callback org-select-all-toggled();
+    // The bar's verbs: 0 复制 (笔记), 1 完成 (任务), 2 删除 (both).
+    callback org-selection-verbed(int);
     // the list column's quick-add line: committed on Enter, and the task lands
     // in whichever list the view is showing (a smart view means 收集箱)
     callback org-quick-add-submitted();
