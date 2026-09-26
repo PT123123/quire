@@ -2,6 +2,63 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0113 · A list is managed from its own ⋯, and a reply is written on the note's page
+
+Decision: the two writes the area was missing — managing a stored 清单 (rename /
+colour / delete) and writing a 评论 from the interface — are done, both through
+mechanisms this shell already had.
+
+**A list's ⋯.** The 任务 tab's stored-list rows gain a ⋯ (drawn on hover or when the
+row is the selected one, the way a task row's own is) that opens the **shared**
+`ContextMenu` — the same `UIState.menu-rows` / `menu-action` popup the page tree and
+the task row already use, with the list travelling on `menu-node-id` exactly as a
+task does. Its rows are 重命名 / 颜色 / 删除清单, and 颜色 swaps the popup for the
+**closed** palette as swatch rows, the list's own colour checked.
+
+**重命名 is inline.** The row's own name becomes a `TextInput` — the sidebar's page
+rename, moved into the 32 px nav row: Enter commits, Escape puts the old name back,
+a blank name is refused. It reads a **new** `org-list-renaming` property and *not*
+the sidebar's `renaming-id`, because those two id spaces overlap: a page numbered
+like the list would wear the rename box.
+
+**评论 is written on the note's page.** 引用's replies list has been read-only since
+ADR-0112 (only 指令's `comment` could add one); the page gains a field and a 评论
+button, committed on Enter or the button and **not** on a 300 ms settle — a reply is
+a *create*, and half a row is not a row (the quick-add line's rule).
+`org_create_reply` writes a note whose `ref_note` names the parent through the same
+`CreateNote` every other note uses, and refuses a parent that is gone rather than
+inventing a dangling ref: that is a thing a **merge** leaves behind, not a thing a
+write should make.
+
+Why: ADR-0112's tail named both as still missing — "从界面写回复（回复框）" and a list
+that could be created and never renamed — and they were the last two verbs the
+reference app's 收件箱 / 任务 screens had that this one did not.
+
+Consequences:
+
+- **`ContextMenu` now renders `MenuRow.check` and `MenuRow.swatch`.** Both fields have
+  been on the struct since the block menu needed them, and this popup ignored them;
+  the colour picker needed the swatch, and the same rendering finally marks the page
+  menu's Style rows. A latent gap closed rather than a new one opened — and the swept
+  `page-style` scene now shows the checks, which is the change it was always meant to
+  show.
+- **No core change and no rev bump.** A list is `UpdateTaskList` / `DeleteTaskList`
+  commands that already existed; a reply is one `CreateNote`.
+- **`org-list-color-set` / `org-list-deleted` are gone.** They were declared in
+  `Types.slint` and wired to nothing, and the ⋯ is the door now; a callback no
+  interface can reach is worse than no callback. The delete logic moved into
+  `org_list_delete_action`, shared by the one caller that remains.
+- The delete keeps its wording — the notice band says how many tasks moved to 收集箱
+  — and the view falls back to the inbox only when the list being *looked at* is the
+  one that went: the deleted list may be a neighbour of the selected one.
+- The reply card takes an explicit `height` off its wrapped text's preferred-height
+  (the board card's own idiom). A `Rectangle` in the detail column's `VerticalLayout`
+  absorbs the pane's leftover height otherwise, which painted one line of reply
+  stretched down half the panel — a shape no scene had photographed until the reply
+  scene existed.
+- **Still not here, and still named**: a persistent 回收站, 笔记历史 / 恢复版本, and the
+  task-side 详细信息.
+
 ## ADR-0112 · The tag column moves right, a tag can be hidden, and an AI's batch lands as one step
 
 Decision: 标签 becomes the card's **last** column; a tag path can be **excluded** as well as

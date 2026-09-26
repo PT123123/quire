@@ -72,9 +72,9 @@ $all = @(
     # scenes joined the default list: a scene nobody sweeps is a scene nobody
     # measures.
     "notes", "notes-detail", "notes-info", "notes-search", "notes-select",
-    "notes-filter", "notes-commands",
+    "notes-filter", "notes-commands", "notes-reply",
     "tasks", "tasks-detail", "tasks-list", "tasks-overdue", "tasks-board",
-    "tasks-select", "undo-bar",
+    "tasks-select", "tasks-list-menu", "tasks-list-color", "tasks-list-rename", "undo-bar",
     "dark-notes", "dark-notes-detail", "dark-notes-info", "dark-tasks", "dark-tasks-detail",
     "dark-tasks-board", "dark-undo-bar",
     # ADR-0111: selection mode is a whole different header and a different row
@@ -83,7 +83,11 @@ $all = @(
     # ADR-0112: 反向筛选 draws a control and a marked row the plain list has not
     # got, and the 指令 dialog is a whole card over the area — both are shapes, not
     # states of "notes".
-    "dark-notes-filter", "dark-notes-commands"
+    "dark-notes-filter", "dark-notes-commands",
+    # ADR-0113: the list's ⋯ and its colour submenu are two more popup shapes, and
+    # the reply box is a field the note page did not have — all three are shapes,
+    # so each gets a scene (with the dark twins ADR-0112's two also carry).
+    "dark-notes-reply", "dark-tasks-list-menu", "dark-tasks-list-color"
 )
 $targets = if ($Scenes -eq "") { $all } else { $Scenes -split ',' }
 

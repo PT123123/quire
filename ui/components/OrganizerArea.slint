@@ -176,8 +176,16 @@ component OrgNavRow inherits Rectangle {
     // This row is a tag path that can be hidden, and whether it is hidden now.
     in property <bool> excludable: false;
     in property <bool> excluded: false;
+    // A stored list row: its ⋯ opens the shared context menu (rename / colour /
+    // delete), and it can be renamed inline — the sidebar's own idiom, kept in the
+    // row it renames rather than in a dialog.
+    in property <bool> menuable: false;
+    in property <bool> renaming: false;
     callback clicked();
     callback exclude-toggled();
+    callback menu-requested(length, length);
+    callback rename-committed(string);
+    callback rename-cancelled();
 
     height: 32px;
     border-radius: Theme.radius-sm;
@@ -186,11 +194,13 @@ component OrgNavRow inherits Rectangle {
         : (ta.has-hover ? Colors.hover-fill : transparent);
     animate background { duration: Theme.duration-instant; }
 
-    // What the text must leave room for: the count, then the exclude control.
-    // One property rather than two subtractions, because a `Text`'s width is a
-    // `length` and nesting the arithmetic inside it is how a row elides to "…".
+    // What the text must leave room for: the count, then the exclude control, then
+    // the ⋯. One property rather than three subtractions, because a `Text`'s width
+    // is a `length` and nesting the arithmetic inside it is how a row elides to "…".
     private property <length> right-inset:
-        (count > 0 ? count-text.preferred-width + 16px : 13px) + (excludable ? 24px : 0px);
+        (count > 0 ? count-text.preferred-width + 16px : 13px)
+        + (excludable ? 24px : 0px)
+        + (menuable ? 22px : 0px);
 
     if selected : Rectangle {
         x: 0;
@@ -212,6 +222,9 @@ component OrgNavRow inherits Rectangle {
         x: color-slot >= 0 ? 29px : 13px;
         width: parent.width - self.x - root.right-inset;
         height: parent.height;
+        // The rename input takes this slot's place while it is up, so a renamed
+        // row is one row and not a row with a second copy of its name under it.
+        visible: !root.renaming;
         text: root.label;
         font-family: Typography.ui-font;
         font-size: Typography.size-ui;
@@ -223,11 +236,12 @@ component OrgNavRow inherits Rectangle {
         overflow: elide;
     }
     count-text := Text {
-        x: parent.width - count-text.width - (root.excludable ? 26px : 12px);
+        x: parent.width - count-text.width - (root.excludable ? 26px : 12px)
+            - (root.menuable ? 22px : 0px);
         y: 0;
         width: self.preferred-width;
         height: parent.height;
-        visible: root.count > 0;
+        visible: root.count > 0 && !root.renaming;
         text: root.count;
         font-family: Typography.ui-font;
         font-size: Typography.size-caption;
@@ -266,6 +280,59 @@ component OrgNavRow inherits Rectangle {
         excl-ta := TouchArea {
             mouse-cursor: MouseCursor.pointer;
             clicked => { root.exclude-toggled(); }
+        }
+    }
+    // The ⋯ that opens the shared context menu — 重命名 / 颜色 / 删除清单. Drawn on
+    // hover or when the row is the selected one, the way a task row's own ⋯ is, and
+    // after `ta` so it is *above* the row's hit area.
+    if root.menuable : IconButton {
+        x: parent.width - self.width - 3px;
+        y: (parent.height - self.height) / 2;
+        icon-name: "dots-horizontal";
+        icon-color: Colors.text-muted;
+        size: 20px;
+        visible: !root.renaming && (ta.has-hover || root.selected);
+        clicked => {
+            root.menu-requested(self.absolute-position.x, self.absolute-position.y);
+        }
+    }
+    // Inline rename, the sidebar's own shape: Enter commits, Escape puts the old
+    // name back. Above `ta`, because a field under the row's own hit area is a
+    // field nobody can type into.
+    if root.renaming : Rectangle {
+        x: nav-text.x;
+        y: (parent.height - 22px) / 2;
+        width: parent.width - self.x - 13px;
+        height: 22px;
+        border-radius: Theme.radius-xs;
+        background: Colors.background;
+        border-width: 1px;
+        border-color: Colors.accent;
+        rename := TextInput {
+            x: 4px;
+            width: parent.width - 8px;
+            height: parent.height;
+            vertical-alignment: center;
+            font-family: Typography.ui-font;
+            font-size: Typography.size-ui;
+            color: Colors.text-primary;
+            selection-foreground-color: Colors.text-primary;
+            selection-background-color: Colors.selection;
+            single-line: true;
+            text: root.label;
+            accepted => { root.rename-committed(self.text); }
+            key-pressed(event) => {
+                if (event.text == Key.Escape) {
+                    root.rename-cancelled();
+                    accept
+                } else {
+                    reject
+                }
+            }
+            init => {
+                rename.focus();
+                rename.select-all();
+            }
         }
     }
 }
@@ -1281,23 +1348,45 @@ export component OrganizerArea inherits Rectangle {
                                 edited => { UIState.org-field-edited(2); }
                             }
 
-                            // 引用 (SPEC §四十一): the notes that answer this one.
-                            // Read-only — a reply is written by 指令's `comment` or by
-                            // the reference's own reply box, which this build has no
-                            // field for — so a row is its text and its age.
-                            if UIState.org-note-replies.length > 0 : VerticalLayout {
+                            // 引用 (SPEC §四十一): the notes that answer this one, and
+                            // the field that writes them — a reply is a note whose
+                            // `ref_note` names this one (core ADR-0001). Committed on
+                            // Enter or the 评论 button and not on a settle, because a
+                            // reply is a *create* and half a row is not a row.
+                            VerticalLayout {
                                 spacing: 4px;
                                 OrgField {
                                     name: "评论 " + UIState.org-note-replies.length;
                                     height: 18px;
                                 }
+                                HorizontalLayout {
+                                    height: 30px;
+                                    spacing: 8px;
+                                    OrgInput {
+                                        placeholder: "写一条评论…";
+                                        value <=> UIState.org-reply-draft;
+                                        accepted => { UIState.org-reply-submitted(); }
+                                    }
+                                    OrgButton {
+                                        label: "评论";
+                                        accent: true;
+                                        font-size: Typography.size-caption;
+                                        clicked => { UIState.org-reply-submitted(); }
+                                    }
+                                }
                                 for reply[i] in UIState.org-note-replies : Rectangle {
+                                    // The card hugs its text, the board card's own
+                                    // idiom (`height` off the wrapped text's
+                                    // preferred-height): a reply is a line or two, and
+                                    // the detail pane's leftover height must not be
+                                    // poured into the newest one.
+                                    height: reply-text.preferred-height + 14px + 18px;
                                     background: Colors.hover-fill;
                                     border-radius: Theme.radius-sm;
                                     VerticalLayout {
                                         padding: 8px;
                                         spacing: 2px;
-                                        Text {
+                                        reply-text := Text {
                                             text: reply.body != "" ? reply.body : reply.title;
                                             font-family: Typography.ui-font;
                                             font-size: Typography.size-ui;
@@ -1788,10 +1877,22 @@ export component OrganizerArea inherits Rectangle {
                                 label: entry.name;
                                 count: entry.count;
                                 color-slot: entry.smart ? -1 : entry.color;
+                                // The inbox is a *projection*, not a row: there is
+                                // nothing there to rename, recolour or delete.
+                                menuable: !entry.smart;
+                                renaming: !entry.smart && UIState.org-list-renaming == entry.id;
                                 selected: entry.smart
                                     ? UIState.org-list < 0 && UIState.org-view == 0
                                     : UIState.org-list == entry.id;
                                 clicked => { UIState.org-list-picked(entry.id); }
+                                menu-requested(x, y) => {
+                                    UIState.org-list-menu-requested(entry.id, x, y);
+                                }
+                                rename-committed(text) => {
+                                    UIState.org-list-name-set(entry.id, text);
+                                    UIState.org-list-renaming = -1;
+                                }
+                                rename-cancelled => { UIState.org-list-renaming = -1; }
                             }
                             OrgNavRow {
                                 label: "＋ 新建清单";

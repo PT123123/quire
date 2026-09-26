@@ -856,6 +856,43 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                         org_start_selecting(&g, &s, true);
                         s.org_selection_toggle(task, true);
                     }
+                    // ---- a *list's* ⋯ (the same id range, a different node) ----
+                    // The list travels on `menu-node-id` exactly as a task does, so
+                    // its arms are told apart from the task's by their ids alone.
+                    crate::app::state::MENU_ORG_LIST_RENAME => {
+                        // The menu closes and the row's own input opens: a rename box
+                        // over a popup would be two editors for one name.
+                        g.set_menu_open(false);
+                        g.set_menu_node_id(-1);
+                        g.set_org_list_renaming(id);
+                        return;
+                    }
+                    crate::app::state::MENU_ORG_LIST_COLOR => {
+                        s.fill_org_list_color_menu(id);
+                        reanchor_menu(&g);
+                        return;
+                    }
+                    crate::app::state::MENU_ORG_LIST_BACK => {
+                        s.fill_org_list_menu(id);
+                        reanchor_menu(&g);
+                        return;
+                    }
+                    crate::app::state::MENU_ORG_LIST_DELETE => {
+                        org_list_delete_action(&g, &s, id as i64);
+                        return;
+                    }
+                    // The colour rows sit *above* Move-to's base, which is why this
+                    // arm has to be tested before the move-to one below it.
+                    _ if action >= crate::app::state::MENU_ORG_LIST_COLOR_BASE => {
+                        s.org_list_color(
+                            id as i64,
+                            action - crate::app::state::MENU_ORG_LIST_COLOR_BASE,
+                        );
+                        g.set_menu_open(false);
+                        g.set_menu_node_id(-1);
+                        org_refresh(&g, &s);
+                        return;
+                    }
                     _ if action >= crate::app::state::MENU_ORG_MOVE_BASE => {
                         s.org_task_list(
                             task,
@@ -881,7 +918,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                 } else {
                     s.fill_page_menu_style(id);
                 }
-                reanchor_page_menu(&g);
+                reanchor_menu(&g);
                 return;
             }
             if action == crate::app::state::MENU_BACK {
@@ -902,12 +939,12 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
             // would only add a picker to maintain.
             if action == crate::app::state::MENU_PAGE_TEMPLATES {
                 s.fill_template_menu();
-                reanchor_page_menu(&g);
+                reanchor_menu(&g);
                 return;
             }
             if action == crate::app::state::MENU_TEMPLATE_PICK_BACK {
                 s.fill_template_menu();
-                reanchor_page_menu(&g);
+                reanchor_menu(&g);
                 return;
             }
             if matches!(
@@ -926,7 +963,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                     return;
                 }
                 s.fill_template_pick(action);
-                reanchor_page_menu(&g);
+                reanchor_menu(&g);
                 return;
             }
             g.set_menu_open(false);
@@ -4367,6 +4404,27 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
     {
         let gw = gw.clone();
         let s = state.clone();
+        // 引用 (core ADR-0001): write the reply the note page's own field holds. The
+        // text is the field's draft, and the field is cleared only when something
+        // actually landed — a reply refused by a parent that is gone must not eat
+        // what the user typed.
+        ui.global::<UIState>().on_org_reply_submitted(move || {
+            let g = gw.upgrade().unwrap();
+            let parent = g.get_org_note_detail().id as i64;
+            let text = g.get_org_reply_draft().to_string();
+            if parent < 0 || text.trim().is_empty() {
+                return;
+            }
+            if s.org_create_reply(parent, text).is_some() {
+                g.set_org_reply_draft("".into());
+            }
+            org_refresh(&g, &s);
+            org_load_drafts(&g, &s);
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
         ui.global::<UIState>().on_org_task_create(move || {
             let g = gw.upgrade().unwrap();
             org_commit_field(&g, &s);
@@ -4541,17 +4599,35 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
     {
         let gw = gw.clone();
         let s = state.clone();
-        ui.global::<UIState>().on_org_list_deleted(move |id| {
+        // A stored list's ⋯. Anchored the way a task row's is: the popup's top-left
+        // goes just left of the button and below its top, clamped so the colour
+        // submenu (ten rows with the Back row) still fits on the window.
+        ui.global::<UIState>().on_org_list_menu_requested(move |id, x, y| {
             let g = gw.upgrade().unwrap();
-            if let Some(count) = s.org_delete_list(id as i64) {
-                // back to the inbox: the list the user was looking at is gone
-                g.set_org_list(-1);
-                g.set_org_view(SMART_INBOX);
-                org_refresh(&g, &s);
-                g.set_db_notice(
-                    format!("已删除清单，{count} 条任务已移入收集箱 — Ctrl+Z 可撤销。").into(),
-                );
+            org_commit_field(&g, &s);
+            g.set_menu_node_id(id);
+            s.fill_org_list_menu(id);
+            g.set_menu_rows(s.menu_model());
+            let menu_h = g.get_menu_rows().row_count() as f32 * 30.0 + 8.0;
+            let w = 184.0;
+            g.set_menu_x((x - w).clamp(8.0, (g.get_window_w() - w - 8.0).max(8.0)));
+            g.set_menu_y(y.clamp(48.0, (g.get_window_h() - menu_h - 8.0).max(48.0)));
+            g.set_menu_open(true);
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        // The inline rename input's Enter. A blank name is refused rather than
+        // written: a list with no name is a row nobody can find again, and the row
+        // keeps whatever it had, so Escape and Enter-to-empty behave the same way.
+        ui.global::<UIState>().on_org_list_name_set(move |id, name| {
+            let g = gw.upgrade().unwrap();
+            if !name.trim().is_empty() {
+                s.org_list_name(id as i64, name.to_string());
             }
+            g.set_org_list_renaming(-1);
+            org_refresh(&g, &s);
         });
     }
     {
@@ -4961,6 +5037,27 @@ fn org_show(g: &UIState<'_>, state: &Rc<AppState>, tab: i32) {
 fn org_refresh(g: &UIState<'_>, state: &Rc<AppState>) {
     g.set_org_today(crate::core::today_iso().into());
     state.rebuild_organizer();
+}
+
+/// Delete a stored list and file its tasks in the inbox, the notice band saying how
+/// many came along. One call for the one door (`⋯ → 删除清单`).
+///
+/// The view falls back to the inbox only when the list being *looked at* is the one
+/// that went: the other lists are still there, and a view that jumped anyway would
+/// be a surprise the delete did not ask for.
+fn org_list_delete_action(g: &UIState<'_>, state: &Rc<AppState>, id: i64) {
+    if let Some(count) = state.org_delete_list(id) {
+        if g.get_org_list() as i64 == id {
+            g.set_org_list(-1);
+            g.set_org_view(SMART_INBOX);
+        }
+        g.set_menu_open(false);
+        g.set_menu_node_id(-1);
+        org_refresh(g, state);
+        g.set_db_notice(
+            format!("已删除清单，{count} 条任务已移入收集箱 — Ctrl+Z 可撤销。").into(),
+        );
+    }
 }
 
 /// Enter 多选 on the half of the area that is showing (SPEC §四十一, ADR-0111).
@@ -6089,11 +6186,12 @@ fn copy_current_page_markdown(g: &UIState<'_>, s: &Rc<AppState>) {
     g.set_db_notice(notice.into());
 }
 
-/// Re-measure the page menu's popup after its rows were swapped for a taller
-/// submenu (Move-to, Style, Templates). Every 28 px row counts, and the anchor
-/// is the top of the popup, so a list that outgrows the space below the ⋯
-/// button has to move up or its last rows are unreachable.
-fn reanchor_page_menu(g: &UIState<'_>) {
+/// Re-measure the shared context menu after its rows were swapped for a taller
+/// submenu (the page's Move-to / Style / Templates, and the organizer's list
+/// colours). Every 28 px row counts, and the anchor is the top of the popup, so a
+/// list that outgrows the space below the ⋯ button has to move up or its last rows
+/// are unreachable.
+fn reanchor_menu(g: &UIState<'_>) {
     // 30 px rows + 8 px padding is what `ContextMenu` itself draws and clamps
     // against; this used to say 28 + 16, which under-estimates by
     // `2 * rows - 8` — 40 px on a 24-row Move-to list, so the popup was told it
@@ -7119,9 +7217,19 @@ fn apply_scene_body(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
         // and every one of them goes through the *real* write path
         // (`org_create_*` / `org_*_set`), so a scene cannot photograph a state
         // the commands could not produce.
-        "notes" | "notes-detail" | "notes-search" | "notes-info" => {
+        "notes" | "notes-detail" | "notes-search" | "notes-info" | "notes-reply" => {
             let ids = org_scene_seed(state);
             org_open(&g, state, 0);
+            if scene == "notes-reply" {
+                // 引用: one reply *written* through the real path
+                // (`org_create_reply`) and a second one drafted in the field, so the
+                // scene shows the list and the input in one picture.
+                g.set_org_selected_note(ids.notes[1]);
+                state.org_create_reply(ids.notes[1] as i64, "读完了，下周一把结论贴到这里。".into());
+                g.set_org_reply_draft("再补一句…".into());
+                org_refresh(&g, state);
+                org_load_drafts(&g, state);
+            }
             if scene == "notes-detail" {
                 g.set_org_selected_note(ids.notes[1]);
                 org_refresh(&g, state);
@@ -7172,6 +7280,28 @@ fn apply_scene_body(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             if scene == "tasks-detail" {
                 org_load_drafts(&g, state);
             }
+        }
+        "tasks-list-menu" | "tasks-list-color" => {
+            // A stored list's ⋯ and its colour submenu. The *area* is what this arm
+            // plants; the popup itself opens after the first render pass, in
+            // `apply_scene_overlay`, so its own `is-open` mirror sees the false -> true
+            // transition the `menu` scene relies on.
+            let ids = org_scene_seed(state);
+            org_open(&g, state, 1);
+            let list = ids.lists[1];
+            g.set_org_list(list);
+            g.set_menu_node_id(list);
+            org_refresh(&g, state);
+        }
+        "tasks-list-rename" => {
+            // The list's ⋯ → 重命名: the row's own input, in place of its name. The
+            // sidebar's `rename` scene is the page-tree half of the same shape; this
+            // is the 32 px nav row's copy of it.
+            let ids = org_scene_seed(state);
+            org_open(&g, state, 1);
+            g.set_org_list(ids.lists[1]);
+            g.set_org_list_renaming(ids.lists[1]);
+            org_refresh(&g, state);
         }
         "undo-bar" => {
             // ADR-0108: the 撤销 bar over the note list. The scene goes through
@@ -7275,6 +7405,15 @@ fn apply_scene_body(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
         }
         "dark-notes" => {
             apply_scene_body(ui, state, "notes");
+        }
+        "dark-notes-reply" => {
+            apply_scene_body(ui, state, "notes-reply");
+        }
+        "dark-tasks-list-menu" => {
+            apply_scene_body(ui, state, "tasks-list-menu");
+        }
+        "dark-tasks-list-color" => {
+            apply_scene_body(ui, state, "tasks-list-color");
         }
         "dark-tasks" => {
             apply_scene_body(ui, state, "tasks");
@@ -8219,7 +8358,7 @@ fn apply_scene_body(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             g.set_menu_node_id(page);
             g.set_menu_y(TREE_TOP_PX + state.sidebar_row_y(page) as f32 - 4.0);
             g.set_menu_x(240.0);
-            reanchor_page_menu(&g);
+            reanchor_menu(&g);
             g.set_menu_open(true);
         }
         // The Delete picker rather than the Insert one: the list of names is the
@@ -8232,7 +8371,7 @@ fn apply_scene_body(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             g.set_menu_node_id(page);
             g.set_menu_y(TREE_TOP_PX + state.sidebar_row_y(page) as f32 - 4.0);
             g.set_menu_x(240.0);
-            reanchor_page_menu(&g);
+            reanchor_menu(&g);
             g.set_menu_open(true);
         }
         // A template row inside the "/" popup, with the block kinds filtered
@@ -8510,6 +8649,26 @@ pub fn apply_scene_overlay(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             g.set_menu_x(240.0);
             g.set_menu_open(true);
         }
+        "tasks-list-menu" => {
+            // The stored list's ⋯: 重命名 / 颜色 / 删除清单, with the 颜色 row carrying
+            // the list's current swatch.
+            let id = g.get_org_list();
+            state.fill_org_list_menu(id);
+            g.set_menu_rows(state.menu_model());
+            g.set_menu_x(360.0);
+            g.set_menu_y(260.0);
+            g.set_menu_open(true);
+        }
+        "tasks-list-color" => {
+            // Its colour submenu: the closed palette as swatch rows, the current one
+            // checked — the one picture of the submenu's other half.
+            let id = g.get_org_list();
+            state.fill_org_list_color_menu(id);
+            g.set_menu_rows(state.menu_model());
+            g.set_menu_x(360.0);
+            g.set_menu_y(260.0);
+            g.set_menu_open(true);
+        }
         "page-move-to" => {
             // the sidebar menu's Move-to submenu for page 106: Back, Top
             // level, then every legal target (106's own subtree is skipped)
@@ -8688,6 +8847,10 @@ pub fn apply_scene_overlay(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
         "dark-database-kinds" => apply_scene_overlay(ui, state, "database-kinds"),
         "dark-database-relation" => apply_scene_overlay(ui, state, "database-relation"),
         "dark-database-rollup" => apply_scene_overlay(ui, state, "database-rollup"),
+
+        // The organizer's two popup scenes, dark twins of the same rows.
+        "dark-tasks-list-menu" => apply_scene_overlay(ui, state, "tasks-list-menu"),
+        "dark-tasks-list-color" => apply_scene_overlay(ui, state, "tasks-list-color"),
 
         _ => {}
     }

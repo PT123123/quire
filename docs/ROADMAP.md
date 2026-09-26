@@ -31,8 +31,12 @@ one organizer fact that reaches the file), and so is 多选 (ADR-0111: a kind-ta
 `4899857`, so this shell now carries the core's 唯一 ID (ADR-0002) and its 引用 (`ref_note`,
 core ADR-0001). **The snapshot version stays at 2** for it, unlike the organizer itself
 (ADR-0102): the uuid is additive and `#[serde(default)]`, and locking an older device out of
-syncing is not a price an added attribute should pay. The Android mirror is the rest of the
-milestone; the pixel sweep now has fourteen organizer arms. |
+syncing is not a price an added attribute should pay. **M2.5k** landed 2026-09-26 too: 清单管理
+(the nav row's own ⋯ → 重命名 inline / 颜色 swatch submenu / 删除清单) and the note page's 回复
+field (ADR-0113) — the two verbs ADR-0112's tail still listed as missing, both out of machinery
+this shell already had, and the slice that makes `ContextMenu` draw the `check`/`swatch` its
+`MenuRow` has always carried. The Android mirror is the rest of the milestone; the pixel sweep
+now has eighteen organizer arms. |
 
 ## Repository shape (since ADR-0093 + ADR-0094, 2026-09-23)
 

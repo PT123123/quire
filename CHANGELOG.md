@@ -476,6 +476,42 @@ First functional release: a local, single-file-database notes workspace.
   `4899857` — the rev that carries both the 唯一 ID (core ADR-0002) and the 引用
 - `notes-filter`, `notes-commands` and their dark arms join the sweep
 
+### Notes & tasks — 清单管理、回复框 (ADR-0113)
+
+- **A stored 清单 is managed from its own ⋯** on the 任务 tab's nav row (drawn on hover
+  or when the row is the selected one): 重命名 / 颜色 / 删除清单, through the same shared
+  context menu the page tree and a task row already open. The 颜色 row carries the
+  list's current swatch, and opens the **closed** palette as swatch rows with the
+  list's own colour checked
+- **重命名 is inline**: the row's name becomes an input in its own place — the
+  sidebar's page rename, moved into the 32 px nav row. Enter commits, Escape puts the
+  old name back, and a blank name is refused. It reads a new `org-list-renaming`
+  property and *not* the sidebar's `renaming-id`: those id spaces overlap, and a page
+  numbered like the list would wear the rename box
+- **删除清单** keeps its wording — the notice band says how many tasks moved to 收集箱 —
+  and the view falls back to the inbox only when the list being *looked at* is the one
+  that went (the deleted list may be a neighbour of the selected one)
+- **The note page writes its own replies.** The `引用` list has been read-only since
+  ADR-0112 (only 指令's `comment` could add one); the page now carries a field and a
+  评论 button, committed on Enter or the button and *not* on a 300 ms settle — a reply
+  is a **create**, and half a row is not a row. A reply to a note that is gone is
+  refused rather than written: a dangling ref is a thing a merge leaves behind, not a
+  thing a write should make
+- `ContextMenu` now renders `MenuRow.check` and `MenuRow.swatch` — both fields have been
+  on the struct since the block menu needed them, and this popup ignored them. The list
+  colour picker needed the swatch, and the page menu's Style rows show their checks now,
+  which the swept `page-style` scene says out loud
+- The never-wired `org-list-color-set` / `org-list-deleted` callbacks are gone; the ⋯ is
+  the door, and the delete logic is one shared call
+- The reply card takes an explicit `height` off its wrapped text's preferred-height (the
+  board card's own idiom): a bare `Rectangle` in the detail column's layout absorbs the
+  pane's leftover height, which stretched one line of reply down half the panel — a
+  shape no scene had photographed until the reply scene existed
+- `notes-reply`, `tasks-list-menu`, `tasks-list-color`, `tasks-list-rename` and three
+  dark arms join the sweep
+- **No core change and no rev bump**: a list is existing `UpdateTaskList` /
+  `DeleteTaskList` commands, and a reply is one `CreateNote`
+
 ### Workspace
 - Page tree: create / rename in place / duplicate (nested lists survive) /
   delete with confirmation; favorites; recent pages; last page restored

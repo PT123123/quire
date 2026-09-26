@@ -3697,3 +3697,28 @@ md5 的链条也对得上：`notes-select` 在 m25i 与 m25k 上**同一枚 hash
 **未验证（诚实）**：① 真人跑一遍 指令——`复制示例` → 交给 AI → 把答案贴回来 → 执行，手感与文案归你；② 反向筛选的
 **可发现性**（⊖ 只有悬停底色，没有文字说明——这是参考的写法，也是"少加一行注释"那条规矩的代价）；③ 从界面写回复
 （回复框）还没做，`comment` 目前只有 指令 一条门路；④ 移动端镜像（本刀只做桌面，`CHECK`：Android 那份在下一刀）。
+
+## M2.5k · 清单管理 / 回复框 (ADR-0113)
+
+**交付**：M2.5j 那条"从界面写回复（回复框）还没做"和"清单只能建、不能改名改色删除"在这一刀收尾。任务侧的清单行
+多一枚 `⋯`（悬停或选中时画出，与任务行那枚同形状），打开的是**共用**的右键菜单——页面树与任务行用的同一套
+`UIState.menu-rows` / `menu-action`，清单和任务一样走 `menu-node-id`，所以一个机制两种行：`重命名 / 颜色 /
+删除清单`，而 `颜色` 把弹层换成**闭环调色板**（六枚色块行，当前颜色打勾）。重命名**就地**：行自己的名字变成
+`TextInput`（侧边栏改页名那一套搬进 32 px 导航行），回车提交、Escape 还原、空名字拒掉；它读**新**属性
+`org-list-renaming` 而**不是**侧边栏的 `renaming-id`——两个 id 空间重叠，编号撞上清单的页面会顶上一个改名框。
+回复框在**笔记本页**上：`引用` 列表从 ADR-0112 起只读，现在有输入框和一枚 `评论`，回车或按钮提交、**不走
+300 ms**（回复是一次**创建**，半行不是一行）；`org_create_reply` 走与其它笔记同一条 `CreateNote`，父行不在就
+**拒掉**而不是造一条悬空引用。顺带把 `ContextMenu` 的 `check` / `swatch` 补上——`MenuRow` 从块菜单起就带着这两个
+字段，这个弹层一直没画；清单的颜色选择要色块，同一段渲染也终于给页面菜单的 Style 行画上了勾。`org-list-color-set`
+/ `org-list-deleted` 两个从未接线过的回调删掉，删清单的逻辑收进 `org_list_delete_action`，且只在**正在看的那个
+清单**被删时退回收集箱。
+
+**验证**：`cargo test` 全绿（153 lib + 5 integration + 14 其它；本刀新增三条：`a_reply_is_a_note_naming_its_parent`
+/ `a_lists_menu_offers_its_verbs_and_the_submenu_marks_its_colour` / `a_lists_menu_is_empty_for_a_list_that_is_gone`）。
+`cargo check --workspace --all-targets` 干净。四个新场景（`notes-reply` / `tasks-list-menu` / `tasks-list-color` /
+`tasks-list-rename`，另加三枚暗孪生）渲染并逐张看过：清单菜单、色块子菜单（当前色打勾）、就地改名框、回复框与回复
+卡片都对；`page-style` 与 `menu` 两个**既有**场景也重新渲染过，确认 `ContextMenu` 的改动没有破坏既有版面
+（`page-style` 多出三个勾，是预期内的补齐）。
+
+**未验证（诚实）**：① 真手点一遍 `⋯` → 重命名 / 换色 / 删除，以及悬停显出 `⋯` 的手感；② 移动端镜像（这一刀仍是
+桌面）。**core 一行没动、rev 没 bump。**

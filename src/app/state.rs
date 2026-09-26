@@ -2348,23 +2348,11 @@ impl AppState {
         let mut rows = vec![row(8, "返回", "chevron-left", false, -1, false)];
         for (i, kind) in ColorKind::ALL.iter().enumerate() {
             let base = if background { AppState::COLOR_BG_BASE } else { AppState::COLOR_TEXT_BASE };
-            let label = match kind {
-                ColorKind::Default => "默认",
-                ColorKind::Gray => "灰色",
-                ColorKind::Brown => "棕色",
-                ColorKind::Orange => "橙色",
-                ColorKind::Yellow => "黄色",
-                ColorKind::Green => "绿色",
-                ColorKind::Blue => "蓝色",
-                ColorKind::Purple => "紫色",
-                ColorKind::Pink => "粉色",
-                ColorKind::Red => "红色",
-            };
             // the check renders as an icon (MenuRow.check): the software
             // renderer has no font fallback, so glyph marks are unreliable
             let mut menu_row = row(
                 base + i as i32,
-                label,
+                color_label(*kind),
                 "",
                 false,
                 i as i32,
@@ -5272,6 +5260,19 @@ pub const MENU_ORG_DELETE: i32 = 44;
 /// picked, which is what a long press means on the reference shells and the
 /// gesture this window has no.
 pub const MENU_ORG_SELECT: i32 = 45;
+/// A stored list's ⋯ (the nav column's 任务 tab): rename / colour / delete. The
+/// *list* travels on `menu-node-id` the way a task does — one mechanism, two kinds
+/// of row — and these ids are what tells the two apart at dispatch.
+pub const MENU_ORG_LIST_RENAME: i32 = 46;
+pub const MENU_ORG_LIST_COLOR: i32 = 47;
+pub const MENU_ORG_LIST_DELETE: i32 = 48;
+/// The colour submenu's Back: back to the *list* menu, which is what the generic
+/// `MENU_BACK` would not do — it rebuilds the page menu, for a node that is a list.
+pub const MENU_ORG_LIST_BACK: i32 = 49;
+/// A colour row's action is this plus the palette slot. It sits **above**
+/// `MENU_ORG_MOVE_BASE`, so the dispatcher has to test for it first: a bare
+/// `>= MOVE_BASE` would read a colour as a move-to target list.
+pub const MENU_ORG_LIST_COLOR_BASE: i32 = 2_000;
 /// A move-to row's action is this plus the target list's id. Task-list ids are
 /// row ids and the page menu's ids are all below 100, so the two ranges do not
 /// meet; the remainder *is* the list, which is why there is no second lookup.
@@ -5510,6 +5511,24 @@ fn row(id: i32, label: impl AsRef<str>, icon: &str, danger: bool, swatch: i32, s
         swatch,
         swatch_bg,
         check: false,
+    }
+}
+
+/// A palette slot's name, for the two colour submenus that draw swatches (a
+/// block's text/background colours and a list's own). One list of names, so the
+/// same slot cannot read two ways depending on which menu asked.
+fn color_label(kind: ColorKind) -> &'static str {
+    match kind {
+        ColorKind::Default => "默认",
+        ColorKind::Gray => "灰色",
+        ColorKind::Brown => "棕色",
+        ColorKind::Orange => "橙色",
+        ColorKind::Yellow => "黄色",
+        ColorKind::Green => "绿色",
+        ColorKind::Blue => "蓝色",
+        ColorKind::Purple => "紫色",
+        ColorKind::Pink => "粉色",
+        ColorKind::Red => "红色",
     }
 }
 
@@ -7712,6 +7731,37 @@ impl AppState {
         Some(id as i64)
     }
 
+    /// 引用 (SPEC §四十一, core ADR-0001): a new note whose `ref_note` names
+    /// `parent` — the one write the read-only replies list was missing. The reply's
+    /// text is its body and it carries no tags of its own; it is a note like any
+    /// other, so it edits, pins and deletes through the same commands.
+    ///
+    /// A parent that is gone is refused rather than written: a comment with nothing
+    /// to answer would paint as an ordinary note forever, and a dangling ref is a
+    /// thing a *merge* leaves behind, not a thing a write should invent.
+    pub fn org_create_reply(&self, parent: i64, body: String) -> Option<i64> {
+        self.organizer
+            .borrow()
+            .note(NoteId(parent.max(0) as u64))?;
+        let id = self.next_note_id.get();
+        let now = now_secs();
+        self.exec_org(Command::CreateNote {
+            note: Note {
+                id: NoteId(id),
+                uuid: crate::core::organizer::new_uuid(),
+                title: String::new(),
+                body,
+                pinned: false,
+                tags: Vec::new(),
+                created: now,
+                edited: now,
+                ref_note: Some(NoteId(parent.max(0) as u64)),
+            },
+        })?;
+        self.next_note_id.set(id + 1);
+        Some(id as i64)
+    }
+
     pub fn org_note_title(&self, id: i64, title: String) -> Option<Vec<Change>> {
         self.org_edit_note(id, |n| n.title = title)
     }
@@ -7972,6 +8022,61 @@ impl AppState {
             ));
         }
         rows.push(row(MENU_ORG_DELETE, "删除任务", "trash", true));
+        self.menu.set_vec(rows);
+    }
+
+    /// Fill the shared context menu with one stored list's rows: 重命名 / 颜色 /
+    /// 删除清单. The list travels on `menu-node-id`, exactly as a task does.
+    ///
+    /// An id that names no list empties the menu rather than offering verbs that
+    /// would refuse — the row was deleted under the pointer, which a merge can do.
+    pub fn fill_org_list_menu(&self, list: i32) {
+        let catalog = self.organizer.borrow();
+        let Some(current) = catalog.list(ListId(list.max(0) as u64)) else {
+            self.menu.set_vec(Vec::new());
+            return;
+        };
+        // The colour row carries the list's *current* swatch, so the menu says
+        // which colour it is editing before the submenu is opened.
+        let slot = ColorKind::ALL
+            .iter()
+            .position(|k| *k == current.color)
+            .unwrap_or(0) as i32;
+        drop(catalog);
+        self.menu.set_vec(vec![
+            row(MENU_ORG_LIST_RENAME, "重命名", "", false, -1, false),
+            row(MENU_ORG_LIST_COLOR, "颜色", "", false, slot, false),
+            row(MENU_ORG_LIST_DELETE, "删除清单", "trash", true, -1, false),
+        ]);
+    }
+
+    /// The colour submenu: the closed palette a list draws from, one swatch row
+    /// each, with the list's current colour checked. `ORG_LIST_COLORS` and not
+    /// `ColorKind::ALL`: the theme default is not a colour a dot can be, and a
+    /// submenu is the wrong place to discover that.
+    pub fn fill_org_list_color_menu(&self, list: i32) {
+        let current = self
+            .organizer
+            .borrow()
+            .list(ListId(list.max(0) as u64))
+            .map(|l| l.color);
+        let mut rows = vec![row(MENU_ORG_LIST_BACK, "返回", "chevron-left", false, -1, false)];
+        for kind in ORG_LIST_COLORS.iter() {
+            let slot = ColorKind::ALL
+                .iter()
+                .position(|k| k == kind)
+                .unwrap_or(0) as i32;
+            let mut menu_row = row(
+                MENU_ORG_LIST_COLOR_BASE + slot,
+                color_label(*kind),
+                "",
+                false,
+                slot,
+                false,
+            );
+            menu_row.check = current == Some(*kind);
+            rows.push(menu_row);
+        }
         self.menu.set_vec(rows);
     }
 
@@ -22455,5 +22560,79 @@ mod tests {
         let back = state.organizer().note(NoteId(a as u64)).unwrap().clone();
         assert_eq!(back.body, "第一条", "one Ctrl+Z took the whole batch back");
         assert_eq!(back.tags, vec!["原有".to_string()]);
+    }
+
+    /// 引用 (SPEC §四十一, core ADR-0001): the note page's own reply field. A reply
+    /// is a note whose `ref_note` names its parent, so the parent's list is a filter
+    /// of the one catalog — and a reply to a note that is gone is refused rather
+    /// than written, because a dangling ref is a thing a *merge* leaves behind.
+    #[test]
+    fn a_reply_is_a_note_naming_its_parent() {
+        use crate::core::organizer::NoteId;
+
+        let (state, _repo) = org_session();
+        let parent = state.org_create_note().unwrap();
+        state.org_note_body(parent, "正文".into());
+
+        let reply = state.org_create_reply(parent, "读完了".into()).unwrap();
+        let row = state.organizer().note(NoteId(reply as u64)).unwrap().clone();
+        assert_eq!(row.ref_note, Some(NoteId(parent as u64)));
+        assert_eq!(row.body, "读完了");
+        // The parent's own projection lists it, and a reply is not its own reply.
+        assert_eq!(state.org_note_replies(parent).len(), 1);
+        assert!(state.org_note_replies(reply).is_empty());
+
+        // A parent that is gone has nothing to answer: nothing is invented.
+        assert!(state.org_create_reply(404, "孤儿".into()).is_none());
+        assert_eq!(state.organizer().notes.len(), 2);
+    }
+
+    /// A stored list's ⋯ and its colour submenu: the menu is the three verbs with
+    /// the current swatch on 颜色, and the submenu is the *closed* palette with the
+    /// list's own colour checked — the two shapes the nav row's ⋯ opens.
+    #[test]
+    fn a_lists_menu_offers_its_verbs_and_the_submenu_marks_its_colour() {
+        use slint::Model;
+
+        let (state, _repo) = org_session();
+        let list = state.org_create_list("工作".into()).unwrap();
+        state.org_list_color(list, 5); // 绿色
+
+        state.fill_org_list_menu(list as i32);
+        let rows = state.menu_model();
+        let ids: Vec<i32> = (0..rows.row_count())
+            .map(|i| rows.row_data(i).unwrap().id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                super::MENU_ORG_LIST_RENAME,
+                super::MENU_ORG_LIST_COLOR,
+                super::MENU_ORG_LIST_DELETE
+            ]
+        );
+        assert_eq!(rows.row_data(1).unwrap().swatch, 5, "颜色 carries the current swatch");
+
+        state.fill_org_list_color_menu(list as i32);
+        let rows = state.menu_model();
+        // Back, then one row per list colour — and exactly the list's own checked.
+        assert_eq!(rows.row_count(), super::ORG_LIST_COLORS.len() + 1);
+        assert_eq!(rows.row_data(0).unwrap().id, super::MENU_ORG_LIST_BACK);
+        let checked: Vec<i32> = (0..rows.row_count())
+            .filter(|i| rows.row_data(*i).unwrap().check)
+            .map(|i| rows.row_data(i).unwrap().swatch)
+            .collect();
+        assert_eq!(checked, vec![5]);
+    }
+
+    /// The `⋯` on a list that is not there is an empty menu rather than verbs that
+    /// would refuse: a merge can delete the row under the pointer.
+    #[test]
+    fn a_lists_menu_is_empty_for_a_list_that_is_gone() {
+        use slint::Model;
+
+        let (state, _repo) = org_session();
+        state.fill_org_list_menu(404);
+        assert_eq!(state.menu_model().row_count(), 0);
     }
 }

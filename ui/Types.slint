@@ -1330,6 +1330,14 @@ export global UIState {
     in-out property <string> org-task-tags-draft: "";
     in-out property <string> org-task-due-draft: "";
     in-out property <string> org-subtask-draft: "";
+    // 引用: the reply being written on the open note's page. A draft like the rest,
+    // but committed by Enter or the 评论 button rather than on a settle: a reply is
+    // a *create*, and half a row is not a row (the quick-add line's rule).
+    in-out property <string> org-reply-draft: "";
+    // The stored list whose nav row is being renamed inline, or -1. A list id and
+    // **not** the sidebar's `renaming-id`: those two id spaces overlap, so reusing
+    // one for the other would put a rename box on whichever page shared the number.
+    in-out property <int> org-list-renaming: -1;
     // Which field the 300 ms commit is pending on: the slot (`FIELD_*` in
     // OrganizerArea.slint, `ORG_FIELD_*` in state.rs), the row it belongs to, and
     // — for a checklist line — which subtask. A triple, and session state on
@@ -1354,6 +1362,9 @@ export global UIState {
     callback org-undo-delete();
     // 转为待办: the note becomes a task and the note goes
     callback org-note-to-task(int);
+    // 引用 (SPEC §四十一, core ADR-0001): write a reply to the open note — a new
+    // note whose `ref_note` names it. The write the read-only replies list lacked.
+    callback org-reply-submitted();
     // the 笔记 tab's tag column: "" is 全部笔记
     callback org-tag-picked(string);
     // 反向筛选 (SPEC §四十一): hide this path and its subtree, or stop hiding it.
@@ -1426,11 +1437,15 @@ export global UIState {
     callback org-subtask-title-set(int, int, string);
     callback org-subtask-done-toggled(int, int, bool);
     callback org-subtask-deleted(int, int);
-    // lists
+    // lists. A stored list is managed from its own ⋯ menu — rename / colour /
+    // delete — rather than by three separate doors: the ⋯ is where every other
+    // per-row verb in this window lives, and a list row is a row.
     callback org-list-created();
+    // the ⋯ on a stored list's nav row: the list, and where the pointer was, so
+    // the shared context menu anchors the way the page tree's own does
+    callback org-list-menu-requested(int, length, length);
+    // the inline rename input's Enter or blur: the list and the name it was given
     callback org-list-name-set(int, string);
-    callback org-list-color-set(int, int);
-    callback org-list-deleted(int);
     // filters
     callback org-view-picked(int);
     callback org-list-picked(int);

@@ -60,7 +60,23 @@ export component ContextMenu inherits PopupWindow {
                     spacing: Theme.spacing-sm;
                     padding-left: Theme.spacing-sm;
                     padding-right: Theme.spacing-sm;
-                    Icon {
+                    // A color row carries a swatch instead of an icon — the same
+                    // `MenuRow` the block menu draws, rendered the same way, so the
+                    // organizer's list colours look like every other palette here.
+                    if item.swatch >= 0 : Rectangle {
+                        vertical-stretch: 0;
+                        cross-axis-self-alignment: center;
+                        width: 14px;
+                        height: 14px;
+                        border-radius: 7px;
+                        background: item.swatch-bg ? Colors.block-bg(item.swatch)
+                            : Colors.block-text(item.swatch);
+                        // every background swatch carries a border: the light
+                        // pastels are invisible on the popup (A4 sweep)
+                        border-width: item.swatch-bg ? 1px : 0px;
+                        border-color: Colors.border-strong;
+                    }
+                    if item.swatch < 0 : Icon {
                         vertical-stretch: 0;
                         cross-axis-self-alignment: center;
                         width: 14px;
@@ -72,12 +88,28 @@ export component ContextMenu inherits PopupWindow {
                     }
                     Text {
                         text: item.label;
+                        // The label takes the leftover width so the current-pick check
+                        // sits at the row's right edge; a bare Text would size to its
+                        // content and push the check off the popup.
+                        horizontal-stretch: 1;
                         font-family: Typography.ui-font;
                         font-size: Typography.size-ui;
                         color: item.danger ? Colors.danger
                             : (row-ta.has-hover ? Colors.text-primary : Colors.text-secondary);
                         vertical-alignment: center;
                         overflow: elide;
+                    }
+                    // The "current pick" check: the organizer's list-colour submenu
+                    // and the page's Style rows both mark one row with it.
+                    if item.check : Icon {
+                        vertical-stretch: 0;
+                        cross-axis-self-alignment: center;
+                        width: 13px;
+                        height: 13px;
+                        size: 13px;
+                        name: "todo-check";
+                        stroke-width: 2.6px;
+                        color: Colors.accent;
                     }
                 }
 
