@@ -1203,7 +1203,11 @@ export global UIState {
 
     callback node-clicked(int);
     callback node-expand-toggled(int);
-    callback node-context(int);
+    // A left-column row asking for its menu (SPEC §八): its id, and the y its own
+    // delegate sits at. The second argument is why the row reports itself rather
+    // than being looked up by id — the 收藏 / 最近 sections re-list pages the tree
+    // also holds, so an id is not a row.
+    callback node-context(int, length);
     callback page-menu-requested();
     callback page-create-requested();
     callback rename-committed(int, string);

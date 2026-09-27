@@ -13,6 +13,10 @@ component SidebarPinnedRow inherits Rectangle {
     in property <string> icon-name;
     in property <string> label;
     in property <string> shortcut-hint: "";
+    // The row's id in the same space the tree's rows use (the `ROW_PINNED_*`
+    // constants in Rust), so a menu asked from here can say which row it was
+    // for. Negative, like every other row that is not a page.
+    in property <int> node-id: -1;
     // The row's area is the one being shown (SPEC §四十一's two rows). A pinned
     // row that is a *place* rather than an action has to say so, or the sidebar
     // gives no answer to "where am I": the page tree's own selection is about a
@@ -61,6 +65,12 @@ component SidebarPinnedRow inherits Rectangle {
         clicked => {
             root.clicked();
         }
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.up
+                && event.button == PointerEventButton.right) {
+                UIState.node-context(root.node-id, root.absolute-position.y);
+            }
+        }
     }
 }
 
@@ -76,8 +86,18 @@ export component Sidebar inherits Rectangle {
         padding-right: Theme.spacing-sm;
 
         // ---- workspace header ----
-        Rectangle {
+        // A button whose affordance is the chevron (SPEC §八): the menu it opens
+        // is the workspace's own — 新建页面 / 打开数据文件夹 / 设置. Until this, the
+        // one control in the corner of the window answered neither a click nor a
+        // right-click, which is the *only* place the workspace's verbs live.
+        ws-header := Rectangle {
             height: 36px;
+            TouchArea {
+                mouse-cursor: MouseCursor.pointer;
+                clicked => {
+                    UIState.node-context(-100, ws-header.absolute-position.y);
+                }
+            }
             HorizontalLayout {
                 spacing: Theme.spacing-sm;
                 padding-left: Theme.spacing-xs;
@@ -114,6 +134,9 @@ export component Sidebar inherits Rectangle {
                     cross-axis-self-alignment: center;
                     icon-name: "chevron-down";
                     size: 22px;
+                    clicked => {
+                        UIState.node-context(-100, ws-header.absolute-position.y);
+                    }
                 }
             }
         }
@@ -127,6 +150,8 @@ export component Sidebar inherits Rectangle {
         SidebarPinnedRow {
             icon-name: "note";
             label: "笔记";
+            // the `ROW_PINNED_*` constants in Rust, in the tree's id space
+            node-id: -10;
             selected: UIState.active-area == "organizer" && UIState.org-tab == 0;
             clicked => {
                 UIState.org-open-requested(0);
@@ -135,6 +160,7 @@ export component Sidebar inherits Rectangle {
         SidebarPinnedRow {
             icon-name: "todo-check";
             label: "任务";
+            node-id: -11;
             selected: UIState.active-area == "organizer" && UIState.org-tab == 1;
             clicked => {
                 UIState.org-open-requested(1);
@@ -143,6 +169,7 @@ export component Sidebar inherits Rectangle {
         SidebarPinnedRow {
             icon-name: "search";
             label: "搜索";
+            node-id: -12;
             shortcut-hint: "Ctrl P";
             clicked => {
                 UIState.search-open-requested();
@@ -151,6 +178,7 @@ export component Sidebar inherits Rectangle {
         SidebarPinnedRow {
             icon-name: "settings";
             label: "设置";
+            node-id: -13;
             clicked => {
                 UIState.settings-open-requested();
             }

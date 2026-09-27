@@ -13,6 +13,15 @@ export component SidebarItem inherits Rectangle {
 
     property <bool> is-header: node.kind == "header";
     property <bool> is-page: node.kind == "page";
+    // Every row that *is* a page answers a right-click with the page's menu — the
+    // tree's own rows and the replicas the 收藏 / 最近 sections re-list, which had
+    // no handler at all and read as rows that do nothing. Renaming, dragging and
+    // dropping stay on the tree's row: a replica is a way to get somewhere, not a
+    // second place a page is edited from.
+    property <bool> is-page-row: is-page || node.kind == "favorite" || node.kind == "recent";
+    // The Workspace header is the tree's own door (with the header at the top of
+    // the rail): it carries the workspace's menu, not a page's.
+    property <bool> is-workspace: is-header && node.id == -100;
     property <bool> is-new-page: node.kind == "new-page";
     property <bool> renaming: is-page && UIState.renaming-id == node.id;
     // a page row or the Workspace header shows the "landing here" tint
@@ -175,8 +184,11 @@ export component SidebarItem inherits Rectangle {
         pointer-event(event) => {
             if (event.kind == PointerEventKind.up
                 && event.button == PointerEventButton.right
-                && is-page) {
-                UIState.node-context(node.id);
+                && (is-page-row || is-workspace)) {
+                // the row reports its own y: a 收藏 / 最近 replica and the tree's
+                // row of the same page are two rows, and `sidebar_row_y` would
+                // anchor the popup on whichever of them comes first.
+                UIState.node-context(node.id, root.absolute-position.y);
             }
         }
     }

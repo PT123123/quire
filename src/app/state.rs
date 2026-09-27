@@ -4763,10 +4763,76 @@ impl AppState {
         self.menu.set_vec(rows);
     }
 
-    /// The page menu's Style submenu: the three switches of SPEC §三十八's
-    /// 页面版式, each showing what this page stores. Deliberately not
-    /// undoable, like the favorite above it — a look is a property of the
-    /// page, and Ctrl+Z on a page you were typing in must not be a font.
+    /// The left column's own rows (SPEC §八): the four entries the rail pins —
+    /// which are *places*, not pages — and the Workspace header, which is the
+    /// tree's root. Each answers with the doors it actually has. Every one of
+    /// them was silent before: a page row opened a menu, and the row above it
+    /// did nothing at all, which reads as a row that is broken rather than as
+    /// restraint (the same reason the note card got its ⋯).
+    ///
+    /// An unknown id leaves the menu empty, and the controller then does not
+    /// open it: a popup with no rows is worse than no popup.
+    pub fn fill_sidebar_menu(&self, id: i32) {
+        let rows = match id {
+            WORKSPACE_HEADER_ID => {
+                let mut rows = vec![row(
+                    MENU_SIDE_NEW_PAGE,
+                    "新建页面",
+                    "plus",
+                    false,
+                    -1,
+                    false,
+                )];
+                // The folder is the settings dialog's own row, under the rule
+                // that hides it there: a memory-only session has no folder to
+                // open, so the row would be a button that does nothing.
+                if self.data_dir().is_some() {
+                    rows.push(row(
+                        MENU_SIDE_OPEN_FOLDER,
+                        "打开数据文件夹",
+                        "",
+                        false,
+                        -1,
+                        false,
+                    ));
+                }
+                rows.push(row(MENU_SIDE_SETTINGS, "设置", "settings", false, -1, false));
+                rows
+            }
+            ROW_PINNED_NOTE => vec![
+                row(MENU_SIDE_OPEN_NOTE, "打开笔记", "note", false, -1, false),
+                // The floating ＋'s door, which is the notes half's only
+                // "make one of these" verb.
+                row(MENU_SIDE_NEW_NOTE, "新建笔记", "plus", false, -1, false),
+            ],
+            ROW_PINNED_TASK => vec![row(
+                MENU_SIDE_OPEN_TASK,
+                "打开任务",
+                "todo-check",
+                false,
+                -1,
+                false,
+            )],
+            ROW_PINNED_SEARCH => vec![row(
+                MENU_SIDE_OPEN_SEARCH,
+                "打开搜索",
+                "search",
+                false,
+                -1,
+                false,
+            )],
+            ROW_PINNED_SETTINGS => vec![row(
+                MENU_SIDE_SETTINGS,
+                "打开设置",
+                "settings",
+                false,
+                -1,
+                false,
+            )],
+            _ => Vec::new(),
+        };
+        self.menu.set_vec(rows);
+    }
     pub fn fill_page_menu_style(&self, id: i32) {
         let (font, full_width, small_text) = self
             .workspace
@@ -5238,6 +5304,15 @@ pub const PAGE_CHINESE: i32 = 112;
 pub const PAGE_SCRATCHPAD: i32 = 113;
 
 pub const ROW_NEW_PAGE: i32 = -2;
+/// The four rows the rail pins above the tree — 笔记 / 任务 / 搜索 / 设置. They are
+/// hardcoded in `Sidebar.slint` rather than coming from the page model, so they
+/// need ids of their own to travel on `menu-node-id` when one of them is asked
+/// for its menu. Negative like `ROW_NEW_PAGE` and the Workspace header, so a real
+/// page id can never collide with one; the literals are repeated in the .slint.
+pub const ROW_PINNED_NOTE: i32 = -10;
+pub const ROW_PINNED_TASK: i32 = -11;
+pub const ROW_PINNED_SEARCH: i32 = -12;
+pub const ROW_PINNED_SETTINGS: i32 = -13;
 
 // Context-menu action ids.
 pub const MENU_NEW_SUBPAGE: i32 = 1;
@@ -5283,6 +5358,18 @@ pub const MENU_TEMPLATE_PICK_BACK: i32 = 24;
 /// "Restore version" would both arrive as "…". The panel this row opens holds
 /// the list, the comparison and the restore, and says which version each is.
 pub const MENU_PAGE_VERSIONS: i32 = 25;
+/// The left column's own rows: the ones that are places rather than pages. The
+/// rail's four fixed entries open the area or panel they name (and 笔记 its
+/// composer), and the Workspace header opens the page-create door. They sit in
+/// the gap between the page menu's family, which stops at 25, and the
+/// organizer's, which starts at 40, so the one dispatcher can tell them apart.
+pub const MENU_SIDE_NEW_PAGE: i32 = 30;
+pub const MENU_SIDE_OPEN_FOLDER: i32 = 31;
+pub const MENU_SIDE_SETTINGS: i32 = 32;
+pub const MENU_SIDE_OPEN_NOTE: i32 = 33;
+pub const MENU_SIDE_NEW_NOTE: i32 = 34;
+pub const MENU_SIDE_OPEN_TASK: i32 = 35;
+pub const MENU_SIDE_OPEN_SEARCH: i32 = 36;
 
 // ─── SPEC §四十一: the organizer's task menu ────────────────────────────────
 //
@@ -23271,6 +23358,72 @@ mod tests {
         assert_eq!(state.org_note_uid(404), "", "a row that is gone copies nothing");
 
         state.fill_org_note_menu(404);
+        assert_eq!(state.menu_model().row_count(), 0);
+    }
+
+    /// The rail's own rows, which answered nothing at all before (SPEC §八): the
+    /// four fixed entries open the place they name — 笔记 with its composer as a
+    /// second door — and the Workspace header opens the page-create door, with
+    /// the folder under the rule the settings dialog already keeps (a
+    /// memory-only session has no folder, so the row would be a dead button).
+    /// An id that is not a row is an empty menu, and the controller then leaves
+    /// the popup shut rather than opening an empty card.
+    #[test]
+    fn the_rails_own_rows_offer_the_doors_they_have() {
+        use slint::Model;
+
+        let (state, _repo) = org_session();
+        let ids = |state: &super::AppState| -> Vec<i32> {
+            let rows = state.menu_model();
+            (0..rows.row_count())
+                .map(|i| rows.row_data(i).unwrap().id)
+                .collect()
+        };
+        let labels = |state: &super::AppState| -> Vec<String> {
+            let rows = state.menu_model();
+            (0..rows.row_count())
+                .map(|i| rows.row_data(i).unwrap().label.to_string())
+                .collect()
+        };
+
+        state.fill_sidebar_menu(super::WORKSPACE_HEADER_ID);
+        assert_eq!(
+            ids(&state),
+            vec![super::MENU_SIDE_NEW_PAGE, super::MENU_SIDE_SETTINGS],
+            "a memory-only session has no 打开数据文件夹 to offer"
+        );
+
+        state.fill_sidebar_menu(super::ROW_PINNED_NOTE);
+        assert_eq!(ids(&state)[0], super::MENU_SIDE_OPEN_NOTE);
+        assert_eq!(
+            labels(&state),
+            vec!["打开笔记".to_string(), "新建笔记".to_string()]
+        );
+
+        for (row, action, label) in [
+            (
+                super::ROW_PINNED_TASK,
+                super::MENU_SIDE_OPEN_TASK,
+                "打开任务",
+            ),
+            (
+                super::ROW_PINNED_SEARCH,
+                super::MENU_SIDE_OPEN_SEARCH,
+                "打开搜索",
+            ),
+            (
+                super::ROW_PINNED_SETTINGS,
+                super::MENU_SIDE_SETTINGS,
+                "打开设置",
+            ),
+        ] {
+            state.fill_sidebar_menu(row);
+            assert_eq!(ids(&state), vec![action], "row {row}");
+            assert_eq!(labels(&state), vec![label.to_string()], "row {row}");
+        }
+
+        // A section header (收藏 / 最近) is a label, not a row: nothing to ask for.
+        state.fill_sidebar_menu(-1);
         assert_eq!(state.menu_model().row_count(), 0);
     }
 

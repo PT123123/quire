@@ -17,8 +17,12 @@ use std::rc::Rc;
 use std::time::Duration;
 
 /// Y offset of the first tree row inside the window: title bar (40) +
-/// workspace header (36) + search row (28) + settings row (28) + spacer (8).
-pub const TREE_TOP_PX: f32 = 140.0;
+/// workspace header (36) + the four pinned rows (笔记 / 任务 / 搜索 / 设置, 4 × 28) +
+/// spacer (8). Only the shot scenes read it now — the live anchors take the row's
+/// own `absolute-position.y` — and it had been left at the 140 of a rail with
+/// **two** pinned rows, which put every page-menu shot 56 px above the row it
+/// belonged to (the four rows are SPEC §四十一's).
+pub const TREE_TOP_PX: f32 = 196.0;
 
 /// plain-text marker identifying the app's own drag payload:
 /// "slint-notion/block:<id>". Foreign drops (files etc.) don't carry it and
@@ -806,17 +810,27 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
     {
         let gw = gw.clone();
         let s = state.clone();
-        ui.global::<UIState>().on_node_context(move |id| {
+        ui.global::<UIState>().on_node_context(move |id, y| {
             let g = gw.upgrade().unwrap();
-            s.fill_menu(id);
+            // A page has the page menu; the rail's own rows (the Workspace
+            // header, the four pinned entries) have theirs. `id > 0` is the
+            // whole test: every row that is not a page carries a negative id.
+            if id > 0 {
+                s.fill_menu(id);
+            } else {
+                s.fill_sidebar_menu(id);
+            }
+            // Nothing to ask for — the popup stays shut rather than opening as
+            // an empty card.
+            if s.menu_model().row_count() == 0 {
+                return;
+            }
             g.set_menu_node_id(id);
-            // anchor at the row's right edge; MenuRow y comes from the
-            // sidebar projection, adjusted by the tree scroll position.
-            let row_y = s.sidebar_row_y(id) as f32;
-            let y = (TREE_TOP_PX + g.get_tree_viewport_y() + row_y - 4.0)
-                .max(48.0)
-                .min(g.get_window_h() - 190.0);
-            g.set_menu_y(y);
+            // anchor at the row's right edge, its top arriving from the delegate
+            // itself, so a page the 收藏 / 最近 sections re-list opens its menu
+            // where it was clicked rather than where its tree row sits.
+            let menu_h = g.get_menu_rows().row_count() as f32 * 30.0 + 8.0;
+            g.set_menu_y((y - 4.0).clamp(48.0, (g.get_window_h() - menu_h - 8.0).max(48.0)));
             g.set_menu_x(240.0);
             g.set_menu_open(true);
         });
@@ -1048,6 +1062,43 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
             g.set_menu_open(false);
             g.set_menu_node_id(-1);
             match action {
+                // ---- the left column's own rows (SPEC §八) ----
+                // `id` is the row that asked, not a page: these are the rail's
+                // four fixed entries and the Workspace header, and each arm is
+                // the same door its click (or the panel's own button) goes
+                // through, so a menu and a click cannot drift apart.
+                crate::app::state::MENU_SIDE_NEW_PAGE => {
+                    let new_id = s.create_page(None);
+                    open(&g, &s, new_id);
+                    g.set_renaming_id(new_id);
+                }
+                crate::app::state::MENU_SIDE_OPEN_FOLDER => {
+                    if let Some(dir) = s.data_dir() {
+                        crate::platform::open_folder(&dir);
+                    }
+                }
+                crate::app::state::MENU_SIDE_SETTINGS => {
+                    refresh_sync_ui(&g, &s);
+                    g.set_settings_open(true);
+                }
+                crate::app::state::MENU_SIDE_OPEN_NOTE => {
+                    org_commit_field(&g, &s);
+                    org_open(&g, &s, 0);
+                }
+                crate::app::state::MENU_SIDE_NEW_NOTE => {
+                    org_commit_field(&g, &s);
+                    org_capture_open(&g, &s);
+                }
+                crate::app::state::MENU_SIDE_OPEN_TASK => {
+                    org_commit_field(&g, &s);
+                    org_open(&g, &s, 1);
+                }
+                crate::app::state::MENU_SIDE_OPEN_SEARCH => {
+                    g.set_search_query("".into());
+                    s.set_search_query("");
+                    g.set_search_focus(0);
+                    g.set_search_open(true);
+                }
                 crate::app::state::MENU_NEW_SUBPAGE => {
                     let new_id = s.create_page(Some(id));
                     open(&g, &s, new_id);
@@ -9113,6 +9164,18 @@ pub fn apply_scene_overlay(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             state.fill_menu(106);
             g.set_menu_node_id(106);
             let row_y = state.sidebar_row_y(106) as f32;
+            g.set_menu_y(TREE_TOP_PX + row_y - 4.0);
+            g.set_menu_x(240.0);
+            g.set_menu_open(true);
+        }
+        "sidebar-menu" => {
+            // The rail's own menu (SPEC §八), opened from the tree's Workspace
+            // header row — the rail's own door, beside the same-named header at
+            // the top of it. A memory-only session has no folder to open, so the
+            // scene shows two rows and the third is the settings dialog's rule.
+            state.fill_sidebar_menu(crate::app::state::WORKSPACE_HEADER_ID);
+            g.set_menu_node_id(crate::app::state::WORKSPACE_HEADER_ID);
+            let row_y = state.sidebar_row_y(crate::app::state::WORKSPACE_HEADER_ID) as f32;
             g.set_menu_y(TREE_TOP_PX + row_y - 4.0);
             g.set_menu_x(240.0);
             g.set_menu_open(true);

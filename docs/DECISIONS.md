@@ -2,6 +2,68 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0120 · Every row in the left rail answers a right-click, and a row reports its own y
+
+Decision: the rail's rows are all callable, not only the ones that happen to be a
+page. A **page** row — the tree's own, and the replicas the 收藏 / 最近 sections
+re-list — opens the page menu (`fill_menu`). The **Workspace header**, both the
+header at the top of the rail and the tree's own header row
+(`WORKSPACE_HEADER_ID`), opens the workspace's menu: 新建页面, 打开数据文件夹 (absent
+for a memory-only session, which is the settings dialog's own rule for that row),
+设置. The four **fixed entries** — 笔记 / 任务 / 搜索 / 设置 — open the place or panel
+they name, with 新建笔记 beside 打开笔记 because the floating ＋'s door is the notes
+half's only "make one of these" verb. The header at the top of the rail is also a
+**left-click** button now: its chevron was the one affordance in the corner of the
+window and it answered neither a click nor a right-click. **收藏 / 最近 section
+headers stay silent** — they are labels with no verbs, and a menu there would be
+invented to fill the silence.
+
+Context: the user reported "目前桌面端左边的配置，右键为什么没有菜单呢", and, told that
+only tree rows of kind `page` had a handler, answered "左边那栏很多东西都点不了，你都修
+一下". The gap was exactly that: `SidebarItem`'s right-click guard was `is-page`, so
+the 收藏 / 最近 rows — the *same* pages, re-listed — were dead, and the four fixed
+rows live in `Sidebar.slint` as hardcoded components with no `pointer-event` at
+all.
+
+Two shapes were weighed for the anchor. The existing one looked a row up by id —
+`TREE_TOP_PX + tree-viewport-y + sidebar_row_y(id)` — which is right for a tree row
+and **wrong for a replica**: `sidebar_row_y` finds the *first* row carrying an id,
+and 收藏 / 最近 come first, so right-clicking the tree row of a favorited page
+anchored the popup on the favorite instead. The shape taken is the one the
+organizer's note cards already use: the delegate reports its own
+`absolute-position.y` in the callback (`node-context(int, length)`) and Rust only
+clamps. One rule for both listings of a page, and no lookup that can be wrong.
+
+Deliberately **not** taken: a **⋯ button on hover** for the rail's rows. It is the
+note cards' affordance, but a right-click is what a desktop expects of a row, and
+the rail is narrow — a button on every row would add a column of chrome for a menu
+the pointer already opens. Also not taken: a **fold-all** on the Workspace header's
+click, which is what Notion's tree does there. It needs a "tree folded" state, a
+row in settings and a rule for what happens to the tree while it holds — a slice of
+its own rather than a fix for a dead pixel.
+
+Consequences: `fill_sidebar_menu` builds three to five rows per rail id and an
+**empty** menu for an id that is not a rail row, and `on_node_context` leaves the
+popup shut when the model is empty rather than opening an empty card. The fixed
+rows carry negative ids (`ROW_PINNED_*`), in the same space as `ROW_NEW_PAGE` and
+the Workspace header, so a page id can never collide with one; the literals are
+repeated in `Sidebar.slint`, where those rows are hardcoded. Each menu item is the
+same door its own click uses (`create_page`, `open_folder`, `refresh_sync_ui`,
+`org_open`, `org_capture_open`), so a menu and a click cannot drift apart, and the
+new ids sit in the gap between the page menu's family (which stops at 25) and the
+organizer's (which starts at 40). Covered by
+`the_rails_own_rows_offer_the_doors_they_have` (one row's actions and labels per id,
+the memory-only absence of the folder row, and the empty menu). **Honest limit**: the
+right-click *hit-testing* itself is Slint wiring that no test reaches headlessly —
+the `sidebar-menu` shot scene photographs the model and the popup, and the row that
+reports its y is a one-line handler in `SidebarItem` / `SidebarPinnedRow`.
+
+Removing the id lookup also exposed a stale constant. `TREE_TOP_PX` was still the
+**140** of a rail with two pinned rows (its own comment named only 搜索 and 设置), so
+every sweep anchored a page menu — and the emoji-grid scene — 56 px above the row it
+belonged to, and the old live right-click path inherited the same offset. It is 196
+now (40 + 36 + 4 × 28 + 8), and the only readers left are the shot scenes.
+
 ## ADR-0119 · HTML is not a content format; the system browser is the only door
 
 Decision: HTML stays **out** of the document model. No `BlockKind::Html`, no

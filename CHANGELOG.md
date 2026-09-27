@@ -636,6 +636,28 @@ First functional release: a local, single-file-database notes workspace.
   caret sits in (Slint exposes no caret position), so moving the caret back into the
   middle of a line costs a suggestion rather than applying the wrong tag
 
+### Sidebar — 左栏每一行的右键菜单 (ADR-0120)
+- **Every row in the left rail answers a right-click now**, not just the page tree's
+  own rows. The 收藏 / 最近 rows open the same page menu their tree row does — they
+  were dead (the guard was `kind == "page"`), so the same page had a menu in one
+  listing and nothing in the other
+- The four fixed entries are callable too: 笔记 opens the notes half and adds
+  **新建笔记** (the floating ＋'s door), 任务 / 搜索 / 设置 open what they name
+- The header at the top of the rail — with the chevron that promised a menu and
+  opened nothing — is a **button**: it opens the workspace's menu, 新建页面 /
+  **打开数据文件夹** / 设置. The folder row is absent in a memory-only session, which is
+  the settings dialog's own rule
+- A page's menu is anchored from **the row that was clicked** rather than looked up
+  by id, which fixes right-clicking the tree row of a *favorited* page — the popup
+  used to open on the 收藏 row instead (ADR-0120)
+- 收藏 / 最近 section headers keep no menu: they are labels, and their verbs would be
+  invented to fill the silence
+- **Fixed on the way past**: `TREE_TOP_PX` was still the 140 of a rail with two pinned
+  rows, so every page-menu screenshot anchored 56 px above its row (and the emoji grid
+  with it). It is 196 now — 40 title bar + 36 header + the four pinned rows + 8 spacer
+- New test `the_rails_own_rows_offer_the_doors_they_have`; new shot scene
+  `sidebar-menu`
+
 ### HTML — 在浏览器中打开 (ADR-0119)
 - **HTML is not a content format; the system browser is its only door.** A new
   palette command, **在浏览器中打开 HTML…** (页面), picks a local `.html` / `.htm`
