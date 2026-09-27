@@ -805,6 +805,16 @@ export component AppWindow inherits Window {
             UIState.icon-picker-page = -1;
         }
     }
+    // 设置 is a card over the page, so an outside click has to dismiss it like
+    // any other popup: the engine eats that click (so `AppShell`'s scrim never
+    // sees it) and closes the popup itself, and this mirror is the only way
+    // `settings-open` — and the Rust layer behind it — learns.
+    property <bool> settings-shown: settings.is-open;
+    changed settings-shown => {
+        if (!settings-shown && UIState.settings-open) {
+            UIState.settings-open = false;
+        }
+    }
 
     // geometry mirror for Rust-side popup anchoring
     changed width => {
@@ -919,6 +929,20 @@ export component AppWindow inherits Window {
             keys: @keys(Alt + RightArrow);
             activated => {
                 UIState.nav-forward-requested();
+            }
+        }
+        // Escape puts the notes half's note 浮层 down (ADR-0118) — the same ask
+        // its ✕ makes. Guarded on the panel actually being up, so an Escape in
+        // the editor is nobody's business but the editor's, and slint calls a
+        // focused input's own `key-pressed` first, so the capture layer's Escape
+        // still closes only that layer.
+        KeyBinding {
+            keys: @keys(Escape);
+            activated => {
+                if (UIState.active-area == "organizer" && UIState.org-tab == 0
+                    && UIState.org-note-detail.id >= 0) {
+                    UIState.org-note-closed();
+                }
             }
         }
 

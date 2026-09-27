@@ -2,6 +2,97 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0118 · 笔记 is one column: the filter is a chip row, the note opens as a 浮层, and the composer suggests tags
+
+Decision: the organizer's **笔记** half loses both of its right-hand columns and
+gains two things the Android shell already had. Four changes, plus three repairs
+that fell out of the same pass.
+
+**The notes half is the list, full width.** The 208 px nav column (the 笔记/任务
+tabs, a needle, 全部笔记, the tag column, 回收站) and the 340 px detail column are
+both gone from 笔记. What is left is the rows' own card.
+
+**What the nav column carried moves into the list's own header.** A second header
+row — the needle (`搜索笔记`), the tag chips, and a `回收站` chip — is the notes
+half's filter bar. The chips are `OrgTagColumn`'s semantics re-drawn for a row of
+pills (`OrgFilterChip`): the level *under* the current path, each with its subtree
+count, each with the same drawn ⊖ for 反向筛选, plus `全部笔记` at the top level,
+the excluded set as its own marked chip, and `清除筛选` when there is anything to
+clear. This is the Android shell's own shape (`OrgTagChips` + `TagFilterBar` over
+its `LazyColumn`), so the two shells now *filter* the same way as well as by the
+same rules.
+
+**The note is a 浮层 over the rows** (`OrganizerArea.slint`'s own overlay): 420 px
+wide, 16 px in from the card's top and right, a shadow plate, a scrollable column
+of exactly the fields the docked column held, and a ✕ in the corner every other
+popup in this window closes from. Escape is bound to the same call (guarded on the
+panel being up, so the editor's Escape is still nobody's business). Picking
+another row moves the panel; ✕ and Escape put the selection down and write
+nothing.
+
+**The composer suggests tags.** The capture field asks Rust for a tray of tags on
+every edit (`org-capture-draft-changed`) and draws them as chips over itself; a tap
+rewrites the half-typed `#token` into the whole tag and hands the caret back
+through `org-capture-caret`. `AppState::org_tag_suggestions` owns the rule — the
+run after the **last** `#`, cut where the same field's `tag_tokens` already cuts a
+token (a space, a tab or a newline ends it), matched against the whole tag *or* its
+last segment so `#工` finds `项目/工作`, capped at five. This is the Android
+composer's `tagSuggestions` / `applyTagSuggestion` ported.
+
+Context: the user, on the desktop shell: "我点笔记跟任务的时候，它侧边栏焦点却还是在
+其他页面中。另外那个 PC 端的笔记右边的那个侧两个侧边栏我都不需要。另外，PC 端照理说是
+有标签建议的功能，但目前我没看到。然后是任务跟笔记的设置，当焦点离开它的时候，它就应该
+销毁了呀。但我点设置外面的界面，那个设置界面还在". Asked which of the two columns to
+keep, they took the option that drops both and gives the note a 浮层.
+
+Consequences:
+
+- **任务 keeps both columns, on purpose.** 收集箱 / 今天 / 最近 7 天 / the lists and
+  the tags *are* that half's navigation and have nowhere else to be, and its
+  detail column is the form the board also opens. The asymmetry is the answer to
+  "what did the columns cost": for 笔记 they cost the rows a third of the card to
+  repeat a nav the left sidebar already draws, and for 任务 they are the screen.
+  `org_show` clears the tag filter on a real tab change (ADR-0112), so the two
+  halves' filters can still never be confused for one another.
+- **The sidebar can no longer light two rows at once.** This was the same bug the
+  user named first, and it was not in the organizer at all: `SidebarItem`'s
+  highlight is `node.selected`, Rust's projection of `open_page`, and the organizer
+  does not open a page — so on 笔记 the previously-open page row stayed lit *beside*
+  the pinned 笔记 row. The row now paints `node.selected && active-area !=
+  "organizer"`: the tree's highlight means "a page is showing", which is exactly
+  what it always said.
+- **设置 closes on a click outside it.** It was `no-auto-close`, which is the one
+  policy that *cannot* be dismissed from outside: the engine eats that click (so
+  `AppShell`'s scrim never sees it) and the dialog then ignores it, so only 完成 and
+  Escape got rid of the card. It is `close-on-click-outside` now, with the same
+  `is-open` mirror in `AppWindow` that every other popup uses to carry the
+  dismissal back to `UIState`. Escape is unchanged — it still comes through the
+  dialog's focus-proxy.
+- **A layout's `self.width` is not its content's.** The 回收站 row's `恢复` /
+  `彻底删除` pair was pinned with `parent.width - self.width - 10px`, but a
+  `HorizontalLayout` *fills* its parent, so `self.width` was the whole row and the
+  pair rendered at the row's left edge — on top of the note's text, which the 132 px
+  of `padding-right` above it reserves for exactly those two buttons. It reads
+  `preferred-width` now.
+- **The tray's rule is the draft's tail, not the caret.** Slint's `TextInput`
+  exposes no caret position, so the token is the run after the last `#` rather than
+  the run the caret sits in (which is what the Android copy reads off
+  `field.selection.start`). The two agree wherever the caret is at the end — the
+  seeded preset and every keystroke land there — and diverge only when the user
+  moves the caret back into the middle of the line, where the cost is a suggestion
+  that does not appear, never a tag applied to the wrong run. Written down here
+  because it is a real difference between the shells, not an oversight.
+- **The suggestion pool spans both halves and skips the bin.** A `#token` typed
+  into this layer becomes a tag on a *note*, and the 任务 half's tags are just tags
+  the user has used; binned rows are not in the pool, which is the same rule the
+  tag chips already keep (their counts come from the live half).
+- **`回收站` shows no count at zero**, the way the nav row it replaces drew it:
+  "回收站 0" reads like a filter that found nothing rather than a place.
+- **`notes-capture-suggest` / `dark-notes-capture-suggest` join the sweep.** The
+  tray is a shape the layer did not have; the list, the chips and the 浮层 are
+  drawn by `notes`, `notes-filter`, `notes-detail` and `notes-info` themselves,
+  which now photograph the new geometry without a new scene each.
+
 ## ADR-0117 · A new row inherits the tag filter, and 笔记 can open its input on arrival
 
 Decision: two gaps against the reference app's inbox, closed in one pass, both of

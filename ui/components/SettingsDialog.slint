@@ -84,7 +84,13 @@ export component SettingsDialog inherits PopupWindow {
         content-col.preferred-height + Theme.spacing-lg * 2,
         Math.max(UIState.window-h - 80px, 320px)
     );
-    close-policy: PopupClosePolicy.no-auto-close;
+    // Dismissed like every other popup in the window: a click outside it closes
+    // it (Escape is the focus-proxy below). It used to be `no-auto-close`, so the
+    // engine swallowed the outside click *and* the dialog ignored it — the card
+    // stayed up over a page the user had already clicked into, and only 完成 or
+    // Escape got rid of it. The `is-open` mirror in `AppWindow` carries the
+    // dismissal back to `UIState`.
+    close-policy: PopupClosePolicy.close-on-click-outside;
 
     property <bool> opened: UIState.settings-open;
     changed opened => {

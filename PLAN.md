@@ -3818,3 +3818,60 @@ emoji、十六进制值全同），其中 `jade` / `deepblue` / `twilight` / `cr
 `quire-shot` 渲染 `edit` / `notes` / `settings` / `dark-tasks`，渐变与两套纯色主题都逐像素量过。
 **core 一行没动、rev 没 bump。**
 
+## M2.5o · 笔记页只剩一栏 / 笔记开成浮层 / 撰写层给标签建议 (ADR-0118)
+
+**缘起**：用户点名四件事，三件是缺陷、一件是缺的功能——「我点笔记跟任务的时候，它侧边栏焦点却还是
+在其他页面中。另外那个 PC 端的笔记右边的那个侧两个侧边栏我都不需要。另外，PC 端照理说是有标签建议的
+功能，但目前我没看到。然后是任务跟笔记的设置，当焦点离开它的时候，它就应该销毁了呀。但我点设置外面的
+界面，那个设置界面还在」。问「两条栏留哪条」时选的是**两条都去掉、笔记给浮层**。
+
+**交付**：
+
+① **侧边栏**：`SidebarItem` 的高亮读 `node.selected`（Rust 对 `open_page` 的投影），而组织器**不打开
+页面**，所以点「笔记 / 任务」时页面树里上一次打开的那一页仍然亮着——树里一行 + 钉住的一行同时点亮。
+行现在画 `node.selected && active-area != "organizer"`。
+
+② **笔记页右边两条栏都删掉**（208 px 导航列 + 340 px 详情列），卡片就是行本身。导航列里的东西搬进
+列表自己的**筛选条**（表头第二行）：`搜索笔记` 搜索框、标签 chips、`回收站`（计数为 0 时不印数字，与
+它替代的那行导航一致）。`OrgFilterChip` 是 `OrgTagColumn` 的语义重画成一排药丸：当前路径的**下一层**、
+各带子树计数、各带同一条画出来的 ⊖（反向筛选）、顶层 `全部笔记`、被排除集合自己那枚标记 chip、
+`清除筛选`。形状取自 compose 壳的 `OrgTagChips` + `TagFilterBar`，所以两端现在连筛选的手势都一样。
+**笔记开成压在行上的浮层**：420 px、距卡片上/右各 16 px、画出来的暗板、内部 `ScrollView`、角落一枚
+✕，Escape 绑同一个调用（只在浮层开着时动手，编辑器的 Escape 不归它管）；点另一行就换，✕ / Escape
+只是把选中放下、什么都不写。**任务那一半两条栏保留是刻意的**：收集箱 / 今天 / 最近 7 天 / 清单**就是**
+那半边自己的导航，没有别处可放；对 `org-tab == 1`，新旧门条件是逻辑等价的，所以任务半边一个像素没动。
+
+③ **标签建议**：撰写层的字段每次编辑都向 Rust 要一份 `#token` 的建议托盘（`org-capture-draft-changed`
+→ `AppState::org_tag_suggestions`，`org_tag_suggest` 只负责把答案搬过边界），画成自己头顶上一排 chips；
+点一枚就把半截 token 换成整个标签，并把 `org-capture-caret` 交回给字段（与打开时的预填同一个机制）。
+规则：**最后一个 `#` 之后的那一段**，切法与同一个字段的 `note_tag_tokens` 同一条；前缀既比整个标签也比
+**最后一段**，所以 `#工` 找得到 `项目/工作`；池子是活目录的**两半**（这个层里的 `#token` 是**笔记**的标签，
+而任务那半的标签就是用户用过的标签）；最多五枚，短的在前。
+
+④ **设置**从 `no-auto-close` 改成 `close-on-click-outside`，并在 `AppWindow` 里补上其它弹层都有的
+`is-open` 镜像把关闭带回 `UIState`：前者是唯一一种**从外面关不掉**的策略——引擎吃掉那次点击
+（`AppShell` 的遮罩因此看不见它），而对话框又无视它，于是只有「完成」和 Escape 能收走那张卡。
+
+**顺手修掉的既有缺陷**：回收站行里 `恢复` / `彻底删除` 那一对用 `parent.width - self.width - 10px`
+定位，而 `HorizontalLayout` 会**铺满**父元素，所以 `self.width` 是整行宽、那对按钮落在行的左边缘、正好
+压在笔记自己的字上（上面那 132 px 的 `padding-right` 正是给它们留的）。改用 `preferred-width`。
+
+**验证**：`cargo check --workspace --all-targets` 干净（零警告）；`cargo test --workspace` 全绿（本刀新增一条：
+`a_tag_suggestion_is_the_run_after_the_last_hash`——只有**最后一个** `#` 算数、空格 / 换行结束 token、
+`#工` 同时找得到 `工作` 与 `项目/工作`、空前缀是全池**截到五枚**、没有前缀命中的返回空）；`--features
+software` 的 `quire-shot` 渲染并逐张看过 `notes` / `notes-detail` / `notes-info` / `notes-filter` /
+`notes-search` / `notes-select` / `bin` / `notes-capture` / `notes-capture-empty` / `notes-capture-suggest`
+/ `tasks` / `tasks-detail` / `tasks-board` / `settings` 及暗色孪生：侧边栏只有一枚高亮、chips 与排除标记
+（含 `排除 #会议` + `清除筛选`）、浮层压在列表上而选中行仍可见、`详细信息` 折块在浮层里展开、建议托盘
+五枚 chips、任务半边同形、回收站两枚按钮回到行右缘不再压字。新增场景 `notes-capture-suggest` /
+`dark-notes-capture-suggest` 进 `sweep.ps1`（托盘是新形状，而列表 / chips / 浮层由既有场景自己拍到）。
+**core 一行没动、rev 没 bump。**
+
+**未验证（诚实）**：① 设置的「点外面关闭」是行为，截不到指针——用的是本仓其它弹层已有多处验证过的
+`close-on-click-outside` + `is-open` 镜像同一条写法，但没有真手点过；② 建议托盘读的是草稿**尾部**的
+token 而不是光标所在的那一段（Slint 的 `TextInput` 不暴露光标位置，compose 壳读的是
+`field.selection.start`）——光标在行尾时两者一致，只有用户把光标移回行中间时才会**少给一次建议**，
+绝不会写错一段；③ 浮层的 ✕ / Escape、点另一行换选中、以及 chips 的点选，都只有键盘与指针的手感没验；
+④ 浮层里 `正文` 仍是 300 px 的最小高（沿用在栏里的取值），短正文时浮层下半是空的——观感是否要收紧
+留给下一轮。
+

@@ -57,7 +57,15 @@ transparent above it, and the default becomes AW's `midnight`, so the shell no l
 with the purple accent. Settings gets
 a preview grid instead of two cards, the visual-regression scenes are pinned by name
 (`dark-*` → midnight, everything else → light), and the command palette's 切换主题 now persists
-(it never reached `AppState` before). |
+(it never reached `AppState` before). **M2.5o** (2026-09-27) then took the notes half's own
+geometry apart (ADR-0118) at the user's request: its two right-hand columns are gone — the
+filter is a chip row in the list's header (the needle, the tags with the drawn ⊖, a 回收站
+chip) and a note opens as a 浮层 over the rows, which is the Compose shell's own shape — while
+任务 keeps its columns, because 收集箱 / 今天 / 最近 7 天 / the lists *are* that half's
+navigation. The page tree stops lighting a second row beside the pinned 笔记 row, 设置 closes on
+a click outside it, the composer raises a 标签建议 tray for the `#token` being typed, and the
+回收站 row's 恢复 / 彻底删除 pair goes back to the row's right edge where it was always meant to
+be. |
 
 ## Repository shape (since ADR-0093 + ADR-0094, 2026-09-23)
 

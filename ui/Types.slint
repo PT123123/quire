@@ -1358,6 +1358,10 @@ export global UIState {
     // instead of writing an empty row. 任务 keeps `org-task-create` — its ＋ is still
     // the nav column's, and a task has no capture layer.
     callback org-note-selected(int);
+    // ✕ (and Escape) on the note's own 浮层 (ADR-0118): the panel goes and the
+    // list is left as it was, with nothing written — the selection is how the
+    // panel is *found*, so closing it is putting that selection down.
+    callback org-note-closed();
     callback org-note-title-set(int, string);
     callback org-note-body-set(int, string);
     callback org-note-pin-toggled(int);
@@ -1436,6 +1440,16 @@ export global UIState {
     callback org-capture-opened();
     callback org-capture-sent();
     callback org-capture-closed();
+    // 标签建议 (ADR-0118): the `#`-typeahead the Android shell's composer has had
+    // since its own ADR-0015. `org-tag-suggestions` is Rust's projection — the
+    // distinct tags of the live catalog whose last path segment starts with the
+    // `#token` being typed — and the field reports every edit so the tray follows
+    // the draft, the way the Android copy recomputes it off its catalog.
+    in-out property <[string]> org-tag-suggestions;
+    callback org-capture-draft-changed();
+    // A tap on one of the tray's chips: the half-typed `#token` it names is
+    // replaced by the whole tag, which is the Android copy's `applyTagSuggestion`.
+    callback org-tag-suggest-picked(string);
     // 启动时自动弹出输入框 (the Settings row): whether *arriving* at 笔记 opens the
     // capture layer with the caret in it. Persisted as the shared
     // `notes.auto_input` row — the Android shell reads the same one out of the

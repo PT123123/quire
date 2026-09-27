@@ -18,11 +18,17 @@ export component SidebarItem inherits Rectangle {
     // a page row or the Workspace header shows the "landing here" tint
     property <bool> drop-target: UIState.page-drop-target-id == node.id
         && (is-page || (is-header && node.id == -100));
+    // The lit row is only ever *this* area's. `node.selected` is Rust's
+    // projection of `open_page`, and the organizer does not open one — so while
+    // the notes or tasks half is showing, the page the tree still names is
+    // covered, and a second lit row beside the pinned 笔记/任务 row would say the
+    // window is in two places at once.
+    property <bool> lit: node.selected && UIState.active-area != "organizer";
 
     height: is-header ? 26px : 28px;
     border-radius: Theme.radius-sm;
     background: drop-target ? Colors.accent-soft
-        : node.selected
+        : lit
         ? Colors.surface-selected
         : (ta.has-hover && !renaming ? Colors.hover-fill : transparent);
     animate background { duration: Theme.duration-instant; }
@@ -91,7 +97,7 @@ export component SidebarItem inherits Rectangle {
                         : node.kind == "recent" ? "clock"
                         : "page";
                     color: is-new-page ? Colors.text-muted
-                        : node.selected ? Colors.accent-text
+                        : lit ? Colors.accent-text
                         : (ta.has-hover ? Colors.text-secondary : Colors.text-muted);
                 }
             }
@@ -140,7 +146,7 @@ export component SidebarItem inherits Rectangle {
             font-weight: is-header ? Typography.weight-semibold : Typography.weight-regular;
             color: is-header ? Colors.text-muted
                 : is-new-page ? Colors.text-muted
-                : node.selected ? Colors.text-primary
+                : lit ? Colors.text-primary
                 : Colors.text-secondary;
             overflow: elide;
             vertical-alignment: center;

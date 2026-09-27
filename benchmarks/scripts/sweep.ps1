@@ -103,7 +103,13 @@ $all = @(
     # through `org_show` rather than the arrival (`org_scene_open`), so the list,
     # the filter and the detail panes are photographed as themselves.
     "notes-capture", "notes-capture-empty", "notes-menu",
-    "dark-notes-capture", "dark-notes-capture-empty", "dark-notes-menu"
+    "dark-notes-capture", "dark-notes-capture-empty", "dark-notes-menu",
+    # ADR-0118: the notes half lost its two right-hand columns — the list owns the
+    # card and a note opens as a 浮层 over it, and the filter is a chip bar in the
+    # list's header. "notes", "notes-filter" and "notes-detail" photograph those
+    # three as themselves; the 标签建议 tray is the one shape nothing drew, so it is
+    # the one new scene (with the dark twin the rest of the layer carries).
+    "notes-capture-suggest", "dark-notes-capture-suggest"
 )
 $targets = if ($Scenes -eq "") { $all } else { $Scenes -split ',' }
 

@@ -598,6 +598,44 @@ First functional release: a local, single-file-database notes workspace.
 - Two new tests: a task created under a filter carries it, and an absent flag whose
   default is on does not read as off
 
+### Notes & tasks — 笔记页单栏、笔记浮层、标签建议 (ADR-0118)
+- **The 笔记 half is one column.** Its 208 px nav column and its 340 px detail
+  column are gone; the list owns the card. What the nav column carried became a
+  **filter bar** in the list's own header: the 搜索笔记 needle, the tag chips (the
+  level under the current path, each with its subtree count and the drawn ⊖ for
+  反向筛选, plus 全部笔记 / the excluded set / 清除筛选) and a 回收站 chip. It is the
+  Android shell's own shape, so the two shells filter the same way as well as by the
+  same rules
+- **A note opens as a 浮层 over the rows** — 420 px, inset from the card's top and
+  right, holding the fields the docked column held, scrollable, with the ✕ every
+  other popup in this window closes from; Escape does the same. Picking another row
+  moves it, and closing it puts the selection down without writing anything
+- **任务 keeps both columns**, deliberately: 收集箱 / 今天 / 最近 7 天 / the lists are
+  that half's navigation and have nowhere else to be
+- **The capture field suggests tags.** Typing a `#token` raises a tray of known tags
+  over the field; tapping one rewrites the token into the whole tag and puts the
+  caret after it. The pool is the live catalog of both halves, the prefix matches
+  the whole tag or its last segment (so `#工` finds `项目/工作`), and the tray holds
+  at most five
+- **The sidebar can no longer light two rows at once.** The page tree's highlight is
+  Rust's projection of `open_page` and the organizer opens no page — so 笔记 showed
+  *its* pinned row lit beside the previously-open page's. The row now paints
+  `node.selected && active-area != "organizer"`
+- **设置 closes on a click outside it.** It was the one close policy that cannot be
+  dismissed from outside — the engine eats that click and the dialog then ignored it
+  — so only 完成 and Escape got rid of the card
+- Also fixed: the 回收站 row's 恢复 / 彻底删除 pair was pinned with a layout's
+  `self.width` (which is the whole row, because a layout fills its parent) and so
+  rendered over the note's own text
+- New sweep scenes `notes-capture-suggest` / `dark-notes-capture-suggest`; `notes`,
+  `notes-filter`, `notes-detail` and `notes-info` now photograph the new geometry
+- One new test: the suggestion rule — only the last `#` counts, a space or a
+  newline ends the token, `#工` finds both `工作` and `项目/工作`, and an empty
+  prefix returns the pool capped at five
+- Not in this slice: the tray reads the draft's *tail* token rather than the one the
+  caret sits in (Slint exposes no caret position), so moving the caret back into the
+  middle of a line costs a suggestion rather than applying the wrong tag
+
 ### Theme (ADR-0116)
 - The palette is now **ActivityWatch's twelve themes**, ported field for field from
   `aw-qtui/src/theme.h`'s `kThemes[]` and chosen by name in Settings:

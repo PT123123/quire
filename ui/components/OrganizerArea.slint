@@ -408,6 +408,75 @@ component OrgTagColumn inherits VerticalLayout {
     }
 }
 
+// One pill of the 笔记 half's filter bar (ADR-0118). `OrgNavRow` is a full-width
+// row with a left selection bar and a ⋯ — right for a nav column, wrong for a row
+// of chips over a list that owns its card. This is that row's chip-sized twin: a
+// label, the count it would leave, and the same ⊖ for 反向筛选.
+component OrgFilterChip inherits Rectangle {
+    in property <string> label;
+    in property <bool> selected: false;
+    in property <bool> accent: false;
+    in property <bool> excluded: false;
+    // A tag chip carries the filter's other half; 全部笔记 / 回收站 / 清除筛选 do not.
+    in property <bool> excludable: false;
+    callback clicked();
+    callback exclude-toggled();
+
+    height: 24px;
+    max-width: 100000px;
+    border-radius: 12px;
+    border-width: 1px;
+    border-color: root.selected || root.accent ? Colors.accent : Colors.border;
+    background: root.excluded
+        ? Colors.danger.with-alpha(0.12)
+        : root.selected || root.accent
+        ? Colors.accent-soft
+        : (ta.has-hover ? Colors.hover-fill : Colors.background);
+    animate background { duration: Theme.duration-instant; }
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: root.excludable ? 4px : 10px;
+        spacing: 4px;
+        Text {
+            text: root.label;
+            font-family: Typography.ui-font;
+            font-size: Typography.size-caption;
+            color: root.excluded ? Colors.danger
+                : root.selected || root.accent ? Colors.accent-text
+                : Colors.text-secondary;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        // The ⊖, the same shape and the same job as `OrgNavRow`'s: this build's
+        // Slint has no `rotation-angle`, so a slashed circle is a minus in a ring.
+        if root.excludable : Rectangle {
+            width: 16px;
+            height: 16px;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: root.excluded ? Colors.danger : Colors.border-strong;
+            background: root.excluded ? Colors.danger.with-alpha(0.12)
+                : (excl-ta.has-hover ? Colors.hover-fill : transparent);
+            Rectangle {
+                x: (parent.width - 8px) / 2;
+                y: (parent.height - 1.5px) / 2;
+                width: 8px;
+                height: 1.5px;
+                background: root.excluded ? Colors.danger : Colors.text-muted;
+            }
+            excl-ta := TouchArea {
+                mouse-cursor: MouseCursor.pointer;
+                clicked => { root.exclude-toggled(); }
+            }
+        }
+    }
+    ta := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
 // The toolbar's segmented control (列表 / 平铺). Two states, one box: the lit half
 // is the answer, and the box itself is what says the two are alternatives.
 component OrgSeg inherits Rectangle {
@@ -1138,6 +1207,77 @@ export component OrganizerArea inherits Rectangle {
                             }
                         }
 
+                        // ── the 笔记 half's filter bar (ADR-0118) ────────────
+                        // What the removed nav column carried, in the one place a
+                        // list that owns its card can put it: the needle, the tag
+                        // chips (the level under the current path, 反向筛选 and
+                        // all), and the 回收站 door. A row of its own rather than a
+                        // third header line, so the title row stays the same shape
+                        // on both halves.
+                        if UIState.org-tab == 0 && !UIState.org-selecting : HorizontalLayout {
+                            height: 30px;
+                            spacing: 8px;
+                            OrgInput {
+                                grow: false;
+                                field-width: 170px;
+                                hint-height: 30px;
+                                placeholder: "搜索笔记";
+                                value <=> UIState.org-query;
+                                edited => { UIState.org-query-changed(); }
+                            }
+                            // The bin is not a filter over the live notes, so the
+                            // chips go with it (the Android copy's own rule): its
+                            // counts are drawn from the other half of the catalog.
+                            if !UIState.org-bin-open : ScrollView {
+                                height: 30px;
+                                horizontal-stretch: 1;
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    padding-top: 3px;
+                                    padding-bottom: 3px;
+                                    // one level down the ↑ chip says where the
+                                    // filter is *and* is the way out of it
+                                    if UIState.org-tag != "" : OrgFilterChip {
+                                        label: "↑ " + UIState.org-tag-label;
+                                        selected: true;
+                                        clicked => { UIState.org-tag-picked(UIState.org-tag-parent); }
+                                    }
+                                    if UIState.org-tag == "" : OrgFilterChip {
+                                        label: "全部笔记";
+                                        selected: true;
+                                        clicked => { UIState.org-tag-picked(""); }
+                                    }
+                                    for tag[i] in UIState.org-tag-rows : OrgFilterChip {
+                                        label: "#" + tag.name + "  " + tag.count;
+                                        excludable: true;
+                                        excluded: tag.excluded;
+                                        clicked => { UIState.org-tag-picked(tag.path); }
+                                        exclude-toggled => { UIState.org-tag-excluded(tag.path); }
+                                    }
+                                    if UIState.org-excluded-label != "" : OrgFilterChip {
+                                        label: UIState.org-excluded-label;
+                                        excluded: true;
+                                    }
+                                    if UIState.org-tag != "" || UIState.org-excluded-label != "" : OrgFilterChip {
+                                        label: "清除筛选";
+                                        accent: true;
+                                        clicked => { UIState.org-filters-cleared(); }
+                                    }
+                                }
+                            }
+                            if UIState.org-bin-open : Rectangle { horizontal-stretch: 1; }
+                            OrgFilterChip {
+                                // The count only when there is one: the nav row this
+                                // replaces hid a zero too, and "回收站 0" reads like a
+                                // filter that found nothing rather than a place.
+                                label: "回收站" + (UIState.org-bin-note-count > 0
+                                    ? "  " + UIState.org-bin-note-count
+                                    : "");
+                                selected: UIState.org-bin-open;
+                                clicked => { UIState.org-bin-toggled(); }
+                            }
+                        }
+
                         // 回收站 is a mode *over* the list, so it takes the list's
                         // branch whatever 列表/平铺 says: a bin is not a kanban, and
                         // the board draws no binned cards anyway (`org_board_rows`
@@ -1399,7 +1539,13 @@ export component OrganizerArea inherits Rectangle {
                                 // every verb outside those two is a write to a note
                                 // that is on no list.
                                 if UIState.org-bin-open : HorizontalLayout {
-                                    x: parent.width - self.width - 10px;
+                                    // `preferred-width` and not `self.width`: a layout
+                                    // *fills* its parent, so `self.width` here is the
+                                    // row's own and the pair came out at the row's left
+                                    // edge — on top of the note's own text, which the
+                                    // 132 px of `padding-right` above is reserving for
+                                    // exactly these two buttons.
+                                    x: parent.width - self.preferred-width - 10px;
                                     y: (parent.height - self.height) / 2;
                                     spacing: 4px;
                                     OrgButton {
@@ -1474,215 +1620,29 @@ export component OrganizerArea inherits Rectangle {
                     }
                 }
 
-                // ── the detail column ──────────────────────────────────────
+                // ── the detail column (任务's list mode, ADR-0118) ──────────
                 // 340 px, always there: it used to slide out from 0, which meant
                 // the list reflowed on every selection. Hidden on the board,
                 // where the columns want the width — activitywatch's board does
                 // the same. Its own edge goes with it: a divider with nothing
                 // behind it is a line to nowhere.
-                if UIState.org-mode == 0 || UIState.org-tab == 0 : Rectangle {
+                //
+                // The 笔记 half has no docked column any more: a note opens as a
+                // 浮层 over the list it was picked from (see the card's own
+                // overlay below), which is what lets the list own the card.
+                if UIState.org-tab == 1 && UIState.org-mode == 0 : Rectangle {
                     width: 1px;
                     background: Colors.divider;
                 }
-                if UIState.org-mode == 0 || UIState.org-tab == 0 : Rectangle {
+                if UIState.org-tab == 1 && UIState.org-mode == 0 : Rectangle {
                     min-width: 340px;
                     max-width: 340px;
                     clip: true;
                     background: Colors.background;
 
-                    if UIState.org-tab == 0 : VerticalLayout {
-                        padding: 16px;
-                        spacing: 10px;
-
-                        if UIState.org-note-detail.id < 0 : Text {
-                            text: "选择一条笔记，或按 ＋ 新建。";
-                            font-family: Typography.ui-font;
-                            font-size: Typography.size-ui;
-                            color: Colors.text-muted;
-                        }
-
-                        if UIState.org-note-detail.id >= 0 : VerticalLayout {
-                            spacing: 10px;
-
-                            HorizontalLayout {
-                                height: 34px;
-                                spacing: 8px;
-                                OrgInput {
-                                    placeholder: "标题";
-                                    font-size: Typography.size-ui-lg;
-                                    value <=> UIState.org-note-title-draft;
-                                    edited => { UIState.org-field-edited(1); }
-                                }
-                                IconButton {
-                                    icon-name: "star";
-                                    icon-color: UIState.org-note-detail.pinned
-                                        ? Colors.accent-text
-                                        : Colors.text-muted;
-                                    clicked => { UIState.org-note-pin-toggled(UIState.org-note-detail.id); }
-                                }
-                                // 转为待办: the note becomes a task and the note goes —
-                                // no dialog, because the notice band is the way back.
-                                IconButton {
-                                    icon-name: "todo-check";
-                                    icon-color: Colors.text-muted;
-                                    hover-color: Colors.accent-text;
-                                    clicked => { UIState.org-note-to-task(UIState.org-note-detail.id); }
-                                }
-                                IconButton {
-                                    icon-name: "trash";
-                                    icon-color: Colors.text-muted;
-                                    hover-color: Colors.danger;
-                                    clicked => { UIState.org-note-deleted(UIState.org-note-detail.id); }
-                                }
-                            }
-
-                            HorizontalLayout {
-                                height: 30px;
-                                spacing: 8px;
-                                OrgField { name: "标签"; width: 40px; }
-                                OrgInput {
-                                    placeholder: "用逗号分隔";
-                                    value <=> UIState.org-note-tags-draft;
-                                    edited => { UIState.org-field-edited(3); }
-                                }
-                            }
-
-                            // No 修改 row here. The age a note was last written on
-                            // is 详细信息's business (and the list row already says
-                            // it); a second copy an inch above the block was this
-                            // shell's own invention, and the reference has no such
-                            // line — its page is title, body, tags, replies.
-                            OrgInput {
-                                placeholder: "正文";
-                                multiline: true;
-                                hint-height: 300px;
-                                value <=> UIState.org-note-body-draft;
-                                edited => { UIState.org-field-edited(2); }
-                            }
-
-                            // 引用 (SPEC §四十一): the notes that answer this one, and
-                            // the field that writes them — a reply is a note whose
-                            // `ref_note` names this one (core ADR-0001). Committed on
-                            // Enter or the 评论 button and not on a settle, because a
-                            // reply is a *create* and half a row is not a row.
-                            VerticalLayout {
-                                spacing: 4px;
-                                OrgField {
-                                    name: "评论 " + UIState.org-note-replies.length;
-                                    height: 18px;
-                                }
-                                HorizontalLayout {
-                                    height: 30px;
-                                    spacing: 8px;
-                                    OrgInput {
-                                        placeholder: "写一条评论…";
-                                        value <=> UIState.org-reply-draft;
-                                        accepted => { UIState.org-reply-submitted(); }
-                                    }
-                                    OrgButton {
-                                        label: "评论";
-                                        accent: true;
-                                        font-size: Typography.size-caption;
-                                        clicked => { UIState.org-reply-submitted(); }
-                                    }
-                                }
-                                for reply[i] in UIState.org-note-replies : Rectangle {
-                                    // The card hugs its text, the board card's own
-                                    // idiom (`height` off the wrapped text's
-                                    // preferred-height): a reply is a line or two, and
-                                    // the detail pane's leftover height must not be
-                                    // poured into the newest one.
-                                    height: reply-text.preferred-height + 14px + 18px;
-                                    background: Colors.hover-fill;
-                                    border-radius: Theme.radius-sm;
-                                    VerticalLayout {
-                                        padding: 8px;
-                                        spacing: 2px;
-                                        reply-text := Text {
-                                            text: reply.body != "" ? reply.body : reply.title;
-                                            font-family: Typography.ui-font;
-                                            font-size: Typography.size-ui;
-                                            color: Colors.text-primary;
-                                            wrap: word-wrap;
-                                        }
-                                        OrgMeta { tags: reply.tags; when: reply.when; height: 14px; }
-                                    }
-                                }
-                            }
-
-                            // 详细信息: what the store holds about this note, and
-                            // the one thing it does not hold.
-                            //
-                            // A disclosure **below** the body rather than the
-                            // reference's bottom sheet, for two reasons. Slint has
-                            // no sheet, and a popup window for six read-only rows
-                            // is a window inside a window; and opening it must not
-                            // move the field the user is typing into — above the
-                            // body it would shove 正文 down every time.
-                            //
-                            // The header is a Rectangle with a TouchArea under its
-                            // text: a layout child that is only a row of text has
-                            // nothing to click on for the empty part of the column.
-                            Rectangle {
-                                height: 24px;
-                                details-ta := TouchArea {
-                                    mouse-cursor: MouseCursor.pointer;
-                                    clicked => {
-                                        UIState.org-note-details-open = !UIState.org-note-details-open;
-                                    }
-                                }
-                                HorizontalLayout {
-                                    spacing: 6px;
-                                    cross-axis-alignment: center;
-                                    Icon {
-                                        width: 14px;
-                                        height: 14px;
-                                        name: UIState.org-note-details-open
-                                            ? "chevron-down"
-                                            : "chevron-right";
-                                        size: 14px;
-                                        color: Colors.text-muted;
-                                    }
-                                    Text {
-                                        text: "详细信息";
-                                        font-family: Typography.ui-font;
-                                        font-size: Typography.size-caption;
-                                        color: Colors.text-muted;
-                                        vertical-alignment: center;
-                                    }
-                                }
-                            }
-
-                            if UIState.org-note-details-open : VerticalLayout {
-                                spacing: 2px;
-                                OrgDetailRow { label: "编号"; value: UIState.org-note-details.id; }
-                                // SPEC §四十一's 唯一 ID: what 复制 hands an AI and
-                                // what a batch instruction names this note by. Next to
-                                // 编号 because they are both "which note", and only one
-                                // of them survives a sync.
-                                OrgDetailRow { label: "唯一 ID"; value: UIState.org-note-details.uuid; }
-                                OrgDetailRow { label: "创建"; value: UIState.org-note-details.created; }
-                                OrgDetailRow { label: "修改"; value: UIState.org-note-details.edited; }
-                                OrgDetailRow { label: "标签"; value: UIState.org-note-details.tags; }
-                                OrgDetailRow { label: "长度"; value: UIState.org-note-details.length; }
-                                OrgDetailRow { label: "置顶"; value: UIState.org-note-details.pinned; }
-                                // The reference says this out loud instead of
-                                // painting an empty 历史 list: `quire-core` keeps
-                                // one copy of a note, so there is no version to
-                                // restore to — 撤销 walks an edit back, and that
-                                // is all there is.
-                                Text {
-                                    text: "没有历史版本：资料库只保存当前这一份，撤销可以回退编辑，但没有按时间恢复的版本。";
-                                    wrap: word-wrap;
-                                    font-family: Typography.ui-font;
-                                    font-size: Typography.size-caption;
-                                    color: Colors.text-muted;
-                                }
-                            }
-                        }
-                    }
-
-                    if UIState.org-tab == 1 : VerticalLayout {
+                    // the column is 任务's alone (the gate above says so), so the
+                    // pane inside it does not repeat the test
+                    VerticalLayout {
                         padding: 16px;
                         spacing: 10px;
 
@@ -1987,8 +1947,13 @@ export component OrganizerArea inherits Rectangle {
                     }
                 }
 
-                // ── the nav column ─────────────────────────────────────────
-                Rectangle {
+                // ── the nav column (任务 only, ADR-0118) ────────────────────
+                // The notes half has no column here any more: its two tabs were a
+                // second copy of the left sidebar's pinned rows, and its filter is
+                // the list header's own chip row now. 任务 keeps it, because
+                // 收集箱 / 今天 / 最近 7 天 / the lists *are* that half's navigation
+                // and there is nowhere else for them to be.
+                if UIState.org-tab == 1 : Rectangle {
                     // min *and* max, not `width`: in a layout an explicit width
                     // is only the *preferred* one, and Slint raises it to
                     // whatever the content says it needs. The detail column's
@@ -2040,34 +2005,21 @@ export component OrganizerArea inherits Rectangle {
 
                         Rectangle { height: 6px; }
 
-                        // one needle for the tab that is showing: the two lists
-                        // are never on screen together, so a second box would be
-                        // a second thing to clear
+                        // 任务's own needle. The notes half's is in its filter bar
+                        // (ADR-0118), and the two halves are never on screen
+                        // together, so neither box is a second thing to clear.
                         OrgInput {
                             hint-height: 30px;
-                            placeholder: UIState.org-tab == 0 ? "搜索笔记" : "搜索任务";
+                            placeholder: "搜索任务";
                             value <=> UIState.org-query;
                             edited => { UIState.org-query-changed(); }
                         }
 
                         Rectangle { height: 6px; }
 
-                        // ── 笔记: 全部, then the level the filter is on ──────
-                        if UIState.org-tab == 0 : VerticalLayout {
-                            spacing: 1px;
-                            OrgNavRow {
-                                label: "全部笔记";
-                                count: UIState.org-note-count;
-                                selected: UIState.org-tag == "" && !UIState.org-bin-open;
-                                clicked => { UIState.org-tag-picked(""); }
-                            }
-                            // The tag column, shared with the 任务 tab: the filter
-                            // is the same question asked of whichever half is
-                            // showing, so it is one component and not two.
-                            OrgTagColumn { }
-                        }
-
                         // ── 任务: the smart views, then the lists ───────────
+                        // (The 笔记 half's 全部笔记 row and its tag column moved to
+                        // the list's own filter bar — ADR-0118.)
                         if UIState.org-tab == 1 : VerticalLayout {
                             spacing: 1px;
                             for name[i] in root.smart-names : OrgNavRow {
@@ -2151,9 +2103,240 @@ export component OrganizerArea inherits Rectangle {
                     }
                 }
 
-                // the two columns' own edges, drawn rather than bordered: a
-                // border would put a line on all four sides of each column
-                Rectangle { width: 1px; background: Colors.divider; }
+                // the columns' own edge, drawn rather than bordered: a border
+                // would put a line on all four sides. It goes with the nav
+                // column it belongs to.
+                if UIState.org-tab == 1 : Rectangle { width: 1px; background: Colors.divider; }
+            }
+
+            // ── the 笔记 half's note page, as a 浮层 (ADR-0118) ──────────────
+            // The note the list picked, drawn *over* the rows rather than beside
+            // them: the notes half's card is the rows' now. A docked column cost
+            // them a third of the card whether a note was open or not, and the
+            // row that opened the note is *context* — which note among which
+            // others — which is what the list behind this card still says.
+            //
+            // Last among the card's children, so it sits above the list; the
+            // `TouchArea` inside it is what keeps a click on its own padding off
+            // the rows. ✕ and Escape close it, and picking another row moves it.
+            if UIState.org-tab == 0 && UIState.org-note-detail.id >= 0 : Rectangle {
+                x: parent.width - self.width - 16px;
+                y: 16px;
+                width: min(420px, parent.width - 32px);
+                height: parent.height - 32px;
+
+                // the shadow plate, the way `ContextMenu` and the 悬浮 ＋ draw
+                // theirs: this renderer has no drop-shadow
+                Rectangle {
+                    x: 2px;
+                    y: 3px;
+                    width: parent.width;
+                    height: parent.height;
+                    border-radius: Theme.radius-lg;
+                    background: Colors.shadow;
+                }
+                Rectangle {
+                    width: parent.width;
+                    height: parent.height;
+                    border-radius: Theme.radius-lg;
+                    border-width: 1px;
+                    border-color: Colors.border-strong;
+                    background: Colors.surface-overlay;
+                    clip: true;
+
+                    // Swallows the card's own clicks — its padding, its title, the
+                    // space under the last field — so that the rows beside it stay
+                    // clickable and its own margin is not a hole onto them.
+                    // Declared first, so every control below sits above it.
+                    TouchArea { mouse-cursor: MouseCursor.pointer; }
+
+                    // The fields are a column taller than the card can be, so the
+                    // page scrolls rather than clipping 详细信息 off the bottom.
+                    ScrollView {
+                        VerticalLayout {
+                            padding: 16px;
+                            spacing: 10px;
+
+                            HorizontalLayout {
+                                height: 34px;
+                                spacing: 8px;
+                                OrgInput {
+                                    placeholder: "标题";
+                                    font-size: Typography.size-ui-lg;
+                                    value <=> UIState.org-note-title-draft;
+                                    edited => { UIState.org-field-edited(1); }
+                                }
+                                IconButton {
+                                    icon-name: "star";
+                                    icon-color: UIState.org-note-detail.pinned
+                                        ? Colors.accent-text
+                                        : Colors.text-muted;
+                                    clicked => { UIState.org-note-pin-toggled(UIState.org-note-detail.id); }
+                                }
+                                // 转为待办: the note becomes a task and the note goes —
+                                // no dialog, because the notice band is the way back.
+                                IconButton {
+                                    icon-name: "todo-check";
+                                    icon-color: Colors.text-muted;
+                                    hover-color: Colors.accent-text;
+                                    clicked => { UIState.org-note-to-task(UIState.org-note-detail.id); }
+                                }
+                                IconButton {
+                                    icon-name: "trash";
+                                    icon-color: Colors.text-muted;
+                                    hover-color: Colors.danger;
+                                    clicked => { UIState.org-note-deleted(UIState.org-note-detail.id); }
+                                }
+                                // The panel's own door, in the corner every popup in
+                                // this window closes from. Escape is the same ask.
+                                IconButton {
+                                    icon-name: "x";
+                                    icon-color: Colors.text-muted;
+                                    clicked => { UIState.org-note-closed(); }
+                                }
+                            }
+
+                            HorizontalLayout {
+                                height: 30px;
+                                spacing: 8px;
+                                OrgField { name: "标签"; width: 40px; }
+                                OrgInput {
+                                    placeholder: "用逗号分隔";
+                                    value <=> UIState.org-note-tags-draft;
+                                    edited => { UIState.org-field-edited(3); }
+                                }
+                            }
+
+                            OrgInput {
+                                placeholder: "正文";
+                                multiline: true;
+                                hint-height: 300px;
+                                value <=> UIState.org-note-body-draft;
+                                edited => { UIState.org-field-edited(2); }
+                            }
+
+                            // 引用 (SPEC §四十一): the notes that answer this one, and
+                            // the field that writes them — a reply is a note whose
+                            // `ref_note` names this one (core ADR-0001). Committed on
+                            // Enter or the 评论 button and not on a settle, because a
+                            // reply is a *create* and half a row is not a row.
+                            VerticalLayout {
+                                spacing: 4px;
+                                OrgField {
+                                    name: "评论 " + UIState.org-note-replies.length;
+                                    height: 18px;
+                                }
+                                HorizontalLayout {
+                                    height: 30px;
+                                    spacing: 8px;
+                                    OrgInput {
+                                        placeholder: "写一条评论…";
+                                        value <=> UIState.org-reply-draft;
+                                        accepted => { UIState.org-reply-submitted(); }
+                                    }
+                                    OrgButton {
+                                        label: "评论";
+                                        accent: true;
+                                        font-size: Typography.size-caption;
+                                        clicked => { UIState.org-reply-submitted(); }
+                                    }
+                                }
+                                for reply[i] in UIState.org-note-replies : Rectangle {
+                                    // The card hugs its text, the board card's own
+                                    // idiom (`height` off the wrapped text's
+                                    // preferred-height): a reply is a line or two, and
+                                    // the card's leftover height must not be poured
+                                    // into the newest one.
+                                    height: reply-text.preferred-height + 14px + 18px;
+                                    background: Colors.hover-fill;
+                                    border-radius: Theme.radius-sm;
+                                    VerticalLayout {
+                                        padding: 8px;
+                                        spacing: 2px;
+                                        reply-text := Text {
+                                            text: reply.body != "" ? reply.body : reply.title;
+                                            font-family: Typography.ui-font;
+                                            font-size: Typography.size-ui;
+                                            color: Colors.text-primary;
+                                            wrap: word-wrap;
+                                        }
+                                        OrgMeta { tags: reply.tags; when: reply.when; height: 14px; }
+                                    }
+                                }
+                            }
+
+                            // 详细信息: what the store holds about this note, and
+                            // the one thing it does not hold.
+                            //
+                            // A disclosure **below** the body rather than the
+                            // reference's bottom sheet, for two reasons. Slint has
+                            // no sheet, and a popup window for six read-only rows
+                            // is a window inside a window; and opening it must not
+                            // move the field the user is typing into — above the
+                            // body it would shove 正文 down every time.
+                            //
+                            // The header is a Rectangle with a TouchArea under its
+                            // text: a layout child that is only a row of text has
+                            // nothing to click on for the empty part of the card.
+                            Rectangle {
+                                height: 24px;
+                                details-ta := TouchArea {
+                                    mouse-cursor: MouseCursor.pointer;
+                                    clicked => {
+                                        UIState.org-note-details-open = !UIState.org-note-details-open;
+                                    }
+                                }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    cross-axis-alignment: center;
+                                    Icon {
+                                        width: 14px;
+                                        height: 14px;
+                                        name: UIState.org-note-details-open
+                                            ? "chevron-down"
+                                            : "chevron-right";
+                                        size: 14px;
+                                        color: Colors.text-muted;
+                                    }
+                                    Text {
+                                        text: "详细信息";
+                                        font-family: Typography.ui-font;
+                                        font-size: Typography.size-caption;
+                                        color: Colors.text-muted;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+
+                            if UIState.org-note-details-open : VerticalLayout {
+                                spacing: 2px;
+                                OrgDetailRow { label: "编号"; value: UIState.org-note-details.id; }
+                                // SPEC §四十一's 唯一 ID: what 复制 hands an AI and
+                                // what a batch instruction names this note by. Next to
+                                // 编号 because they are both "which note", and only one
+                                // of them survives a sync.
+                                OrgDetailRow { label: "唯一 ID"; value: UIState.org-note-details.uuid; }
+                                OrgDetailRow { label: "创建"; value: UIState.org-note-details.created; }
+                                OrgDetailRow { label: "修改"; value: UIState.org-note-details.edited; }
+                                OrgDetailRow { label: "标签"; value: UIState.org-note-details.tags; }
+                                OrgDetailRow { label: "长度"; value: UIState.org-note-details.length; }
+                                OrgDetailRow { label: "置顶"; value: UIState.org-note-details.pinned; }
+                                // The reference says this out loud instead of
+                                // painting an empty 历史 list: `quire-core` keeps
+                                // one copy of a note, so there is no version to
+                                // restore to — 撤销 walks an edit back, and that
+                                // is all there is.
+                                Text {
+                                    text: "没有历史版本：资料库只保存当前这一份，撤销可以回退编辑，但没有按时间恢复的版本。";
+                                    wrap: word-wrap;
+                                    font-family: Typography.ui-font;
+                                    font-size: Typography.size-caption;
+                                    color: Colors.text-muted;
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -2339,6 +2522,39 @@ export component OrganizerArea inherits Rectangle {
                     }
                 }
 
+                // ── 标签建议 (ADR-0118) ─────────────────────────────────────
+                // The tray the Android composer raises for the `#token` being
+                // typed; tapping a chip rewrites that token into the whole tag
+                // (its `tagSuggestions` / `applyTagSuggestion`). Rust decides
+                // what is in it — the field only reports its edits — so the pool,
+                // the prefix rule and the "a space ends a token" rule are one
+                // definition and not a second copy of the parser.
+                //
+                // Above the field rather than under it: the card grows upward
+                // from a floor that does not move, and a tray between the field
+                // and the ➤ would shove the button the eye is already on.
+                if UIState.org-tag-suggestions.length > 0 : ScrollView {
+                    height: 30px;
+                    HorizontalLayout {
+                        spacing: 6px;
+                        padding-top: 3px;
+                        padding-bottom: 3px;
+                        for tag[i] in UIState.org-tag-suggestions : OrgFilterChip {
+                            label: "#" + tag;
+                            // Rust rewrites the token and hands the caret's new
+                            // byte offset back; the field takes it, so the next
+                            // keystroke lands after the tag and not inside it.
+                            clicked => {
+                                UIState.org-tag-suggest-picked(tag);
+                                capture-input.set-selection-offsets(
+                                    UIState.org-capture-caret,
+                                    UIState.org-capture-caret,
+                                );
+                            }
+                        }
+                    }
+                }
+
                 Rectangle {
                     vertical-stretch: 1;
                     border-radius: Theme.radius-sm;
@@ -2371,6 +2587,9 @@ export component OrganizerArea inherits Rectangle {
                         color: Colors.text-primary;
                         selection-foreground-color: Colors.text-on-accent;
                         selection-background-color: Colors.selection;
+                        // Every keystroke re-asks Rust for the 标签建议 tray: the
+                        // field owns the text, and the pool is the catalog's.
+                        edited => { UIState.org-capture-draft-changed(); }
                         // Escape closes the layer and Ctrl+Enter *is* the ➤ — the
                         // reference app's own pair of keys, and what lets a
                         // multi-line note be sent without the pointer leaving the

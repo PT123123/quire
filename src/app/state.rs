@@ -7502,6 +7502,66 @@ impl AppState {
         rows
     }
 
+    /// The 标签建议 tray for a capture draft (ADR-0118): the distinct tags the
+    /// `#token` being typed could still turn into, capped at five — the Android
+    /// shell's `tagSuggestions`, ported.
+    ///
+    /// The token is the run after the **last** `#`. That is the token being
+    /// written because the caret is at the end of the draft: the field seeds it
+    /// there (`org_capture_open`) and every keystroke lands there, and a caret the
+    /// user moves by hand is the one case where the tray would name the wrong run
+    /// — which costs a suggestion, never a wrong write, since the chosen tag is
+    /// applied to that same last run.
+    ///
+    /// A run holding a space, a tab or a newline is not a token any more, which is
+    /// the rule the same field's `#`-parser already uses to decide what a tag is.
+    /// (The run can never hold a second `#` — it starts after the last one by
+    /// construction, which is what makes the tail the token.) The prefix matches
+    /// the **whole tag or its last segment**: `#工` has to find `项目/工作`, or a
+    /// hierarchical tag would be unreachable by the name a user calls it.
+    ///
+    /// Both halves' tags are in the pool — a `#token` typed into this layer is a
+    /// tag on a *note*, and the 任务 half's tags are just tags the user has used.
+    pub fn org_tag_suggestions(&self, draft: &str) -> Vec<String> {
+        let Some(hash) = draft.rfind('#') else {
+            return Vec::new();
+        };
+        let typed = &draft[hash + 1..];
+        if typed.contains([' ', '\n', '\t']) {
+            return Vec::new();
+        }
+        let prefix = typed.to_lowercase();
+        let mut pool: BTreeSet<String> = BTreeSet::new();
+        {
+            let catalog = self.organizer.borrow();
+            for tags in catalog
+                .live_notes()
+                .map(|n| &n.tags)
+                .chain(catalog.live_tasks().map(|t| &t.tags))
+            {
+                for tag in tags {
+                    pool.insert(tag.clone());
+                }
+            }
+        }
+        let mut out: Vec<String> = pool
+            .into_iter()
+            .filter(|tag| {
+                if prefix.is_empty() {
+                    return true;
+                }
+                let last = tag_segments(tag).last().copied().unwrap_or_default();
+                tag.to_lowercase().starts_with(&prefix) || last.to_lowercase().starts_with(&prefix)
+            })
+            .collect();
+        // shortest first, then by name: the tag the user is reaching for is the
+        // one they wrote a word for, not the deepest path that happens to start
+        // the same way
+        out.sort_by(|a, b| a.len().cmp(&b.len()).then(a.cmp(b)));
+        out.truncate(5);
+        out
+    }
+
     /// One note as its row. `excerpt` is the body's first non-empty line, which
     /// is what a list of notes is read by; the delegate elides it.
     fn org_note_row(note: &Note, selected: bool) -> NoteRow {
@@ -23231,6 +23291,43 @@ mod tests {
         assert!(super::note_tag_tokens("# #3 issue#4").is_empty());
         // First-seen order, and a repeat is one tag.
         assert_eq!(super::note_tag_tokens("#b #a #b"), vec!["b", "a"]);
+    }
+
+    /// 标签建议 (ADR-0118): the tray follows the `#token` at the **end** of the
+    /// draft, which is where the caret is — the seeded preset and every keystroke
+    /// land there. The prefix is tested against the whole tag *and* its last
+    /// segment, so a hierarchical tag is reachable by the name a user calls it.
+    #[test]
+    fn a_tag_suggestion_is_the_run_after_the_last_hash() {
+        let (state, _repo) = org_session();
+        let note = |tags: &str| {
+            let id = state.org_create_note().unwrap_or(-1);
+            state.org_note_tags(id, tags.into());
+        };
+        note("项目/工作, 工作, 会议");
+        note("a1, a2, a3, a4, a5, a6");
+
+        // No `#` is no question, and a tail that is not a token — a space, a
+        // newline — is not one, exactly where `note_tag_tokens` would refuse the
+        // same run.
+        assert!(state.org_tag_suggestions("写点什么").is_empty());
+        assert!(state.org_tag_suggestions("#会议 然后呢").is_empty());
+        assert!(state.org_tag_suggestions("#会议\n然后").is_empty());
+
+        // Only the **last** `#` is the token being written, and `#工` finds the tag
+        // whose last segment is 工作 as well as the one spelled 工作.
+        assert_eq!(
+            state.org_tag_suggestions("记一下 #想法 再看 #工"),
+            vec!["工作", "项目/工作"]
+        );
+        // An empty prefix is the whole pool, capped at five, shortest first.
+        assert_eq!(
+            state.org_tag_suggestions("#"),
+            vec!["a1", "a2", "a3", "a4", "a5"]
+        );
+        // A prefix that neither a whole tag nor a last segment starts with suggests
+        // nothing — including the leaf of a path the user has not written before.
+        assert!(state.org_tag_suggestions("#z").is_empty());
     }
 
     /// 筛选后的新行 (SPEC §四十一): a task made **under** a tag filter is born

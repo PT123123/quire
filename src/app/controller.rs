@@ -4543,7 +4543,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         ui.global::<UIState>().on_org_capture_opened(move || {
             let g = gw.upgrade().unwrap();
             org_commit_field(&g, &s);
-            org_capture_open(&g);
+            org_capture_open(&g, &s);
         });
     }
     {
@@ -4562,19 +4562,69 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
             g.set_org_capture_draft("".into());
             g.set_org_capture_caret(0);
             g.set_org_capture_open(false);
+            // the draft and its tray are one thing: an empty draft has no token
+            org_tag_suggest(&g, &s);
             org_refresh(&g, &s);
             org_load_drafts(&g, &s);
         });
     }
     {
         let gw = gw.clone();
+        let s = state.clone();
         // ✕, the scrim and Escape: nothing was written, so there is nothing to undo
-        // and nothing to say about it. The draft goes with the layer.
+        // and nothing to say about it. The draft — and the 标签建议 tray that
+        // followed it — goes with the layer.
         ui.global::<UIState>().on_org_capture_closed(move || {
             let g = gw.upgrade().unwrap();
             g.set_org_capture_draft("".into());
             g.set_org_capture_caret(0);
             g.set_org_capture_open(false);
+            org_tag_suggest(&g, &s);
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        // 标签建议 (ADR-0118): the field reports every edit, and the tray is
+        // recomputed from the draft rather than filtered here — the pool is the
+        // catalog's, and only Rust holds it.
+        ui.global::<UIState>().on_org_capture_draft_changed(move || {
+            let g = gw.upgrade().unwrap();
+            org_tag_suggest(&g, &s);
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        // A tap on a 标签建议 chip: the `#token` under the caret becomes the whole
+        // tag. The caret's new byte offset travels with the text, the way the
+        // open-seed's does, so the next keystroke lands *after* the tag.
+        ui.global::<UIState>().on_org_tag_suggest_picked(move |tag| {
+            let g = gw.upgrade().unwrap();
+            let draft = g.get_org_capture_draft().to_string();
+            if let Some(hash) = draft.rfind('#') {
+                let mut next = draft[..hash].to_string();
+                next.push('#');
+                next.push_str(&tag);
+                next.push(' ');
+                g.set_org_capture_caret(next.len() as i32);
+                g.set_org_capture_draft(next.into());
+                org_tag_suggest(&g, &s);
+            }
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        // ✕ and Escape on the note 浮层 (ADR-0118). Nothing was written that the
+        // panel was making, so putting it down is only the selection going: the
+        // list is left exactly as the user found it.
+        ui.global::<UIState>().on_org_note_closed(move || {
+            let g = gw.upgrade().unwrap();
+            org_commit_field(&g, &s);
+            g.set_org_selected_note(-1);
+            org_refresh(&g, &s);
+            org_load_drafts(&g, &s);
         });
     }
     {
@@ -5236,7 +5286,7 @@ fn org_land(g: &UIState<'_>, state: &Rc<AppState>, tab: i32) {
     let arriving = g.get_org_tab() != tab || g.get_active_area() != "organizer";
     org_show(g, state, tab);
     if tab == 0 && arriving && state.setting_flag_or("notes.auto_input", true) {
-        org_capture_open(g);
+        org_capture_open(g, state);
     }
 }
 
@@ -5248,7 +5298,7 @@ fn org_land(g: &UIState<'_>, state: &Rc<AppState>, tab: i32) {
 /// byte offset travels with the text (`org-capture-caret`): a caret left at 0
 /// would put the next keystroke *in front of* the preset and file the note under
 /// a token that never started with `#`.
-fn org_capture_open(g: &UIState<'_>) {
+fn org_capture_open(g: &UIState<'_>, state: &Rc<AppState>) {
     let tag = g.get_org_tag().to_string();
     let preset = if tag.is_empty() {
         String::new()
@@ -5258,6 +5308,22 @@ fn org_capture_open(g: &UIState<'_>) {
     g.set_org_capture_caret(preset.len() as i32);
     g.set_org_capture_draft(preset.into());
     g.set_org_capture_open(true);
+    // The pre-filled `#token` is a token like any other, so the 标签建议 tray is
+    // asked for on the frame the layer appears and not only on the next keystroke.
+    org_tag_suggest(g, state);
+}
+
+/// Push the capture layer's 标签建议 tray (ADR-0118) for whatever `#token` the
+/// draft is on. `AppState::org_tag_suggestions` owns the rule; this only carries
+/// its answer across the boundary.
+fn org_tag_suggest(g: &UIState<'_>, state: &Rc<AppState>) {
+    let draft = g.get_org_capture_draft().to_string();
+    let rows: Vec<slint::SharedString> = state
+        .org_tag_suggestions(&draft)
+        .into_iter()
+        .map(|tag| tag.into())
+        .collect();
+    g.set_org_tag_suggestions(slint::ModelRc::new(slint::VecModel::from(rows)));
 }
 
 /// The tag filter as the tags a **new** row made under it should carry: at most
@@ -7652,18 +7718,28 @@ fn apply_scene_body(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             org_refresh(&g, state);
             org_load_drafts(&g, state);
         }
-        "notes-capture" | "notes-capture-empty" => {
+        "notes-capture" | "notes-capture-empty" | "notes-capture-suggest" => {
             // The 悬浮 ＋ and the layer it opens. Two scenes rather than one because
             // the layer's two states are the two states of its ➤: with a draft the
             // send is lit at full strength, and empty it is dimmed *and* the field's
             // placeholder is the only thing the user has to read — a line no other
-            // scene draws.
+            // scene draws. The third is ADR-0118's 标签建议 tray, which is a shape
+            // this layer did not have before and therefore a shape to measure.
             org_scene_seed(state);
             org_scene_open(&g, state, 0);
             if scene == "notes-capture" {
                 g.set_org_capture_draft("周三前把 §四十一 的卡片过一遍 #项目/quire".into());
             }
+            if scene == "notes-capture-suggest" {
+                // A bare `#` on purpose: an empty prefix is the widest the tray
+                // can be, so the shot is of the *most* chips the card has to hold
+                // — the case that would overflow is the one worth photographing.
+                g.set_org_capture_draft("周三开会，先把讨论点记一下 #".into());
+            }
             g.set_org_capture_open(true);
+            // The tray is computed from the draft, so the scene asks for it the
+            // way a keystroke does.
+            org_tag_suggest(&g, state);
         }
         "notes-select" | "tasks-select" => {
             // ADR-0111: 多选 on each half of the area. The scene calls the header
@@ -7761,6 +7837,9 @@ fn apply_scene_body(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
         }
         "dark-notes-capture-empty" => {
             apply_scene_body(ui, state, "notes-capture-empty");
+        }
+        "dark-notes-capture-suggest" => {
+            apply_scene_body(ui, state, "notes-capture-suggest");
         }
         "dark-tasks-list-menu" => {
             apply_scene_body(ui, state, "tasks-list-menu");
