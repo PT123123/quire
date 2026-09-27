@@ -474,6 +474,11 @@ pub fn bind(ui: &AppWindow, state: &Rc<AppState>) {
     g.set_theme(state.theme_setting().into());
     g.set_lan_sharing(state.setting_flag("lan.share"));
     g.set_sidebar_open(!state.setting_flag("sidebar.closed"));
+    // 笔记's 启动时自动弹出输入框: absent (a library that never touched the row) is
+    // on, which is the reference app's own default read the other way round — its
+    // `auto_input_on_start` must be *written* to fire. The Android shell reads the
+    // same `notes.auto_input` row out of the same database.
+    g.set_org_auto_input(state.setting_flag_or("notes.auto_input", true));
     // settings storage row (M8): the database folder, hidden for a
     // memory-only session
     g.set_data_dir(state.data_dir().unwrap_or_default().into());
@@ -4215,6 +4220,14 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         });
     }
 
+    {
+        let s = state.clone();
+        // The Settings row behind `org_land`'s auto-open.
+        ui.global::<UIState>().on_org_auto_input_toggled(move |on| {
+            s.record_setting("notes.auto_input", if on { "1" } else { "0" });
+        });
+    }
+
     // ---- page title in-place editing ----
     {
         let gw = gw.clone();
@@ -4522,15 +4535,15 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
     {
         let gw = gw.clone();
         let s = state.clone();
-        // The ＋ at the list's bottom-right. The layer opens **empty** every time —
+        // The ＋ at the list's bottom-right. The layer opens with the tag filter
+        // pre-filled when there is one (`org_capture_open`), and otherwise empty —
         // a draft left over from a dismissal would be a note nobody asked to
         // finish — and its field is focused on the frame it appears (the layer's
         // own `init`), so the caret is where the typing goes.
         ui.global::<UIState>().on_org_capture_opened(move || {
             let g = gw.upgrade().unwrap();
             org_commit_field(&g, &s);
-            g.set_org_capture_draft("".into());
-            g.set_org_capture_open(true);
+            org_capture_open(&g);
         });
     }
     {
@@ -4547,6 +4560,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                 g.set_org_selected_note(id as i32);
             }
             g.set_org_capture_draft("".into());
+            g.set_org_capture_caret(0);
             g.set_org_capture_open(false);
             org_refresh(&g, &s);
             org_load_drafts(&g, &s);
@@ -4559,6 +4573,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         ui.global::<UIState>().on_org_capture_closed(move || {
             let g = gw.upgrade().unwrap();
             g.set_org_capture_draft("".into());
+            g.set_org_capture_caret(0);
             g.set_org_capture_open(false);
         });
     }
@@ -4570,9 +4585,11 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
             org_commit_field(&g, &s);
             // The new task lands in whichever chip is showing, which is the only
             // honest answer to "where does this go": a smart view is a *question*
-            // ("today", "unfinished"), not a list, so it means the inbox.
+            // ("today", "unfinished"), not a list, so it means the inbox. It also
+            // keeps the tag filter it was made under, which the Android shell's
+            // ➤ pre-fills into the field for the same reason.
             let list = g.get_org_list();
-            if let Some(id) = s.org_create_task(list as i64) {
+            if let Some(id) = s.org_create_task_tagged(list as i64, org_filter_tags(&g)) {
                 g.set_org_selected_task(id as i32);
             }
             org_refresh(&g, &s);
@@ -5032,7 +5049,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
             let view = g.get_org_view();
             let list = g.get_org_list() as i64;
             let today = g.get_org_today().to_string();
-            if let Some(id) = s.org_quick_add(view, list, title, &today) {
+            if let Some(id) = s.org_quick_add(view, list, title, &today, org_filter_tags(&g)) {
                 g.set_org_quick_add("".into());
                 g.set_org_selected_task(id as i32);
             }
@@ -5048,7 +5065,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         // ambiguous "where does this go" on a board.
         ui.global::<UIState>().on_org_task_add_to(move |list, title| {
             let g = gw.upgrade().unwrap();
-            if let Some(id) = s.org_quick_add(-1, list as i64, title.to_string(), "") {
+            if let Some(id) = s.org_quick_add(-1, list as i64, title.to_string(), "", org_filter_tags(&g)) {
                 g.set_org_selected_task(id as i32);
             }
             org_refresh(&g, &s);
@@ -5178,9 +5195,10 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
 
     // …and if this session *starts* in the area (ADR-0110: a library last read
     // in 收件箱 opens there), this is the one moment the landing can be applied
-    // — after the projection that fills the rows, before the first frame.
+    // — after the projection that fills the rows, before the first frame. It is
+    // an arrival like any other, so 自动弹出输入框 applies here too.
     if let NavStop::Org(tab) = state.nav_start() {
-        org_show(&ui.global::<UIState>(), state, tab);
+        org_land(&ui.global::<UIState>(), state, tab);
     }
 }
 
@@ -5204,7 +5222,54 @@ const ORG_FIELD_TASK_DUE: i32 = 8;
 /// it goes on the history like any other (ADR-0110).
 fn org_open(g: &UIState<'_>, state: &Rc<AppState>, tab: i32) {
     state.nav_record(NavStop::Org(tab));
+    org_land(g, state, tab);
+}
+
+/// `org_show` for an **arrival** — the sidebar, the palette, the startup landing —
+/// rather than a step through history.
+///
+/// Arriving at 笔记 is the one moment the reference app opens its input box by
+/// itself (`auto_input_on_start`), so that happens here and not inside `org_show`:
+/// a back/forward step must not pop a composer nobody asked for, and it is the
+/// same `org_capture_open` the ＋ uses, so the left-over filter pre-fill applies.
+fn org_land(g: &UIState<'_>, state: &Rc<AppState>, tab: i32) {
+    let arriving = g.get_org_tab() != tab || g.get_active_area() != "organizer";
     org_show(g, state, tab);
+    if tab == 0 && arriving && state.setting_flag_or("notes.auto_input", true) {
+        org_capture_open(g);
+    }
+}
+
+/// Open the capture layer, seeded with the tag filter when there is one.
+///
+/// The preset is written as a `#token` rather than stapled onto the row, so ➤
+/// reads it back through the same `note_tag_tokens` rule the user's own typing
+/// goes through — the reference shell's `input.setText("#$tag ")`. The caret's
+/// byte offset travels with the text (`org-capture-caret`): a caret left at 0
+/// would put the next keystroke *in front of* the preset and file the note under
+/// a token that never started with `#`.
+fn org_capture_open(g: &UIState<'_>) {
+    let tag = g.get_org_tag().to_string();
+    let preset = if tag.is_empty() {
+        String::new()
+    } else {
+        format!("#{tag} ")
+    };
+    g.set_org_capture_caret(preset.len() as i32);
+    g.set_org_capture_draft(preset.into());
+    g.set_org_capture_open(true);
+}
+
+/// The tag filter as the tags a **new** row made under it should carry: at most
+/// one path, or none. The reference app's rule for a task — the filter is where
+/// the row was made, so it stays in it.
+fn org_filter_tags(g: &UIState<'_>) -> Vec<String> {
+    let tag = g.get_org_tag();
+    if tag.is_empty() {
+        Vec::new()
+    } else {
+        vec![tag.to_string()]
+    }
 }
 
 /// Paint the area on `tab`, writing no history. `org_open` is a move to here;
@@ -7429,6 +7494,20 @@ pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
         .set_theme(if scene.starts_with("dark") { "midnight".into() } else { "light".into() });
     apply_scene_body(ui, state, scene);
 }
+
+/// Paint the area on `tab` for a photograph.
+///
+/// `org_show` and not `org_open`, because a scene is a *state* rather than a step:
+/// the sweep photographs what a screen looks like, and a screenshot has no history
+/// to put a move on. It is also the one difference that matters here — an
+/// *arrival* through `org_open` carries ADR-0117's 自动弹出输入框, and a scene that
+/// names the list must not be photographed behind the composer an arrival would
+/// open. `notes-capture-empty` is that arrival's picture, and it opens the layer
+/// by hand.
+fn org_scene_open(g: &UIState<'_>, state: &Rc<AppState>, tab: i32) {
+    org_show(g, state, tab);
+}
+
 fn apply_scene_body(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
     let g = ui.global::<UIState>();
     match scene {
@@ -7441,7 +7520,7 @@ fn apply_scene_body(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
         // the commands could not produce.
         "notes" | "notes-detail" | "notes-search" | "notes-info" | "notes-reply" => {
             let ids = org_scene_seed(state);
-            org_open(&g, state, 0);
+            org_scene_open(&g, state, 0);
             if scene == "notes-reply" {
                 // 引用: one reply *written* through the real path
                 // (`org_create_reply`) and a second one drafted in the field, so the
@@ -7475,7 +7554,7 @@ fn apply_scene_body(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
         }
         "tasks" | "tasks-detail" | "tasks-list" | "tasks-overdue" | "tasks-board" => {
             let ids = org_scene_seed(state);
-            org_open(&g, state, 1);
+            org_scene_open(&g, state, 1);
             if scene == "tasks-list" {
                 // the second stored list, which is what the nav column looks
                 // like with one of *its* lists picked rather than a smart view
@@ -7509,7 +7588,7 @@ fn apply_scene_body(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             // `apply_scene_overlay`, so its own `is-open` mirror sees the false -> true
             // transition the `menu` scene relies on.
             let ids = org_scene_seed(state);
-            org_open(&g, state, 1);
+            org_scene_open(&g, state, 1);
             let list = ids.lists[1];
             g.set_org_list(list);
             g.set_menu_node_id(list);
@@ -7520,7 +7599,7 @@ fn apply_scene_body(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             // sidebar's `rename` scene is the page-tree half of the same shape; this
             // is the 32 px nav row's copy of it.
             let ids = org_scene_seed(state);
-            org_open(&g, state, 1);
+            org_scene_open(&g, state, 1);
             g.set_org_list(ids.lists[1]);
             g.set_org_list_renaming(ids.lists[1]);
             org_refresh(&g, state);
@@ -7536,7 +7615,7 @@ fn apply_scene_body(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             // waited past the expiry would show the note deleted rather than
             // pending, which is a different scene and the wrong one to check.
             let ids = org_scene_seed(state);
-            org_open(&g, state, 0);
+            org_scene_open(&g, state, 0);
             let note = ids.notes[1] as i64;
             let line = format!("已移入回收站：笔记「{}」", state.org_row_label(note, false));
             state.org_defer_delete(vec![note], false, line.clone());
@@ -7552,7 +7631,7 @@ fn apply_scene_body(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             // bin exists for.
             let is_task = scene == "tasks-bin";
             let ids = org_scene_seed(state);
-            org_open(&g, state, if is_task { 1 } else { 0 });
+            org_scene_open(&g, state, if is_task { 1 } else { 0 });
             let id = if is_task { ids.tasks[1] as i64 } else { ids.notes[1] as i64 };
             state.org_defer_delete(vec![id], is_task, "已移入回收站".into());
             if let Some(pending) = state.org_pending() {
@@ -7567,7 +7646,7 @@ fn apply_scene_body(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             // `apply_scene_overlay`, so its own `is-open` mirror sees the false ->
             // true transition the `menu` scene relies on.
             let ids = org_scene_seed(state);
-            org_open(&g, state, 0);
+            org_scene_open(&g, state, 0);
             g.set_org_selected_note(ids.notes[0]);
             g.set_menu_node_id(ids.notes[0]);
             org_refresh(&g, state);
@@ -7580,7 +7659,7 @@ fn apply_scene_body(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             // placeholder is the only thing the user has to read — a line no other
             // scene draws.
             org_scene_seed(state);
-            org_open(&g, state, 0);
+            org_scene_open(&g, state, 0);
             if scene == "notes-capture" {
                 g.set_org_capture_draft("周三前把 §四十一 的卡片过一遍 #项目/quire".into());
             }
@@ -7593,7 +7672,7 @@ fn apply_scene_body(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             // rows the page is *showing*, which is what 已选 2 项 has to agree with.
             let is_task = scene == "tasks-select";
             org_scene_seed(state);
-            org_open(&g, state, if is_task { 1 } else { 0 });
+            org_scene_open(&g, state, if is_task { 1 } else { 0 });
             org_start_selecting(&g, state, is_task);
             let picked: Vec<i64> = state.org_shown_ids(is_task).into_iter().take(2).collect();
             for id in &picked {
@@ -7626,7 +7705,7 @@ fn apply_scene_body(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             // path are gone, the column paints it marked, the header's count agrees
             // with the list, and 清除筛选 is offered.
             org_scene_seed(state);
-            org_open(&g, state, 0);
+            org_scene_open(&g, state, 0);
             // The first tag the seed actually carries, rather than a hard-coded
             // path: the scene has to hide *something* to be a photograph of 反向筛选.
             let first = state
@@ -7647,7 +7726,7 @@ fn apply_scene_body(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             // scene exists to photograph its geometry — the card's bounds against a
             // short window, the monospace wrap, and the three buttons under it.
             org_scene_seed(state);
-            org_open(&g, state, 0);
+            org_scene_open(&g, state, 0);
             g.set_org_cmd_tab(0);
             g.set_org_cmd_text(
                 "{\n  \"operations\": [\n    {\"action\": \"add_tags\", \"uuid\": \"在此填笔记ID\", \"tags\": [\"重要\", \"待办\"]},\n    {\"action\": \"comment\", \"uuid\": \"在此填笔记ID\", \"content\": \"给这条笔记加一条评论\"}\n  ]\n}"

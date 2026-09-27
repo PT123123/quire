@@ -97,6 +97,11 @@ $all = @(
     # area's tallest popup — so both are scenes, with the dark twins the rest carry.
     # The layer is swept twice because its two draft states are its ➤'s two states,
     # and the empty one is where the field's placeholder is the only readable line.
+    # ADR-0117: that empty one is now *two* states in one picture — the ＋ with
+    # nothing typed, and arriving at 笔记 with 自动弹出输入框 on — which is why no
+    # third scene was added for the arrival. The organizer's other scenes paint
+    # through `org_show` rather than the arrival (`org_scene_open`), so the list,
+    # the filter and the detail panes are photographed as themselves.
     "notes-capture", "notes-capture-empty", "notes-menu",
     "dark-notes-capture", "dark-notes-capture-empty", "dark-notes-menu"
 )

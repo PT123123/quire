@@ -573,6 +573,31 @@ First functional release: a local, single-file-database notes workspace.
   writing body + tags, the token rule's three refusals, and an empty draft writing
   nothing
 
+### Notes & tasks — 筛选预填、打开笔记页自动弹出输入框 (ADR-0117)
+- **A new row keeps the tag filter it was made under.** 笔记's 悬浮 ＋ opens the
+  capture layer with `#筛选标签 ` already in the field, and 任务's ＋ plus both
+  quick-add lines (the list column's and a board column's) attach the path to the
+  row they create — on the create itself, so keeping it costs no second Ctrl+Z. The
+  pre-filled `#token` is read back by ➤ through the same `note_tag_tokens` rule the
+  user's own typing goes through, and the caret is placed *after* it
+  (`org-capture-caret`): a caret at 0 would put the next keystroke in front of the
+  tag and file the note under a token that never started with `#`
+- **打开笔记页时自动弹出输入框**, a new Settings row under 笔记 and on by default:
+  *arriving* at 笔记 — the sidebar row, a palette command, a cold start that lands
+  there — opens the capture layer with the caret in it, the way the reference app's
+  inbox does. A back/forward step does not: `org_show` is the paint history also
+  lands on, `org_land` is the arrival, and only the second pops the layer
+- The flag is the shared `notes.auto_input` row, **absent meaning on** — the first
+  settings row in this shell whose default is not "off", which is what
+  `setting_flag_or` exists for. The Android shell reads the same row, so the choice
+  travels with the library rather than with the machine
+- Not in this slice: 反向筛选 paths are *hidden*, not inherited, so neither the
+  pre-fill nor the task merge ever carries one; and the layer still opens empty when
+  nothing is filtered, because a draft left behind by a dismissal is a note nobody
+  asked to finish (ADR-0115)
+- Two new tests: a task created under a filter carries it, and an absent flag whose
+  default is on does not read as off
+
 ### Theme (ADR-0116)
 - The palette is now **ActivityWatch's twelve themes**, ported field for field from
   `aw-qtui/src/theme.h`'s `kThemes[]` and chosen by name in Settings:

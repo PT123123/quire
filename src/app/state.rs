@@ -1872,6 +1872,14 @@ impl AppState {
         self.settings.borrow().get(key).map(|v| v == "1").unwrap_or(false)
     }
 
+    /// A persisted settings flag whose **absence means on**: a row nobody has
+    /// written reads as `default`, and only an explicit "1"/"0" decides it. A row
+    /// that defaults to on cannot be stored as its own absence, which is why the
+    /// default is a parameter here rather than a second spelling of the same key.
+    pub fn setting_flag_or(&self, key: &str, default: bool) -> bool {
+        self.settings.borrow().get(key).map(|v| v == "1").unwrap_or(default)
+    }
+
     /// Persist a settings flag (one batch, flushed with the session).
     pub fn record_setting(&self, key: &str, value: &str) {
         self.settings
@@ -8133,6 +8141,15 @@ impl AppState {
     }
 
     pub fn org_create_task(&self, list: i64) -> Option<i64> {
+        self.org_create_task_tagged(list, Vec::new())
+    }
+
+    /// `org_create_task` with the row's tags decided up front, so a task made
+    /// *under* a tag filter is born carrying it in one undo step rather than two
+    /// (SPEC §四十一's 筛选, and the reference app's own rule for a new row: the
+    /// filter is where it was made, so it stays in it even if the pre-filled text
+    /// is edited away).
+    pub fn org_create_task_tagged(&self, list: i64, tags: Vec<String>) -> Option<i64> {
         let id = self.next_task_id.get();
         let now = now_secs();
         // Append to its list: the order key after the last task already there,
@@ -8156,7 +8173,7 @@ impl AppState {
                 repeat: Repeat::None,
                 done: false,
                 completed_at: None,
-                tags: Vec::new(),
+                tags,
                 subtasks: Vec::new(),
                 created: now,
                 edited: now,
@@ -8391,12 +8408,22 @@ impl AppState {
     /// The list column's quick-add line, and a board column's ＋ line: one write,
     /// and the row it makes is already titled — a blank row nobody asked for is
     /// not a step the undo stack should hold.
-    pub fn org_quick_add(&self, view: i32, list: i64, title: String, today: &str) -> Option<i64> {
+    ///
+    /// `tags` is the tag filter the line was typed under, which the new row keeps
+    /// (see `org_create_task_tagged`).
+    pub fn org_quick_add(
+        &self,
+        view: i32,
+        list: i64,
+        title: String,
+        today: &str,
+        tags: Vec<String>,
+    ) -> Option<i64> {
         let title = title.trim();
         if title.is_empty() {
             return None;
         }
-        let id = self.org_create_task(list)?;
+        let id = self.org_create_task_tagged(list, tags)?;
         self.org_task_title(id, title.to_string());
         // 今天 is a *date* view: a task typed into it is due today, which is the
         // only reading of "today" that survives the next rebuild.
@@ -23204,5 +23231,51 @@ mod tests {
         assert!(super::note_tag_tokens("# #3 issue#4").is_empty());
         // First-seen order, and a repeat is one tag.
         assert_eq!(super::note_tag_tokens("#b #a #b"), vec!["b", "a"]);
+    }
+
+    /// 筛选后的新行 (SPEC §四十一): a task made **under** a tag filter is born
+    /// carrying that path, because the filter is where it was made — the reference
+    /// app's own rule for a task added while looking at `#工作`. The ＋ and both
+    /// quick-add lines go through the same list, and the tag rides on the *create*,
+    /// so keeping it costs no second undo step.
+    #[test]
+    fn a_new_task_keeps_the_tag_filter_it_was_made_under() {
+        use crate::core::organizer::TaskId;
+
+        let (state, _repo) = org_session();
+        let filter = || vec!["项目/工作".to_string()];
+
+        let plus = state.org_create_task_tagged(-1, filter()).unwrap();
+        let row = state.organizer().task(TaskId(plus as u64)).unwrap().clone();
+        assert!(row.title.is_empty(), "the ＋ makes a row with no title yet");
+        assert_eq!(row.tags, vec!["项目/工作".to_string()]);
+
+        let quick = state
+            .org_quick_add(super::SMART_INBOX, -1, "买牛奶".into(), "2026-09-27", filter())
+            .unwrap();
+        let row = state.organizer().task(TaskId(quick as u64)).unwrap().clone();
+        assert_eq!(row.title, "买牛奶");
+        assert_eq!(row.tags, vec!["项目/工作".to_string()]);
+
+        // No filter, no tag: the wrapper the rest of the suite uses is the same call.
+        let plain = state.org_create_task(-1).unwrap();
+        assert!(state.organizer().task(TaskId(plain as u64)).unwrap().tags.is_empty());
+    }
+
+    /// A Settings row whose default is **on**: absent reads as the default, and only
+    /// an explicit "0" turns it off. That is what lets `notes.auto_input` be on out
+    /// of the box in a library that has never opened Settings, while the other rows
+    /// keep the opposite reading they have always had.
+    #[test]
+    fn a_flag_whose_absence_means_on_reads_its_default_not_false() {
+        let (state, _repo) = org_session();
+        assert!(state.setting_flag_or("notes.auto_input", true));
+        state.record_setting("notes.auto_input", "0");
+        assert!(!state.setting_flag_or("notes.auto_input", true));
+        state.record_setting("notes.auto_input", "1");
+        assert!(state.setting_flag_or("notes.auto_input", true));
+        // An absent key is still off for a row whose default is off.
+        assert!(!state.setting_flag_or("notes.something_else", false));
+        assert!(!state.setting_flag("notes.something_else"));
     }
 }

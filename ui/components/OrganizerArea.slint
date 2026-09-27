@@ -2387,8 +2387,16 @@ export component OrganizerArea inherits Rectangle {
                             }
                         }
                         // The caret is asked for on the frame the field exists, so
-                        // the layer is ready to be typed into the moment it appears.
-                        init => { capture-input.focus(); }
+                        // the layer is ready to be typed into the moment it appears
+                        // — and it goes *after* whatever `org-capture-open` seeded
+                        // (the tag filter's `#token`), not in front of it.
+                        init => {
+                            capture-input.focus();
+                            capture-input.set-selection-offsets(
+                                UIState.org-capture-caret,
+                                UIState.org-capture-caret,
+                            );
+                        }
                     }
                 }
 

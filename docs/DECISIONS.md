@@ -2,6 +2,76 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0117 · A new row inherits the tag filter, and 笔记 can open its input on arrival
+
+Decision: two gaps against the reference app's inbox, closed in one pass, both of
+them about the tag filter.
+
+**A row made under a filter is born carrying it.** 笔记's 悬浮 ＋ opens the capture
+layer with `#<org-tag> ` already in the field — written as a `#token`, never as a
+tag stapled onto the row, so ➤ reads it back through `note_tag_tokens`, the same
+rule the user's own typing goes through. 任务's ＋ and both quick-add lines (the
+list column's and a board column's) take the filter as the tag *of the create*:
+`org_create_task_tagged` and `org_quick_add` receive a `Vec<String>` and the row
+lands with it in one write, so keeping the tag costs no second Ctrl+Z.
+
+Because the preset is text rather than a caret-agnostic label, the layer needs to
+know where the caret goes: `org-capture-caret` carries the byte offset Rust wrote,
+and the field's `init` hands it to `set-selection-offsets` after focusing. A caret
+left at 0 would put the next keystroke *in front of* the preset and file the note
+under a token that never started with `#` — the failure this property exists to
+prevent, and the reason it is a property rather than an expression on
+`org-capture-draft` (the two shells disagree about what `string.length` counts).
+
+**打开笔记页时自动弹出输入框** is a new row in Settings (under 笔记, on by
+default): with it on, *arriving* at 笔记 — the sidebar row, a palette command, a
+cold start that lands there — opens the capture layer with the caret in it, the
+way the reference's inbox does. The arrival is `org_land`; `org_show` stays the
+paint that back/forward also lands on, so walking history never pops a composer
+nobody asked for. The flag is stored as the shared `notes.auto_input` row and read
+through a new `setting_flag_or(key, default)` — absent means **on**, the first row
+in this shell whose default is not simply "off".
+
+Context: the user compared the two shells against `aw-android-native`'s inbox and
+named exactly these two: "在筛选了标签以后，打开输入框，发现里面没有预填筛选的标签"
+and "当打开这个笔记页面的时候，它默认会弹出输入框准备好输入，而且这个可以在设置中
+关掉". The reference implements both — `showQuickNoteDialog`'s
+`val preset = currentTag?.let { "#$it " } ?: ""` (with an in-progress draft taking
+priority over the preset) and `InboxPrefs.autoInputOnStart` + the
+`view.post { showQuickNoteDialog() }` in `InboxFragment.onViewCreated` — and the
+desktop had neither: the capture layer opened empty every time, and `org_create_task`
+hardcoded `tags: Vec::new()`.
+
+Consequences:
+
+- **The tag rides the create, not a follow-up edit.** `org_create_task_tagged` is
+  the body and `org_create_task(list)` is now a one-line wrapper, so every existing
+  caller and test keeps its signature while the two "made under a filter" paths get
+  the tag in the same command the row is created by.
+- **Only the *include* path is inherited.** `org_excluded` (反向筛选) is a set of
+  *hidden* paths; a new row is not "under" any of them, so none of them is
+  pre-filled or attached.
+- **A back step does not auto-open.** The gate is `tab == 0 && arriving`, where
+  arriving means the tab changed or the area was not the organizer. Landing on 笔记
+  from the document area also counts, which is what makes a cold start on 笔记 open
+  the layer.
+- **The pre-fill cannot reach the start-up landing with a stale filter.** `org_show`
+  clears the include path on a real tab change, and the auto-open runs after it, so
+  arriving at 笔记 from 任务 opens an empty field rather than one pre-filled with a
+  path whose chips are no longer on screen.
+- **The setting lives in Settings, not on the page.** A behaviour switch is a
+  preference, and the notes list is where its effect shows — the same rule the
+  mobile shells keep for light/dark.
+- **The desktop does not keep a dismissed draft, and the Android shell does.**
+  `org-capture-closed` still drops the draft on purpose (ADR-0115), so there is no
+  "draft beats preset" branch here; the Compose shell's `composerSeed` has one,
+  because `orgCloseComposer` there keeps the draft by design. The divergence is
+  pre-existing and is not what this ADR changes.
+- **`notes.auto_input` is read by both shells.** The Compose shell reads the same
+  row and offers the same switch (its ADR-0022), so the choice travels with the
+  library rather than with the machine — which is the only reason it is a settings
+  key at all instead of a flat in this shell.
+
 ## ADR-0116 · The palette is ActivityWatch's twelve, chosen by name; the light/dark boolean becomes an id
 
 Decision: `ui/Colors.slint` stops being a two-column table and becomes a catalog.

@@ -1428,9 +1428,20 @@ export global UIState {
     // no undo step (the Android copy's rule, and why this is a draft at all).
     in-out property <bool> org-capture-open: false;
     in-out property <string> org-capture-draft: "";
+    // Where the caret goes on the frame the layer appears. The tag filter is
+    // pre-filled into `org-capture-draft` as a `#token`, and a caret at 0 would
+    // put the next keystroke in front of it — so Rust hands over the byte offset
+    // it wrote, the same shape the find flow's `pending-sel-*` pair has.
+    in-out property <int> org-capture-caret: 0;
     callback org-capture-opened();
     callback org-capture-sent();
     callback org-capture-closed();
+    // 启动时自动弹出输入框 (the Settings row): whether *arriving* at 笔记 opens the
+    // capture layer with the caret in it. Persisted as the shared
+    // `notes.auto_input` row — the Android shell reads the same one out of the
+    // same database — and absent means on.
+    in-out property <bool> org-auto-input: true;
+    callback org-auto-input-toggled(bool);
     // tasks: the row's own switches are immediate, the text fields commit on blur
     callback org-task-create();
     callback org-task-selected(int);

@@ -183,6 +183,50 @@ export component SettingsDialog inherits PopupWindow {
             Rectangle { height: 1px; background: Colors.border; }
 
             Text {
+                text: "笔记";
+                font-size: Typography.size-caption;
+                font-weight: Typography.weight-semibold;
+                color: Colors.text-muted;
+            }
+            HorizontalLayout {
+                spacing: Theme.spacing-sm;
+                Text {
+                    text: "打开笔记页时自动弹出输入框";
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-ui;
+                    color: Colors.text-secondary;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    wrap: word-wrap;
+                }
+                Rectangle {
+                    width: 40px;
+                    height: 22px;
+                    border-radius: 11px;
+                    background: UIState.org-auto-input ? Colors.accent : Colors.border-strong;
+                    animate background { duration: Theme.duration-fast; }
+                    TouchArea {
+                        mouse-cursor: MouseCursor.pointer;
+                        clicked => {
+                            UIState.org-auto-input = !UIState.org-auto-input;
+                            UIState.org-auto-input-toggled(UIState.org-auto-input);
+                        }
+                    }
+                    Rectangle {
+                        x: UIState.org-auto-input ? parent.width - self.width - 2px : 2px;
+                        y: 2px;
+                        width: 18px;
+                        height: 18px;
+                        border-radius: 9px;
+                        background: Colors.surface-overlay;
+                        animate x { duration: Theme.duration-fast; }
+                    }
+                }
+            }
+
+            Rectangle { height: 1px; background: Colors.border; }
+
+            Text {
                 text: "共享";
                 font-size: Typography.size-caption;
                 font-weight: Typography.weight-semibold;
