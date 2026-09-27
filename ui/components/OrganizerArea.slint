@@ -1058,7 +1058,10 @@ export component OrganizerArea inherits Rectangle {
                             // written to in bulk — one by hand, one by pasting what
                             // 复制 sent out. Both tabs have it: the batches differ but
                             // the door does not.
-                            if UIState.org-tab == 0 || UIState.org-mode == 0 : OrgButton {
+                            // Neither is offered while the bin is open: 指令 edits
+                            // rows on a list and 多选 picks a set of them, and a bin
+                            // is neither. 清空回收站 above is the bin's own bulk verb.
+                            if (UIState.org-tab == 0 || UIState.org-mode == 0) && !UIState.org-bin-open : OrgButton {
                                 label: "指令…";
                                 font-size: Typography.size-caption;
                                 clicked => { UIState.org-command-opened(UIState.org-tab); }
@@ -1067,12 +1070,14 @@ export component OrganizerArea inherits Rectangle {
                             // press, which this window has no gesture for; a
                             // button is the desktop's answer, and it is also the
                             // only door the 笔记 tab has — a note row has no ⋯.
-                            if UIState.org-tab == 0 || UIState.org-mode == 0 : OrgButton {
+                            if (UIState.org-tab == 0 || UIState.org-mode == 0) && !UIState.org-bin-open : OrgButton {
                                 label: "多选";
                                 font-size: Typography.size-caption;
                                 clicked => { UIState.org-select-entered(UIState.org-tab); }
                             }
-                            if UIState.org-tab == 1 : OrgSeg {
+                            // 列表/平铺 says nothing about a bin, so the segmented
+                            // control goes with it.
+                            if UIState.org-tab == 1 && !UIState.org-bin-open : OrgSeg {
                                 selected: UIState.org-mode;
                                 picked(m) => { UIState.org-mode-picked(m); }
                             }
@@ -1131,17 +1136,24 @@ export component OrganizerArea inherits Rectangle {
                             }
                         }
 
-                        if UIState.org-tab == 1 && UIState.org-mode == 0 : VerticalLayout {
+                        // 回收站 is a mode *over* the list, so it takes the list's
+                        // branch whatever 列表/平铺 says: a bin is not a kanban, and
+                        // the board draws no binned cards anyway (`org_board_rows`
+                        // reads the live half).
+                        if UIState.org-tab == 1 && (UIState.org-mode == 0 || UIState.org-bin-open) : VerticalLayout {
                             spacing: 8px;
                             vertical-stretch: 1;
 
-                            OrgQuickAdd {
+                            // Adding into a bin and sorting one are both questions
+                            // about a *list*, so neither is offered while the bin is
+                            // open — the row is there for the list it belongs to.
+                            if !UIState.org-bin-open : OrgQuickAdd {
                                 placeholder: "添加任务到「" + UIState.org-view-title + "」…";
                                 value <=> UIState.org-quick-add;
                                 submitted => { UIState.org-quick-add-submitted(); }
                             }
 
-                            HorizontalLayout {
+                            if !UIState.org-bin-open : HorizontalLayout {
                                 height: 24px;
                                 spacing: 4px;
                                 OrgField { name: "排序"; width: 28px; }
@@ -1197,7 +1209,7 @@ export component OrganizerArea inherits Rectangle {
                         }
 
                         // ── 平铺: one column per list ──────────────────────
-                        if UIState.org-tab == 1 && UIState.org-mode == 1 : ScrollView {
+                        if UIState.org-tab == 1 && UIState.org-mode == 1 && !UIState.org-bin-open : ScrollView {
                             vertical-stretch: 1;
                             HorizontalLayout {
                                 spacing: 12px;
@@ -1913,7 +1925,11 @@ export component OrganizerArea inherits Rectangle {
                             for name[i] in root.smart-names : OrgNavRow {
                                 label: name;
                                 count: UIState.org-smart-counts[i];
-                                selected: UIState.org-list < 0 && UIState.org-view == i;
+                                // The bin is a place of its own: while it is open no
+                                // view and no list is the one being looked at, and a
+                                // second lit row would say otherwise.
+                                selected: UIState.org-list < 0 && UIState.org-view == i
+                                    && !UIState.org-bin-open;
                                 clicked => { UIState.org-view-picked(i); }
                             }
                             Rectangle { height: 8px; }
@@ -1936,7 +1952,8 @@ export component OrganizerArea inherits Rectangle {
                                 renaming: !entry.smart && UIState.org-list-renaming == entry.id;
                                 selected: entry.smart
                                     ? UIState.org-list < 0 && UIState.org-view == 0
-                                    : UIState.org-list == entry.id;
+                                        && !UIState.org-bin-open
+                                    : UIState.org-list == entry.id && !UIState.org-bin-open;
                                 clicked => { UIState.org-list-picked(entry.id); }
                                 menu-requested(x, y) => {
                                     UIState.org-list-menu-requested(entry.id, x, y);
@@ -1979,7 +1996,8 @@ export component OrganizerArea inherits Rectangle {
                         if UIState.org-tab == 1 : OrgNavRow {
                             label: "已完成";
                             count: UIState.org-smart-counts[4];
-                            selected: UIState.org-list < 0 && UIState.org-view == 4;
+                            selected: UIState.org-list < 0 && UIState.org-view == 4
+                                && !UIState.org-bin-open;
                             clicked => { UIState.org-view-picked(4); }
                         }
                     }
