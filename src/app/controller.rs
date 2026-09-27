@@ -4639,6 +4639,9 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
             // the one selector's two halves: a smart view clears the list
             g.set_org_view(view);
             g.set_org_list(-1);
+            // Picking a view is leaving the bin: 回收站 is a mode *over* the list,
+            // and "today's tasks" is not a question about a bin.
+            g.set_org_bin_open(false);
             org_refresh(&g, &s);
         });
     }
@@ -4648,6 +4651,9 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         ui.global::<UIState>().on_org_list_picked(move |id| {
             let g = gw.upgrade().unwrap();
             org_commit_field(&g, &s);
+            // A list is a place, and the bin is a place: picking one leaves the
+            // other, exactly as picking a smart view does.
+            g.set_org_bin_open(false);
             if id < 0 {
                 // the inbox chip is the *view* half: it is not a stored list
                 g.set_org_list(-1);
@@ -4689,6 +4695,10 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                 s.org_exclude_toggled(&tag);
             }
             g.set_org_tag(tag.into());
+            // The 标签 column is a filter over the *live* list — its counts are the
+            // live rows' — so picking one is leaving the bin, for the same reason
+            // picking a view is.
+            g.set_org_bin_open(false);
             org_refresh(&g, &s);
         });
     }
@@ -4718,6 +4728,73 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
             s.org_filters_clear();
             g.set_org_tag("".into());
             org_refresh(&g, &s);
+        });
+    }
+    // ── 回收站 (SPEC §四十一, core ADR-0003) ──────────────────────────────────
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        // The nav row on both tabs: one flag, and the list beneath it swaps to the
+        // binned half the user is standing on. Nothing is written, and a row that
+        // was selected stays selected — the detail pane is a view of a row, not of
+        // a list.
+        ui.global::<UIState>().on_org_bin_toggled(move || {
+            let g = gw.upgrade().unwrap();
+            org_commit_field(&g, &s);
+            g.set_org_bin_open(!g.get_org_bin_open());
+            org_refresh(&g, &s);
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        // 恢复: the row leaves the bin and lands back where it was. Which *kind* the
+        // id names is the tab's answer, exactly as the row's own verbs already are.
+        ui.global::<UIState>().on_org_bin_restored(move |id| {
+            let g = gw.upgrade().unwrap();
+            if g.get_org_tab() == 1 {
+                s.org_restore_task(id as i64);
+            } else {
+                s.org_restore_note(id as i64);
+            }
+            org_refresh(&g, &s);
+            g.set_db_notice("已恢复到原处 — Ctrl+Z 可撤销。".into());
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        // 彻底删除: the one write in the area that really removes a row, so the
+        // notice says which verb happened — Ctrl+Z still brings it back, but
+        // nothing else will.
+        ui.global::<UIState>().on_org_bin_purged(move |id| {
+            let g = gw.upgrade().unwrap();
+            let label = if g.get_org_tab() == 1 {
+                s.org_delete_task(id as i64)
+            } else {
+                s.org_delete_note(id as i64)
+            };
+            org_refresh(&g, &s);
+            if let Some(label) = label {
+                g.set_db_notice(format!("已彻底删除「{label}」— Ctrl+Z 可撤销。").into());
+            }
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        // 清空回收站: every binned row of the half on screen, one batch, one Ctrl+Z.
+        ui.global::<UIState>().on_org_bin_emptied(move || {
+            let g = gw.upgrade().unwrap();
+            let count = s.org_empty_bin(g.get_org_tab() == 1);
+            org_refresh(&g, &s);
+            match count {
+                Some(0) => g.set_db_notice("回收站已经是空的。".into()),
+                Some(n) => {
+                    g.set_db_notice(format!("已清空回收站，{n} 项 — Ctrl+Z 可撤销。").into())
+                }
+                None => {}
+            }
         });
     }
     // ── 指令 (SPEC §四十一) ───────────────────────────────────────────────────
@@ -5101,7 +5178,8 @@ const NOTE_COMMAND_EXAMPLE: &str = r#"{
     {"action": "remove_tags", "uuid": "在此填笔记ID", "tags": ["待办"]},
     {"action": "set_tags", "uuid": "在此填笔记ID", "tags": ["项目/工作", "重要"]},
     {"action": "comment", "uuid": "在此填笔记ID", "content": "给这条笔记加一条评论"},
-    {"action": "delete", "uuid": "在此填笔记ID"}
+    {"action": "delete", "uuid": "在此填笔记ID"},
+    {"action": "restore", "uuid": "在此填笔记ID"}
   ]
 }"#;
 
@@ -5121,7 +5199,8 @@ const TASK_COMMAND_EXAMPLE: &str = r#"{
     {"action": "set_subtask", "uuid": "在此填任务ID", "subtask_id": 1, "completed": true},
     {"action": "remove_subtask", "uuid": "在此填任务ID", "subtask_id": 1},
     {"action": "comment", "uuid": "在此填任务ID", "content": "追加到任务备注的评论"},
-    {"action": "delete", "uuid": "在此填任务ID"}
+    {"action": "delete", "uuid": "在此填任务ID"},
+    {"action": "restore", "uuid": "在此填任务ID"}
   ]
 }"#;
 
@@ -5290,7 +5369,7 @@ fn org_deferred_delete(
 ) {
     org_commit_field(g, s);
     let message =
-        message.unwrap_or_else(|| format!("已删除{}", s.org_batch_label(&ids, is_task)));
+        message.unwrap_or_else(|| format!("已移入回收站：{}", s.org_batch_label(&ids, is_task)));
     let token = s.org_defer_delete(ids, is_task, message.clone());
     // The row the detail pane was showing is hidden from every projection now,
     // so the selection goes with it and the drafts reload to the empty row.
@@ -7316,9 +7395,27 @@ fn apply_scene_body(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             let ids = org_scene_seed(state);
             org_open(&g, state, 0);
             let note = ids.notes[1] as i64;
-            let line = format!("已删除笔记「{}」", state.org_row_label(note, false));
+            let line = format!("已移入回收站：笔记「{}」", state.org_row_label(note, false));
             state.org_defer_delete(vec![note], false, line.clone());
             g.set_org_undo_text(line.as_str().into());
+            org_refresh(&g, state);
+        }
+        "bin" | "tasks-bin" => {
+            // 回收站 (SPEC §四十一, core ADR-0003): the row a 🗑 actually leaves,
+            // through the real write path — `org_defer_delete` and then the commit
+            // that stamps `deleted_at` — with the bin open, so what is photographed
+            // is the list the 恢复 / 彻底删除 pair belongs to. The bar is *not*
+            // armed: this is the state after its three seconds, which is the one a
+            // bin exists for.
+            let is_task = scene == "tasks-bin";
+            let ids = org_scene_seed(state);
+            org_open(&g, state, if is_task { 1 } else { 0 });
+            let id = if is_task { ids.tasks[1] as i64 } else { ids.notes[1] as i64 };
+            state.org_defer_delete(vec![id], is_task, "已移入回收站".into());
+            if let Some(pending) = state.org_pending() {
+                state.org_commit_pending(pending.token);
+            }
+            g.set_org_bin_open(true);
             org_refresh(&g, state);
         }
         "notes-select" | "tasks-select" => {
@@ -7414,6 +7511,12 @@ fn apply_scene_body(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
         }
         "dark-tasks-list-color" => {
             apply_scene_body(ui, state, "tasks-list-color");
+        }
+        "dark-bin" => {
+            apply_scene_body(ui, state, "bin");
+        }
+        "dark-tasks-bin" => {
+            apply_scene_body(ui, state, "tasks-bin");
         }
         "dark-tasks" => {
             apply_scene_body(ui, state, "tasks");

@@ -648,12 +648,26 @@ component OrgTaskRow inherits Rectangle {
             size: 24px;
             // Gone while picking: every action it offers is one the bar has, and
             // a row menu over a row that is already a checkbox is two answers to
-            // the same question.
-            visible: !UIState.org-selecting;
+            // the same question. Gone in the bin as well, where the two verbs are
+            // drawn instead — a menu that holds only 恢复 and 彻底删除 is a menu
+            // that costs a click to say what a button already says.
+            visible: !UIState.org-selecting && !UIState.org-bin-open;
             opacity: ta.has-hover || task.selected ? 1 : 0;
             clicked => {
                 root.menu-requested(self.absolute-position.x, self.absolute-position.y);
             }
+        }
+        // 回收站: a binned task's own two verbs, in the row.
+        if UIState.org-bin-open : OrgButton {
+            label: "恢复";
+            font-size: Typography.size-caption;
+            clicked => { UIState.org-bin-restored(task.id); }
+        }
+        if UIState.org-bin-open : OrgButton {
+            label: "彻底删除";
+            font-size: Typography.size-caption;
+            danger: true;
+            clicked => { UIState.org-bin-purged(task.id); }
         }
     }
     ta := TouchArea {
@@ -1029,6 +1043,16 @@ export component OrganizerArea inherits Rectangle {
                                 vertical-alignment: center;
                             }
                             Rectangle { horizontal-stretch: 1; }
+                            // 回收站's own verb: the whole half on screen, purged as
+                            // one undoable step. Drawn only while the bin is open —
+                            // a "clear the bin" button over a list of notes is a
+                            // button nobody can explain.
+                            if UIState.org-bin-open : OrgButton {
+                                label: "清空回收站";
+                                font-size: Typography.size-caption;
+                                danger: true;
+                                clicked => { UIState.org-bin-emptied(); }
+                            }
                             // 指令: the door an AI's answer comes back through. Next
                             // to 多选 because they are the two ways this page is
                             // written to in bulk — one by hand, one by pasting what
@@ -1203,7 +1227,14 @@ export component OrganizerArea inherits Rectangle {
                                     : (note-ta.has-hover ? Colors.hover-fill : transparent);
 
                                 VerticalLayout {
-                                    padding: 8px;
+                                    padding-top: 8px;
+                                    padding-bottom: 8px;
+                                    padding-left: 8px;
+                                    // While the bin is open the row's own two verbs
+                                    // sit at its right edge, so the text stops short
+                                    // of them: a title elided *under* a button is a
+                                    // title nobody can read.
+                                    padding-right: UIState.org-bin-open ? 132px : 8px;
                                     spacing: 2px;
                                     HorizontalLayout {
                                         height: 18px;
@@ -1256,6 +1287,28 @@ export component OrganizerArea inherits Rectangle {
                                     checked: row.picked;
                                     box-size: 18px;
                                     toggled => { UIState.org-note-selected(row.id); }
+                                }
+                                // 回收站: a binned row's own two verbs, at its right
+                                // edge and last among the row's children so they are
+                                // above `note-ta`. Drawn rather than put in a menu
+                                // because a note has no ⋯ here, and because the bin is
+                                // a short list of things the user came to decide about
+                                // one at a time.
+                                if UIState.org-bin-open : HorizontalLayout {
+                                    x: parent.width - self.width - 10px;
+                                    y: (parent.height - self.height) / 2;
+                                    spacing: 4px;
+                                    OrgButton {
+                                        label: "恢复";
+                                        font-size: Typography.size-caption;
+                                        clicked => { UIState.org-bin-restored(row.id); }
+                                    }
+                                    OrgButton {
+                                        label: "彻底删除";
+                                        font-size: Typography.size-caption;
+                                        danger: true;
+                                        clicked => { UIState.org-bin-purged(row.id); }
+                                    }
                                 }
                             }
                         }
@@ -1844,8 +1897,8 @@ export component OrganizerArea inherits Rectangle {
                             spacing: 1px;
                             OrgNavRow {
                                 label: "全部笔记";
-                                count: UIState.note-rows.length;
-                                selected: UIState.org-tag == "";
+                                count: UIState.org-note-count;
+                                selected: UIState.org-tag == "" && !UIState.org-bin-open;
                                 clicked => { UIState.org-tag-picked(""); }
                             }
                             // The tag column, shared with the 任务 tab: the filter
@@ -1908,6 +1961,19 @@ export component OrganizerArea inherits Rectangle {
 
                         Rectangle { vertical-stretch: 1; min-height: 8px; }
 
+                        // 回收站 (core ADR-0003): one row on **both** tabs, because
+                        // what it holds is the half the user is standing on. Drawn
+                        // last-but-one so it sits where a nav puts the place you go
+                        // to when the list is not what you want.
+                        OrgNavRow {
+                            label: "回收站";
+                            count: UIState.org-tab == 0
+                                ? UIState.org-bin-note-count
+                                : UIState.org-bin-task-count;
+                            selected: UIState.org-bin-open;
+                            clicked => { UIState.org-bin-toggled(); }
+                        }
+
                         // the finished ones are a view like any other, so they
                         // sit where a nav puts the thing you go to last
                         if UIState.org-tab == 1 : OrgNavRow {
@@ -1967,14 +2033,14 @@ export component OrganizerArea inherits Rectangle {
                     vertical-alignment: center;
                 }
                 // The actions, spelled out: the same list the template carries, so
-                // the box does not have to be read off the example. `restore` is
-                // absent because this build has no 回收站, and it is refused by name
-                // rather than silently skipped.
+                // the box does not have to be read off the example. `delete` and
+                // `restore` are 回收站's two verbs (core ADR-0003), which is why the
+                // first one no longer throws the row away.
                 Text {
                     height: 30px;
                     text: UIState.org-cmd-tab == 1
-                        ? "粘贴 AI 返回的 JSON（{\"operations\":[…] }）。可用 action：create / update / delete / add_tags / remove_tags / set_tags / set_completed / move / set_priority / set_due / add_subtask / set_subtask / remove_subtask / comment。目标用 uuid（推荐，跨设备唯一）或 id。"
-                        : "粘贴 AI 返回的 JSON（{\"operations\":[…] }）。可用 action：create / update / delete / add_tags / remove_tags / set_tags / comment。目标用 uuid（推荐，跨设备唯一）或 id。";
+                        ? "粘贴 AI 返回的 JSON（{\"operations\":[…] }）。可用 action：create / update / delete / restore / add_tags / remove_tags / set_tags / set_completed / move / set_priority / set_due / add_subtask / set_subtask / remove_subtask / comment。delete 移入回收站，restore 取出。目标用 uuid（推荐，跨设备唯一）或 id。"
+                        : "粘贴 AI 返回的 JSON（{\"operations\":[…] }）。可用 action：create / update / delete / restore / add_tags / remove_tags / set_tags / comment。delete 移入回收站，restore 取出。目标用 uuid（推荐，跨设备唯一）或 id。";
                     font-family: Typography.ui-font;
                     font-size: Typography.size-caption;
                     color: Colors.text-muted;

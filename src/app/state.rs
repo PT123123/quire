@@ -369,9 +369,9 @@ pub struct OrgPendingDelete {
     pub token: u64,
     pub ids: Vec<i64>,
     pub is_task: bool,
-    /// The bar's own line, decided by whoever asked (`已删除笔记「…」` for one row,
-    /// `已删除 3 条笔记` for a batch, `笔记「…」已转为待办` for a conversion) — the
-    /// state layer does not know what the user just did, only what to hand back.
+    /// The bar's own line, decided by whoever asked (`已移入回收站：笔记「…」` for one
+    /// row, `已移入回收站：3 条笔记` for a batch, `笔记「…」已转为待办` for a conversion) —
+    /// the state layer does not know what the user just did, only what to hand back.
     pub message: String,
 }
 
@@ -7113,6 +7113,13 @@ impl AppState {
             ),
             None => (SMART_ALL, -1, String::new(), 0, false, String::new(), 1),
         };
+        // 回收站 (core ADR-0003) is a *mode* of the list, not a fourth view on one
+        // half: the row that opens it is on both tabs, and what it shows is the
+        // half the user is standing on.
+        let bin = match &ui {
+            Some(g) => g.get_org_bin_open(),
+            None => false,
+        };
         let mode = match &ui {
             Some(g) => g.get_org_mode(),
             None => 0,
@@ -7125,11 +7132,47 @@ impl AppState {
         // The 反向筛选 set, read once so every projection below filters and styles
         // by one snapshot of it (and so the borrow is not held across a rebuild).
         let excluded = self.org_excluded();
-        let mut notes = self.org_notes(&query, &tag, &excluded, note_id as i64);
+        let (bin_notes, bin_tasks) = self.org_bin_counts();
+        let mut notes = if bin {
+            if tab == 0 {
+                self.org_bin_notes(&query, note_id as i64)
+            } else {
+                Vec::new()
+            }
+        } else {
+            self.org_notes(&query, &tag, &excluded, note_id as i64)
+        };
+        let mut tasks = if bin {
+            if tab == 1 {
+                self.org_bin_tasks(&query, task_id as i64, &dates)
+            } else {
+                Vec::new()
+            }
+        } else {
+            self.org_tasks(
+                view,
+                list as i64,
+                &query,
+                sort,
+                &dates,
+                task_id as i64,
+                show_done,
+                &tag,
+                &excluded,
+            )
+        };
         // The header is the *tab's* header: the notes count notes, and a board
         // counts lists — one line reading "2 项待办" over a list of notes would
-        // be the window describing something it is not showing.
-        let header = if tab == 0 {
+        // be the window describing something it is not showing. It comes *after*
+        // both lists because the bin's own count is what it is showing, not what
+        // the half holds: a header that counted through the search box would be
+        // answering a different question from the one it looks like it answers.
+        let header = if bin {
+            (
+                "回收站".to_string(),
+                format!("{} 项", if tab == 0 { notes.len() } else { tasks.len() }),
+            )
+        } else if tab == 0 {
             let title = if tag.is_empty() {
                 "全部笔记".to_string()
             } else {
@@ -7146,17 +7189,6 @@ impl AppState {
         } else {
             self.org_view_header(view, list as i64, &query, &dates)
         };
-        let mut tasks = self.org_tasks(
-            view,
-            list as i64,
-            &query,
-            sort,
-            &dates,
-            task_id as i64,
-            show_done,
-            &tag,
-            &excluded,
-        );
         // 多选 is a flag the rows carry, not a filter they answer to: a picked row
         // that a filter hides stays picked (the set holds ids, not rows), so the
         // only place that can light it is the projection that knows what is being
@@ -7201,6 +7233,14 @@ impl AppState {
             // sentence of its own rather than being read off the rows.
             g.set_org_excluded_label(org_excluded_label(&excluded).into());
             g.set_org_smart_counts(self.org_smart_counts_model());
+            // The nav row's two numbers: the bin is drawn on both tabs, and the one
+            // it prints is the half the user is standing on.
+            g.set_org_bin_note_count(bin_notes);
+            g.set_org_bin_task_count(bin_tasks);
+            // 全部笔记's own count. Read off the catalog and not off
+            // `note-rows.length`: while the bin is open that model holds the *bin's*
+            // rows, and a nav row reading them would say the list is empty.
+            g.set_org_note_count(self.organizer.borrow().live_notes().count() as i32);
             g.set_org_view_title(view_title.into());
             g.set_org_view_count_label(view_count_label.into());
             g.set_org_done_count(done);
@@ -7225,8 +7265,7 @@ impl AppState {
         let catalog = self.organizer.borrow();
         let count = |slot: i32| -> i32 {
             catalog
-                .tasks
-                .iter()
+                .live_tasks()
                 .filter(|t| {
                     let wanted = slot == SMART_DONE;
                     !hidden.contains(&(t.id.0 as i64))
@@ -7263,8 +7302,7 @@ impl AppState {
             _ => org_view_name(view).to_string(),
         };
         let count = catalog
-            .tasks
-            .iter()
+            .live_tasks()
             .filter(|t| {
                 let bucket = if list >= 0 {
                     t.list.0 as i64 == list
@@ -7289,8 +7327,7 @@ impl AppState {
         let hidden = self.org_pending_ids(true);
         let catalog = self.organizer.borrow();
         let live: Vec<&Task> = catalog
-            .tasks
-            .iter()
+            .live_tasks()
             .filter(|t| !hidden.contains(&(t.id.0 as i64)))
             .collect();
         let total = live.len() as i32;
@@ -7316,8 +7353,7 @@ impl AppState {
             .into_iter()
             .map(|(id, name, color)| {
                 let mut tasks: Vec<&Task> = catalog
-                    .tasks
-                    .iter()
+                    .live_tasks()
                     .filter(|t| {
                         let bucket = if id < 0 {
                             catalog.list(t.list).is_none()
@@ -7377,14 +7413,12 @@ impl AppState {
         // and one column that answered about notes while tasks were on screen
         // would be a filter for rows that are not there.
         let sources = catalog
-            .notes
-            .iter()
+            .live_notes()
             .filter(|n| !is_task && n.ref_note.is_none() && !hidden.contains(&(n.id.0 as i64)))
             .map(|n| &n.tags)
             .chain(
                 catalog
-                    .tasks
-                    .iter()
+                    .live_tasks()
                     .filter(|t| is_task && !hidden.contains(&(t.id.0 as i64)))
                     .map(|t| &t.tags),
             );
@@ -7452,8 +7486,7 @@ impl AppState {
         let hidden = self.org_pending_ids(false);
         let catalog = self.organizer.borrow();
         let mut notes: Vec<&Note> = catalog
-            .notes
-            .iter()
+            .live_notes()
             .filter(|n| !hidden.contains(&(n.id.0 as i64)))
             // A reply is not a row of the list — it is shown on the note it
             // answers (`org_note_replies`). The reference keeps them apart the
@@ -7481,6 +7514,52 @@ impl AppState {
             .collect()
     }
 
+    /// 回收站 (core ADR-0003): the notes that have been binned, most recently
+    /// binned first — *when it went in* and not when it was written, because that
+    /// is the order a reader of a bin is looking for.
+    ///
+    /// The **needle applies and the tag filter does not**: searching a bin is a
+    /// question with an answer, while the tag column's counts are about the live
+    /// list and a filter that silently narrowed by a number the column drew from
+    /// somewhere else would be the window lying about itself.
+    fn org_bin_notes(&self, query: &str, selected: i64) -> Vec<NoteRow> {
+        let needle = query.trim().to_lowercase();
+        let catalog = self.organizer.borrow();
+        let mut rows: Vec<&Note> = catalog
+            .trashed_notes()
+            .filter(|n| org_note_matches(n, &needle))
+            .collect();
+        rows.sort_by(|a, b| b.deleted_at.cmp(&a.deleted_at).then(b.id.cmp(&a.id)));
+        rows.into_iter()
+            .map(|n| Self::org_note_row(n, n.id.0 as i64 == selected))
+            .collect()
+    }
+
+    /// The tasks in 回收站, on the same terms.
+    fn org_bin_tasks(&self, query: &str, selected: i64, dates: &OrgDates) -> Vec<TaskRow> {
+        let needle = query.trim().to_lowercase();
+        let catalog = self.organizer.borrow();
+        let mut rows: Vec<&Task> = catalog
+            .trashed_tasks()
+            .filter(|t| org_task_matches(t, &needle))
+            .collect();
+        rows.sort_by(|a, b| b.deleted_at.cmp(&a.deleted_at).then(b.id.cmp(&a.id)));
+        rows.into_iter()
+            .map(|t| org_task_row(&catalog, t, dates, t.id.0 as i64 == selected))
+            .collect()
+    }
+
+    /// How many rows each half's 回收站 holds, for the nav row's count. Both
+    /// numbers at once because the row is drawn on both tabs and what it shows is
+    /// the tab it is on.
+    fn org_bin_counts(&self) -> (i32, i32) {
+        let catalog = self.organizer.borrow();
+        (
+            catalog.trashed_notes().count() as i32,
+            catalog.trashed_tasks().count() as i32,
+        )
+    }
+
     /// The replies the given note holds (SPEC §四十一's 引用, core ADR-0001): the
     /// rows whose `ref_note` is this note, newest last — the order a thread is
     /// read in. Projected off the catalog like every other list here, so a comment
@@ -7492,8 +7571,10 @@ impl AppState {
         let target = NoteId(note as u64);
         let catalog = self.organizer.borrow();
         let mut rows: Vec<&Note> = catalog
-            .notes
-            .iter()
+            .live_notes()
+            // A reply that is itself in 回收站 is not a reply on screen: the bin
+            // holds it, and the thread it answered reads without it until it comes
+            // back.
             .filter(|n| n.ref_note == Some(target))
             .collect();
         rows.sort_by(|a, b| a.created.cmp(&b.created).then(a.id.cmp(&b.id)));
@@ -7567,8 +7648,7 @@ impl AppState {
             // includes a task whose list a merge left dangling — the same fold
             // `org_list_of` makes for one row.
             count: catalog
-                .tasks
-                .iter()
+                .live_tasks()
                 .filter(|t| !hidden.contains(&(t.id.0 as i64)))
                 .filter(|t| catalog.list(t.list).is_none())
                 .count() as i32,
@@ -7584,6 +7664,9 @@ impl AppState {
                 color: l.color.slot(),
                 count: catalog
                     .tasks_in(l.id)
+                    // `tasks_in` is the write-side question and keeps both halves
+                    // (core ADR-0003), so the chip filters the bin out itself.
+                    .filter(|t| !t.is_trashed())
                     .filter(|t| !hidden.contains(&(t.id.0 as i64)))
                     .count() as i32,
                 selected: list >= 0 && l.id.0 as i64 == list,
@@ -7615,8 +7698,7 @@ impl AppState {
         // smart view's predicate.
         let keep_done = show_done || view == SMART_DONE;
         let mut tasks: Vec<&Task> = catalog
-            .tasks
-            .iter()
+            .live_tasks()
             .filter(|t| !hidden.contains(&(t.id.0 as i64)))
             .filter(|t| {
                 // One selector with two halves: a stored list id, or a smart
@@ -7703,6 +7785,80 @@ impl AppState {
         })
     }
 
+    // ---- 回收站 (SPEC §四十一, core ADR-0003) ------------------------------
+    //
+    // Trashing and restoring are the two writes whose *content* does not change:
+    // they stamp or clear `deleted_at` and nothing else, and deliberately do **not**
+    // restamp `edited` — a row's last real edit is still its last real edit, and
+    // 详细信息's 修改 line would be lying if putting a note in the bin made it look
+    // freshly written. `deleted_at` is the bin's own clock.
+
+    fn org_set_note_trashed(&self, id: i64, trashed: bool) -> Option<Vec<Change>> {
+        let before = self.organizer.borrow().note(NoteId(id.max(0) as u64))?.clone();
+        let mut after = before.clone();
+        after.deleted_at = trashed.then(now_secs);
+        if after == before {
+            return None;
+        }
+        self.exec_org(Command::UpdateNote {
+            id: before.id,
+            before,
+            after,
+        })
+    }
+
+    fn org_set_task_trashed(&self, id: i64, trashed: bool) -> Option<Vec<Change>> {
+        let before = self.organizer.borrow().task(TaskId(id.max(0) as u64))?.clone();
+        let mut after = before.clone();
+        after.deleted_at = trashed.then(now_secs);
+        if after == before {
+            return None;
+        }
+        self.exec_org(Command::UpdateTask {
+            id: before.id,
+            before,
+            after,
+        })
+    }
+
+    /// 恢复: take one note back out of 回收站. The mirror of a trash, and the one
+    /// write a bin exists for.
+    pub fn org_restore_note(&self, id: i64) -> Option<Vec<Change>> {
+        self.org_set_note_trashed(id, false)
+    }
+
+    /// 恢复 for a task, on the same terms.
+    pub fn org_restore_task(&self, id: i64) -> Option<Vec<Change>> {
+        self.org_set_task_trashed(id, false)
+    }
+
+    /// 清空回收站: every binned row of one half, purged in **one** batch — so the
+    /// whole emptying is one Ctrl+Z. A bin that took twenty undos to refill would
+    /// be a trap, and every row is still in the file while the batch is planned, so
+    /// the revert carries them all back.
+    pub fn org_empty_bin(&self, is_task: bool) -> Option<usize> {
+        let cmds: Vec<Command> = {
+            let catalog = self.organizer.borrow();
+            if is_task {
+                catalog
+                    .trashed_tasks()
+                    .map(|t| Command::DeleteTask { task: t.clone() })
+                    .collect()
+            } else {
+                catalog
+                    .trashed_notes()
+                    .map(|n| Command::DeleteNote { note: n.clone() })
+                    .collect()
+            }
+        };
+        let n = cmds.len();
+        if n == 0 {
+            return Some(0);
+        }
+        self.exec_org_all(cmds)?;
+        Some(n)
+    }
+
     /// A new, empty note — the one thing the area never asks the user for. The
     /// id and both instants are stamped here, which is what makes the undo of
     /// "new note" restore *this* note rather than a copy of it.
@@ -7723,8 +7879,9 @@ impl AppState {
                 edited: now,
                 // A note the user makes from the ＋ is never a reply. 引用 is the
                 // model's (`ref_note`), and 指令's `comment` is the only thing in
-                // this shell that sets one.
+                // this shell that sets one. It is born live, like every new row.
                 ref_note: None,
+                deleted_at: None,
             },
         })?;
         self.next_note_id.set(id + 1);
@@ -7756,6 +7913,7 @@ impl AppState {
                 created: now,
                 edited: now,
                 ref_note: Some(NoteId(parent.max(0) as u64)),
+                deleted_at: None,
             },
         })?;
         self.next_note_id.set(id + 1);
@@ -7910,6 +8068,7 @@ impl AppState {
                 created: now,
                 edited: now,
                 ord,
+                deleted_at: None,
             },
         })?;
         self.next_task_id.set(id + 1);
@@ -8284,22 +8443,37 @@ impl AppState {
         // user's single gesture take back with a single Ctrl+Z. (The reference
         // shells are N steps there; this shell has the batch path, so it does not
         // inherit that cost.)
+        //
+        // Since core ADR-0003 the step is a **trash**: the row is stamped with
+        // `deleted_at`, not removed, so it is waiting in 回收站 as well as behind
+        // the bar. `edited` is deliberately left alone — the content did not change.
         let cmds: Vec<Command> = {
             let catalog = self.organizer.borrow();
+            let now = now_secs();
             pending
                 .ids
                 .iter()
                 .filter_map(|&id| {
                     if pending.is_task {
-                        catalog
-                            .task(TaskId(id.max(0) as u64))
-                            .cloned()
-                            .map(|task| Command::DeleteTask { task })
+                        catalog.task(TaskId(id.max(0) as u64)).cloned().map(|before| {
+                            let mut after = before.clone();
+                            after.deleted_at = Some(now);
+                            Command::UpdateTask {
+                                id: before.id,
+                                before,
+                                after,
+                            }
+                        })
                     } else {
-                        catalog
-                            .note(NoteId(id.max(0) as u64))
-                            .cloned()
-                            .map(|note| Command::DeleteNote { note })
+                        catalog.note(NoteId(id.max(0) as u64)).cloned().map(|before| {
+                            let mut after = before.clone();
+                            after.deleted_at = Some(now);
+                            Command::UpdateNote {
+                                id: before.id,
+                                before,
+                                after,
+                            }
+                        })
                     }
                 })
                 .collect()
@@ -8583,6 +8757,7 @@ impl AppState {
                 created: now,
                 edited: now,
                 ref_note: None,
+                deleted_at: None,
             };
             *next += 1;
             // Visible to the rest of the batch at once, so a `create` followed by an
@@ -8644,14 +8819,28 @@ impl AppState {
                     created: now,
                     edited: now,
                     ref_note: Some(id),
+                    deleted_at: None,
                 };
                 *next += 1;
                 sim.notes.push(comment.clone());
                 return Ok(Command::CreateNote { note: comment });
             }
+            // 回收站 (core ADR-0003): an instruction's `delete` is the same verb the
+            // UI's 🗑 is — *binned*, not removed — so a batch can be taken back and
+            // the row is still there for a `restore`. `restore` is its mirror.
+            //
+            // Neither restamps `edited`: the content did not change, and a batch that
+            // made a note look freshly written by putting it in the bin would move
+            // 详细信息's 修改 line for no reason.
             "delete" => {
-                sim.notes.retain(|n| n.id != id);
-                return Ok(Command::DeleteNote { note: before });
+                after.edited = before.edited;
+                after.deleted_at = Some(now);
+                Command::UpdateNote { id, before, after: after.clone() }
+            }
+            "restore" => {
+                after.edited = before.edited;
+                after.deleted_at = None;
+                Command::UpdateNote { id, before, after: after.clone() }
             }
             other => return Err(format!("笔记不支持动作 {other}")),
         };
@@ -8701,6 +8890,7 @@ impl AppState {
                 created: now,
                 edited: now,
                 ord,
+                deleted_at: None,
             };
             *next += 1;
             sim.tasks.push(task.clone());
@@ -8711,10 +8901,6 @@ impl AppState {
             .task(id)
             .cloned()
             .ok_or_else(|| "任务不存在".to_string())?;
-        if action == "delete" {
-            sim.tasks.retain(|t| t.id != id);
-            return Ok(Command::DeleteTask { task: before });
-        }
         let mut after = before.clone();
         after.edited = now;
         let cmd = match action {
@@ -8828,6 +9014,19 @@ impl AppState {
                 } else {
                     format!("{}\n\n{}", after.notes, text)
                 };
+                Command::UpdateTask { id, before, after: after.clone() }
+            }
+            // 回收站 (core ADR-0003): `delete` bins the task rather than removing
+            // it, exactly as the UI's 🗑 does, and `restore` takes it back out.
+            // Neither moves `edited` — the content did not change.
+            "delete" => {
+                after.edited = before.edited;
+                after.deleted_at = Some(now);
+                Command::UpdateTask { id, before, after: after.clone() }
+            }
+            "restore" => {
+                after.edited = before.edited;
+                after.deleted_at = None;
                 Command::UpdateTask { id, before, after: after.clone() }
             }
             other => return Err(format!("任务不支持动作 {other}")),
@@ -21888,6 +22087,7 @@ mod tests {
             created: 0,
             edited: 0,
             ref_note: None,
+            deleted_at: None,
         };
         assert_eq!(super::org_convert_title(&bare("会议", "# 别的")), "会议");
         assert_eq!(super::org_convert_title(&bare("", "\n  买了牛奶\n还有鸡蛋")), "买了牛奶");
@@ -21985,13 +22185,14 @@ mod tests {
         let second = state.org_create_note().unwrap();
         state.org_note_title(second, "第二条".into());
 
-        let token = state.org_defer_delete(vec![first], false, "已删除笔记「第一条」".into());
+        let token = state.org_defer_delete(vec![first], false, "已移入回收站：笔记「第一条」".into());
         // A second delete *commits* the first rather than queueing behind it,
         // because one bar can only stand in front of one thing.
-        let next = state.org_defer_delete(vec![second], false, "已删除笔记「第二条」".into());
+        let next = state.org_defer_delete(vec![second], false, "已移入回收站：笔记「第二条」".into());
         assert_ne!(token, next, "each batch gets its own token");
-        assert!(
-            state.organizer().note(NoteId(first as u64)).is_none(),
+        assert_eq!(
+            state.organizer().note(NoteId(first as u64)).map(|n| n.is_trashed()),
+            Some(true),
             "the superseded delete landed the moment the new one was asked for"
         );
 
@@ -21999,16 +22200,28 @@ mod tests {
         assert!(!state.org_commit_pending(token));
         assert!(!state.org_commit_pending(token), "a commit is one-shot");
         assert!(state.org_commit_pending(next), "the live token commits");
-        assert!(state.organizer().note(NoteId(second as u64)).is_none());
+        assert_eq!(
+            state.organizer().note(NoteId(second as u64)).map(|n| n.is_trashed()),
+            Some(true)
+        );
         assert!(state.org_pending().is_none(), "and the bar is empty afterwards");
 
         state.persistence_force_flush();
-        assert!(repo.load_organizer().unwrap().notes.is_empty());
+        // Since core ADR-0003 a "delete" is a tombstone, so the file still holds
+        // both rows — that is what 回收站 restores from, and what makes the bar's
+        // verb reversible twice over (the bar, and the bin).
+        let binned = repo.load_organizer().unwrap().notes;
+        assert_eq!(binned.len(), 2, "both rows are still in the file");
+        assert!(binned.iter().all(|n| n.is_trashed()), "{binned:?}");
         // Both deletes are steps now — which is the documented downside of the
         // bar: after the window closes, taking them back is two Ctrl+Zs.
         assert!(state.undo_org().is_some());
         assert!(state.undo_org().is_some());
         assert_eq!(state.org_notes("", "", &BTreeSet::new(), -1).len(), 2);
+        assert!(
+            state.organizer().notes.iter().all(|n| !n.is_trashed()),
+            "and the two undos took both rows back out of the bin"
+        );
     }
 
     /// Every projection answers to the same hidden set. A number that counts a row
@@ -22207,7 +22420,7 @@ mod tests {
         state.persistence_force_flush();
         assert_eq!(repo.load_organizer().unwrap().notes.len(), 3);
 
-        let token = state.org_defer_delete(ids.clone(), false, "已删除3 条笔记".into());
+        let token = state.org_defer_delete(ids.clone(), false, "已移入回收站：3 条笔记".into());
         org_project(&state);
         assert!(
             state.org_notes("", "", &BTreeSet::new(), -1).is_empty(),
@@ -22215,7 +22428,16 @@ mod tests {
         );
         assert!(state.org_commit_pending(token));
         state.persistence_force_flush();
-        assert!(repo.load_organizer().unwrap().notes.is_empty(), "the file agrees");
+        // The file agrees — and since core ADR-0003 that means all three rows are
+        // still there with a tombstone on each: the batch *binned* them instead of
+        // throwing them away, which is what 回收站 restores from.
+        let binned = repo.load_organizer().unwrap().notes;
+        assert_eq!(binned.len(), 3, "nothing left the file");
+        assert!(binned.iter().all(|n| n.is_trashed()), "{binned:?}");
+        assert!(
+            state.org_notes("", "", &BTreeSet::new(), -1).is_empty(),
+            "and a binned row is on no list"
+        );
 
         assert!(state.undo_org().is_some());
         assert_eq!(state.org_notes("", "", &BTreeSet::new(), -1).len(), 3, "one undo returned the batch");
@@ -22226,6 +22448,67 @@ mod tests {
                 .expect("the row came back with its title, not as an empty shell");
             assert_eq!(note.title, title);
         }
+    }
+
+    /// 回收站 (SPEC §四十一, core ADR-0003): the bin is a *projection* of the one
+    /// catalog, so a binned row is off every list and in the bin at the same time,
+    /// a restore puts it back where it was, and 彻底删除 is the only write that
+    /// takes a row out of the file. Each of the three is one Ctrl+Z.
+    #[test]
+    fn the_bin_holds_stamped_rows_and_only_a_purge_removes_them() {
+        use crate::core::organizer::NoteId;
+
+        let (state, repo) = org_session();
+        let a = state.org_create_note().unwrap();
+        state.org_note_title(a, "留下".into());
+        let b = state.org_create_note().unwrap();
+        state.org_note_title(b, "进回收站".into());
+        let token = state.org_defer_delete(vec![b], false, "已移入回收站".into());
+        assert!(state.org_commit_pending(token));
+
+        // The two halves are two answers about one catalog: `b` is on no list, and
+        // it is the bin's whole contents.
+        assert_eq!(state.org_notes("", "", &BTreeSet::new(), -1).len(), 1);
+        assert_eq!(state.org_bin_counts(), (1, 0));
+        assert_eq!(
+            state.org_bin_notes("", -1).iter().map(|r| r.id as i64).collect::<Vec<_>>(),
+            vec![b]
+        );
+        assert_eq!(
+            state.org_note_detail(b).title,
+            "进回收站",
+            "the bin's row is the row, titles and all"
+        );
+
+        // 恢复: back on the list, out of the bin, one step.
+        assert!(state.org_restore_note(b).is_some());
+        assert_eq!(state.org_bin_counts(), (0, 0));
+        assert_eq!(state.org_notes("", "", &BTreeSet::new(), -1).len(), 2);
+        assert!(state.undo_org().is_some(), "and Ctrl+Z bins it again");
+        assert_eq!(state.org_bin_counts(), (1, 0));
+
+        // 彻底删除: the only write that removes the row — and its undo is the only
+        // way back, because there is no bin behind the bin.
+        assert_eq!(state.org_delete_note(b).as_deref(), Some("进回收站"));
+        state.persistence_force_flush();
+        assert_eq!(repo.load_organizer().unwrap().notes.len(), 1, "the row is gone");
+        assert!(state.undo_org().is_some());
+        assert_eq!(
+            state.organizer().note(NoteId(b as u64)).map(|n| n.is_trashed()),
+            Some(true),
+            "and its undo brings it back still binned"
+        );
+
+        // 清空回收站: the whole half in one batch, so it is one Ctrl+Z.
+        let c = state.org_create_note().unwrap();
+        state.org_note_title(c, "也进".into());
+        let token = state.org_defer_delete(vec![c], false, "已移入回收站".into());
+        assert!(state.org_commit_pending(token));
+        assert_eq!(state.org_empty_bin(false), Some(2), "b and c");
+        assert_eq!(state.org_bin_counts(), (0, 0));
+        assert_eq!(state.organizer().notes.len(), 1);
+        assert!(state.undo_org().is_some(), "one Ctrl+Z refills the whole bin");
+        assert_eq!(state.org_bin_counts(), (2, 0));
     }
 
     /// 完成 on a batch: every open row ticked in one step, a row that was already

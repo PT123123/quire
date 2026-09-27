@@ -3722,3 +3722,25 @@ md5 的链条也对得上：`notes-select` 在 m25i 与 m25k 上**同一枚 hash
 
 **未验证（诚实）**：① 真手点一遍 `⋯` → 重命名 / 换色 / 删除，以及悬停显出 `⋯` 的手感；② 移动端镜像（这一刀仍是
 桌面）。**core 一行没动、rev 没 bump。**
+
+## M2.5l · 回收站 (ADR-0114, core ADR-0003)
+
+**交付**：这个区域从落地起就写着的"没有回收站"在这一刀收尾，三端一起。core 里 `notes` / `tasks` 各多一列
+`deleted_at`（迁移 29，可空、**不 backfill**），`trash` / `restore` 是普通的 `UpdateNote` / `UpdateTask`、
+`purge` 才走 `DeleteNote`，并长出 `live_notes` / `trashed_notes` / `live_tasks` / `trashed_tasks` 四个访问器。
+壳这边：🗑、行菜单的删除、多选栏的删除全部改成**盖章**（`org_commit_pending` 的批次、`org_delete_note/task`
+的路径都改）；导航列两半各多一行 `回收站`（`org-bin-open` 是窗口状态，显示的是正站着的那半，计数也是那半的）；行里直接画
+`恢复` / `彻底删除`；表头多 `清空回收站`（整批 `exec_all`，一次 Ctrl+Z）。所有绘制投影从 `catalog.notes` 换成
+`live_notes()`。`指令` 的 `delete` 改成移入回收站，并新增 `restore`；模板与对话框动作表都更新。**pin bump**
+`4899857 → fbfdaca`，**快照版本 2 → 3**。
+
+**验证**：`cargo check --workspace --all-targets` 干净；`cargo test` 全绿（154 lib + 19 其它；本刀新增
+`the_bin_holds_stamped_rows_and_only_a_purge_removes_them`，并把 `only_the_bar_expiring_performs_the_delete`
+与 `a_batched_delete_costs_one_step_and_one_undo_returns_every_row` 改成断言**墓碑**而不是"文件里没有这一行"——
+这两条正是这一刀必须改的证据）。core 侧 `cargo test` 全绿（309 lib + 51 storage，新增四条）。场景 `bin` /
+`tasks-bin` 与两枚暗孪生进 `sweep.ps1`（组织器共二十臂），两张都渲染并看过；顺带重渲染了 `notes` 确认普通列表没被
+`live_*` 改坏，并当场抓到一个计数 bug（回收站打开时 `全部笔记` 的计数读的是画出来的行数）——加了 `org-note-count`
+投影修掉。
+
+**未验证（诚实）**：① 真手点一遍 🗑 → 回收站 → 恢复 / 彻底删除 / 清空，以及三秒柱子与回收站并存的顺序感；
+② 两台设备互相同步一条被删的行（版本闸让旧端直接拒绝，实机往返这一刀没跑）；③ 移动端镜像（下一刀，compose 仓）。

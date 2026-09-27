@@ -28,7 +28,7 @@ default-run = "quire"
 # branch and no releases yet; the SHA is what makes a build reproducible.
 # Over HTTPS on purpose: the repository is public, and this is the URL that works
 # on a machine that has no SSH key registered — pushing uses SSH.
-quire-core = { git = "https://github.com/PT123123/quire-core.git", rev = "4899857f0e95a6784ad2a2657eb9cf64efdd612f" }
+quire-core = { git = "https://github.com/PT123123/quire-core.git", rev = "fbfdaca7273021f3d0171e9d88df7ff7404b4f95" }
 image = { workspace = true }
 rfd = "0.17.2"
 rusqlite = { workspace = true }

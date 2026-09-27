@@ -35,8 +35,13 @@ syncing is not a price an added attribute should pay. **M2.5k** landed 2026-09-2
 (the nav row's own ⋯ → 重命名 inline / 颜色 swatch submenu / 删除清单) and the note page's 回复
 field (ADR-0113) — the two verbs ADR-0112's tail still listed as missing, both out of machinery
 this shell already had, and the slice that makes `ContextMenu` draw the `check`/`swatch` its
-`MenuRow` has always carried. The Android mirror is the rest of the milestone; the pixel sweep
-now has eighteen organizer arms. |
+`MenuRow` has always carried. **M2.5l** (2026-09-26) closed the oldest gap of all: **回收站**
+(ADR-0114). A delete is now a *tombstone* — `deleted_at` on the row, stamped by an ordinary
+`UpdateNote` / `UpdateTask` — so the bin is a projection of the same catalog rather than a second
+store, and the shell's drawing paths moved to core's `live_*` accessors while the bin reads
+`trashed_*`; the rev moves to `fbfdaca` and **snapshot version 2 → 3**, because a peer that cannot
+see a tombstone would read a binned row as an ordinary remote edit and resurrect it. The Android
+mirror is the rest of the milestone; the pixel sweep now has twenty organizer arms. |
 
 ## Repository shape (since ADR-0093 + ADR-0094, 2026-09-23)
 

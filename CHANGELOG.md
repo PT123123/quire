@@ -512,6 +512,36 @@ First functional release: a local, single-file-database notes workspace.
 - **No core change and no rev bump**: a list is existing `UpdateTaskList` /
   `DeleteTaskList` commands, and a reply is one `CreateNote`
 
+### Notes & tasks — 回收站 (ADR-0114, core ADR-0003)
+
+- **A delete is a stamp.** The 🗑, the row menu's 删除 and the selection bar's 删除
+  now write `deleted_at` on the row (`UpdateNote` / `UpdateTask`) instead of removing
+  it, so a delete is reversible twice over: the 撤销 bar for three seconds, and the
+  bin for as long as the user wants
+- **回收站 is a nav row on both tabs** — the bin is the *list* turned over, so what it
+  shows is the half the user is standing on, and its count is that half's
+- A binned row carries its own two verbs, drawn in the row: **恢复** (back where it
+  was) and **彻底删除** (the only write that really removes it, and the only one the
+  undo stack has to reach for). 清空回收站 in the header purges the whole half as
+  **one** Ctrl+Z
+- The **search box applies to the bin** and the tag filter does not: the 标签 column's
+  counts are the live rows', so a filter over them would narrow by a number drawn
+  from somewhere else. Picking a tag, a view or a list closes the bin
+- **`edited` does not move** when a row is binned — the content did not change, so
+  详细信息's 修改 still says when the note was last written
+- 指令 gains **`restore`**, and its `delete` now means *bin* — the same verb the 🗑 is
+  — so an AI batch can take a row out of 回收站 as easily as it put one in
+- **Core rev `4899857 → fbfdaca`**, which brings the tombstone, the `live_*` /
+  `trashed_*` accessors and **snapshot version 3**. The version is the loud half: an
+  older peer that could not see the tombstone would read a binned row as an ordinary
+  remote edit and resurrect it, so a v2 build and a v3 build refuse each other
+  instead. This shell and quire-compose ship together
+- `bin`, `tasks-bin` and their dark arms join the sweep
+- One new test (`the_bin_holds_stamped_rows_and_only_a_purge_removes_them`) and two
+  updated ones: the deferred delete's expiry now asserts a *tombstone* in the file
+  rather than a missing row, and the batched delete asserts all three rows are still
+  there, binned
+
 ### Workspace
 - Page tree: create / rename in place / duplicate (nested lists survive) /
   delete with confirmation; favorites; recent pages; last page restored

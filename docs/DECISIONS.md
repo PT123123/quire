@@ -2,6 +2,60 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0114 · 回收站 is a mode of the list, and a delete is a stamp
+
+Decision: the area has a **回收站**. A nav row on both tabs opens it; the list then
+shows the *binned* rows of whichever half the user is standing on, each with 恢复 and
+彻底删除 drawn in the row itself, and the header carries 清空回收站. The writes are
+this shell's half of core ADR-0003: the 🗑, the row menu's 删除 and the selection
+bar's 删除 now **stamp** `deleted_at` (one `UpdateNote` / `UpdateTask`) instead of
+reaching for `DeleteNote` / `DeleteTask`, and only 彻底删除 — and 清空回收站 — do
+that.
+
+**A mode, not a fourth view.** `org-bin-open` is a `UIState` flag, so it belongs to
+the window like every other "what am I looking at" (ADR-0073) and writes nothing.
+The row is drawn on both halves because the bin is the *list* turned over and not a
+place of its own: notes are binned on 笔记, tasks on 任务, and the nav row's count is
+whichever one the user is standing on.
+
+**The projections learn one question.** Every drawing path moves from `catalog.notes`
+/ `catalog.tasks` to `live_notes()` / `live_tasks()`; the bin's own projections read
+`trashed_*`. That is the whole of the shell-side cost, and it is why core grew the
+accessors: the collection is core's, so "which half of it" is core's question to
+answer (core ADR-0003).
+
+Why: both shells' own notes have named this as the missing piece since the area
+landed — "a real 回收站 needs soft delete in `quire-core` (a column, the store, the
+merge), a settings page, and restore/purge". The delete's only way back was the
+撤销 bar's three seconds, which expire; now a delete is reversible twice over and the
+second door does not.
+
+Consequences:
+
+- **One Ctrl+Z each.** Trash, restore and purge are ordinary one-row commands
+  (`UpdateNote` / `UpdateTask` / `DeleteNote`), and 清空回收站 is one `exec_all`
+  batch — so the whole bin empties and refills in one press, exactly as a batched
+  delete already did (ADR-0111).
+- **`edited` does not move.** Putting a row in the bin is not an edit of its
+  content, so its 修改 stays where it was and 详细信息 does not claim the note was
+  just written.
+- **The tag filter does not apply to the bin** — the 标签 column's counts are the
+  *live* rows', so a filter over them would narrow by a number drawn from somewhere
+  else. The **search box does**: searching a bin is a question with an answer.
+  Picking a tag, a view or a list closes the bin, for the same reason.
+- **A binned reply leaves its thread** (`org_note_replies` reads the live half) and a
+  binned task leaves its list's chip count: the count of a thing nobody can see is a
+  count that disagrees with the list.
+- 指令's `delete` now means *bin* — the same verb the 🗑 is — and a new `restore`
+  action is its mirror; the templates and the dialog's action list say so. Neither
+  restamps `edited`, for the same reason the UI's own pair does not.
+- **A core rev bump**: `4899857 → fbfdaca`, which carries the tombstone, the
+  `live_*` accessors and **snapshot version 3** — so this shell and the Compose one
+  ship together, and an older LAN peer refuses the sync instead of resurrecting what
+  was deleted.
+- **Still not here**: an automatic empty-the-bin policy, and any history — the bin
+  knows *when* a row went in, not what it used to be.
+
 ## ADR-0113 · A list is managed from its own ⋯, and a reply is written on the note's page
 
 Decision: the two writes the area was missing — managing a stored 清单 (rename /

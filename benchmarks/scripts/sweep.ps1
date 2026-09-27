@@ -75,6 +75,7 @@ $all = @(
     "notes-filter", "notes-commands", "notes-reply",
     "tasks", "tasks-detail", "tasks-list", "tasks-overdue", "tasks-board",
     "tasks-select", "tasks-list-menu", "tasks-list-color", "tasks-list-rename", "undo-bar",
+    "bin", "tasks-bin",
     "dark-notes", "dark-notes-detail", "dark-notes-info", "dark-tasks", "dark-tasks-detail",
     "dark-tasks-board", "dark-undo-bar",
     # ADR-0111: selection mode is a whole different header and a different row
@@ -87,7 +88,10 @@ $all = @(
     # ADR-0113: the list's ⋯ and its colour submenu are two more popup shapes, and
     # the reply box is a field the note page did not have — all three are shapes,
     # so each gets a scene (with the dark twins ADR-0112's two also carry).
-    "dark-notes-reply", "dark-tasks-list-menu", "dark-tasks-list-color"
+    "dark-notes-reply", "dark-tasks-list-menu", "dark-tasks-list-color",
+    # ADR-0114 / core ADR-0003: 回收站 is its own list, its own header verb and the
+    # only pair of row buttons in the area.
+    "dark-bin", "dark-tasks-bin"
 )
 $targets = if ($Scenes -eq "") { $all } else { $Scenes -split ',' }
 

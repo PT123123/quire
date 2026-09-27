@@ -1374,6 +1374,25 @@ export global UIState {
     // 清除筛选: drop the include path *and* every exclusion. Session state, so it
     // writes nothing.
     callback org-filters-cleared();
+    // ── 回收站 (SPEC §四十一, core ADR-0003) ──────────────────────────────────
+    // A *mode* of the list rather than a fourth view on one half: the row that
+    // opens it is on both tabs, and what it shows is the half the user is standing
+    // on. A row in the bin is still a row — it is stamped, not removed — so every
+    // count on this screen comes from the projections and not from the file.
+    in-out property <bool> org-bin-open: false;
+    // What each half holds, for the nav row's count; the row prints the tab's own.
+    in-out property <int> org-bin-note-count: 0;
+    in-out property <int> org-bin-task-count: 0;
+    // 全部笔记's own count, projected off the catalog: the list model holds the
+    // *bin's* rows while the bin is open, so a nav row reading it would be wrong.
+    in-out property <int> org-note-count: 0;
+    callback org-bin-toggled();
+    // 恢复 / 彻底删除 on a binned row. One pair for both halves: which kind the id
+    // names is the tab's answer, exactly as the row's own verbs already are.
+    callback org-bin-restored(int);
+    callback org-bin-purged(int);
+    // 清空回收站: every binned row of the half on screen, purged as **one** step.
+    callback org-bin-emptied();
     // ── 指令 (SPEC §四十一): a batch of AI instructions ──────────────────────
     // The dialog's own state. `org-cmd-text` is the pasted JSON and is a two-way
     // draft like every other field here; `org-cmd-tab` is which half of the area
