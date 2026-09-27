@@ -2,6 +2,75 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0116 · The palette is ActivityWatch's twelve, chosen by name; the light/dark boolean becomes an id
+
+Decision: `ui/Colors.slint` stops being a two-column table and becomes a catalog.
+Its `ThemePalette` struct and the twelve-entry `themes` array are
+`activitywatch/aw-qtui/src/theme.h`'s `kThemes[]` ported field for field — same
+ids, same names, same emoji, same hexes — and four of the entries
+(`jade`, `deepblue`, `twilight`, `crimson`) carry the vertical page ramp AW gives
+them. Every other token is *derived* from the chosen row inside
+`Colors`, in the same order and by the same rules AW's `applyThemeColors` derives
+`hover`/`pressed`/`fgSoft`/`navSel` from its own: `text-secondary` is
+`mix(fg, fgMuted, 0.55)`, `accent-soft`/`accent-text` are tints of the theme's
+accent over its own page, `success` is AW's `ok`, and so on.
+
+The selection is an **id**, not a mode. `UIState.dark: bool` becomes
+`UIState.theme: string`, `UIState.set-dark(bool)` becomes `set-theme(string)`, and
+`Theme.dark` becomes *derived* (`theme != "light"`) instead of stored — one source
+of truth, because a second one could only ever disagree with the first. `system`
+is the one id that is not a palette: `Theme.theme` resolves it against
+`Palette.color-scheme`, which is the only place this shell can ask the platform,
+and everything downstream reads a real id. Settings gets a preview grid instead of
+two light/dark cards: one `ThemeCard` per row plus 跟随系统, each painting its own
+ramp in its own ink, so the picker needs no legend.
+
+Context: this shell is a port of ActivityWatch, and the reference's *theme* is not
+one palette but a table of them with a picker (`settingsdialog.cpp`'s
+`buildThemeCombo`). Quire shipped exactly two (`Colors.slint`'s two ternaries) and
+a `Ctrl+Shift+L` that flipped between them. The user asked for the reference's
+theme, both shells, so what was missing was not a colour but the *system*: a
+catalog, a name for the choice, and a place to make it.
+
+Consequences:
+
+- **Every leaf component is untouched.** The token discipline in
+  `UI_ARCHITECTURE.md` holds: nothing outside `Colors.slint` names a colour, so
+  swapping the palette changes no other file. The only two files that still branch
+  are `Colors.slint` itself and `Theme.slint`'s `dark`, which is the design.
+- **The page is a ramp.** `Colors.page` is a `@linear-gradient(180deg, bg,
+  grad2)` brush; the nine flat themes set `grad2 == bg`, which makes the ramp a
+  no-op for them and one rule draw both kinds. It is painted by a full-window
+  `Rectangle` behind `AppShell`, and the two areas inside (`Editor`,
+  `OrganizerArea`) are transparent, so the ramp is one surface rather than one per
+  pane. **Not on `Window.background`:** that property is the renderer's clear
+  colour and silently flattens a brush to its first stop — the jade scene's whole
+  right edge came back `#0f4938` top to bottom, measured before the rectangle
+  existed, and this is the trap to remember. The title bar keeps
+  `Colors.background` — a flat `bg` — which is where AW's own glass top bar sits
+  too. Flat themes come out byte-identical to the pre-ramp build, which is the
+  evidence that the ramp touched only the four gradient entries.
+- **The visual-regression scenes are pinned by name.** `apply_scene` used
+  `set_dark`, so `dark-*` becomes `midnight` and everything else `light`: a
+  photograph of the shell has to be one specific palette, not a mode, or the
+  baseline moves when someone picks a different theme on their own machine.
+- **`dark`/`light` still resolve on read.** A library written by the previous
+  build holds those two strings in its `theme` row; `AppState::theme_setting`
+  maps `dark` to `midnight` and leaves `light` alone, so an existing database
+  opens in the theme it was left in. Nothing writes them any more.
+- **Notion's ten block swatches stay put across all twelve themes.** They are
+  *content* colours: a note must not change meaning because the chrome did, and
+  the measured ratios ADR-0023 records are the ratios the user sees. The same
+  applies to `find-hit`/`find-hit-border` and `cover-scrim`, whose comments say
+  their values are arithmetic against the *block* palette and a photo.
+- **The command palette's 切换主题 now persists.** It assigned the UIState global
+  directly and never reached `AppState`, so the choice was lost on quit; it now
+  goes through the same rule as the keystroke. That was a defect found on the way
+  here, not a new feature.
+- **`Ctrl+Shift+L` still means "the other mode"** — light↔midnight — rather than
+  walking the list. Twelve themes are picked in Settings; a keystroke that cycled
+  them would be a slot machine.
+
 ## ADR-0115 · A note card is read age-first and answers a right-click, and a note is written in a layer that sends
 
 Decision: the notes half of the area catches up with the reference app (and with

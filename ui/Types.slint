@@ -565,7 +565,10 @@ export struct BoardColumn {
 // The one place transient UI state lives. Components read/write it directly;
 // Rust reaches it through the generated global accessor.
 export global UIState {
-    in-out property <bool> dark: false;
+    // The chosen palette id from AW's theme catalog (see Colors.slint), or
+    // "system" to follow the platform's colour scheme. Rust owns the value and
+    // persists it as the `theme` settings row; `Theme.dark` is derived from it.
+    in-out property <string> theme: "midnight";
     in-out property <bool> sidebar-open: true;
 
     in-out property <[SidebarNode]> sidebar-rows;
@@ -835,7 +838,7 @@ export global UIState {
     // routed to Rust controller
     callback toggle-sidebar();
     callback toggle-theme();
-    callback set-dark(bool);
+    callback set-theme(string);
     // Whole-window zoom (Ctrl + = / Ctrl + +, Ctrl + -, Ctrl + 0). The factor
     // itself lives in Rust — persisted, and applied by handing the window a new
     // scale factor, which is the one lever Slint has for this — so the shell

@@ -430,6 +430,27 @@ struct NavHistory {
     forward: Vec<NavStop>,
 }
 
+/// The palette ids `ui/Colors.slint`'s catalog knows, plus `system` (follow the
+/// platform's colour scheme). Held here so the `theme` settings row can only
+/// ever contain a choice the shell can actually resolve; `Colors.slint`'s
+/// `index-of` is the other half of the same contract and falls back to
+/// `midnight` for anything else.
+const THEME_IDS: &[&str] = &[
+    "midnight",
+    "graphite",
+    "violet",
+    "emerald",
+    "amber",
+    "ocean",
+    "rose",
+    "light",
+    "jade",
+    "deepblue",
+    "twilight",
+    "crimson",
+    "system",
+];
+
 /// How far back Go Back reaches before it starts dropping entries.
 const NAV_MAX: usize = 50;
 
@@ -1802,10 +1823,15 @@ impl AppState {
         )
     }
 
-    /// Set the theme and persist it (settings table; key spelling matches
-    /// services/settings_store.rs `Settings::KEY_THEME`).
-    pub fn set_dark(&self, dark: bool) {
-        let value = if dark { "dark" } else { "light" };
+    /// Persist the theme choice (settings table, key `theme`). The value is an
+    /// id from the catalog in `ui/Colors.slint`, or `system`; anything else is
+    /// stored as `midnight` rather than left for the shell to trip over.
+    ///
+    /// The light/dark era's two spellings are still accepted and mapped on read
+    /// (`theme_setting`), so an existing database opens in the theme it was left
+    /// in, but nothing writes them any more.
+    pub fn set_theme(&self, id: &str) {
+        let value = if THEME_IDS.contains(&id) { id } else { "midnight" };
         self.settings
             .borrow_mut()
             .insert("theme".into(), value.into());
@@ -1857,14 +1883,18 @@ impl AppState {
         }]);
     }
 
-    pub fn dark_setting(&self) -> bool {
-        self.settings
-            .borrow()
-            .get("theme")
-            // No stored pick defaults to dark (M9 FEEDBACK: dark is the theme
-            // both platforms should open in); a stored "light" still wins.
-            .map(|v| v != "light")
-            .unwrap_or(true)
+    /// The chosen palette id (settings row `theme`). `midnight` is the default
+    /// and the fallback: it is the catalog's first entry and AW's own default,
+    /// and `Colors.slint`'s `index-of` resolves an unknown id to the same row,
+    /// so the two agree about what a bad value means.
+    pub fn theme_setting(&self) -> String {
+        match self.settings.borrow().get("theme").map(String::as_str) {
+            // legacy spellings: "dark" was the midnight-shaped theme this shell
+            // shipped before the catalog existed
+            Some("dark") => "midnight".into(),
+            Some(v) if THEME_IDS.contains(&v) => v.into(),
+            _ => "midnight".into(),
+        }
     }
 
     // ---- whole-window zoom (Ctrl + = / Ctrl + -, Ctrl + 0) ----

@@ -963,7 +963,9 @@ component OrgInput inherits Rectangle {
 }
 
 export component OrganizerArea inherits Rectangle {
-    background: Colors.background;
+    // Transparent for the same reason as the editor: the window's `Colors.page`
+    // ramp is the backdrop, so the gradient runs behind the organizer too.
+    background: transparent;
     // `horizontal-stretch` alone does **not** grow this area, and the reason is
     // worth the two lines: a `Rectangle` whose content is a layout takes its
     // `max-width` from that layout's preferred width, so the stretch factor has

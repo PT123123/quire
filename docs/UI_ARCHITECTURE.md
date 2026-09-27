@@ -116,6 +116,13 @@ direct `Ic*` components for hot paths). No component hard-codes a second
 "8px". Zero-length path segments are forbidden — the software renderer
 drops them (see `Icons.slint` comment).
 
+A colour is not chosen here either. `Colors.slint` holds ActivityWatch's
+twelve-entry catalog (`themes`), `UIState.theme` is the chosen **id**, and every
+token in the file is derived from that one row. Nothing outside `Colors.slint`
+branches on the theme except `Theme.dark`, which is itself derived from the id
+(`theme != "light"`) rather than stored — one source of truth, because a second
+one could only ever disagree with the first (ADR-0116).
+
 ## Overlay layering
 
 Two tiers, and the scrim is what separates them (`AppShell.slint`'s

@@ -573,6 +573,31 @@ First functional release: a local, single-file-database notes workspace.
   writing body + tags, the token rule's three refusals, and an empty draft writing
   nothing
 
+### Theme (ADR-0116)
+- The palette is now **ActivityWatch's twelve themes**, ported field for field from
+  `aw-qtui/src/theme.h`'s `kThemes[]` and chosen by name in Settings:
+  暗夜蓝 midnight (default) / 石墨灰 graphite / 紫罗兰 violet / 森林绿 emerald /
+  琥珀暖 amber / 海洋青 ocean / 珊瑚红 rose / 明亮 light, plus the four
+  gradient themes 翡翠绿 jade / 深空蓝 deepblue / 暮光紫 twilight / 荣艳红 crimson
+- **跟随系统** is the one choice that is not a palette: it resolves to `midnight` or
+  `light` from the platform's colour scheme, and everything downstream reads a real id
+- Settings' 外观 section is a preview grid — each card paints its own ramp in its own
+  ink, so the picker needs no legend (it replaced the two 浅色/深色 cards)
+- The four gradient themes paint a vertical ramp (`Colors.page`) on a full-window
+  rectangle behind the shell, with the editor and organizer transparent above it so
+  the ramp is one surface; the nine flat themes set `grad2 == bg`, so one rule draws
+  both kinds — and they come out byte-identical to the pre-catalog build. The ramp
+  deliberately does *not* live on `Window.background`, which is the renderer's clear
+  colour and silently flattens a brush to its first stop
+- The selection is an id, not a mode: `UIState.dark` became `UIState.theme`, and
+  `Theme.dark` is derived from it. A library written by the previous build still
+  opens in the theme it was left in — the old `dark` spelling resolves to `midnight`
+- Notion's ten block swatches, the find marker and the cover veil are unchanged and
+  shared by all twelve: they are content colours and arithmetic, not chrome
+- `Ctrl+Shift+L` still means light↔midnight rather than walking the list, and the
+  command palette's 切换主题 now persists — it used to assign the UIState global
+  directly and never reach `AppState`, so the choice was lost on quit
+
 ### Workspace
 - Page tree: create / rename in place / duplicate (nested lists survive) /
   delete with confirmation; favorites; recent pages; last page restored

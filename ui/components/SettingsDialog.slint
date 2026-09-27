@@ -7,28 +7,38 @@ import { Typography } from "../Typography.slint";
 import { Button } from "./Button.slint";
 import { UIState } from "../Types.slint";
 
-component ThemeOption inherits Rectangle {
+// One palette swatch of the theme picker (ADR: the theme catalog). The card
+// paints the theme's own page ramp and writes its name in the theme's own ink,
+// so it is a live preview rather than a label next to a colour — the same
+// reason AW's Android shell draws swatches instead of a list.
+component ThemeCard inherits Rectangle {
     in property <string> label;
+    in property <brush> preview;
+    in property <color> ink;
     in property <bool> active;
     callback clicked();
 
-    height: 30px;
-    width: 96px;
-    border-radius: Theme.radius-sm;
-    background: active ? Colors.accent-soft
-        : (ta.has-hover ? Colors.surface-hover : Colors.surface);
-    border-width: 1px;
+    width: 110px;
+    height: 62px;
+    border-radius: Theme.radius-md;
+    background: root.preview;
+    border-width: active ? 2px : 1px;
     border-color: active ? Colors.accent : Colors.border;
-    animate background { duration: Theme.duration-instant; }
+    clip: true;
 
     Text {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        height: parent.height;
         text: root.label;
         font-family: Typography.ui-font;
-        font-size: Typography.size-ui;
+        font-size: Typography.size-caption;
         font-weight: active ? Typography.weight-semibold : Typography.weight-regular;
-        color: active ? Colors.accent-text : Colors.text-secondary;
+        color: root.ink;
         horizontal-alignment: center;
         vertical-alignment: center;
+        wrap: word-wrap;
     }
     ta := TouchArea {
         mouse-cursor: MouseCursor.pointer;
@@ -142,20 +152,30 @@ export component SettingsDialog inherits PopupWindow {
                 font-weight: Typography.weight-semibold;
                 color: Colors.text-muted;
             }
-            HorizontalLayout {
+            // AW's twelve themes, preceded by the one id that is not a palette
+            // (跟随系统) (ADR: the theme catalog). Each card previews its own
+            // ramp, so the picker reads without a legend. `FlexboxLayout` wraps
+            // by default, which is what this needs: the dialog is a fixed
+            // 400 px and the number of themes is data, not a layout decision.
+            FlexboxLayout {
+                width: parent.width;
                 spacing: Theme.spacing-sm;
-                ThemeOption {
-                    label: "浅色";
-                    active: !UIState.dark;
+                ThemeCard {
+                    label: "跟随系统";
+                    preview: Colors.page;
+                    ink: Colors.text-primary;
+                    active: UIState.theme == "system";
                     clicked => {
-                        UIState.set-dark(false);
+                        UIState.set-theme("system");
                     }
                 }
-                ThemeOption {
-                    label: "深色";
-                    active: UIState.dark;
+                for t in Colors.themes : ThemeCard {
+                    label: t.emoji + " " + t.name;
+                    preview: @linear-gradient(180deg, t.bg, t.grad2);
+                    ink: t.fg;
+                    active: UIState.theme == t.id;
                     clicked => {
-                        UIState.set-dark(true);
+                        UIState.set-theme(t.id);
                     }
                 }
             }

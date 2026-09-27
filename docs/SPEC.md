@@ -490,22 +490,31 @@ spacing-xl
 
 ## 颜色
 
-默认设计至少：
+调色板是 **ActivityWatch 的十二个主题**（`aw-qtui/src/theme.h` 的 `kThemes[]`，
+逐字移植进 `ui/Colors.slint`，ADR-0116），在设置里按名字选：
 
-Light
+* 纯色八个：midnight（默认）/ graphite / violet / emerald / amber / ocean / rose / light
+* 渐变四个：jade / deepblue / twilight / crimson——`bg` 是页面上端、`grad2` 是下端，
+  页面画这条竖向渐变（`Colors.page`），九个纯色主题令 `grad2 == bg`，同一条规则
+  对两者都成立
 
-Dark
+十二个主题共用同一套语义 token：其余 `.slint` 文件只引用 token，一个颜色都不写死。
+所有 token 都由所选那行在 `ui/Colors.slint` 里**推导**（`text-secondary =
+mix(fg, fgMuted, 0.55)`、`accent-soft`/`accent-text` 是强调色在本主题自己页面上的
+淡色，等等），与 AW 的 `applyThemeColors` 同一套规则。`UIState.theme` 存的是
+**主题 id**（或 `system`，跟随系统色阶），`Theme.dark` 由它推导而不是另存一份。
 
-但不需要第一阶段支持用户自定义颜色。
+Notion 的十个块色、`find-hit` / `cover-scrim` **不随主题变**：它们是内容色与算术
+（ADR-0023、ADR-0043、ADR-0047），一条笔记的含义不该因为换了外壳配色而变。
 
-浅色模式优先：
+浅色主题（light）仍遵守：
 
 * 接近白色的主背景
 * 非纯黑文字
 * 极轻的 border
 * 低对比度 sidebar
 
-深色：
+深色主题仍遵守：
 
 * 不使用纯黑
 * 不使用大面积强对比

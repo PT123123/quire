@@ -1,18 +1,131 @@
 // Palette tokens. Every color in the app must come from here.
-// Light: near-white backgrounds, warm-neutral ink, whisper-thin borders.
-// Dark: never pure black; layered surfaces carry the hierarchy.
+//
+// The catalog is ActivityWatch's: `activitywatch/aw-qtui/src/theme.h`'s
+// `kThemes[]` table, ported name-for-name, emoji-for-emoji and
+// value-for-value, with four of its entries (emerald/jade, midnight/deepblue,
+// violet/twilight, rose/crimson) carrying the vertical page gradient AW gives
+// them. AW is the reference implementation for this shell, so the catalog is
+// copied rather than reinterpreted (see the theme ADR).
+//
+// Every other file names a *semantic* token (`Colors.text-primary`) and none
+// of them branches on the theme: the palette is chosen by name here, in one
+// place, from `Theme.theme`.
 
 import { Theme } from "Theme.slint";
 
+// One entry of AW's theme table, field-for-field with `struct Theme` in
+// `theme.h` minus the ones quire has no token for (`warn`, `tagBg`, `tagFg`).
+export struct ThemePalette {
+    id: string,
+    name: string,
+    emoji: string,
+    light: bool,
+    bg: color,
+    bg-elev: color,
+    bg-elev2: color,
+    border: color,
+    fg: color,
+    fg-muted: color,
+    accent: color,
+    danger: color,
+    ok: color,
+    // The second stop of the page gradient. Equal to `bg` for the nine flat
+    // themes, which is what makes one `@linear-gradient` work for both kinds.
+    grad2: color,
+}
+
 export global Colors {
+    // AW's twelve themes, in `kThemes[]` order. `midnight` is AW's default and
+    // quire's too (ADR: the theme catalog).
+    in-out property <[ThemePalette]> themes: [
+        { id: "midnight", name: "暗夜蓝", emoji: "🌙", light: false,
+          bg: #1a1d21, bg-elev: #22262c, bg-elev2: #2a2f37, border: #343a44,
+          fg: #e6e6e6, fg-muted: #9aa4b0, accent: #4c8bf5, danger: #e5534b,
+          ok: #3fb950, grad2: #1a1d21 },
+        { id: "graphite", name: "石墨灰", emoji: "🪨", light: false,
+          bg: #161b22, bg-elev: #1f242c, bg-elev2: #282e36, border: #363d46,
+          fg: #e6edf3, fg-muted: #8b949e, accent: #2f81f7, danger: #f85149,
+          ok: #3fb950, grad2: #161b22 },
+        { id: "violet", name: "紫罗兰", emoji: "💜", light: false,
+          bg: #17151f, bg-elev: #211e2d, bg-elev2: #2b2738, border: #3a3550,
+          fg: #e8e6f0, fg-muted: #9d97b5, accent: #a78bfa, danger: #f87171,
+          ok: #34d399, grad2: #17151f },
+        { id: "emerald", name: "森林绿", emoji: "🌲", light: false,
+          bg: #0f1a16, bg-elev: #16241e, bg-elev2: #1d2f27, border: #2a4238,
+          fg: #e2efe7, fg-muted: #93b3a4, accent: #34d399, danger: #f87171,
+          ok: #22c55e, grad2: #0f1a16 },
+        { id: "amber", name: "琥珀暖", emoji: "🔥", light: false,
+          bg: #1c1712, bg-elev: #241d16, bg-elev2: #2e251b, border: #45392a,
+          fg: #f0e6d6, fg-muted: #b8a68a, accent: #f59e0b, danger: #f87171,
+          ok: #34d399, grad2: #1c1712 },
+        { id: "ocean", name: "海洋青", emoji: "🌊", light: false,
+          bg: #0b1a22, bg-elev: #10222c, bg-elev2: #16303c, border: #20404f,
+          fg: #d8eef7, fg-muted: #86b3c4, accent: #22d3ee, danger: #fb7185,
+          ok: #2dd4bf, grad2: #0b1a22 },
+        { id: "rose", name: "珊瑚红", emoji: "🌹", light: false,
+          bg: #1a1216, bg-elev: #221820, bg-elev2: #2c2029, border: #43313a,
+          fg: #f0e4e9, fg-muted: #bb9fa9, accent: #fb7185, danger: #f43f5e,
+          ok: #34d399, grad2: #1a1216 },
+        { id: "light", name: "明亮", emoji: "☀️", light: true,
+          bg: #f5f6f8, bg-elev: #ffffff, bg-elev2: #eceff3, border: #d9dee5,
+          fg: #24292f, fg-muted: #6b7280, accent: #2f6fed, danger: #d13438,
+          ok: #1a7f37, grad2: #f5f6f8 },
+        // ---- the four gradient themes: `bg` is the top stop, `grad2` the
+        // bottom one; the page paints the ramp and the panels sit on it ----
+        { id: "jade", name: "翡翠绿", emoji: "💎", light: false,
+          bg: #0f4938, bg-elev: #143f35, bg-elev2: #1b4f43, border: #2a4f46,
+          fg: #e6eef0, fg-muted: #8fa8a6, accent: #34d399, danger: #f87171,
+          ok: #22c55e, grad2: #0a2442 },
+        { id: "deepblue", name: "深空蓝", emoji: "🌌", light: false,
+          bg: #0d2a49, bg-elev: #112f4e, bg-elev2: #173b5f, border: #1e3a57,
+          fg: #e3ecf5, fg-muted: #8aa3bd, accent: #38bdf8, danger: #f87171,
+          ok: #34d399, grad2: #060f1e },
+        { id: "twilight", name: "暮光紫", emoji: "🌆", light: false,
+          bg: #2b1d45, bg-elev: #312250, bg-elev2: #3a2a63, border: #413566,
+          fg: #ece8f5, fg-muted: #a395c4, accent: #c084fc, danger: #f87171,
+          ok: #34d399, grad2: #120a24 },
+        { id: "crimson", name: "荣艳红", emoji: "🌺", light: false,
+          bg: #471524, bg-elev: #4c1a2a, bg-elev2: #5c2235, border: #5c2e3e,
+          fg: #f5e8ec, fg-muted: #c09aa6, accent: #f87171, danger: #e11d48,
+          ok: #34d399, grad2: #1c0b14 },
+    ];
+
+    // The selected theme's row. An unknown id (a settings row written by a
+    // newer build, or a hand-edited database) falls back to `midnight` rather
+    // than painting nothing.
+    public pure function index-of(id: string) -> int {
+        if (id == "graphite") { return 1; }
+        if (id == "violet") { return 2; }
+        if (id == "emerald") { return 3; }
+        if (id == "amber") { return 4; }
+        if (id == "ocean") { return 5; }
+        if (id == "rose") { return 6; }
+        if (id == "light") { return 7; }
+        if (id == "jade") { return 8; }
+        if (id == "deepblue") { return 9; }
+        if (id == "twilight") { return 10; }
+        if (id == "crimson") { return 11; }
+        return 0;
+    }
+
+    out property <int> theme-index: Colors.index-of(Theme.theme);
+    out property <ThemePalette> p: Colors.themes[Colors.theme-index];
+
     // ---- backgrounds & surfaces ----
-    out property <color> background: Theme.dark ? #1a1a1e : #ffffff;
-    out property <color> sidebar: Theme.dark ? #16161a : #f6f6f4;
-    out property <color> surface: Theme.dark ? #1f1f24 : #ffffff;
-    out property <color> surface-hover: Theme.dark ? #26262c : #efefec;
-    out property <color> surface-selected: Theme.dark ? #2d2d34 : #e8e8e4;
-    out property <color> surface-overlay: Theme.dark ? #212127 : #ffffff;
-    out property <color> code-background: Theme.dark ? #101014 : #f6f6f4;
+    out property <color> background: Colors.p.bg;
+    // The page ramp. Nine of the twelve themes are flat (`grad2 == bg`), so the
+    // ramp is a no-op for them and the same rule draws both kinds. Painted on
+    // the window root only; the areas above it are transparent so the ramp is
+    // one surface instead of one per pane.
+    out property <brush> page: @linear-gradient(180deg, Colors.p.bg, Colors.p.grad2);
+    out property <color> sidebar: Colors.p.bg-elev;
+    out property <color> surface: Colors.p.bg-elev;
+    out property <color> surface-hover: Colors.p.bg-elev2;
+    out property <color> surface-selected: Colors.p.bg-elev2.mix(Colors.p.accent, 0.22);
+    out property <color> surface-overlay: Colors.p.bg-elev2;
+    out property <color> code-background: Theme.dark
+        ? Colors.p.bg.mix(#000000, 0.35)
+        : Colors.p.bg.mix(#000000, 0.03);
 
     // ---- page cover (SPEC §三十八 "图标与封面", ADR-0047) ----
     // The veil the title sits on. Its job is arithmetic, not taste: §二十一's
@@ -23,53 +136,62 @@ export global Colors {
     // relative luminance of 0.1195. That is the number `contrast_probe.ps1`
     // reads off the rendered `page-cover-white` scene rather than the number
     // quoted here, and every darker picture scores better. The alpha floor for
-    // 4.5:1 alone is 0.535, so this keeps headroom for the theme's #e7e7ea-tier
-    // ink too. It is the same value in both themes because the thing it has to
-    // beat is the picture, not the palette.
+    // 4.5:1 alone is 0.535, so this keeps headroom for the theme's ink tier
+    // too. It is the same value in every theme because the thing it has to beat
+    // is the picture, not the palette.
     out property <color> cover-scrim: #0000009e;
 
     // ---- text ----
-    out property <color> text-primary: Theme.dark ? #e7e7ea : #1f2328;
-    out property <color> text-secondary: Theme.dark ? #b4b4bb : #5f6569;
-    // The third tier is the one that carries the palette's hint rows, block
-    // handles and footers, and in light it used to sit at 2.71:1 on white --
-    // the dimmest text in a light UI, which is a legibility floor, not a style.
-    // #75787d is 4.43 on white / 4.10 on the sidebar, still clearly lighter
-    // than secondary (5.91), so the three tiers survive. Dark was never the
-    // problem: 4.25 / 4.02 on its surfaces.
-    out property <color> text-muted: Theme.dark ? #7d7d86 : #75787d;
-    out property <color> text-on-accent: Theme.dark ? #ffffff : #ffffff;
+    // AW's two text tiers plus the derived soft tier between them
+    // (`applyThemeColors`'s `fgSoft`): nothing here is a new colour.
+    out property <color> text-primary: Colors.p.fg;
+    out property <color> text-secondary: Colors.p.fg.mix(Colors.p.fg-muted, 0.55);
+    out property <color> text-muted: Colors.p.fg-muted;
+    out property <color> text-on-accent: #ffffff;
 
     // ---- lines & fills ----
-    out property <color> border: Theme.dark ? #2b2b31 : #ebebea;
-    out property <color> border-strong: Theme.dark ? #3b3b43 : #d9d9d6;
-    out property <color> divider: Theme.dark ? #34343b : #e2e2df;
+    out property <color> border: Colors.p.border;
+    out property <color> border-strong: Colors.p.border.mix(Colors.p.fg, 0.14);
+    out property <color> divider: Colors.p.border;
 
     // ---- semantic ----
-    out property <color> accent: Theme.dark ? #8f87f0 : #5b54d6;
-    out property <color> accent-soft: Theme.dark ? #2a2945 : #eeeeff;
-    out property <color> accent-text: Theme.dark ? #a8a2f5 : #4a44b0;
-    out property <color> danger: Theme.dark ? #f0776c : #d9412e;
-    out property <color> success: Theme.dark ? #4cc38a : #1d9e6f;
-    out property <color> selection: Theme.dark ? #3d4a86 : #b5d3f7;
+    // `accent-soft`/`accent-text` are tints of the theme's own accent over its
+    // own page rather than AW's separate `tagBg`/`tagFg` pair: quire spends
+    // them on callout bodies and mention chips, where the text on top is
+    // `text-primary`, not a tag's ink. Deriving from `bg` keeps every theme's
+    // primary tier legible on the tint by construction.
+    out property <color> accent: Colors.p.accent;
+    out property <color> accent-soft: Colors.p.accent.mix(Colors.p.bg, 0.84);
+    out property <color> accent-text: Theme.dark
+        ? Colors.p.accent.mix(#ffffff, 0.30)
+        : Colors.p.accent.mix(#000000, 0.25);
+    out property <color> danger: Colors.p.danger;
+    out property <color> success: Colors.p.ok;
+    out property <color> selection: Colors.p.accent.mix(Colors.p.bg, 0.50);
 
     // ---- in-page find (SPEC §二十, A4 D7) ----
     // A match is painted as a cell around the matched text, so the token has
     // two jobs: read against the page, and leave the block's own text colour
     // alive. Only the border does the first. A fill bright enough to reach 3:1
-    // on its own (an amber at #ffd75e, 1.39 here — it takes 3.0+ to reach it,
+    // on its own (an amber at #ffd75e, 1.39 here -- it takes 3.0+ to reach it,
     // which is a solid yellow) drags yellow text to 2.85 and orange to 3.03,
     // so the fill stays pale and says only "this cell": #ffe9a8 keeps primary
     // text at 13.14 (from 15.80) and its worst coloured pair, yellow, at 3.29
-    // (from 3.95 — the floor ADR-0023 already accepted). Dark mirrors it: fill
+    // (from 3.95 -- the floor ADR-0023 already accepted). Dark mirrors it: fill
     // #3d3413 keeps primary at 10.02 (from 14.06) and worst pair purple at
-    // 3.83 (from 5.37). The borders are #bd6408 and #a87718 — 4.21 and 4.39 on
-    // their page, 3.50 and 3.13 on the fill they sit in — so the marker itself
+    // 3.83 (from 5.37). The borders are #bd6408 and #a87718 -- 4.21 and 4.39 on
+    // their page, 3.50 and 3.13 on the fill they sit in -- so the marker itself
     // clears 3:1 both ways.
+    //
+    // The two pairs stay put across all twelve themes: the arithmetic above is
+    // about the *block* palette (notion's ten swatches, unchanged per theme),
+    // which is the same in every one of them.
     out property <color> find-hit: Theme.dark ? #3d3413 : #ffe9a8;
     out property <color> find-hit-border: Theme.dark ? #a87718 : #bd6408;
 
     // ---- interactive states ----
+    // Whisper-thin washes, so they stay literal per mode rather than tinted by
+    // the theme: a 4% wash of the ink is 4% of the ink whatever the accent is.
     out property <color> hover-fill: Theme.dark ? #ffffff14 : #0000000a;
     out property <color> pressed-fill: Theme.dark ? #ffffff20 : #00000014;
     out property <color> focus-ring: Colors.accent;
@@ -79,11 +201,13 @@ export global Colors {
     out property <color> scrim: #00000059;
 
     // ---- callout block ----
-    out property <color> callout-background: Theme.dark ? #2a2945 : #eeeeff;
+    out property <color> callout-background: Colors.accent-soft;
 
     // ---- block color palette (Notion-style; ADR-0023) ----
     // Slot 0 is the theme default; 1..9 are gray..red. Values approximate
-    // Notion's light/dark swatches so exported text stays readable.
+    // Notion's light/dark swatches so exported text stays readable. The ten
+    // swatches are notion's, not AW's, and are shared by every theme: they are
+    // content colours, and a note must not change meaning when the chrome does.
 
     // text colors: pure function, resolved per row
     //
@@ -93,7 +217,7 @@ export global Colors {
     // hardest row to read. (The A4 sweep named "green-on-olive and red-on-black"
     // as the weakest pairs by eye; they measure 3.86 and 4.72, so that finding
     // is retracted and these two are the real ones.) They now read 3.61 and 3.56
-    // on their tint, 4.21 and 3.95 on a plain background — and stop there,
+    // on their tint, 4.21 and 3.95 on a plain background -- and stop there,
     // because a darker orange is no longer orange. Every other slot is at or
     // above 3.71 in light and 4.72 in dark, and dark is unchanged.
     public pure function block-text(slot: int) -> color {
@@ -111,7 +235,7 @@ export global Colors {
 
     // code highlight (SPEC §三十七 批次 C): the colour of one layer of a code
     // block, keyed by core::highlight::Kind. Notion's own code colours are a
-    // second palette, and this app already has one — the block swatches are
+    // second palette, and this app already has one -- the block swatches are
     // tuned for the same two backgrounds, so a keyword here is a purple block
     // there. 0 is the block's own colour and never comes through here: that
     // layer is the row's `code-text`, which paints `block-text-color`.

@@ -2,11 +2,24 @@
 // Colors and Typography live in their own files and read `Theme.dark`.
 
 import { UIState } from "Types.slint";
+import { Palette } from "std-widgets.slint";
 
 export global Theme {
-    // Light is the default; dark mode is a first-class citizen but not forced.
-    // The single writable source is UIState.dark (owned by Rust).
-    out property <bool> dark: UIState.dark;
+    // The chosen palette id (AW's theme catalog; see Colors.slint), straight
+    // from UIState -- which Rust owns and persists as the `theme` settings row.
+    //
+    // "system" is the one id that is not a palette: it is resolved here against
+    // the platform's colour scheme, which is the only place this shell can ask
+    // for it. Everything downstream -- including the picker -- reads a real id.
+    out property <string> theme: UIState.theme == "system"
+        ? (Palette.color-scheme == ColorScheme.dark ? "midnight" : "light")
+        : (UIState.theme == "" ? "midnight" : UIState.theme);
+
+    // The one mode flag the rest of the shell branches on. Derived, never
+    // stored: `light` is the only light palette in the catalog, so asking the
+    // resolved id is the whole question, and a second source of truth could
+    // only ever disagree with the first.
+    out property <bool> dark: Theme.theme != "light";
 
     // ---- spacing scale (the only allowed step ladder) ----
     out property <length> spacing-xxs: 2px;

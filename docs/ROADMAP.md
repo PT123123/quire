@@ -46,7 +46,18 @@ see a tombstone would read a binned row as an ordinary remote edit and resurrect
 shared context menu, 新建笔记 is a floating ＋ whose capture layer writes nothing until its floating
 ➤ is pressed, and a draft's `#标签` become the note's tags under the Android shell's own token rule,
 copied word for word so one sentence files the same way on either shell. The Android mirror is the
-rest of the milestone; the pixel sweep now has twenty-three organizer arms. |
+rest of the milestone; the pixel sweep now has twenty-three organizer arms. **M2.5n** (2026-09-27)
+is the milestone's theme slice (ADR-0116): the palette stops being a light/dark pair and becomes
+ActivityWatch's twelve-entry catalog (`aw-qtui/src/theme.h`'s `kThemes[]`, ported field for field),
+selected by **id** — `UIState.dark: bool` becomes `UIState.theme: string`, `Theme.dark` is derived
+from it, and both shells read the same `theme` row out of the same `quire.db`. Four entries carry AW's
+vertical page ramp, painted once on a full-window rectangle behind the shell — not on
+`Window.background`, which flattens a brush to its first stop — with the editor and organizer
+transparent above it, and the default becomes AW's `midnight`, so the shell no longer opens
+with the purple accent. Settings gets
+a preview grid instead of two cards, the visual-regression scenes are pinned by name
+(`dark-*` → midnight, everything else → light), and the command palette's 切换主题 now persists
+(it never reached `AppState` before). |
 
 ## Repository shape (since ADR-0093 + ADR-0094, 2026-09-23)
 

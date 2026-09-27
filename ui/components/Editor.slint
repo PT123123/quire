@@ -213,7 +213,9 @@ export component Editor inherits Rectangle {
             Theme.spacing-xl,
             (root.width - Theme.editor-max-width) / 2);
 
-    background: Colors.background;
+    // Transparent: the window's own `Colors.page` ramp is the document's
+    // background, so a gradient theme is continuous across the chrome.
+    background: transparent;
 
     // The editor's own height is the viewport the database window is computed
     // from (SPEC §三十九): every database on the page sees the same viewport,

@@ -3770,3 +3770,51 @@ md5 的链条也对得上：`notes-select` 在 m25i 与 m25k 上**同一枚 hash
 **未验证（诚实）**：① 真手点一遍 FAB → 撰写层 → ➤ 建出一条带 `#标签` 的笔记，以及右键卡片、悬停显出 `⋯`、Escape
 关层的完整手感（截不到键盘与指针）；② 中英文 IME 在那个多行框里的行为；③ 移动端镜像（compose 壳已有这三样东西，
 这一刀是桌面端补齐）。**core 一行没动、rev 没 bump。**
+
+## M2.5n · AW 的主题目录（十二个主题）(ADR-0116)
+
+**交付**：调色板从「一个 light/dark 布尔」变成 **AW 的主题目录**。`ui/Colors.slint` 的
+`ThemePalette` + 十二行 `themes` 是 `aw-qtui/src/theme.h` 的 `kThemes[]` 逐字段移植（id、名字、
+emoji、十六进制值全同），其中 `jade` / `deepblue` / `twilight` / `crimson` 四行带 AW 的竖向页面渐变。
+其余 token 全部**由所选那行在 `Colors` 里推导**，规则与 AW 的 `applyThemeColors` 同一套：
+`text-secondary = mix(fg, fgMuted, 0.55)`、`accent-soft`/`accent-text` 是强调色在本主题自己页面上的淡色、
+`success = ok`、`border-strong = mix(border, fg, 0.14)`。
+
+**选择是一个 id，不是一个模式**：`UIState.dark: bool` → `UIState.theme: string`，`set-dark(bool)` →
+`set-theme(string)`，`Theme.dark` 改为**推导**（`theme != "light"`）——一份真值，第二份只会跟它吵架。
+`system` 是唯一不是调色板的 id，由 `Theme.theme` 对 `Palette.color-scheme` 求值（这是本壳唯一能问到
+平台的地方），下游读到的永远是真实 id。`AppState::theme_setting` 读旧值：`dark` → `midnight`、`light`
+原样，所以老库仍开在它上次的配色里；本机没测过 `Palette.color-scheme` 在 Windows 上的回报时机，只测了
+默认分支（`system` → `midnight`）。
+
+**页面是一条渐变**：`Colors.page` 是 `@linear-gradient(180deg, bg, grad2)` 画笔，九个纯色主题令
+`grad2 == bg`（渐变退化成纯色），一条规则画两种主题。它画在 `AppShell` 底下的一块**满窗 Rectangle**
+上，`Editor`、`OrganizerArea` 两层改为透明，因此渐变是一整块而不是每个 pane 各起一次；标题栏保留
+`Colors.background`（就是纯 `bg`），AW 自己的玻璃标题栏也落在同一处。
+
+**这里踩过一个坑，量出来的**：最初把渐变放在 `Window.background` 上，`--scene` 渲染出来整条右边缘
+从上到下都是 `#0f4938`——`Window.background` 是渲染器的清屏色，**画笔会被悄悄压成第一个色标**，
+渐变根本不出现。改成显式 Rectangle 后同一个场景量到 `y45=#0e4638 → y795=#0a2441`，正是 jade 的
+`#0f4938 → #0a2442`。九个纯色主题的渲染结果与改前**逐字节相同**（`notes` = `E1141FE1`、
+`settings` = `04C3A388`），这也证明这一刀只动了四个渐变主题。
+
+**设置里的选择器**：`SettingsDialog` 的两张 浅色/深色 卡片换成 `FlexboxLayout` 里的
+`ThemeCard` 网格——每张卡画自己的渐变、用自己的 ink 写自己的名字，所以不需要图例；第一张是
+跟随系统，用当前解析出的那套配色预览。
+
+**场景按名字钉死**：`apply_scene` 原本靠 `set_dark`，现在 `dark-*` → `midnight`、其余 → `light`。
+一张壳的照片必须是一个具体配色，否则别人的机器换了个主题，基线就跟着动。
+
+**顺手修掉的既有缺陷**：命令面板的 `切换主题` 原本直接改 UIState 全局、从不到 `AppState`，退出即丢；
+现在与快捷键走同一条规则并落盘。
+
+**未验证（诚实）**：① `Palette.color-scheme` 在 Windows 上的实际回报（跟随系统是否真的跟随浅色系统，
+本机截不到系统主题切换）；② 十二套配色里 `callout` / `mention` 这类「accent 淡底 + 主文字」的组合只在
+推导规则上保证可读，没有逐主题跑 `contrast_probe.ps1`；③ 整窗观感——只把 **jade** 一套接上渲染器量过色
+（`edit` / `notes` 两个场景，见上），另外三套渐变主题和其余八个纯色主题没有逐张看过，也没有进
+`sweep.ps1` 的常驻场景表（`apply_scene` 只钉 midnight / light 两套，所以全量 sweep 只会拍这两套）。
+
+**验证**：`cargo check --all-targets` 干净；`cargo test --workspace` 全绿；`--features software` 的
+`quire-shot` 渲染 `edit` / `notes` / `settings` / `dark-tasks`，渐变与两套纯色主题都逐像素量过。
+**core 一行没动、rev 没 bump。**
+

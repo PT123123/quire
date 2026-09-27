@@ -471,7 +471,7 @@ pub fn bind(ui: &AppWindow, state: &Rc<AppState>) {
     g.set_page_title(title.into());
     g.set_page_breadcrumb(crumb.into());
     g.set_renderer_name(renderer_name().into());
-    g.set_dark(state.dark_setting());
+    g.set_theme(state.theme_setting().into());
     g.set_lan_sharing(state.setting_flag("lan.share"));
     g.set_sidebar_open(!state.setting_flag("sidebar.closed"));
     // settings storage row (M8): the database folder, hidden for a
@@ -585,20 +585,27 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         let gw = gw.clone();
         let s = state.clone();
         ui.global::<UIState>().on_toggle_theme(move || {
-            let g = gw.upgrade().unwrap();
-            let dark = !g.get_dark();
-            g.set_dark(dark);
-            s.set_dark(dark);
+            // Ctrl+Shift+L still means "the other mode", not "the next catalog
+            // entry": the twelve themes are picked in Settings, and a keystroke
+            // that walked the list would be a slot machine. From any light
+            // palette to midnight, from any dark one (or 跟随系统) to light.
+            let next = if gw.upgrade().unwrap().get_theme() == "light" {
+                "midnight"
+            } else {
+                "light"
+            };
+            gw.upgrade().unwrap().set_theme(next.into());
+            s.set_theme(next);
         });
     }
 
     {
         let gw = gw.clone();
         let s = state.clone();
-        ui.global::<UIState>().on_set_dark(move |dark| {
+        ui.global::<UIState>().on_set_theme(move |id| {
             let g = gw.upgrade().unwrap();
-            g.set_dark(dark);
-            s.set_dark(dark);
+            g.set_theme(id.clone());
+            s.set_theme(id.as_str());
         });
     }
 
@@ -1535,7 +1542,14 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                     g.set_search_open(true);
                 }
                 PaletteAction::ToggleSidebar => g.set_sidebar_open(!g.get_sidebar_open()),
-                PaletteAction::ToggleTheme => g.set_dark(!g.get_dark()),
+                PaletteAction::ToggleTheme => {
+                    // The keystroke's twin (same rule as `on_toggle_theme`) —
+                    // and it persists, which the old global-only assignment
+                    // here did not: a palette toggle was lost on quit.
+                    let next = if g.get_theme() == "light" { "midnight" } else { "light" };
+                    g.set_theme(next.into());
+                    s.set_theme(next);
+                }
                 PaletteAction::Settings => g.set_settings_open(true),
                 PaletteAction::RenamePage => {
                     g.set_renaming_id(g.get_sidebar_selected_id());
@@ -7400,22 +7414,25 @@ fn seed_versions(state: &Rc<AppState>, g: &UIState<'_>, page: i32) -> Vec<(i64, 
 /// **The scene owns the theme.** A scene called `dark-*` is dark and every other
 /// scene is light, whatever the machine happens to have stored: scenes are
 /// photographs of the shell, and a photograph whose palette depends on a settings
-/// row is one that cannot be compared with last week's. Before this split the
-/// `dark-*` arms leaned on `set_dark(true)` alone, which was a no-op 鈥?a session
-/// with no `theme` row already opens dark (`AppState::dark_setting`) 鈥?so all
+/// row is one that cannot be compared with last week's. The two arms name a
+/// palette outright (`midnight` / `light`) rather than a mode, because the
+/// catalog has twelve of them and a scene has to be one specific photograph.
+/// Before this split the `dark-*` arms leaned on a bare "make it dark" call,
+/// which was a no-op — a session with no `theme` row already opens dark — so all
 /// forty-two dark arms came out byte-identical to their light twins, and a light
 /// scene was only light by accident.
 ///
 /// The body is separate so a `dark-*` arm can render its base scene *without*
 /// re-deciding the theme.
 pub fn apply_scene(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
-    ui.global::<UIState>().set_dark(scene.starts_with("dark"));
+    ui.global::<UIState>()
+        .set_theme(if scene.starts_with("dark") { "midnight".into() } else { "light".into() });
     apply_scene_body(ui, state, scene);
 }
 fn apply_scene_body(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
     let g = ui.global::<UIState>();
     match scene {
-        "dark" => g.set_dark(true),
+        "dark" => g.set_theme("midnight".into()),
         // SPEC §四十一: the organizer's scenes. They plant their own rows (the
         // area has no file to read from in a headless session and no fixture is
         // baked into `AppState::new` — a user's own notes are not sample content),
@@ -7729,11 +7746,11 @@ fn apply_scene_body(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             apply_scene_body(ui, state, "code-hl");
         }
         "dark-link" => {
-            g.set_dark(true);
+            g.set_theme("midnight".into());
             apply_scene_overlay(ui, state, "link-dlg");
         }
         "dark-block-menu" => {
-            g.set_dark(true);
+            g.set_theme("midnight".into());
             apply_scene_overlay(ui, state, "block-menu");
         }
         "dark-block-colors" => {
@@ -7746,7 +7763,7 @@ fn apply_scene_body(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             apply_scene_body(ui, state, "synced-source-gone");
         }
         "dark-move-to-tall" => {
-            g.set_dark(true);
+            g.set_theme("midnight".into());
             apply_scene_overlay(ui, state, "move-to-tall");
         }
         "dark-title-edit" => {

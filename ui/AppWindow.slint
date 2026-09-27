@@ -523,6 +523,12 @@ export component AppWindow inherits Window {
     preferred-height: 800px;
     min-width: 940px;
     min-height: 600px;
+    // A `Window`'s own background is the renderer's clear colour, so a *brush*
+    // here is silently flattened to its first stop: the four gradient themes
+    // painted a plain `bg` until this was moved onto a real Rectangle below
+    // (measured, not assumed — the jade scene's whole right edge came back
+    // #0f4938 top to bottom). `Colors.background` is the flat colour this shell
+    // opens with, and `ramp` paints the gradient over it.
     background: Colors.background;
 
     // Frameless: TopBar provides the move area and window controls.
@@ -915,6 +921,22 @@ export component AppWindow inherits Window {
                 UIState.nav-forward-requested();
             }
         }
+
+        // The page ramp, painted behind everything (`Colors.page`): the four
+        // gradient themes run `bg` into `grad2` here, and the nine flat ones
+        // hand back a ramp whose stops are equal. It is one rectangle for the
+        // whole window rather than one per pane, which is what makes the ramp
+        // continuous; `AppShell` above it, and the editor and organizer inside
+        // it, draw no fill of their own.
+        ramp := Rectangle {
+            x: 0;
+            y: 0;
+            width: parent.width;
+            height: parent.height;
+            background: Colors.page;
+        }
+        // (`ramp` is named so the comment above has something to point at; it is
+        // never referenced.)
 
         AppShell {
             minimize-requested => {
