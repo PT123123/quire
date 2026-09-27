@@ -1577,6 +1577,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                 PaletteAction::ExportMarkdown => export_current_page(&g, &s),
                 PaletteAction::ImportMarkdown => import_markdown_dialog(&g, &s),
                 PaletteAction::CopyMarkdown => copy_current_page_markdown(&g, &s),
+                PaletteAction::OpenHtml => open_html_in_browser(&g),
                 PaletteAction::NavigateBack => navigate(&g, &s, false),
                 PaletteAction::NavigateForward => navigate(&g, &s, true),
                 PaletteAction::OpenOrganizer(tab) => {
@@ -6673,6 +6674,35 @@ fn export_current_page(g: &UIState<'_>, state: &Rc<AppState>) {
         }
     }
     let _ = g;
+}
+
+/// Open a local `.html` file in the system browser (ADR-0119).
+///
+/// HTML is not a content format in this app: there is no HTML block, no importer
+/// and no renderer, and §三十三's ban on a WebView rules out the one rendering
+/// would need. The browser is therefore the only door, and this is the explicit
+/// way to it — pick the file, hand its path to the shell, and let the registered
+/// browser draw it. `open_with_default` is the same `ShellExecuteW` the
+/// attachment blocks already use, so a path never reaches a command line the way
+/// `cmd /C start` would put it there.
+fn open_html_in_browser(g: &UIState<'_>) {
+    let Some(path) = rfd::FileDialog::new()
+        .set_title("在浏览器中打开 HTML")
+        .add_filter("HTML", &["html", "htm"])
+        .pick_file()
+    else {
+        return;
+    };
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.display().to_string());
+    let notice = if crate::platform::open_with_default(&path) {
+        format!("已在浏览器中打开 {name}。")
+    } else {
+        format!("无法在浏览器中打开 {name}。")
+    };
+    g.set_db_notice(notice.into());
 }
 
 /// Import a .md file as a new page via the native open dialog.

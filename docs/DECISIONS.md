@@ -2,6 +2,70 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0119 · HTML is not a content format; the system browser is the only door
+
+Decision: HTML stays **out** of the document model. No `BlockKind::Html`, no
+HTML importer or exporter in `quire-core`, no HTML renderer, no `CF_HTML`
+clipboard read — the block+mark AST (25 kinds, 8 marks, byte-offset spans) stays
+the one content format and Markdown stays the one interchange channel (§二十六).
+The single door HTML gets is the **system browser**, and it is now explicit:
+
+- **Desktop.** A new palette command, 在浏览器中打开 HTML… (`CMD_OPEN_HTML`, the
+  页面 section), picks a local `.html` / `.htm` file and hands its path to
+  `platform::open_with_default` — the same `ShellExecuteW` the attachment blocks
+  already use — so the registered browser draws it. Nothing is fetched, parsed or
+  painted in-app, and the file does **not** become a page.
+- **Android** (quire-compose, its ADR-0023). The matching OS-open path lands:
+  `QuireViewModel.openUrl` over `Intent.ACTION_VIEW`, behind a mirrored
+  http/https/mailto allow-list, with the embed card as its first caller.
+
+Deliberately **not** built, and left in §二十六's 后续, unstarted: an HTML import
+channel (parse HTML → blocks), an HTML→blocks paste, and export-to-HTML.
+
+Context: the user asked whether the app supports HTML and whether "HTML 是一等公民",
+then — having heard it does not — weighed *"让 HTML 成为一等公民要做啥？还是说我让外部的
+浏览器会更好一点。我在考虑开销，对于代码的复杂度这些"*. Three readings of
+"first-class" turned out to differ by roughly a hundredfold:
+
+- **A content channel** (import/export like Markdown): the template to mirror is
+  `import_service.rs` 785 + `export_service.rs` 898 ≈ 1680 LOC of hand-written
+  parser/serializer, plus `markdown_test.rs`'s 1464 LOC / 70 tests, plus ~14 shell
+  call sites. An HTML importer is *harder* than the Markdown one (the Markdown
+  reader is line-oriented with ~8 block arms and no `<` branch at all; HTML is a
+  nested tree needing attribute, void-element, entity and error-recovery handling),
+  and the mapping is lossy both ways: only `p/h1-3/ul/ol/blockquote/pre/a/strong/em/hr/img`
+  survive, and everything else collapses to paragraph text.
+- **A rendered block** (store HTML, draw it inline): not possible without building
+  a browser engine. The app has no CSS or layout engine of any kind, and the
+  reference costs are small jobs done by hand — LaTeX→Unicode is `math.rs`'s 646
+  LOC, the code lexer is `highlight.rs`'s 1005 LOC. Arbitrary HTML/CSS is two
+  orders of magnitude beyond either, and the cheap substitute — a WebView — is
+  exactly what §二 and §三十三 forbid, on top of rule 2's low-memory/low-CPU budget.
+- **The document format**: a rewrite.
+
+So the only honest "first-class" collapses into *either* the importer *or* a
+WebView; there is no middle. The browser is the door that costs nothing and keeps
+every existing promise.
+
+Consequences:
+
+- **§三十三 stands untouched.** No WebView, no HTML/CSS UI, no JS runtime enters
+  the tree — the command only hands a path to the shell.
+- **It is a viewer hand-off, not an import.** A `.html` file opened this way never
+  becomes a page and nothing is copied into the library. The `.md` file association
+  (`--open`) is unchanged: that one still imports.
+- **`ShellExecuteW`, not `cmd /C start`.** The picked path goes through
+  `open_with_default`, so it never reaches a command line the way the link path's
+  inline `cmd /C start "" <url>` would put it there. The link path keeps its own
+  `is_openable` gate for the same reason.
+- **The limitations this leaves, named.** No HTML import, no `CF_HTML` paste —
+  §二十七 still reads "HTML/RTF 等其它富格式仍未做" — and no export to HTML. A user
+  who wants HTML *in* a document keeps pasting its text as Markdown or plain text.
+- **On Android the path's only caller is the embed card.** Inline link marks stay
+  inert: Compose 1.6.8 (that shell's BOM) has no link annotation for a text field,
+  and intercepting taps there competes with the caret and the IME — quire-compose's
+  ADR-0023 records that limitation and why it is deliberate.
+
 ## ADR-0118 · 笔记 is one column: the filter is a chip row, the note opens as a 浮层, and the composer suggests tags
 
 Decision: the organizer's **笔记** half loses both of its right-hand columns and

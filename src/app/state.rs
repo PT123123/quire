@@ -14398,6 +14398,11 @@ pub const CMD_NAV_FORWARD: i32 = 13;
 /// goes from the keyboard (`Ctrl+K`, then the first two letters of either).
 pub const CMD_OPEN_NOTES: i32 = 14;
 pub const CMD_OPEN_TASKS: i32 = 15;
+/// Open a local `.html` file in the system browser (ADR-0119). HTML is not a
+/// content format here — no block, importer or renderer, and §三十三's ban on a
+/// WebView rules out the one rendering would need — so the browser is the only
+/// door, and this is the explicit way to it.
+pub const CMD_OPEN_HTML: i32 = 16;
 /// Jump-to-page commands are 10 000 + page id.
 pub const CMD_PAGE_BASE: i32 = 10_000;
 
@@ -14422,6 +14427,8 @@ pub enum PaletteAction {
     ExportMarkdown,
     ImportMarkdown,
     CopyMarkdown,
+    /// Open a local `.html` file in the system browser (ADR-0119).
+    OpenHtml,
     NavigateBack,
     NavigateForward,
     /// SPEC §四十一's two places: 0 笔记, 1 任务.
@@ -14443,6 +14450,7 @@ pub fn palette_action(id: i32) -> PaletteAction {
         CMD_EXPORT_PAGE => PaletteAction::ExportMarkdown,
         CMD_IMPORT_MD => PaletteAction::ImportMarkdown,
         CMD_COPY_MD => PaletteAction::CopyMarkdown,
+        CMD_OPEN_HTML => PaletteAction::OpenHtml,
         CMD_NAV_BACK => PaletteAction::NavigateBack,
         CMD_NAV_FORWARD => PaletteAction::NavigateForward,
         CMD_OPEN_NOTES => PaletteAction::OpenOrganizer(0),
@@ -14583,6 +14591,9 @@ fn mock_commands(ws: &Workspace) -> Vec<CommandRow> {
         "页面",
         "copy",
     );
+    // The explicit HTML door (ADR-0119): HTML is not content this app stores or
+    // draws, so the row hands a `.html` file to the browser and nothing more.
+    cmd(CMD_OPEN_HTML, "在浏览器中打开 HTML…", "", "页面", "link");
     cmd(CMD_NAV_BACK, "后退", "Alt+Left", "导航", "arrow-left");
     cmd(
         CMD_NAV_FORWARD,
@@ -16170,7 +16181,7 @@ fn org_strip_lead(line: &str) -> String {
 mod tests {
     use super::{
         mock_commands, palette_action, start_stop, FindHits, Lang, NavHistory, NavStop,
-        CMD_NAV_BACK, CMD_NAV_FORWARD, CMD_PAGE_BASE, NAV_MAX, PaletteAction,
+        CMD_NAV_BACK, CMD_NAV_FORWARD, CMD_OPEN_HTML, CMD_PAGE_BASE, NAV_MAX, PaletteAction,
     };
     use crate::app::workspace::Workspace;
     use crate::core::persistence::Change;
@@ -17463,6 +17474,21 @@ mod tests {
         }
     }
 
+    /// The palette's HTML door (ADR-0119): the row exists in 页面 and its id
+    /// resolves. `every_palette_row_resolves_to_its_own_action` already walks the
+    /// registry; this names which command the row is.
+    #[test]
+    fn the_palette_carries_the_open_html_row() {
+        let cmds = mock_commands(&Workspace::sample());
+        let row = cmds
+            .iter()
+            .find(|c| c.id == CMD_OPEN_HTML)
+            .expect("row present");
+        assert_eq!(row.name.as_str(), "在浏览器中打开 HTML…");
+        assert_eq!(row.section.as_str(), "页面");
+        assert_eq!(palette_action(CMD_OPEN_HTML), PaletteAction::OpenHtml);
+    }
+
     /// The whole registry, walked: every row must resolve to an action of its
     /// own. This is the durable repair for `aaa3763`, where a missing import
     /// turned one `match` arm into a catch-all binding and every row with id
@@ -17504,13 +17530,15 @@ mod tests {
             palette_action(CMD_PAGE_BASE + 42),
             PaletteAction::OpenPage(42)
         );
-        // SPEC §四十一's two rows, at the end of the command block and below the
-        // page ids: a place the palette can open is still not a page.
+        // SPEC §四十一's two rows, and then the HTML door: the whole command
+        // block sits below the page ids, so a place the palette can open is not
+        // a page — and neither is a command.
         assert_eq!(palette_action(14), PaletteAction::OpenOrganizer(0));
         assert_eq!(palette_action(15), PaletteAction::OpenOrganizer(1));
+        assert_eq!(palette_action(16), PaletteAction::OpenHtml);
         // nothing past the command block and before the page block, and nothing
         // the palette could invent, may reach a handler
-        for id in [0, 16, 9_999, -1] {
+        for id in [0, 17, 9_999, -1] {
             assert_eq!(palette_action(id), PaletteAction::None, "id {id}");
         }
     }

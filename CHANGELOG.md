@@ -636,6 +636,22 @@ First functional release: a local, single-file-database notes workspace.
   caret sits in (Slint exposes no caret position), so moving the caret back into the
   middle of a line costs a suggestion rather than applying the wrong tag
 
+### HTML — 在浏览器中打开 (ADR-0119)
+- **HTML is not a content format; the system browser is its only door.** A new
+  palette command, **在浏览器中打开 HTML…** (页面), picks a local `.html` / `.htm`
+  file and hands its path to `ShellExecuteW` — the same call the attachment blocks
+  use — so the registered browser draws it. Nothing is fetched, parsed or drawn
+  in-app, and the file does not become a page
+- There is **no HTML block, importer or exporter**, and that is the decision, not
+  a gap: a content channel is ≈ 3–4k LOC and lossy both ways, and in-app rendering
+  needs the WebView §三十三 forbids. The cost analysis is ADR-0119
+- The Android shell gets the matching OS-open path (its ADR-0023): the embed card
+  opens its address through `Intent.ACTION_VIEW`, behind the same http/https/mailto
+  allow-list the desktop already checks
+- `open_with_default` is used rather than the link path's inline `cmd /C start`, so
+  a picked path never reaches a command line
+- New test: the palette row is present in 页面 and resolves to its own action
+
 ### Theme (ADR-0116)
 - The palette is now **ActivityWatch's twelve themes**, ported field for field from
   `aw-qtui/src/theme.h`'s `kThemes[]` and chosen by name in Settings:
