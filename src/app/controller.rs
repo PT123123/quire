@@ -856,6 +856,73 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                         org_start_selecting(&g, &s, true);
                         s.org_selection_toggle(task, true);
                     }
+                    // ---- a *note* row's ⋯ / right-click (the same id range, a
+                    // third kind of node) ----
+                    // The note travels on `menu-node-id` as the other two do, so
+                    // these arms are told apart from theirs by their ids alone.
+                    crate::app::state::MENU_ORG_NOTE_PIN
+                    | crate::app::state::MENU_ORG_NOTE_UNPIN => {
+                        s.org_note_pinned(
+                            id as i64,
+                            action == crate::app::state::MENU_ORG_NOTE_PIN,
+                        );
+                    }
+                    // 打开 and 详细信息 are one move — the note is what the detail
+                    // pane shows either way — and the second opens the disclosure
+                    // under its body, which is the thing its name promises.
+                    crate::app::state::MENU_ORG_NOTE_OPEN
+                    | crate::app::state::MENU_ORG_NOTE_DETAILS => {
+                        g.set_org_selected_note(id);
+                        if action == crate::app::state::MENU_ORG_NOTE_DETAILS {
+                            g.set_org_note_details_open(true);
+                        }
+                    }
+                    // 复制内容 is the smallest unit 复制 hands an AI: one note with
+                    // its 唯一 ID on a line of its own, which is the name a 指令
+                    // batch answers it by. 复制唯一 ID is that name alone.
+                    crate::app::state::MENU_ORG_NOTE_COPY => {
+                        let text = s.org_note_copy_text(&[id as i64]);
+                        if !text.is_empty() {
+                            crate::platform::copy_to_clipboard(&text);
+                        }
+                    }
+                    crate::app::state::MENU_ORG_NOTE_COPY_ID => {
+                        let text = s.org_note_uid(id as i64);
+                        if !text.is_empty() {
+                            crate::platform::copy_to_clipboard(&text);
+                        }
+                    }
+                    // 转为待办 and 删除 both hide the row behind the bar and write
+                    // three seconds later (ADR-0108), which is also why both return
+                    // instead of falling through to the refresh below:
+                    // `org_deferred_delete` is the one that rebuilds what is on
+                    // screen, and it moves the selection off the row it hid.
+                    crate::app::state::MENU_ORG_NOTE_TO_TASK => {
+                        if let Some(title) = s.org_note_to_task(id as i64) {
+                            org_deferred_delete(
+                                org_delete_timer,
+                                &g,
+                                &gw,
+                                &s,
+                                vec![id as i64],
+                                false,
+                                Some(format!("笔记「{title}」已转为待办")),
+                            );
+                        }
+                        return;
+                    }
+                    crate::app::state::MENU_ORG_NOTE_DELETE => {
+                        org_deferred_delete(
+                            org_delete_timer,
+                            &g,
+                            &gw,
+                            &s,
+                            vec![id as i64],
+                            false,
+                            None,
+                        );
+                        return;
+                    }
                     // ---- a *list's* ⋯ (the same id range, a different node) ----
                     // The list travels on `menu-node-id` exactly as a task does, so
                     // its arms are told apart from the task's by their ids alone.
@@ -4331,19 +4398,10 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
             open(&g, &s, page);
         });
     }
-    {
-        let gw = gw.clone();
-        let s = state.clone();
-        ui.global::<UIState>().on_org_note_create(move || {
-            let g = gw.upgrade().unwrap();
-            org_commit_field(&g, &s);
-            if let Some(id) = s.org_create_note() {
-                g.set_org_selected_note(id as i32);
-            }
-            org_refresh(&g, &s);
-            org_load_drafts(&g, &s);
-        });
-    }
+    // No `on_org_note_create` any more (ADR-0115): the notes half's ＋ is the floating
+    // one, and what it opens is the capture layer below — a create that writes nothing
+    // until ➤. A callback no interface can reach is worse than no callback (the rule
+    // ADR-0113 applied to `org-list-color-set`).
     {
         let gw = gw.clone();
         let s = state.clone();
@@ -4404,6 +4462,30 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
     {
         let gw = gw.clone();
         let s = state.clone();
+        // A note row's ⋯ **and** its right-click (ADR-0115). Anchored the way a task
+        // row's own is: the popup's top-left goes just left of the button and below
+        // its top, clamped so the seven rows still fit on the window.
+        //
+        // Unlike the task's, this does **not** move the selection. A task row's ⋯
+        // is also that row's "open", so it lights the detail pane on the way past;
+        // a note's menu has 打开 as a row of its own, and a right-click is a
+        // question about a row rather than a decision to leave the one being read.
+        ui.global::<UIState>().on_org_note_menu_requested(move |id, x, y| {
+            let g = gw.upgrade().unwrap();
+            org_commit_field(&g, &s);
+            g.set_menu_node_id(id);
+            s.fill_org_note_menu(id);
+            g.set_menu_rows(s.menu_model());
+            let menu_h = g.get_menu_rows().row_count() as f32 * 30.0 + 8.0;
+            let w = 184.0;
+            g.set_menu_x((x - w).clamp(8.0, (g.get_window_w() - w - 8.0).max(8.0)));
+            g.set_menu_y(y.clamp(48.0, (g.get_window_h() - menu_h - 8.0).max(48.0)));
+            g.set_menu_open(true);
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
         // 引用 (core ADR-0001): write the reply the note page's own field holds. The
         // text is the field's draft, and the field is cleared only when something
         // actually landed — a reply refused by a parent that is gone must not eat
@@ -4420,6 +4502,50 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
             }
             org_refresh(&g, &s);
             org_load_drafts(&g, &s);
+        });
+    }
+    // ── the 悬浮 ＋ and the capture layer (ADR-0115) ──────────────────────────
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        // The ＋ at the list's bottom-right. The layer opens **empty** every time —
+        // a draft left over from a dismissal would be a note nobody asked to
+        // finish — and its field is focused on the frame it appears (the layer's
+        // own `init`), so the caret is where the typing goes.
+        ui.global::<UIState>().on_org_capture_opened(move || {
+            let g = gw.upgrade().unwrap();
+            org_commit_field(&g, &s);
+            g.set_org_capture_draft("".into());
+            g.set_org_capture_open(true);
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        // ➤: the one write the layer makes. It lands as an ordinary note — the
+        // `#`-tokens in the draft become its tags, exactly as the Android shell's
+        // ➤ does — and the row is then selected, the "open what you just made"
+        // rule the nav column's ＋ already keeps.
+        ui.global::<UIState>().on_org_capture_sent(move || {
+            let g = gw.upgrade().unwrap();
+            let text = g.get_org_capture_draft().to_string();
+            if let Some(id) = s.org_create_note_from_capture(text) {
+                g.set_org_selected_note(id as i32);
+            }
+            g.set_org_capture_draft("".into());
+            g.set_org_capture_open(false);
+            org_refresh(&g, &s);
+            org_load_drafts(&g, &s);
+        });
+    }
+    {
+        let gw = gw.clone();
+        // ✕, the scrim and Escape: nothing was written, so there is nothing to undo
+        // and nothing to say about it. The draft goes with the layer.
+        ui.global::<UIState>().on_org_capture_closed(move || {
+            let g = gw.upgrade().unwrap();
+            g.set_org_capture_draft("".into());
+            g.set_org_capture_open(false);
         });
     }
     {
@@ -7418,6 +7544,31 @@ fn apply_scene_body(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             g.set_org_bin_open(true);
             org_refresh(&g, state);
         }
+        "notes-menu" => {
+            // A note card's ⋯ / right-click (ADR-0115). The *area* is what this arm
+            // plants — the popup itself opens after the first render pass, in
+            // `apply_scene_overlay`, so its own `is-open` mirror sees the false ->
+            // true transition the `menu` scene relies on.
+            let ids = org_scene_seed(state);
+            org_open(&g, state, 0);
+            g.set_org_selected_note(ids.notes[0]);
+            g.set_menu_node_id(ids.notes[0]);
+            org_refresh(&g, state);
+            org_load_drafts(&g, state);
+        }
+        "notes-capture" | "notes-capture-empty" => {
+            // The 悬浮 ＋ and the layer it opens. Two scenes rather than one because
+            // the layer's two states are the two states of its ➤: with a draft the
+            // send is lit at full strength, and empty it is dimmed *and* the field's
+            // placeholder is the only thing the user has to read — a line no other
+            // scene draws.
+            org_scene_seed(state);
+            org_open(&g, state, 0);
+            if scene == "notes-capture" {
+                g.set_org_capture_draft("周三前把 §四十一 的卡片过一遍 #项目/quire".into());
+            }
+            g.set_org_capture_open(true);
+        }
         "notes-select" | "tasks-select" => {
             // ADR-0111: 多选 on each half of the area. The scene calls the header
             // button's own function and then the row tap's, so the photograph is
@@ -7505,6 +7656,15 @@ fn apply_scene_body(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
         }
         "dark-notes-reply" => {
             apply_scene_body(ui, state, "notes-reply");
+        }
+        "dark-notes-menu" => {
+            apply_scene_body(ui, state, "notes-menu");
+        }
+        "dark-notes-capture" => {
+            apply_scene_body(ui, state, "notes-capture");
+        }
+        "dark-notes-capture-empty" => {
+            apply_scene_body(ui, state, "notes-capture-empty");
         }
         "dark-tasks-list-menu" => {
             apply_scene_body(ui, state, "tasks-list-menu");
@@ -8762,6 +8922,18 @@ pub fn apply_scene_overlay(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             g.set_menu_y(260.0);
             g.set_menu_open(true);
         }
+        "notes-menu" => {
+            // A card's ⋯: 置顶 / 打开 / 详细信息 / 复制内容 / 复制唯一 ID / 转为待办 /
+            // 删除 — the tallest menu in this area, and the one place the popup is
+            // photographed whole. Anchored the way the row's own callback anchors it
+            // (the popup's right edge at the card's), just not off-screen.
+            let id = g.get_menu_node_id();
+            state.fill_org_note_menu(id);
+            g.set_menu_rows(state.menu_model());
+            g.set_menu_x(430.0);
+            g.set_menu_y(210.0);
+            g.set_menu_open(true);
+        }
         "tasks-list-color" => {
             // Its colour submenu: the closed palette as swatch rows, the current one
             // checked — the one picture of the submenu's other half.
@@ -8954,6 +9126,7 @@ pub fn apply_scene_overlay(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
         // The organizer's two popup scenes, dark twins of the same rows.
         "dark-tasks-list-menu" => apply_scene_overlay(ui, state, "tasks-list-menu"),
         "dark-tasks-list-color" => apply_scene_overlay(ui, state, "tasks-list-color"),
+        "dark-notes-menu" => apply_scene_overlay(ui, state, "notes-menu"),
 
         _ => {}
     }

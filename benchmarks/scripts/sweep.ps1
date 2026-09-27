@@ -91,7 +91,14 @@ $all = @(
     "dark-notes-reply", "dark-tasks-list-menu", "dark-tasks-list-color",
     # ADR-0114 / core ADR-0003: 回收站 is its own list, its own header verb and the
     # only pair of row buttons in the area.
-    "dark-bin", "dark-tasks-bin"
+    "dark-bin", "dark-tasks-bin",
+    # ADR-0115: the 悬浮 ＋ and the layer it opens are a shape the area has not had
+    # (a card over the rows with a field and a ➤), and a note card's ⋯ is the
+    # area's tallest popup — so both are scenes, with the dark twins the rest carry.
+    # The layer is swept twice because its two draft states are its ➤'s two states,
+    # and the empty one is where the field's placeholder is the only readable line.
+    "notes-capture", "notes-capture-empty", "notes-menu",
+    "dark-notes-capture", "dark-notes-capture-empty", "dark-notes-menu"
 )
 $targets = if ($Scenes -eq "") { $all } else { $Scenes -split ',' }
 

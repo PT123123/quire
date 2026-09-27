@@ -1224,23 +1224,36 @@ export component OrganizerArea inherits Rectangle {
                         }
 
                         // ── 笔记 ───────────────────────────────────────────
+                        // A card in the reference app's own order, which is what a
+                        // note is *read* by: the age first, at the top-left, with
+                        // the pin beside it and the row's ⋯ at the right edge; the
+                        // note's own words under that; its tags last (ADR-0115).
+                        // The old shape led with the title and buried the age on
+                        // the tags line, so a list of notes was scanned by the
+                        // field a captured note does not even have.
                         if UIState.org-tab == 0 : ListView {
                             vertical-stretch: 1;
                             for row[i] in UIState.note-rows : Rectangle {
-                                // The row is as tall as what it draws: title,
-                                // excerpt and the tags/age line, plus the
-                                // padding. A fixed 46 px was 11 px short of
-                                // that, and the first full sweep showed it as
-                                // three lines of one note overlapping the next.
-                                height: 62px;
+                                // As tall as what it draws — the board card's own
+                                // idiom — because a note with no title is a row with
+                                // one line fewer, and the fixed 62 px these rows
+                                // used to be left that line as a gap under every
+                                // captured note. A row with neither title nor body
+                                // is still one line: 无标题.
+                                height: 12px + 16px
+                                    + (row.title != "" ? 18px : 0px)
+                                    + (row.excerpt != "" ? 16px : 0px)
+                                    + (row.title == "" && row.excerpt == "" ? 16px : 0px)
+                                    + (row.tags != "" ? 16px : 0px)
+                                    + 8px;
                                 border-radius: Theme.radius-md;
                                 background: row.selected || row.picked
                                     ? Colors.surface-selected
                                     : (note-ta.has-hover ? Colors.hover-fill : transparent);
 
                                 VerticalLayout {
-                                    padding-top: 8px;
-                                    padding-bottom: 8px;
+                                    padding-top: 6px;
+                                    padding-bottom: 6px;
                                     padding-left: 8px;
                                     // While the bin is open the row's own two verbs
                                     // sit at its right edge, so the text stops short
@@ -1248,16 +1261,28 @@ export component OrganizerArea inherits Rectangle {
                                     // title nobody can read.
                                     padding-right: UIState.org-bin-open ? 132px : 8px;
                                     spacing: 2px;
+                                    // the age line: what the reference puts first,
+                                    // and where the row's ⋯ lives — the corner every
+                                    // other per-row menu in this window is in
                                     HorizontalLayout {
-                                        height: 18px;
+                                        height: 16px;
                                         spacing: 6px;
-                                        // The pick is an overlay on the row's top-right, so the
-                                        // title's line has to stop short of it: the box starts
-                                        // 28 px in from the row's edge and this line's parent
-                                        // already pads 8, so 20 px is the least that clears and
-                                        // two more keep the last glyph off the box. The excerpt
-                                        // line below it needs nothing: the box ends above it.
-                                        padding-right: UIState.org-selecting ? 22px : 0px;
+                                        // The pick and the ⋯ are both overlays on this
+                                        // line's right end (ADR-0111), so the age
+                                        // stops short of the corner whichever of the
+                                        // two is up: 22 px clears both a 22 px ⋯ and
+                                        // the 18 px box at x = width - 28.
+                                        padding-right: 22px;
+                                        Text {
+                                            // Rust's relative age and never a clock:
+                                            // this app stores UTC and has no zone.
+                                            text: row.when;
+                                            font-family: Typography.ui-font;
+                                            font-size: Typography.size-caption;
+                                            color: Colors.text-muted;
+                                            vertical-alignment: center;
+                                            overflow: elide;
+                                        }
                                         if row.pinned : Icon {
                                             width: 12px;
                                             height: 12px;
@@ -1265,28 +1290,92 @@ export component OrganizerArea inherits Rectangle {
                                             name: "star";
                                             color: Colors.accent-text;
                                         }
-                                        Text {
-                                            text: row.title != "" ? row.title : "无标题";
-                                            font-family: Typography.ui-font;
-                                            font-size: Typography.size-ui;
-                                            font-weight: Typography.weight-semibold;
-                                            color: Colors.text-primary;
-                                            vertical-alignment: center;
-                                            overflow: elide;
-                                        }
+                                        Rectangle { horizontal-stretch: 1; }
                                     }
-                                    Text {
+                                    if row.title != "" : Text {
+                                        text: row.title;
+                                        font-family: Typography.ui-font;
+                                        font-size: Typography.size-ui;
+                                        font-weight: Typography.weight-semibold;
+                                        color: Colors.text-primary;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                    }
+                                    if row.excerpt != "" : Text {
                                         text: row.excerpt;
                                         font-family: Typography.ui-font;
                                         font-size: Typography.size-caption;
                                         color: Colors.text-muted;
                                         overflow: elide;
                                     }
-                                    OrgMeta { tags: row.tags; when: row.when; height: 14px; }
+                                    // A row a ＋ was pressed on and left alone: one
+                                    // muted line rather than nothing at all, which
+                                    // is what the reference draws as （空笔记）.
+                                    if row.title == "" && row.excerpt == "" : Text {
+                                        text: "无标题";
+                                        font-family: Typography.ui-font;
+                                        font-size: Typography.size-caption;
+                                        color: Colors.text-muted;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                    }
+                                    if row.tags != "" : Text {
+                                        text: row.tags;
+                                        font-family: Typography.ui-font;
+                                        font-size: Typography.size-caption;
+                                        color: Colors.text-muted;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                    }
                                 }
                                 note-ta := TouchArea {
                                     mouse-cursor: MouseCursor.pointer;
                                     clicked => { UIState.org-note-selected(row.id); }
+                                    // The reference opens this menu with a long
+                                    // press; the gesture a pointer has for the same
+                                    // question is the right button, which is what
+                                    // the page tree's own rows already answer to.
+                                    // Off in the bin and while 多选 is on, exactly
+                                    // as the ⋯ below is: a binned row's verbs are
+                                    // drawn in it, and picking is not asking.
+                                    //
+                                    // The anchor is the row's **right edge** and not
+                                    // the pointer's own position, so the menu opens
+                                    // in the same place whichever of the two doors
+                                    // was used — the shared popup is placed by its
+                                    // right edge (`menu-x` minus its width).
+                                    pointer-event(event) => {
+                                        if (event.kind == PointerEventKind.up
+                                            && event.button == PointerEventButton.right
+                                            && !UIState.org-bin-open
+                                            && !UIState.org-selecting) {
+                                            UIState.org-note-menu-requested(
+                                                row.id,
+                                                self.absolute-position.x + self.width,
+                                                self.absolute-position.y);
+                                        }
+                                    }
+                                }
+                                // The ⋯: this row's other door to the menu above,
+                                // drawn the way a task row draws its own. `opacity`
+                                // and not `visible`, for the task row's reason — the
+                                // button appears *under* the pointer, so hiding it
+                                // the moment the row loses hover would hide it from
+                                // the click that was reaching for it.
+                                IconButton {
+                                    x: parent.width - self.width - 6px;
+                                    y: 3px;
+                                    icon-name: "dots-horizontal";
+                                    icon-color: Colors.text-muted;
+                                    size: 22px;
+                                    visible: !UIState.org-selecting && !UIState.org-bin-open;
+                                    opacity: note-ta.has-hover || row.selected ? 1 : 0;
+                                    clicked => {
+                                        UIState.org-note-menu-requested(
+                                            row.id,
+                                            self.absolute-position.x,
+                                            self.absolute-position.y);
+                                    }
                                 }
                                 // The box a long press would have shown on the
                                 // reference's row (ADR-0111). Last among the row's
@@ -1295,7 +1384,7 @@ export component OrganizerArea inherits Rectangle {
                                 // row: while picking, both mean "this one".
                                 if UIState.org-selecting : OrgCheck {
                                     x: parent.width - self.width - 10px;
-                                    y: 8px;
+                                    y: 4px;
                                     checked: row.picked;
                                     box-size: 18px;
                                     toggled => { UIState.org-note-selected(row.id); }
@@ -1303,9 +1392,10 @@ export component OrganizerArea inherits Rectangle {
                                 // 回收站: a binned row's own two verbs, at its right
                                 // edge and last among the row's children so they are
                                 // above `note-ta`. Drawn rather than put in a menu
-                                // because a note has no ⋯ here, and because the bin is
-                                // a short list of things the user came to decide about
-                                // one at a time.
+                                // because the bin is a short list of things the user
+                                // came to decide about one at a time — and because
+                                // every verb outside those two is a write to a note
+                                // that is on no list.
                                 if UIState.org-bin-open : HorizontalLayout {
                                     x: parent.width - self.width - 10px;
                                     y: (parent.height - self.height) / 2;
@@ -1323,6 +1413,61 @@ export component OrganizerArea inherits Rectangle {
                                     }
                                 }
                             }
+                        }
+                    }
+
+                    // ── the 悬浮 ＋ (ADR-0115) ─────────────────────────────────
+                    // The reference shell's Fab: 56 px, round, the accent colour,
+                    // 20 px in from the list's bottom-right corner. It is the notes
+                    // tab's only door to a new note, and what it opens is the
+                    // *capture layer* rather than an empty row: the reference's Fab
+                    // opens its editor, and a note born blank is a row the undo
+                    // stack has to carry on behalf of a keystroke that never came.
+                    //
+                    // It floats over the list, as the reference's does — the last
+                    // rows scroll under it, which is the price of a corner that
+                    // never moves with the content.
+                    //
+                    // Declared after the `VerticalLayout` so it is *above* the rows
+                    // it covers; gone in the bin and while 多选 is on, where a note
+                    // is not what the user came for.
+                    if UIState.org-tab == 0 && !UIState.org-bin-open && !UIState.org-selecting : Rectangle {
+                        x: parent.width - self.width - 20px;
+                        y: parent.height - self.height - 20px;
+                        width: 56px;
+                        height: 56px;
+
+                        // The shadow, drawn the way `ContextMenu` draws its own: this
+                        // renderer has no drop-shadow, so it is a plate behind the
+                        // disc, offset down and right.
+                        Rectangle {
+                            x: 1px;
+                            y: 2px;
+                            width: parent.width;
+                            height: parent.height;
+                            border-radius: 28px;
+                            background: Colors.shadow;
+                        }
+                        Rectangle {
+                            width: parent.width;
+                            height: parent.height;
+                            border-radius: 28px;
+                            background: fab-ta.has-hover ? Colors.accent-text : Colors.accent;
+                            animate background { duration: Theme.duration-instant; }
+
+                            Icon {
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                                width: 26px;
+                                height: 26px;
+                                name: "plus";
+                                size: 26px;
+                                color: Colors.text-on-accent;
+                            }
+                        }
+                        fab-ta := TouchArea {
+                            mouse-cursor: MouseCursor.pointer;
+                            clicked => { UIState.org-capture-opened(); }
                         }
                     }
                 }
@@ -1877,16 +2022,17 @@ export component OrganizerArea inherits Rectangle {
                                 clicked => { UIState.org-open-requested(1); }
                             }
                             Rectangle { horizontal-stretch: 1; }
-                            IconButton {
+                            // The ＋ that makes the thing this tab is about — and
+                            // only on 任务 (ADR-0115): the notes half's ＋ is the
+                            // floating one at the list's bottom-right, and two
+                            // buttons for one verb in one column pair is one button
+                            // too many. 任务 keeps its own because a task has no
+                            // capture layer — its quick-add line is already in the
+                            // list, in the list the task lands in.
+                            if UIState.org-tab == 1 : IconButton {
                                 icon-name: "plus";
                                 size: 26px;
-                                clicked => {
-                                    if (UIState.org-tab == 0) {
-                                        UIState.org-note-create();
-                                    } else {
-                                        UIState.org-task-create();
-                                    }
-                                }
+                                clicked => { UIState.org-task-create(); }
                             }
                         }
 
@@ -2113,6 +2259,180 @@ export component OrganizerArea inherits Rectangle {
                         selected: true;
                         accent: true;
                         clicked => { UIState.org-command-run(); }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── the capture layer (ADR-0115) ──────────────────────────────────────────
+    // What the 悬浮 ＋ opens: a field, a count of what its `#`-tokens will file
+    // under, and the ➤ that is the only thing in the area that commits it.
+    //
+    // **Nothing is written until ➤.** The draft is a property and the layer is a
+    // mode, so closing it — by ✕, by Escape, by a click on the scrim — throws away
+    // a half-written note and leaves the file, the catalog and the undo stack
+    // exactly where they were. That is the reference's own rule and the Android
+    // copy's (ADR-0015 there), and it is why this is not a new blank row: a row
+    // that exists because a ＋ was pressed is a row every count and every rebuild
+    // has to carry until someone decides to delete it.
+    //
+    // An overlay inside the area rather than a window popup, for the reason 指令's
+    // card is one: what it acts on is *these* rows. Its `TouchArea` is what makes
+    // the three columns behind it unclickable while a note is being written.
+    if UIState.org-capture-open : Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: Colors.scrim;
+
+        // The scrim is the dismissal. A sibling *under* the card rather than a
+        // wrapper, so a click in the field never reaches it — a tap anywhere
+        // outside the card closes the layer, which is what the reference shell
+        // does with a swipe down and with its back gesture.
+        TouchArea {
+            mouse-cursor: MouseCursor.pointer;
+            clicked => { UIState.org-capture-closed(); }
+        }
+
+        Rectangle {
+            // Bottom-centre, the shape the reference shell's sheet has: the field
+            // grows upward from a floor that does not move, so the card is the same
+            // size whether one word or nine lines are being typed into it.
+            x: (parent.width - self.width) / 2;
+            y: parent.height - self.height - 24px;
+            width: min(parent.width - 80px, 620px);
+            height: 236px;
+            background: Colors.surface-overlay;
+            border-radius: Theme.radius-lg;
+            border-width: 1px;
+            border-color: Colors.border-strong;
+
+            // Swallows the card's own clicks — its padding, its title, the hint
+            // line under the field — so that only the scrim *around* the card
+            // closes the layer. Declared first, so every control below sits above
+            // it; without it a click on the card's own margin would land on the
+            // scrim behind and dismiss the note being written.
+            TouchArea { }
+
+            VerticalLayout {
+                padding: 16px;
+                spacing: 10px;
+
+                HorizontalLayout {
+                    height: 24px;
+                    spacing: 8px;
+                    Text {
+                        text: "新建笔记";
+                        font-family: Typography.ui-font;
+                        font-size: Typography.size-ui-lg;
+                        font-weight: Typography.weight-semibold;
+                        color: Colors.text-primary;
+                        vertical-alignment: center;
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    IconButton {
+                        icon-name: "x";
+                        size: 22px;
+                        clicked => { UIState.org-capture-closed(); }
+                    }
+                }
+
+                Rectangle {
+                    vertical-stretch: 1;
+                    border-radius: Theme.radius-sm;
+                    border-width: 1px;
+                    border-color: capture-input.has-focus ? Colors.border-strong : Colors.border;
+                    background: Colors.background;
+
+                    // The placeholder, under the field: Slint's `TextInput` has none,
+                    // and an empty box with no hint is a box nobody knows what to type
+                    // into. It names the one convention this layer has — `#` marks a
+                    // tag — which is the only thing a user has to be told.
+                    if UIState.org-capture-draft == "" : Text {
+                        x: 12px;
+                        y: 10px;
+                        width: parent.width - 24px;
+                        text: "记录点什么… 使用 #标签 标记";
+                        font-family: Typography.ui-font;
+                        font-size: Typography.size-ui;
+                        color: Colors.text-muted;
+                    }
+                    capture-input := TextInput {
+                        x: 10px;
+                        y: 8px;
+                        width: parent.width - 20px;
+                        height: parent.height - 16px;
+                        text <=> UIState.org-capture-draft;
+                        wrap: word-wrap;
+                        font-family: Typography.ui-font;
+                        font-size: Typography.size-ui;
+                        color: Colors.text-primary;
+                        selection-foreground-color: Colors.text-on-accent;
+                        selection-background-color: Colors.selection;
+                        // Escape closes the layer and Ctrl+Enter *is* the ➤ — the
+                        // reference app's own pair of keys, and what lets a
+                        // multi-line note be sent without the pointer leaving the
+                        // field it was written in.
+                        key-pressed(event) => {
+                            if (event.text == Key.Escape) {
+                                UIState.org-capture-closed();
+                                accept
+                            } else if (event.modifiers.control && event.text == Key.Return) {
+                                UIState.org-capture-sent();
+                                accept
+                            } else {
+                                reject
+                            }
+                        }
+                        // The caret is asked for on the frame the field exists, so
+                        // the layer is ready to be typed into the moment it appears.
+                        init => { capture-input.focus(); }
+                    }
+                }
+
+                HorizontalLayout {
+                    height: 40px;
+                    spacing: 8px;
+                    Text {
+                        // The keyboard hint is the desktop's, like the quick-add
+                        // line's 回车创建: a touch copy of this layer drops it
+                        // (ADR-0115's SPEC section).
+                        text: "#标签 会被提取 · Ctrl+Enter 发送 · Esc 关闭";
+                        font-family: Typography.ui-font;
+                        font-size: Typography.size-caption;
+                        color: Colors.text-muted;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    // The ➤: the reference app's send, drawn rather than typed, and
+                    // this layer's only verb. Dimmed over an empty draft instead of
+                    // hidden — the button is where the eye already is, and a control
+                    // that vanishes is a control the user has to find twice — and
+                    // Rust refuses the write as well, so a click on a dimmed ➤
+                    // commits nothing.
+                    Rectangle {
+                        width: 40px;
+                        height: 40px;
+                        border-radius: 20px;
+                        background: send-ta.has-hover && UIState.org-capture-draft != ""
+                            ? Colors.accent-text : Colors.accent;
+                        opacity: UIState.org-capture-draft == "" ? 0.4 : 1;
+                        animate opacity { duration: Theme.duration-instant; }
+
+                        Icon {
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                            width: 18px;
+                            height: 18px;
+                            name: "send";
+                            size: 18px;
+                            color: Colors.text-on-accent;
+                        }
+                        send-ta := TouchArea {
+                            mouse-cursor: MouseCursor.pointer;
+                            clicked => { UIState.org-capture-sent(); }
+                        }
                     }
                 }
             }

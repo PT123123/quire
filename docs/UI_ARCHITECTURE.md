@@ -72,6 +72,24 @@ keystroke burst is one undo step. A checklist line cannot share a draft with its
 siblings, so it is text until its row is clicked and only that row renders an
 input (the codebase's one-live-input rule, the same one the database cell keeps).
 
+**A per-row menu has two doors and one callback** (ADR-0115). A note card draws a
+`⋯` on hover or when it is the selected row, and the card's whole `TouchArea`
+answers `PointerEventButton.right` — the gesture the page tree's rows already
+answer — and both call `org-note-menu-requested(id, x, y)`. The anchor passed is
+the row's **right edge**, not the pointer: the shared `ContextMenu` is positioned
+by its right edge (`menu-x` minus its width), so the two doors land the menu in the
+same place. A task row's own `⋯` is the same shape with one difference worth
+knowing: it also moves the selection, because for a task the `⋯` is also its
+"open", while a note's menu carries 打开 as a row of its own.
+
+**The capture layer is a mode of the area, not a popup.** The notes half's 新建笔记
+is a floating ＋ whose 56 px disc is drawn inside the list column (20 px in from the
+corner), and what it opens is a `Rectangle` over the area with a scrim, a card and a
+field — the same in-area overlay `指令` is. Nothing is written until the floating ➤
+is pressed: the draft is a `UIState` property and the layer is a `UIState` flag, so
+every way of closing it (✕, Escape, the scrim) drops the draft and costs no undo
+step.
+
 ## Sidebar projection
 
 The workspace tree never exists as a Slint tree. Rust flattens it
@@ -112,6 +130,17 @@ outside themselves (the engine swallows that outside click while a popup is
 open), and `AppShell`'s full-window `Rectangle` + `TouchArea` stay in place for
 every overlay flag as the safety net against a `UIState`/popup desync — the
 Rectangle is simply `transparent` unless a modal is up.
+
+A **third** shape sits outside both tiers: an overlay drawn *inside* the area it
+belongs to. `指令`'s dialog and the capture layer (ADR-0115) are each a
+`Rectangle` filling `OrganizerArea`, with their own `Colors.scrim` and their own
+`TouchArea`, declared as the component's last children so they paint over the three
+columns. They need nothing from `AppShell`: what they act on is *these* rows, they
+cannot outlive the area, and a window-level popup for a card that covers one area
+would be a dialog with no owner. The card itself is a `TouchArea` of its own inside
+the layer, so only the scrim *around* it dismisses — without it a click on the
+card's own margin would fall through to the scrim behind and drop the note being
+written.
 
 The empty-page panel is the one click target that is not an overlay: it is a
 `TouchArea` inside `Editor.slint` whose only job is to fire

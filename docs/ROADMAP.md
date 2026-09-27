@@ -40,8 +40,13 @@ this shell already had, and the slice that makes `ContextMenu` draw the `check`/
 `UpdateNote` / `UpdateTask` — so the bin is a projection of the same catalog rather than a second
 store, and the shell's drawing paths moved to core's `live_*` accessors while the bin reads
 `trashed_*`; the rev moves to `fbfdaca` and **snapshot version 2 → 3**, because a peer that cannot
-see a tombstone would read a binned row as an ordinary remote edit and resurrect it. The Android
-mirror is the rest of the milestone; the pixel sweep now has twenty organizer arms. |
+see a tombstone would read a binned row as an ordinary remote edit and resurrect it. **M2.5m**
+(2026-09-27) then brought the notes page up to the reference the Compose shell already matched
+(ADR-0115): a card reads age-first and carries its own ⋯ — and answers a right-click — through the
+shared context menu, 新建笔记 is a floating ＋ whose capture layer writes nothing until its floating
+➤ is pressed, and a draft's `#标签` become the note's tags under the Android shell's own token rule,
+copied word for word so one sentence files the same way on either shell. The Android mirror is the
+rest of the milestone; the pixel sweep now has twenty-three organizer arms. |
 
 ## Repository shape (since ADR-0093 + ADR-0094, 2026-09-23)
 

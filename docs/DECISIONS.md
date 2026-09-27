@@ -2,6 +2,109 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0115 · A note card is read age-first and answers a right-click, and a note is written in a layer that sends
+
+Decision: the notes half of the area catches up with the reference app (and with
+this repository's Compose shell) in three places, all three of them things it had
+none of. **The card** is re-ordered to the reference's shape: the age leads at the
+top-left with the pin beside it and the row's ⋯ at the right edge, the note's own
+words follow, and its tags come last. **The card answers a menu** — the drawn ⋯
+*and* a right-click, both through one `org-note-menu-requested` — carrying 置顶 /
+取消置顶, 打开, 详细信息, 复制内容, 复制唯一 ID, 转为待办 and 删除. **New note is a
+floating ＋** at the list's bottom-right, and what it opens is a **capture layer**:
+a card over the rows with a field and a floating ➤ that is the only thing in the
+area that writes.
+
+**The card, and the four places it deviates.** The reference's order is what a
+note is *read* by, and the old shape read the other way round: a title first and
+the age buried on the tags line, so a list was scanned by the one field a captured
+note does not have. The row's height is now computed off what it draws (the board
+card's own idiom) — a note with no title is a row with one line fewer, and the
+fixed 62 px these rows used to be left that line as a gap under every capture. The
+deviations are deliberate, and each one is something the reference can do that this
+model cannot or should not:
+
+- **The title keeps its own line.** This app's notes have one and the reference's
+  do not; hiding it in the list would hide a field the detail pane still edits.
+- **The excerpt stays one elided line.** The reference's card wraps the whole body,
+  up to 600 characters, and its list is a feed. This list is scanned, and the whole
+  body is one pane to the right; a feed here would also mean the detail column
+  reflows as rows grow.
+- **No `⚠` conflict and no `🗑` pending mark.** This shell has no conflict concept,
+  and a row with a write pending is *hidden* behind the 撤销 bar (ADR-0108) rather
+  than drawn with a stamp on it.
+- **No `↩` parent preview.** A reply is not a list row (ADR-0112).
+
+**The menu, and the two rows it does not have.** 编辑 is the detail pane: a note is
+edited where it is read, and a menu row that opened an editor would be a second
+place to type into the same note. 评论 is the field sitting under the body of the
+note the menu was opened on. The reference carries both because its card cannot be
+edited in place at all.
+
+Both doors are off in **回收站** and while **多选** is on, exactly as a task row's ⋯
+is, and the filler therefore has no trashed arm: a binned row draws 恢复 and
+彻底删除 itself, and every other row here is a write to a note that is on no list.
+That is the same rule that already keeps a binned *task* row from offering a menu
+at all.
+
+**The anchor is the row's right edge, not the pointer.** A right-click reports no
+position this window can trust across coordinate spaces, and the shared popup is
+placed by its *right* edge (`menu-x` minus its width), so both doors pass the same
+number and the menu opens in the same place whichever was used.
+
+**The ＋ yields to the FAB.** The nav column's ＋ is drawn on 任务 only now: the
+notes half's ＋ is the floating one, and two buttons for one verb in one column pair
+is one button too many. 任务 keeps its own because a task has no capture layer — its
+quick-add line is already in the list, in the list the task lands in.
+
+**The capture layer writes nothing until ➤.** The draft is a property and the layer
+is a mode, so ✕, Escape and a click on the scrim all throw away a half-written note
+and leave the file, the catalog and the undo stack exactly where they were. That is
+the reference's rule and the Android copy's (ADR-0015 there), and it is why ➤ is not
+a new blank row: a row that exists because a ＋ was pressed is a row every count and
+every rebuild has to carry until somebody decides to delete it. The layer is an
+overlay inside the area rather than a window popup, for the reason 指令's card is —
+what it acts on is *these* rows.
+
+Why: both shells' own notes have gestured at this since the area landed. The Compose
+shell has had `OrgFab` + `CaptureOverlay` (with its ➤) and `OrgNoteMenuSheet` since
+its own ADR-0015, and the desktop had neither a floating door nor *any* per-card
+menu: the user reached for a right-click on a note card and nothing came up.
+
+Consequences:
+
+- **`note_tag_tokens` is a copy, not a shared idea.** The `#tag` rule is written out
+  again from the Compose shell's `MarkdownText.tagTokens` — the same separators, the
+  same two refusals (a bare `#`, an all-digit name) and the same trailing-punctuation
+  trim — because the two shells share no code for it and this is the one thing about a
+  capture that has to agree **byte for byte**: the same sentence typed into either
+  shell must file under the same tags. Its own consequence is worth saying out loud,
+  because a Chinese note hits it constantly: the separators are the ones the text lays
+  words out with, so `#工作。还有` is *one* token and not two tags — the same on both
+  shells, and the test pins it.
+- **A new note from ➤ has no title.** The draft is the body and the first line is what
+  the row reads it by (the row's `excerpt`), which is exactly the reference's model.
+  A note made that way is an ordinary note from then on.
+- **`IcSend` is drawn.** `➤` is U+27A4, in the same Dingbats block as the `✕` this
+  icon set already had to replace: a `Text` of a glyph no face in this font chain
+  carries is an invisible control whose `TouchArea` still answers.
+- **`org-note-create` is gone.** The nav column's ＋ was its only caller, so it is
+  declared in neither `Types.slint` nor the wiring — the rule ADR-0113 applied to
+  `org-list-color-set`. `任务` keeps `org-task-create`, whose ＋ is still the nav
+  column's.
+- **No core change and no rev bump.** A pin, a copy, a conversion and a delete are
+  commands that already existed; `org_create_note_from_capture` is one `CreateNote`.
+  The whole of this slice is this shell's.
+- **The FAB floats over the list**, so the last rows scroll under it. That is the
+  reference's own geometry (its Fab is 20 px in from the same corner, over a list with
+  no bottom inset) and Slint's `ListView` has no content padding to buy one with.
+- **No markdown toolbar in the layer.** The reference shell's capture carries one
+  because a phone's keyboard has no `*`; ADR-0103 keeps a note's body plain text, and
+  this shell has a real keyboard.
+- **Still not here, and still named**: a title for a captured note (the reference has
+  no such field at all), the capture layer on the *task* half, and 评论 as a mode of
+  this layer rather than the field under the body.
+
 ## ADR-0114 · 回收站 is a mode of the list, and a delete is a stamp
 
 Decision: the area has a **回收站**. A nav row on both tabs opens it; the list then

@@ -542,6 +542,37 @@ First functional release: a local, single-file-database notes workspace.
   rather than a missing row, and the batched delete asserts all three rows are still
   there, binned
 
+### Notes & tasks — 卡片版面、卡片菜单、悬浮 ＋ 与撰写层 (ADR-0115)
+
+- **A note card is read age-first**, the way the reference app draws one: the age
+  leads at the top-left, the ⚑ pin sits beside it, the row's ⋯ is at the right edge,
+  then the note's own words, then its tags. The row is as tall as what it draws, so
+  a captured note (no title) is one line shorter instead of carrying a gap
+- **A note card answers a right-click** — and a drawn ⋯ on hover or on the selected
+  row — opening the shared context menu: 置顶 / 取消置顶, 打开, 详细信息, 复制内容,
+  复制唯一 ID, 转为待办, 删除. Both doors are off in 回收站 (the row draws 恢复 /
+  彻底删除 itself, as a binned task row already does) and while 多选 is on
+- **新建笔记 is a floating ＋** at the list's bottom-right (56 px, round, accent), and
+  the nav column's ＋ is now drawn on 任务 only — the notes half's ＋ is that button
+- It opens a **capture layer**: a card over the rows with a multi-line field, a
+  placeholder, a hint line, and a floating **➤**. Nothing is written until ➤ — ✕,
+  Escape and a click on the scrim simply drop the draft, so dismissing the layer
+  costs no undo step and leaves no empty row behind. Ctrl+Enter sends
+- **`#标签` in a draft become the note's tags**, byte for byte by the Android shell's
+  own rule (`note_tag_tokens` is `MarkdownText.tagTokens` written out again): the same
+  sentence typed into either shell files under the same tags. A bare `#` and an
+  all-digit name are not tags — "issue #3" does not make a label called `3`
+- `org-note-create` is gone with its caller, the nav column's ＋; 任务 keeps
+  `org-task-create`
+- **No core change and no rev bump**: a pin, a copy, a conversion and a delete are
+  commands that already existed, and a capture is one `CreateNote`
+- `notes-capture`, `notes-capture-empty`, `notes-menu` and their dark arms join the
+  sweep; the empty capture is a scene of its own because it is the one that draws the
+  field's placeholder and the dimmed ➤
+- Four new tests: the card menu's rows (and 置顶 read as the way *back*), the capture
+  writing body + tags, the token rule's three refusals, and an empty draft writing
+  nothing
+
 ### Workspace
 - Page tree: create / rename in place / duplicate (nested lists survive) /
   delete with confirmation; favorites; recent pages; last page restored

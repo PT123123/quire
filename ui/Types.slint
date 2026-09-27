@@ -1350,13 +1350,21 @@ export global UIState {
     callback org-open-requested(int); // 0 笔记, 1 任务
     callback org-close-requested(); // back to the document area
     // notes
-    callback org-note-create();
+    // There is deliberately no `org-note-create` (ADR-0115): the notes half's ＋ is
+    // the floating one, and it opens the capture layer (`org-capture-opened`)
+    // instead of writing an empty row. 任务 keeps `org-task-create` — its ＋ is still
+    // the nav column's, and a task has no capture layer.
     callback org-note-selected(int);
     callback org-note-title-set(int, string);
     callback org-note-body-set(int, string);
     callback org-note-pin-toggled(int);
     callback org-note-tags-set(int, string);
     callback org-note-deleted(int);
+    // A note row's ⋯ **and** its right-click (ADR-0115): the note, and where the
+    // pointer was, so the shared context menu anchors the way the page tree's
+    // does. One callback for both doors because they are one question — the ⋯ is
+    // drawn and the right button is not, and a card has to answer to either.
+    callback org-note-menu-requested(int, length, length);
     // 撤销 on the bar: the batch it was standing in front of is forgotten, and
     // because the delete was deferred nothing has been written to undo.
     callback org-undo-delete();
@@ -1409,6 +1417,17 @@ export global UIState {
     // back into the same box.
     callback org-command-example();
     callback org-command-closed();
+    // ── the 悬浮 ＋ and the capture layer (ADR-0115) ──────────────────────────
+    // The ＋ at the notes list's bottom-right, and the draft box it opens — the
+    // one with the ➤ in it. `org-capture-draft` is a two-way draft like every
+    // other field in this area, and **nothing commits until ➤**: a layer closed
+    // by Escape, by ✕ or by its scrim has written nothing, so a dismissal costs
+    // no undo step (the Android copy's rule, and why this is a draft at all).
+    in-out property <bool> org-capture-open: false;
+    in-out property <string> org-capture-draft: "";
+    callback org-capture-opened();
+    callback org-capture-sent();
+    callback org-capture-closed();
     // tasks: the row's own switches are immediate, the text fields commit on blur
     callback org-task-create();
     callback org-task-selected(int);

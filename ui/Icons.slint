@@ -583,6 +583,31 @@ component IcLock {
     }
 }
 
+// The capture layer's ➤ (ADR-0115). Drawn and not typed: `➤` is U+27A4, in the
+// same Dingbats block as the `✕` this set already had to replace — a `Text` of a
+// glyph no face in this font chain carries is an invisible control whose
+// `TouchArea` still answers. The shape is the reference shell's own send icon: a
+// paper plane, its nose at the right and the two tail edges meeting at the notch.
+component IcSend {
+    in property <brush> color: Colors.text-secondary;
+    in property <length> size: 16px;
+    width: size; height: size;
+    Path {
+        width: parent.width; height: parent.height;
+        viewbox-x: 0; viewbox-y: 0; viewbox-width: 24; viewbox-height: 24;
+        stroke: color; stroke-width: 1.8px;
+        stroke-line-cap: round; stroke-line-join: round;
+        fill: transparent;
+        MoveTo { x: 2.5; y: 20.5; }
+        LineTo { x: 21; y: 12; }
+        LineTo { x: 2.5; y: 3.5; }
+        LineTo { x: 2.5; y: 10; }
+        LineTo { x: 13.5; y: 12; }
+        LineTo { x: 2.5; y: 14; }
+        Close {}
+    }
+}
+
 export component Icon {
     in property <string> name;
     in property <length> size: 16px;
@@ -624,4 +649,5 @@ export component Icon {
     IcSmile { visible: root.name == "smile"; size: root.size; color: root.color; }
     IcLock { visible: root.name == "lock"; size: root.size; color: root.color; }
     IcNote { visible: root.name == "note"; size: root.size; color: root.color; }
+    IcSend { visible: root.name == "send"; size: root.size; color: root.color; }
 }

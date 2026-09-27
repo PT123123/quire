@@ -5269,6 +5269,19 @@ pub const MENU_ORG_LIST_DELETE: i32 = 48;
 /// The colour submenu's Back: back to the *list* menu, which is what the generic
 /// `MENU_BACK` would not do — it rebuilds the page menu, for a node that is a list.
 pub const MENU_ORG_LIST_BACK: i32 = 49;
+/// A note row's ⋯ / right-click (ADR-0115). The *note* travels on `menu-node-id`
+/// exactly as a task and a list do — one mechanism, three kinds of row — and
+/// these ids are what tells them apart at dispatch. They start at 50 because the
+/// list menu's family stops at 49, and they stay well below `MENU_ORG_MOVE_BASE`
+/// so the move-to arm cannot swallow one.
+pub const MENU_ORG_NOTE_PIN: i32 = 50;
+pub const MENU_ORG_NOTE_UNPIN: i32 = 51;
+pub const MENU_ORG_NOTE_OPEN: i32 = 52;
+pub const MENU_ORG_NOTE_DETAILS: i32 = 53;
+pub const MENU_ORG_NOTE_COPY: i32 = 54;
+pub const MENU_ORG_NOTE_COPY_ID: i32 = 55;
+pub const MENU_ORG_NOTE_TO_TASK: i32 = 56;
+pub const MENU_ORG_NOTE_DELETE: i32 = 57;
 /// A colour row's action is this plus the palette slot. It sits **above**
 /// `MENU_ORG_MOVE_BASE`, so the dispatcher has to test for it first: a bare
 /// `>= MOVE_BASE` would read a colour as a move-to target list.
@@ -7888,6 +7901,45 @@ impl AppState {
         Some(id as i64)
     }
 
+    /// The capture layer's ➤ (ADR-0115): one note whose body is the whole draft
+    /// and whose tags are the `#`-tokens in it.
+    ///
+    /// This is the Android shell's `orgAddNote(body, tags)`, and the token rule is
+    /// the only thing the two shells have to agree on word for word: the same
+    /// sentence typed into either one files under the same tags, because
+    /// `note_tag_tokens` is that shell's `MarkdownText.tagTokens` written out
+    /// again. A blank draft writes nothing at all — ➤ is drawn dimmed over one and
+    /// refuses here — so there is never an empty row to undo.
+    pub fn org_create_note_from_capture(&self, text: String) -> Option<i64> {
+        let body = text.trim_end().to_string();
+        if body.trim().is_empty() {
+            return None;
+        }
+        let id = self.next_note_id.get();
+        let now = now_secs();
+        self.exec_org(Command::CreateNote {
+            note: Note {
+                id: NoteId(id),
+                uuid: crate::core::organizer::new_uuid(),
+                // The draft is the *body*: the layer has no title field, and the
+                // reference's note has no title at all — a row reads it by its
+                // first line (what `org_note_row` calls the excerpt).
+                title: String::new(),
+                tags: note_tag_tokens(&body),
+                body,
+                pinned: false,
+                created: now,
+                edited: now,
+                // A capture is never a reply: 引用 is the reply field on the note
+                // it answers, or 指令's `comment`. The ＋'s own rule.
+                ref_note: None,
+                deleted_at: None,
+            },
+        })?;
+        self.next_note_id.set(id + 1);
+        Some(id as i64)
+    }
+
     /// 引用 (SPEC §四十一, core ADR-0001): a new note whose `ref_note` names
     /// `parent` — the one write the read-only replies list was missing. The reply's
     /// text is its body and it carries no tags of its own; it is a note like any
@@ -7950,6 +8002,17 @@ impl AppState {
         };
         self.exec_org(Command::DeleteNote { note })?;
         Some(title)
+    }
+
+    /// One note's 唯一 ID as 详细信息 shows it and 指令 addresses it by — what the
+    /// card menu's 复制唯一 ID hands the clipboard. Empty when the row is gone, so
+    /// a menu left open across a merge copies nothing rather than a bare id.
+    pub fn org_note_uid(&self, id: i64) -> String {
+        self.organizer
+            .borrow()
+            .note(NoteId(id.max(0) as u64))
+            .map(|n| org_uid(&n.uuid, n.id.0))
+            .unwrap_or_default()
     }
 
     /// One note's tags as the **editable** form's text — `parse_tags`'s inverse. A
@@ -8182,6 +8245,62 @@ impl AppState {
         }
         rows.push(row(MENU_ORG_DELETE, "删除任务", "trash", true));
         self.menu.set_vec(rows);
+    }
+
+    /// Fill the shared context menu with one note's rows — the notes half of
+    /// `fill_org_task_menu`, and the door this row never had: a note's card
+    /// carried no ⋯ and answered no right-click, so every verb it owns lived in
+    /// the detail pane or behind 多选.
+    ///
+    /// It is the reference app's own list, minus its 编辑 and 评论 rows. 编辑 is
+    /// the detail pane here — the card is not a second editor, and a note is
+    /// edited where it is read, so a row that opened one would be a second place
+    /// to type into the same note; 评论 is the field sitting under the body of the
+    /// note the menu was opened on. The reference's menu carries both because its
+    /// card cannot be edited in place at all.
+    ///
+    /// No 回收站 branch, and the reason is the row's: in the bin a note draws 恢复
+    /// and 彻底删除 itself, and both this menu's doors are off there — the same
+    /// rule that keeps a binned *task* row from offering a menu at all (and the
+    /// same reason its menu has no trashed arm).
+    pub fn fill_org_note_menu(&self, note: i32) {
+        let row = |id: i32, label: &str, icon: &str, danger: bool| MenuRow {
+            id,
+            label: label.into(),
+            icon: icon.into(),
+            danger,
+            swatch: -1,
+            swatch_bg: false,
+            check: false,
+        };
+        // An id that names no note empties the menu rather than offering verbs
+        // that would refuse — the row was deleted under the pointer, which a merge
+        // can do (the list menu's own rule).
+        let Some(current) = self
+            .organizer
+            .borrow()
+            .note(NoteId(note.max(0) as u64))
+            .cloned()
+        else {
+            self.menu.set_vec(Vec::new());
+            return;
+        };
+        self.menu.set_vec(vec![
+            // Two ids rather than one, so the action does not have to read the
+            // row back to learn which way it goes — the task row's 已完成 /
+            // 标记为未完成 pair, and the same reason.
+            if current.pinned {
+                row(MENU_ORG_NOTE_UNPIN, "取消置顶", "star", false)
+            } else {
+                row(MENU_ORG_NOTE_PIN, "置顶", "star", false)
+            },
+            row(MENU_ORG_NOTE_OPEN, "打开", "page", false),
+            row(MENU_ORG_NOTE_DETAILS, "详细信息", "note", false),
+            row(MENU_ORG_NOTE_COPY, "复制内容", "copy", false),
+            row(MENU_ORG_NOTE_COPY_ID, "复制唯一 ID", "copy", false),
+            row(MENU_ORG_NOTE_TO_TASK, "转为待办", "todo-check", false),
+            row(MENU_ORG_NOTE_DELETE, "删除", "trash", true),
+        ]);
     }
 
     /// Fill the shared context menu with one stored list's rows: 重命名 / 颜色 /
@@ -15674,6 +15793,44 @@ fn org_day_and_age(secs: i64) -> String {
     }
 }
 
+/// The `#tag` tokens a capture's text names, in first-seen order and without the
+/// `#` (ADR-0115).
+///
+/// **The Android shell's rule, written out again** (`MarkdownText.tagTokens`), and
+/// deliberately a copy rather than a shared idea: the two shells have no common
+/// code for it, and this is the one thing about a capture that has to agree
+/// *byte for byte*, because the same sentence typed into either one must file
+/// under the same tags. Its three refusals are the reference app's own:
+///
+/// - A token is split on the separators the text itself lays words out with, so a
+///   tag ends where a word does.
+/// - Trailing sentence punctuation is not part of the name: `#工作。` is 工作.
+/// - A bare `#` is dropped, and so is one whose name is only digits — "issue #3"
+///   must not file an issue under a label called `3`.
+fn note_tag_tokens(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for token in text.split([' ', '\n', '\t', '，', ',', '、']) {
+        // `strip_prefix` before the length test, so a `#` on its own — the token
+        // length the reference checks — never reaches the trim below.
+        let Some(name) = token.strip_prefix('#') else {
+            continue;
+        };
+        if token.chars().count() < 2 {
+            continue;
+        }
+        let name = name.trim_end_matches([
+            '.', '。', '!', '！', '?', '？', ')', '）', ':', '：', ';', '；',
+        ]);
+        if name.is_empty() || name.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        if !out.iter().any(|t| t == name) {
+            out.push(name.to_string());
+        }
+    }
+    out
+}
+
 /// A comma-separated tag input as the list a row stores: trimmed, empties
 /// dropped, duplicates dropped in first-seen order. One place decides what the
 /// input means, so the row a typed string produces and the string it renders
@@ -22917,5 +23074,105 @@ mod tests {
         let (state, _repo) = org_session();
         state.fill_org_list_menu(404);
         assert_eq!(state.menu_model().row_count(), 0);
+    }
+
+    /// A note card's ⋯ / right-click, the door this row never had (ADR-0115): the
+    /// reference app's verbs in order, 置顶 drawn as whichever way the row is
+    /// *not*, and — the list menu's own rule — nothing at all for a row a merge
+    /// deleted under the pointer.
+    #[test]
+    fn a_notes_menu_offers_its_verbs_and_follows_the_pin() {
+        use slint::Model;
+
+        let (state, _repo) = org_session();
+        let note = state.org_create_note().unwrap();
+        state.org_note_body(note, "正文".into());
+
+        let ids = |state: &super::AppState| -> Vec<i32> {
+            let rows = state.menu_model();
+            (0..rows.row_count())
+                .map(|i| rows.row_data(i).unwrap().id)
+                .collect()
+        };
+
+        state.fill_org_note_menu(note as i32);
+        assert_eq!(
+            ids(&state),
+            vec![
+                super::MENU_ORG_NOTE_PIN,
+                super::MENU_ORG_NOTE_OPEN,
+                super::MENU_ORG_NOTE_DETAILS,
+                super::MENU_ORG_NOTE_COPY,
+                super::MENU_ORG_NOTE_COPY_ID,
+                super::MENU_ORG_NOTE_TO_TASK,
+                super::MENU_ORG_NOTE_DELETE,
+            ]
+        );
+
+        // Pinned, the first row is the way *back*: one row read the other way,
+        // which is why the action needs two ids rather than a read of the row.
+        state.org_note_pinned(note, true);
+        state.fill_org_note_menu(note as i32);
+        assert_eq!(ids(&state)[0], super::MENU_ORG_NOTE_UNPIN);
+
+        // 复制唯一 ID is the row's own uuid, and 复制内容 carries it on its own
+        // line — the name a 指令 batch answers the row by.
+        let uid = state.org_note_uid(note);
+        assert_eq!(uid.len(), 32, "a minted uuid: {uid}");
+        assert!(
+            state.org_note_copy_text(&[note]).ends_with(&format!("ID: {uid}")),
+            "复制内容 carries the 唯一 ID"
+        );
+        assert_eq!(state.org_note_uid(404), "", "a row that is gone copies nothing");
+
+        state.fill_org_note_menu(404);
+        assert_eq!(state.menu_model().row_count(), 0);
+    }
+
+    /// The capture layer's ➤ (ADR-0115). The draft is the body and its `#`-tokens
+    /// are the tags — the Android shell's own split — and a draft that is blank
+    /// writes nothing, which is what makes dismissing the layer cost no undo step.
+    #[test]
+    fn the_capture_files_a_drafts_hash_tokens_as_tags() {
+        use crate::core::organizer::NoteId;
+
+        let (state, _repo) = org_session();
+        let id = state
+            .org_create_note_from_capture(
+                "写 #项目/工作 和 #工作。 还有 issue #3，再写一次 #工作\n第二行".into(),
+            )
+            .unwrap();
+        let note = state.organizer().note(NoteId(id as u64)).unwrap().clone();
+        assert_eq!(note.title, "", "a capture has no title: the draft is the body");
+        assert!(note.body.starts_with("写 #项目/工作"), "{:?}", note.body);
+        assert_eq!(
+            note.tags,
+            vec!["项目/工作".to_string(), "工作".to_string()],
+            "the trailing 。 is not part of the name, #3 is not a tag, and a repeat is one tag"
+        );
+
+        // A draft with nothing in it is not a note — and neither is whitespace.
+        assert!(state.org_create_note_from_capture("   \n".into()).is_none());
+        assert_eq!(state.organizer().notes.len(), 1);
+    }
+
+    /// The token rule itself, which the two shells have to agree on **byte for
+    /// byte**: the same sentence typed into either one files under the same tags.
+    /// Its three refusals are the reference app's (ADR-0115).
+    #[test]
+    fn a_capture_token_runs_to_the_separator_and_refuses_what_is_not_a_tag() {
+        // Every separator the text lays words out with — both keyboards' commas
+        // and the enumeration mark — ends a token.
+        assert_eq!(
+            super::note_tag_tokens("#a #b\n#c\t#d，#e,#f、#g"),
+            vec!["a", "b", "c", "d", "e", "f", "g"]
+        );
+        // Sentence punctuation is not part of the name.
+        assert_eq!(super::note_tag_tokens("#工作。 #好！"), vec!["工作", "好"]);
+        // A `#` on its own, a name of digits, and a `#` inside a word are not tags:
+        // "issue #3" must not file an issue under a label called `3`.
+        assert!(super::note_tag_tokens("# #3 issue#4").is_empty());
+        // First-seen order, and a repeat is one tag.
+        assert_eq!(super::note_tag_tokens("#b #a #b"), vec!["b", "a"]);
     }
 }
