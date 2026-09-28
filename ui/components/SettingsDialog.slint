@@ -480,8 +480,8 @@ export component SettingsDialog inherits PopupWindow {
                         }
                     }
                 }
-                // The address it was last reached at. Hand pairing is the only
-                // door a network without working broadcasts has, and a round that
+                // The address it was last reached at. Devices are found by the
+                // engine's broadcast and paired from the row above, and a round that
                 // fails says "the address moved to another device" — a sentence the
                 // user can only act on if the number is on the screen.
                 if row.paired : Text {
@@ -490,40 +490,6 @@ export component SettingsDialog inherits PopupWindow {
                     font-size: Typography.size-caption;
                     color: Colors.text-muted;
                     overflow: elide;
-                }
-            }
-            HorizontalLayout {
-                spacing: Theme.spacing-sm;
-                add-ip := TextInput {
-                    text <=> UIState.sync-add-text;
-                    font-family: Typography.mono-font;
-                    font-size: Typography.size-caption;
-                    color: Colors.text-primary;
-                    selection-foreground-color: Colors.text-primary;
-                    selection-background-color: Colors.selection;
-                    horizontal-stretch: 1;
-                    height: 26px;
-                    vertical-alignment: center;
-                    single-line: true;
-                    accepted => {
-                        UIState.sync-add(UIState.sync-add-text);
-                    }
-                }
-                // TextInput has no placeholder (see CommandPalette): the hint
-                // is a Text drawn only while the field is empty
-                if UIState.sync-add-text == "" : Text {
-                    text: "192.168.1.20 或 192.168.1.20:5878";
-                    font-family: Typography.mono-font;
-                    font-size: Typography.size-caption;
-                    color: Colors.text-muted;
-                    vertical-alignment: center;
-                    horizontal-stretch: 1;
-                }
-                Button {
-                    text: "按 IP 添加";
-                    clicked => {
-                        UIState.sync-add(UIState.sync-add-text);
-                    }
                 }
             }
             if UIState.sync-status != "" : HorizontalLayout {

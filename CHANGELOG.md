@@ -992,10 +992,8 @@ First functional release: a local, single-file-database notes workspace.
   last twelve log lines — including the merge's conflicts, which were previously
   invisible — are listed under 最近记录 (ADR-0121). Each paired row now also prints
   the address it was last reached at, because 「the address moved to another device」
-  is a sentence the user can only act on with the number on screen; the 按 IP 添加
-  field empties itself when *that* probe paired (a failed one keeps the text, and a
-  pairing pressed on a discovered row does not wipe somebody's half-typed address);
-  and a rejected push or an unanswered round logs the peer's **name** rather than its
+  is a sentence the user can only act on with the number on screen; and a rejected
+  push or an unanswered round logs the peer's **name** rather than its
   device id, since the log's peer column is 96 px and elides a hash into nonsense
 - A round that keeps an attachment row back says how many it kept: an inbound row
   with neither bytes nor a local copy lands as nothing (a row is the promise a peer
@@ -1112,6 +1110,35 @@ First functional release: a local, single-file-database notes workspace.
   `the_v30_step_adds_and_backfills_the_organizer_revisions` and
   `stamp_rev_covers_the_written_rows_and_never_the_before_half` in the core; and
   `the_funnel_stamps_the_written_row_and_never_the_before_half` on the phone
+
+### LAN sync — 真机联调：一个真 bug、和去掉「按 IP 添加」(ADR-0126)
+- **This is the first time two real devices paired, pulled, pushed and conflicted on
+  the same Wi-Fi** (a Lenovo tablet on `dev.quire.compose` against this shell), and
+  it paid for itself immediately. Discovery over UDP works both ways; 发起配对 from
+  the tablet's row is accepted by this shell's engine with no dialog; the tablet's
+  real 7 notes / 2 tasks / 15 pages landed here, and a note edited *here* with a
+  newer revision replaced the tablet's copy in one round — the whole point of core
+  ADR-0004, seen on screen rather than in a unit test
+- **A round with the tablet reported `push answered 409` on every cycle**, and the
+  refusal was this shell's own and correct: the body said it came from
+  `TEST-DESKTOP`, i.e. from *this* device, and a push from a device that is not in
+  the peer book is refused. The bug was the phone's — it answered a pull with the
+  identity of the snapshot it had been sent. Fixed there (compose ADR-0027); the
+  data had converged anyway, because the pull half of every round lands and this
+  shell's own rounds pull, so only the *report* was wrong. Exactly the kind of
+  defect that a test cannot see: `sync_apply_remote` is driven by the suite, and
+  nobody ever looked at the identity it returns
+- **The 「按 IP 添加」 row is gone** (ADR-0126): a device is found by its broadcast
+  and paired from its row, so this shell no longer asks for an address the network
+  should have told it. `Cmd::ProbeAdd` and the `awaited` entry keyed by address go
+  with it. On a network that filters broadcasts the 已发现的设备 list is now simply
+  empty — the honest answer — and the alternative weighed (the row kept under
+  Settings as an advanced door) was not taken
+- Not here yet, and the reason it matters: the library this ran against was a
+  **scratch** one (`--portable`), because the user's real library is on schema 29
+  and opening it with this build migrates it to 30, which the installed 0.1.10
+  could then no longer open. Their real library is untouched and has no sync rows;
+  `just deploy-workshop` is what puts this build there
 
 ### Build & test
 - `just check`: `cargo check --all-targets`, the whole test suite, a release

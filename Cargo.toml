@@ -32,8 +32,9 @@ default-run = "quire"
 # This rev carries the organizer's sync model (core ADR-0004): notes and tasks are
 # merged by their 唯一 ID with the row's revision as the arbiter, which moves
 # `SNAPSHOT_VERSION` to 4 — so the phone's pin moves with this one, and a device
-# left on the previous rev refuses to sync rather than half-understanding.
-quire-core = { git = "https://github.com/PT123123/quire-core.git", rev = "d4cad517bc468f8d0bc73ab2085d1cf183d251fb" }
+# left on the previous rev refuses to sync rather than half-understanding. It also
+# drops the by-hand "add by IP" door, whose row and callback this shell no longer has.
+quire-core = { git = "https://github.com/PT123123/quire-core.git", rev = "5a6b103103d399368e93cd77df9011f050af80ea" }
 image = { workspace = true }
 rfd = "0.17.2"
 rusqlite = { workspace = true }

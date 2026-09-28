@@ -647,16 +647,15 @@ export global UIState {
     in-out property <[SyncRow]> sync-rows;
     in-out property <string> sync-status: "";
     in-out property <bool> sync-auto: true;
-    in-out property <string> sync-add-text: "";
     callback sync-now(string);       // peer id: one pull-merge-push now
     callback sync-pair(string);      // peer id: ask a discovered device to pair
     callback sync-forget(string);    // peer id: drop it from the table
     callback sync-auto-toggled(bool);
-    callback sync-add(string);       // "ip" or "ip:port": find and pair by hand
-    // This device's own half of the section, so the other one can be pointed at
-    // it: the name the peer sees, the address to type into its 「按 IP 添加」,
-    // how often the periodic round runs, whether a round is in flight, and the
-    // log the engine left. Rust fills all five in `refresh_sync_ui`.
+    // This device's own half of the section, so the other one can be recognised
+    // on the wire: the name the peer sees, this device's address (what a failed
+    // round's "the address moved to another device" is checkable against), how
+    // often the periodic round runs, whether a round is in flight, and the log
+    // the engine left. Rust fills all five in `refresh_sync_ui`.
     in-out property <string> sync-self-name: "";
     in-out property <string> sync-self-address: "";
     in-out property <int> sync-interval: 60;

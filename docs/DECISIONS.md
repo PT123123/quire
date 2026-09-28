@@ -2,6 +2,40 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0126 · Devices are found on the LAN, and there is no by-hand address
+
+**Decision.** The 「按 IP 添加」 row is gone from the 同步 section, along with the
+`sync-add` callback, its `SyncUiState.sync-add-text` field and its handler, and
+`Cmd::ProbeAdd` / `probe_add` are gone from `quire-core` (the other shell's
+「按地址添加」 goes with it — compose ADR-0028). A device appears under 已发现的设备
+because its announcement was heard, and is paired from that row; that is the only
+door onto the LAN. The `awaited` map — "the round the user asked for and has not
+been answered" — is keyed by peer id everywhere now; the address key existed only
+for the door that typed one in.
+
+**Context.** The row was there because UDP broadcast reception is not guaranteed
+everywhere, and it was the honest fallback for a network that filters broadcasts.
+But it asks the user for a fact the network should have told them — the address of
+a device they are holding — and, worse, it makes "the announcement heard nothing"
+a state the user can *work around* instead of one worth fixing. It also carried
+the only reason `awaited` had two key spaces, and the only reason the pairing
+handler had to empty a text field.
+
+**Consequences.**
+
+- On a LAN where announcements do not arrive, this shell now offers no way to
+  pair, and the honest answer is an empty 已发现的设备 list. Bringing the door back
+  is a row, a callback and a command; the alternative weighed and not taken was
+  keeping the row under Settings as an explicit advanced door, which keeps the
+  workaround without advertising it as the normal path.
+- The pairing handler no longer has a field to clear, so a pairing pressed on a
+  discovered row cannot wipe half a typed address — the state it guarded against
+  cannot exist.
+- **Measured on two real devices** (a Lenovo tablet over Wi-Fi): the tablet's row
+  appears by broadcast within a few seconds, 发起配对 is accepted by this shell's
+  engine automatically, and rounds then run in both directions — so the fallback
+  was never needed here, which is the evidence this decision rests on.
+
 ## ADR-0125 · The organizer's funnel stamps the revision, so no write site has to
 
 **Decision.** `exec_org` and `exec_org_all` — the two ways any organizer command

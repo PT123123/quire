@@ -253,30 +253,6 @@ fn start_sync(ui: &AppWindow, state: &Rc<AppState>, awaited: Awaited) {
             );
         });
     }
-    {
-        let gw = ui_state_weak(ui);
-        let cmd = cmd_tx.clone();
-        let a = awaited.clone();
-        ui.global::<UIState>().on_sync_add(move |text| {
-            let g = gw.upgrade().unwrap();
-            let text = text.trim().to_string();
-            if text.is_empty() {
-                return;
-            }
-            let (ip, port) = match text.rsplit_once(':') {
-                Some((host, p)) => match p.parse::<u16>() {
-                    Ok(port) => (host.to_string(), port),
-                    Err(_) => (text.clone(), crate::services::sync::SYNC_PORT),
-                },
-                None => (text.clone(), crate::services::sync::SYNC_PORT),
-            };
-            g.set_sync_status(format!("正在寻找 {ip}:{port} 上的 Quire…").into());
-            // keyed by the address until there is a device to key by: the
-            // engine's `probe_add` answers with the same string on a failure
-            a.borrow_mut().insert(ip.clone(), std::time::Instant::now());
-            let _ = cmd.send(crate::services::sync::engine::Cmd::ProbeAdd { ip, port });
-        });
-    }
 
     // the pump: drain the engine's jobs on this thread, then decide whether
     // the periodic round is due. A `Box::leak`ed Timer is what keeps it
@@ -500,7 +476,6 @@ fn handle_sync_job(
             let _ = reply.send(result);
         }
         Job::InboundPair { device, ip, reply } => {
-            awaited.borrow_mut().remove(&ip);
             state.sync_note_device(
                 &device.id,
                 &device.name,
@@ -524,12 +499,9 @@ fn handle_sync_job(
             );
         }
         Job::Paired { device, ip } => {
-            // 「按 IP 添加」 waits on the *address*, because that is all there is
-            // to wait on before the other device has said who it is.
-            let mut waiting = awaited.borrow_mut();
-            let probed = waiting.remove(&ip).is_some();
-            waiting.remove(&device.id);
-            drop(waiting);
+            // A pairing the user asked for is answered by device id, and the id is
+            // what the round in flight is keyed by once the peer has said who it is.
+            awaited.borrow_mut().remove(&device.id);
             state.sync_note_device(
                 &device.id,
                 &device.name,
@@ -540,13 +512,6 @@ fn handle_sync_job(
             );
             state.sync_log_push(&device.name, true, "已配对");
             g.set_sync_status(format!("已与 {} 配对。", device.name).into());
-            // Empty the field only for the door that typed into it, and only when
-            // that address answered: a failed probe keeps the text so the typo is
-            // there to fix, and a pairing the user pressed on a discovered row has
-            // an address half-typed in the box that is nobody else's to wipe.
-            if probed {
-                g.set_sync_add_text("".into());
-            }
         }
         Job::SyncDone {
             peer_id,

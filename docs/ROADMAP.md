@@ -140,8 +140,9 @@ describe is still true of everything they cover.
    sender's own word. Both shells now gate on their own peers table (desktop
    `sync_peer_kind` + the unpaired-push refusal at `controller.rs:421-435`,
    Compose `sync.rs:686-703`), which leaves one hole: a peer that is paired but
-   whose row has no kind — a device added by hand through `ProbeAdd`, or one that
-   pushed before it was ever announced — reads as the conservative answer, i.e. a
+   whose row has no kind — one that pushed before it was ever announced (the
+   by-hand `ProbeAdd` path that used to be the other case is gone, ADR-0126) —
+   reads as the conservative answer, i.e. a
    desktop's databases and attachments are dropped from *its* push. Add `kind` to
    `SyncSnapshot` (additive, `#[serde(default)]`, no version bump per ADR-0102's
    own argument) and the shells' lookup becomes a check instead of a substitute.
