@@ -2,6 +2,61 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0127 · 笔记 and 任务 carry a 刷新, and a round that lands re-projects them
+
+**Decision.** Both organizer tabs get a 刷新 button — a text button on desktop, a
+`Refresh` icon on Android — that starts **one round with every paired device**,
+not a reload of the local list and not a round with one named peer. Three pieces
+make that one action rather than three:
+
+- `UIState.sync-now-all()` (desktop) and `Request::SyncNowAll` (compose) are the
+  new no-argument door. The per-peer `sync-now` stays, for the 同步 section's
+  立即同步 row, where a named device is exactly what is being asked about.
+- **The target rule moved out of the periodic timer.** `peers_due_for_a_round`
+  (desktop) and `Session::peers_due_for_a_round` (compose) are the single answer
+  to "who does one round dial", and the auto timer now calls them. Compose
+  additionally returns the paired peers it had to skip, by name.
+- `handle_sync_job`'s `Job::ApplyRemote` branch calls `org_refresh` after the
+  merge. It previously redrew pages, blocks and databases but not the organizer,
+  so **a round that merged three new notes left 笔记 and 任务 drawing the list as
+  it was before the pull.**
+
+**Context.** The button was asked for as "像 activitywatch 一样弄个刷新功能，刷新
+同时绑定同步" — and the "同时绑定同步" is the whole of it. Reloading the local
+list is not what was missing; reloading a list that is correct but incomplete is
+indistinguishable from not reloading, and the only thing that makes it complete
+is the round. A per-peer `sync-now` was the wrong shape for it: the press means
+"a note of mine is not here", and which of the devices has it is a question the
+user did not ask. A missing `org_refresh` is why the pre-existing 立即同步 button
+had this shape of problem all along — it worked, and then did not show you.
+
+**Consequences.**
+
+- The button is drawn only when there is a paired device to dial
+  (`sync-has-paired` on desktop, `SyncState.peers` on Android). A 刷新 whose only
+  possible answer is "还没有配对任何设备" is a button in the way, and pairing
+  happens in the 同步 section.
+- A paired device that is not currently announcing is **named in the status line
+  as skipped** rather than silently dropped. The periodic round still drops it
+  silently — nobody is waiting on a tick — but a hand-started round that quietly
+  sat a device out is the round that looks like it worked.
+- The two shells' rules cannot drift, because within each shell there is one
+  function. They can still drift *across* shells; the two implementations are
+  deliberately not shared, since the core deliberately does not own the session
+  glue (see `quire-core/src/services/sync/mod.rs`) and the compose rule carries
+  two filters the desktop has no need of (`p.id != me`, `!p.ip.is_empty()`).
+- `org_refresh` in the `ApplyRemote` branch is a fix, not a feature: it is what
+  every other projection in that same branch already did, and what every
+  organizer write path has done for the whole area's life.
+- **Not done, and deliberately:** a 刷新 on the 文档/页面 area. Pages already go
+  through the same `ApplyRemote` and were redrawn; putting a sync button in the
+  document editor's toolbar would add a button that leaves the app to a
+  screen whose data was never the thing going stale. The weighed alternative —
+  a pull-to-refresh gesture on the organizer lists, which is what the reference
+  app has — costs a gesture recogniser and fights the lists' own scroll, and a
+  visible button was judged the better answer for a device where sync is rare
+  and a missed note is expensive.
+
 ## ADR-0126 · Devices are found on the LAN, and there is no by-hand address
 
 **Decision.** The 「按 IP 添加」 row is gone from the 同步 section, along with the

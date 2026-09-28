@@ -1146,6 +1146,21 @@ export component OrganizerArea inherits Rectangle {
                                 font-size: Typography.size-caption;
                                 clicked => { UIState.org-select-entered(UIState.org-tab); }
                             }
+                            // 刷新: a round with every paired device, right now.
+                            // It is the only button in this row that leaves the
+                            // app — everything else edits what is on screen —
+                            // and it is here rather than only in the settings
+                            // dialog because that is where a note is read *and*
+                            // written, so a row that arrived from another device
+                            // while you were in the list is the moment the button
+                            // is worth pressing. Drawn only with a peer to dial:
+                            // a 刷新 that can only say "还没有配对任何设备" is a
+                            // button in the way.
+                            if UIState.sync-has-paired : OrgButton {
+                                label: "刷新";
+                                font-size: Typography.size-caption;
+                                clicked => { UIState.sync-now-all(); }
+                            }
                             // 列表/平铺 says nothing about a bin, so the segmented
                             // control goes with it.
                             if UIState.org-tab == 1 && !UIState.org-bin-open : OrgSeg {

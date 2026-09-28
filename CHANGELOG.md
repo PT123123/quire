@@ -4,6 +4,22 @@
 
 First functional release: a local, single-file-database notes workspace.
 
+### 笔记 / 任务 (organizer)
+- **刷新 in both tabs: one round with every paired device, right now**
+  (ADR-0127). It is a sync round, not a reload of the local list — a list that is
+  correct but missing a note from another device looks identical to one that was
+  never refreshed, and the round is the only thing that makes it complete. Drawn
+  only when a paired device exists, so it is not a button that can only fail
+- The rule for *which* devices one round dials is now one function
+  (`peers_due_for_a_round`), shared with the periodic auto-sync — a hand-started
+  round and a background one can no longer disagree about who is reachable. A
+  paired device that is not currently on the network is **named in the status
+  line as skipped** rather than silently dropped
+- **A round that lands now redraws 笔记 and 任务.** It previously redrew pages,
+  blocks and databases but not the organizer, so merging three new notes left the
+  tabs drawing the list as it was before the pull — which is why the 同步
+  section's 立即同步 button worked and then showed you nothing
+
 ### Editor
 - Block editor: paragraphs, headings 1–3, bullet / numbered / to-do lists,
   quotes, code blocks, dividers
