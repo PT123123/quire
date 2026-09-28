@@ -4037,3 +4037,60 @@ settings 行，不走 `sync_note_device`，因为那条路拿墙上时钟去盖 
 core 遗留里最后两条（`adopt_uuids` 按整型 id 归并 uuid、影子 := 自己合并后的快照让冲突下一轮被静默改判）是
 用一次性探针在 pin 住的那个 rev 上**跑出来**的，不是读出来的——探针文件已删，`quire-core` 工作区干净。
 
+## M2.5q · 笔记与任务按 唯一 ID 合并，revision 说了算（core ADR-0004，ADR-0125，compose ADR-0026）
+
+用户的一句话是「这个 sync 目前没实现好，你去看 activitywatch 的 sync 怎么实现的也弄好 quire 的」，
+范围定在「笔记和任务对齐那个 AW 的 SYNC 就行」——也就是 §四十一 的两类行，不是整棵文档树。
+`aw-sync-rust` 对这两类的做法是两件事：**uuid 是逻辑键**（`serialize.rs` 的 `logical_key`），
+**rev = (updated_at 毫秒, device_id) 字典序仲裁**（`conflict.rs` 的 `incoming_newer`）。`merge.rs` 的
+头一行本来就自称是这套「adapted」，但它当成键用的是**整型 id**，所以上一节探针跑出来的两件事都有了
+解释：两条不同的行会共用同一个 uuid（ROADMAP 第 7 条），冲突两边各自写进自己的 shadow、下一轮被静默改判
+（第 8 条）。这次把「adapted」补成「是」。
+
+**core（quire-core，ADR-0004）**
+- `merge` 的 organizer 一半换成 uuid 键 + rev 仲裁（新增 `merge_organizer`）：两边都有就按 rev 比，新的
+  赢；只有一边有，就看 shadow 说这是「对方没有的行」（插入，给一个新的本地位 id）还是「对方回收站清空过」
+  （保持删除）。整型 id 不再需要对齐，**renumber 级联在 organizer 上消失了**。
+- `org::Note` / `org::Task` 新增 `rev: String`，形如 `"{millis:013}-{device}"`（`organizer::rev`），迁移
+  **30** 落地并把存量行按 `MAX(edited, deleted_at) * 1000` 就地回填——空 rev 会和所有空 rev 打平，
+  等于没有仲裁依据。存盘与 wire（`SNote.rev` / `STask.rev`，`#[serde(default)]`）都跟着走。
+- 新增 `Command::stamp_rev`：只盖「即将写入的那一行」，**`before` 那一半绝不盖**——undo 写回去的是它，
+  盖了就会让被撤销的行看起来比撤销它的那次编辑还新，对手下一轮把撤销过的值又拿回来。
+- `SNAPSHOT_VERSION` **3 → 4**。这不是 wire 形状变化（rev 是 defaulted），是语义变化：还在按 id 归并的
+  旧构建会把我们的行按它自己编的 id 回过来，那是**静默发散**，所以版本门直接拒绝。
+
+**desktop（ADR-0125）**
+- `exec_org` / `exec_org_all`——所有 organizer 写必经的两个漏斗——在进 `command::exec` 之前盖 rev，调用点
+  一个都不用记得。新增 `now_millis()`（墙上时钟毫秒，不是本会话的单调钟：rev 是要和对手比的）。
+- `sync_apply_remote` 没动：合并结果里的 id 已经是本机的 id，那半段按 id 增改删的逻辑原样成立。
+
+**compose（ADR-0026）**
+- `Organizer` 拿一个 `device: String`（session 在 `open` 时给一次，`reload_in_memory` 保留），两个漏斗
+  `apply` / `apply_all` 同样盖 rev；`now_millis()` 同桌面。
+
+**验证**
+- core：`cargo test` 全绿（310 + 20 + 9 + 70 + 18 + 52）。新增 `the_uuid_is_the_key_not_the_integer_id`、
+  `an_organizer_edit_lands_and_the_newer_revision_wins_a_double_edit`、
+  `a_bin_travels_as_a_write_of_the_row_it_belongs_to`、
+  `a_comment_follows_its_parent_to_the_integer_it_landed_under`、
+  `the_v30_step_adds_and_backfills_the_organizer_revisions`、
+  `stamp_rev_covers_the_written_rows_and_never_the_before_half`。旧测试里五条按新语义重写，其中
+  `a_ref_to_a_note_that_did_not_come...` 改成按 uuid 找——插入的行现在会拿一个新的本地位 id，这一条
+  本身也是新语义的证据。
+- desktop：`cargo test` 全绿（181 + 5 + 14），新增
+  `an_organizer_row_syncs_by_its_uuid_and_the_newer_revision_wins`：两台 session，各自第一行都落在 row 1
+  （两个 uuid、两条行），随后两边改同一行，**后写的那次在一轮内两边都赢**。
+- compose：`cargo test` 全绿（21 + 27），新增 `the_funnel_stamps_the_written_row_and_never_the_before_half`。
+- 两个 shell 都先在本地用 `[patch]` 指到本地 core 跑通，再把 pin 换到这个 rev 重跑。
+
+**没验证的（诚实）**
+- 依旧**一次真机往返都没跑过**：两台真设备配对、推、拉、断网重连还是没测（沿用用户的要求）。rev 仲裁的
+  正确性由 core 的单测确定性覆盖（时间戳是构造出来的，不靠 sleep 撞毫秒），端到端只到「两个 session 之间」。
+- **两端必须一起更新**：`SNAPSHOT_VERSION = 4`，老的一端会被明确拒绝（不是半懂），这是这次唯一用户可见的
+  代价。
+- 关掉了 ROADMAP 九条里的第 7、8 条，以及第 9 条的 **organizer 一半**；附件那半（以及 1–6 条）一行没动
+  ——附件行没有 uuid 可当键，是另一件事。
+- 剩下的：`ref_note` 仍然存整型 id（靠 `remote id → local id` 映射跟随父行）。真正的 AW 式做法是引用直接
+  存 uuid，那要动 wire 字段和两端的引用渲染，这次没做。
+
+

@@ -1059,18 +1059,59 @@ First functional release: a local, single-file-database notes workspace.
   `another_session_does_not_replay_the_beat_it_just_loaded` (+ its moved-address control on
   the cold start), `an_empty_library_with_settings_behind_it_keeps_its_identity` (+ the
   control that the file it opens really has settings and no pages).
-  **Still open, and written up as nine items in `docs/ROADMAP.md` §"Sync backlog owned
+  **Still open, and written up in `docs/ROADMAP.md` §"Sync backlog owned
   by `quire-core`"**: everything that needs a `quire-core` change — the push carries no
   attachment bytes, one unreadable file fails a whole round, an inbound push cannot name
   its sender's kind and records an ephemeral port, `GET /sync/snapshot` answers anyone
-  who asks, a merge re-keying two distinct rows leaves them sharing one 唯一 ID, a pair
-  of rows that share an integer id means the file is never fetched for, and a logged
-  conflict is re-decided silently one round later. The last three were proven
-  against the pinned rev by throwaway probes or by reading the fetch loop, not by
-  guessing.
+  who asks, and the fetch decision is keyed by integer id so a colliding attachment is
+  never fetched for. Four of the nine were proven against the pinned rev by throwaway
+  probes or by reading the fetch loop, not by guessing; **three of them are closed by
+  the section below.**
 - Correction to the section above while passing through: discovery is **5879**, not
   46000, and the automatic cycle runs on the interval the user chose, not a fixed
   minute
+
+### LAN sync — 笔记与任务按 唯一 ID 合并，revision 说了算 (core ADR-0004, ADR-0125)
+- **`notes` and `tasks` are merged by their 唯一 ID, not by their integer row id.** Two
+  devices that each filed a note under row 1 hold *two notes* — the integer is a
+  per-device watermark and the uuid is the name — so the merge no longer renumbers the
+  organizer at all, and the state a renumber created (two distinct rows left sharing one
+  唯一 ID, ROADMAP item 7) is now unreachable rather than papered over. A row that
+  arrived is inserted under a fresh local id, and the merge reports the `remote id →
+  local id` map, so a reply's `ref_note` follows its parent to wherever it landed
+- **A conflict is settled once, by the row's revision** — `"{millis:013}-{device}"`
+  compared as a string, the newer copy standing. Both ends compute that answer from the
+  same two strings, so the round that *finds* a conflict is the round that settles it.
+  The old rule kept this device's copy **and wrote that copy into its own shadow**, so
+  the next round read the winner's row as a one-sided edit and converged on an argument
+  nobody won (ROADMAP item 8). This is `aw-server-plus`'s rev rule, which the merge's
+  own header had claimed to be "adapted" and never was
+- **The bin needs no special case**: a trash and a restore are writes of the row like
+  any other — which is exactly why the revision is a field of its own, since `edited`
+  deliberately does not move when a row is binned, and a bin and the restore that undoes
+  it would otherwise carry the same stamp with nothing to order them
+- **A purge stays the shadow's job.** It is the one removal with no row to carry it, so
+  the shadow remains what tells "a row this side never had" from "a row this side
+  purged"; a stateless last-writer-wins cannot tell them apart and would resurrect what
+  the user emptied out of 回收站
+- **The `rev` column is new (core migration 30)**, backfilled in place from
+  `MAX(edited, deleted_at) * 1000` so no legacy row reaches a merge unstamped, and
+  **every organizer write restamps it** — from the one funnel each shell already had
+  (`exec_org` / `exec_org_all` here, `apply` / `apply_all` on the phone), never from the
+  twenty call sites that build the rows, and never over the `before` half an undo writes
+  back (ADR-0125)
+- **Both devices update together**: `SNAPSHOT_VERSION` is **4**. It is not a wire-shape
+  change — `rev` is a defaulted field — but a build that still keys the organizer by
+  `id` would answer this one's rows under ids this one never wrote, which is silent
+  divergence rather than a visible failure, so the gate refuses instead
+- New tests: `an_organizer_row_syncs_by_its_uuid_and_the_newer_revision_wins` here;
+  `the_uuid_is_the_key_not_the_integer_id`,
+  `an_organizer_edit_lands_and_the_newer_revision_wins_a_double_edit`,
+  `a_bin_travels_as_a_write_of_the_row_it_belongs_to`,
+  `a_comment_follows_its_parent_to_the_integer_it_landed_under`,
+  `the_v30_step_adds_and_backfills_the_organizer_revisions` and
+  `stamp_rev_covers_the_written_rows_and_never_the_before_half` in the core; and
+  `the_funnel_stamps_the_written_row_and_never_the_before_half` on the phone
 
 ### Build & test
 - `just check`: `cargo check --all-targets`, the whole test suite, a release

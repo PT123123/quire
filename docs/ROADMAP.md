@@ -92,13 +92,23 @@ either of them: `cargo check --target aarch64-linux-android` has not been run in
 
 ## Sync backlog owned by `quire-core` (opened 2026-09-28)
 
-ADR-0121…0123 and the Compose shell's ADR-0024/0025 fixed everything a shell can
+ADRs 0121…0123 and the Compose shell's ADR-0024/0025 fixed everything a shell can
 fix alone. What is left is in `quire-core::services::sync`, and none of it can be
-delivered from this checkout: the crate is a git dependency **at a pinned rev**
-(`fbfdaca`), so a core change is commit → push → bump → both shells rebuilt, and
-that is one decision the user has to make rather than an edit I can land. Each
-item below was read out of the pinned source (and the first is *proven* by a
-probe), with what each shell does in the meantime.
+delivered from this checkout: the crate is a git dependency **at a pinned rev**, so a
+core change is commit → push → bump → both shells rebuilt, and that is one decision
+the user has to make rather than an edit I can land. Each item below was read out of
+the pinned source (and several are *proven* by a probe), with what each shell does in
+the meantime.
+
+**Landed 2026-09-28 — items 7, 8 and the notes/tasks half of 9 are closed** by core
+ADR-0004 (with this shell's ADR-0125 and the phone's ADR-0026): `notes` and `tasks`
+are merged by their 唯一 ID with the row's **revision** as the arbiter. That removes
+the organizer's renumber cascade rather than repairing it, so the two defects a probe
+proved are now unreachable states instead of fixed bugs, and a conflict converges in
+the round that finds it. What is *not* reached by that change is the attachment
+surface (items 1–3, 6) and the identity of a *push* (items 4–5) — neither of which
+carries a uuid to key on. The items below are kept as written, since what they
+describe is still true of everything they cover.
 
 1. **A pushed snapshot carries no attachment bytes.** `server.rs:97-101` answers
    `Job::ApplyRemote { bytes: Vec::new(), .. }`, so a device that only ever
@@ -148,7 +158,8 @@ probe), with what each shell does in the meantime.
    pairing handshake is trust-on-first-use (`pair_with`'s own comment says a code
    "would only matter on a network the user does not already control"). A device
    id + a per-pairing token in the snapshot would be the smallest honest step.
-7. **Two rows with the same integer id end up sharing one 唯一 ID.**
+7. **Two rows with the same integer id end up sharing one 唯一 ID.** *— closed by core
+   ADR-0004; kept for the record.*
    `merge.rs:99-127` collapses `uuid` **keyed by the row's integer id, and only
    over `local` and `remote`** — the shadow never enters — and it runs before
    `merge_flat` decides whether the two rows are the same row. Proven against the
@@ -166,7 +177,10 @@ probe), with what each shell does in the meantime.
    not renumber (or consult the shadow for the id's previous owner), and mint a
    fresh uuid for a renumbered row. No shell can paper over this — the shells only
    see the merged rows.
-8. **A logged conflict is settled a second time, silently, one round later.**
+8. **A logged conflict is settled a second time, silently, one round later.** *— closed
+   by core ADR-0004, which is the "report the conflicted keys" fix this item asked for
+   and one better: the revision decides the winner, so no shell has to keep an old
+   shadow value to keep the divergence honest. Kept for the record.*
    Each side answers a conflict by keeping its own copy *and* writing that copy
    into its own shadow (`state.rs:15913` / Compose `sync.rs:706`, both inside the
    apply, so the pull and the push round write it the same way); the loser's
@@ -185,7 +199,10 @@ probe), with what each shell does in the meantime.
    but has no UI; today's behaviour converges, which is nice, on an argument
    nobody won.
 9. **The fetch decision is keyed by integer id, so a collision never fetches the
-   file.** `engine.rs:368-390` asks the shell 「which attachment ids live here
+   file.** *— the organizer's half is closed by core ADR-0004 (a note or a task is keyed
+   by its 唯一 ID, so a shared integer means nothing there); the **attachment** half is
+   still open, because an attachment row carries no uuid to key on. Kept for the
+   record.* `engine.rs:368-390` asks the shell 「which attachment ids live here
    already」 and skips every remote row whose *id* is in that list — but identity in
    the merge is the 唯一 ID, and item 7 showed two devices hand the same integer to
    different rows. So the remote row that collides is the one the engine does not

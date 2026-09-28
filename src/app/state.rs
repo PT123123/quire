@@ -611,6 +611,21 @@ pub fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
+/// The instant a **revision** is stamped with, in unix **milliseconds**.
+///
+/// Finer than [`now_secs`] on purpose, and the finer unit is the point: the
+/// revision is what a merge orders two copies of one row by
+/// (`core::organizer::rev`), and two writes a second apart are a whole second's
+/// worth of ambiguity the extra three digits take away. Unlike `now_secs` this is
+/// the wall clock and nothing else — a revision outlives the session and has to
+/// mean the same thing to the peer that reads it.
+pub fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 /// The label a save stores: trimmed to one line and cut at a character
 /// boundary, because a panel row that splits an emoji in half renders as a box.
 /// Empty is not a name, so it gets one that says which version of this page it
@@ -7145,6 +7160,7 @@ impl AppState {
     /// Plan, apply and record one organizer command on the area's stack.
     /// `None` is the plan's own refusal (a no-op edit, a row that is not there).
     fn exec_org(&self, cmd: Command) -> Option<Vec<Change>> {
+        let cmd = self.stamp_org(cmd);
         let changes = crate::core::command::exec(
             &mut self.doc.borrow_mut(),
             &mut self.history.borrow_mut(),
@@ -7162,6 +7178,7 @@ impl AppState {
     /// organizer's row commands a safe caller: each carries its own `before`/`after`
     /// row and reads no other row's result.
     fn exec_org_all(&self, cmds: Vec<Command>) -> Option<Vec<Change>> {
+        let cmds: Vec<Command> = cmds.into_iter().map(|cmd| self.stamp_org(cmd)).collect();
         let changes = crate::core::command::exec_all(
             &mut self.doc.borrow_mut(),
             &mut self.history.borrow_mut(),
@@ -7170,6 +7187,36 @@ impl AppState {
         )?;
         self.record(changes.clone());
         Some(changes)
+    }
+
+    /// Stamp the revision of every row a command is about to write — SPEC §四十一's
+    /// sync, `core::organizer::rev`.
+    ///
+    /// **This is the only place the desktop's organizer writes can be stamped**, and
+    /// that is the whole reason the two funnels above are funnels: every note, task
+    /// and list command arrives here (the ＋, an edit on blur, 指令's batch, a
+    /// restore, a list delete that moves its tasks), so one call covers them all
+    /// without a single call site having to remember.
+    ///
+    /// Stamped on the way **in**: the history entry keeps the *old* revision in the
+    /// revert, so an undo puts the row back looking as old as it was — otherwise the
+    /// peer would read the undo as the newer write and take the undone value.
+    fn stamp_org(&self, mut cmd: Command) -> Command {
+        cmd.stamp_rev(&self.org_rev());
+        cmd
+    }
+
+    /// The revision a write made *now* carries: the wall clock in milliseconds and
+    /// this device's id. The two halves together are what make the order total —
+    /// the clock separates writes a millisecond apart, the device separates two
+    /// devices that wrote in the same millisecond.
+    ///
+    /// `sync_self_info` mints the id on first use and remembers it, so this is a
+    /// settings read after the very first write of a session — and it is read here
+    /// rather than from a copy because the merge compares this string with the
+    /// peer's, and a device whose id changed under it would order nothing.
+    fn org_rev(&self) -> String {
+        crate::core::organizer::rev(now_millis(), &self.sync_self_info().id)
     }
 
     pub fn undo_org(&self) -> Option<Vec<Change>> {
@@ -8107,6 +8154,9 @@ impl AppState {
                 // this shell that sets one. It is born live, like every new row.
                 ref_note: None,
                 deleted_at: None,
+                // The revision is the funnel's to write, not the caller's: every
+                // row here is about to go through `exec_org`, which stamps it.
+                rev: String::new(),
             },
         })?;
         self.next_note_id.set(id + 1);
@@ -8146,6 +8196,7 @@ impl AppState {
                 // it answers, or 指令's `comment`. The ＋'s own rule.
                 ref_note: None,
                 deleted_at: None,
+                rev: String::new(), // the funnel stamps it
             },
         })?;
         self.next_note_id.set(id + 1);
@@ -8178,6 +8229,7 @@ impl AppState {
                 edited: now,
                 ref_note: Some(NoteId(parent.max(0) as u64)),
                 deleted_at: None,
+                rev: String::new(), // the funnel stamps it
             },
         })?;
         self.next_note_id.set(id + 1);
@@ -8353,6 +8405,7 @@ impl AppState {
                 edited: now,
                 ord,
                 deleted_at: None,
+                rev: String::new(), // the funnel stamps it
             },
         })?;
         self.next_task_id.set(id + 1);
@@ -9108,6 +9161,7 @@ impl AppState {
                 edited: now,
                 ref_note: None,
                 deleted_at: None,
+                rev: String::new(), // the funnel stamps it
             };
             *next += 1;
             // Visible to the rest of the batch at once, so a `create` followed by an
@@ -9170,6 +9224,7 @@ impl AppState {
                     edited: now,
                     ref_note: Some(id),
                     deleted_at: None,
+                    rev: String::new(), // the funnel stamps it
                 };
                 *next += 1;
                 sim.notes.push(comment.clone());
@@ -9241,6 +9296,7 @@ impl AppState {
                 edited: now,
                 ord,
                 deleted_at: None,
+                rev: String::new(), // the funnel stamps it
             };
             *next += 1;
             sim.tasks.push(task.clone());
@@ -22411,6 +22467,107 @@ mod tests {
         assert_eq!(on_a.as_deref(), Some("Renamed on the phone"));
     }
 
+    /// SPEC §四十一's rows sync the reference app's way — **the 唯一 ID is the key**
+    /// and the **revision decides** — and this is the shell end of it.
+    ///
+    /// Two machines that each file a note under row 1 hold *two notes*, because the
+    /// integer is a per-device watermark and the uuid is the name; and when both
+    /// edit one of them, the later write stands, in **one** round, on both ends.
+    /// That last property is the fix for a proven defect: with the old rule each side
+    /// kept its own copy and wrote it into its shadow, so the next round read the
+    /// winner's row as a one-sided edit and settled the same argument again, the
+    /// other way (`docs/ROADMAP.md` item 8).
+    #[test]
+    fn an_organizer_row_syncs_by_its_uuid_and_the_newer_revision_wins() {
+        let dir_a = crate::testing::ScratchDir::new("sync-org-a");
+        let dir_b = crate::testing::ScratchDir::new("sync-org-b");
+        let a = super::AppState::new(&plain_args(), Some(scratch_repo(&dir_a)));
+        let b = super::AppState::new(&plain_args(), Some(scratch_repo(&dir_b)));
+        let pa = peer("dev-desk", "Desk");
+        let pb = peer("dev-phone", "Phone");
+
+        // Each machine's first note lands on row 1 — the same integer, and two rows.
+        let na = a.org_create_note().expect("A's note");
+        a.org_note_body(na, "written on A".into()).expect("A's body");
+        let nb = b.org_create_note().expect("B's note");
+        b.org_note_body(nb, "written on B".into()).expect("B's body");
+        assert_eq!((na, nb), (1, 1), "two devices, the same watermark");
+
+        b.sync_apply_remote(&a.sync_export().expect("A exports"), &[], &pa)
+            .expect("A's note merges into B");
+        let after_first = b.sync_export().expect("B re-exports");
+        assert_eq!(after_first.notes.len(), 2, "two uuids, two notes — never one");
+        let uuid = after_first
+            .notes
+            .iter()
+            .find(|n| n.body == "written on A")
+            .map(|n| n.uuid.clone())
+            .expect("A's note arrived on B");
+
+        // A agrees with B once, which arms the shadow the next merge resolves
+        // against — then both machines edit A's note, A first and B after it.
+        a.sync_apply_remote(&after_first, &[], &pb)
+            .expect("B's answer merges into A");
+        let id_on_a = a
+            .sync_export()
+            .expect("A exports")
+            .notes
+            .iter()
+            .find(|n| n.uuid == uuid)
+            .map(|n| n.id)
+            .expect("the row on A");
+        a.org_note_body(id_on_a as i64, "edited on A".into()).expect("A edits");
+        let rev_a = a
+            .sync_export()
+            .expect("A exports")
+            .notes
+            .iter()
+            .find(|n| n.uuid == uuid)
+            .map(|n| n.rev.clone())
+            .expect("the row on A");
+        // The clock, so B's write is strictly later: `now_millis` is the wall
+        // clock, and this machine's tick is coarser than the gap below.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let id_on_b = after_first
+            .notes
+            .iter()
+            .find(|n| n.uuid == uuid)
+            .map(|n| n.id)
+            .expect("the row on B");
+        b.org_note_body(id_on_b as i64, "edited on B".into()).expect("B edits");
+        let rev_b = b
+            .sync_export()
+            .expect("B exports")
+            .notes
+            .iter()
+            .find(|n| n.uuid == uuid)
+            .map(|n| n.rev.clone())
+            .expect("the row on B");
+        assert_ne!(rev_a, rev_b, "every write restamps the revision");
+
+        let merged = a
+            .sync_apply_remote(&b.sync_export().expect("B exports"), &[], &pb)
+            .expect("B's newer edit merges into A");
+        let settled = merged
+            .notes
+            .iter()
+            .find(|n| n.uuid == uuid)
+            .map(|n| n.body.clone())
+            .expect("the row survived");
+        assert_eq!(settled, "edited on B", "the later write is the one that stands");
+        // …and it stands on the device that made the *earlier* one too, which is
+        // what "converged in one round" means.
+        let back = a
+            .sync_export()
+            .expect("A re-exports")
+            .notes
+            .into_iter()
+            .find(|n| n.uuid == uuid)
+            .expect("still here");
+        assert_eq!(back.body, "edited on B");
+        assert_eq!(merged.notes.len(), 2, "and the two notes are still two");
+    }
+
     /// The address a peer dials, as the sync page shows it: the port belongs on the
     /// end, because the line is there to be read out to someone typing it into the
     /// other device's add row, and an address without it reaches a closed port. A
@@ -23733,6 +23890,7 @@ mod tests {
             edited: 0,
             ref_note: None,
             deleted_at: None,
+            rev: String::new(),
         };
         assert_eq!(super::org_convert_title(&bare("会议", "# 别的")), "会议");
         assert_eq!(super::org_convert_title(&bare("", "\n  买了牛奶\n还有鸡蛋")), "买了牛奶");

@@ -2,6 +2,56 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0125 · The organizer's funnel stamps the revision, so no write site has to
+
+**Decision.** `exec_org` and `exec_org_all` — the two ways any organizer command
+reaches `core::command::exec` — stamp the row they are about to write with a fresh
+**revision** before planning it:
+
+```rust
+fn stamp_org(&self, mut cmd: Command) -> Command {
+    cmd.stamp_rev(&self.org_rev());
+    cmd
+}
+```
+
+`org_rev()` is `core::organizer::rev(now_millis(), &self.sync_self_info().id)` —
+the `(instant, device)` pair core ADR-0004 made the arbiter of notes and tasks. A new
+`now_millis()` sits beside `now_secs()`. **Nothing else stamps**: the sync apply does
+not, because the rows it writes came out of the merge with their revision already
+decided.
+
+**Context.** Core ADR-0004 keys `notes` and `tasks` on their 唯一 ID and settles two
+copies of one row by the newer revision, which only works if every write carries one.
+The desktop creates and edits those rows from about twenty call sites — the ＋, the
+capture layer, 引用, the 指令 batch, every field on blur, the subtask verbs, a list's
+delete that moves its tasks — and a rule that each of them has to remember is a rule
+that will be forgotten once and then be wrong forever. It does not have to be their
+job: the module note already says every one of these goes through one funnel, so the
+funnel is where the stamp belongs.
+
+The `before` half of an update is deliberately **not** stamped. It is what the
+history entry's revert writes back, and an undo that moved the revision forward would
+leave a reverted row looking newer than the edit it undid — the peer would read the
+revert as a fresh write and take the undone value straight back. Pinned by
+`stamp_rev_covers_the_written_rows_and_never_the_before_half` in the core.
+
+**Consequences.**
+
+- The **device id is minted by the first organizer write** of a session, not by the
+  first visit to the 同步 page: `sync_self_info` remembers it in a `settings` row, so
+  this is one write and then a read. A device that never opens 同步 still orders its
+  rows correctly against a peer, which is what makes the feature work the first time
+  someone does.
+- `edited` keeps its meaning. The revision is a field of its own precisely so that
+  this shell's rule — a bin and a restore do not restamp 修改 — stays true
+  (`org_set_note_trashed` is unchanged).
+- The **timestamp is the wall clock in milliseconds**, not this session's monotonic
+  clock: a revision is meant to be compared with a peer's, and a value that restarts
+  at zero every launch orders nothing.
+- A reverted row is re-stamped on its way *back* in (a redo is a write), so undo and
+  redo each leave a row whose revision matches what the user last saw.
+
 ## ADR-0124 · The merged page list is tested for a tree before the tree is touched
 
 **Decision.** `sync_apply_remote`'s page half asks, for every row it is about to
