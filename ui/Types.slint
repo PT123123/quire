@@ -376,10 +376,21 @@ export struct CommandRow {
 export struct SyncRow {
     id: string,
     label: string,   // "Laptop (windows)"
-    status: string,  // "paired · synced 2026-09-23 14:05" / "seen · not paired"
+    status: string,  // "已配对 · 3 分钟前同步过" / "发现 · 未配对"
     ip: string,
     paired: bool,
     online: bool,
+}
+
+// One line of the sync log (settings row "sync.log"), oldest first, the tail of
+// it reaching the dialog. `when` is the age Rust computed from the stored stamp —
+// the stamp is UTC and the dialog has no timezone to read it against, and a time
+// that is quietly eight hours off is worse than "3 分钟前".
+export struct SyncLogRow {
+    when: string,
+    peer: string,
+    ok: bool,
+    message: string,
 }
 
 export struct SearchRow {
@@ -642,6 +653,17 @@ export global UIState {
     callback sync-forget(string);    // peer id: drop it from the table
     callback sync-auto-toggled(bool);
     callback sync-add(string);       // "ip" or "ip:port": find and pair by hand
+    // This device's own half of the section, so the other one can be pointed at
+    // it: the name the peer sees, the address to type into its 「按 IP 添加」,
+    // how often the periodic round runs, whether a round is in flight, and the
+    // log the engine left. Rust fills all five in `refresh_sync_ui`.
+    in-out property <string> sync-self-name: "";
+    in-out property <string> sync-self-address: "";
+    in-out property <int> sync-interval: 60;
+    in-out property <bool> sync-busy: false;
+    in-out property <[SyncLogRow]> sync-log;
+    callback sync-name-set(string);
+    callback sync-interval-set(int);
     // true when the workspace has no pages: the empty state grows a CTA
     in-out property <bool> workspace-empty: false;
 

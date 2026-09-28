@@ -48,6 +48,40 @@ component ThemeCard inherits Rectangle {
     }
 }
 
+// One interval choice of the 同步 section. The dialog has no combo box, and the
+// theme row above already draws its choices this way: a bordered shape whose
+// border and ink say which one is the current answer.
+component IntervalChip inherits Rectangle {
+    in property <string> label;
+    in property <bool> selected;
+    callback picked();
+
+    width: lab.preferred-width + Theme.spacing-sm * 2;
+    height: 24px;
+    border-radius: Theme.radius-md;
+    background: root.selected ? Colors.selection : transparent;
+    border-width: 1px;
+    border-color: root.selected ? Colors.accent : Colors.border;
+
+    lab := Text {
+        x: Theme.spacing-sm;
+        y: 0;
+        height: parent.height;
+        text: root.label;
+        font-family: Typography.ui-font;
+        font-size: Typography.size-caption;
+        font-weight: root.selected ? Typography.weight-semibold : Typography.weight-regular;
+        color: root.selected ? Colors.accent : Colors.text-secondary;
+        vertical-alignment: center;
+    }
+    TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => {
+            root.picked();
+        }
+    }
+}
+
 component ShortcutRow inherits Rectangle {
     in property <string> keys;
     in property <string> label;
@@ -285,6 +319,76 @@ export component SettingsDialog inherits PopupWindow {
                 font-weight: Typography.weight-semibold;
                 color: Colors.text-muted;
             }
+            // This device's own half. The address is the reason this card
+            // exists: pairing by hand means typing this address into the other
+            // device, and until now the only way to learn it was to know your
+            // own LAN address — the phone's 同步 page shows its own, and this
+            // one did not.
+            HorizontalLayout {
+                spacing: Theme.spacing-sm;
+                Text {
+                    text: "本机名称";
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-ui;
+                    color: Colors.text-secondary;
+                    vertical-alignment: center;
+                    width: 76px;
+                }
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    spacing: 2px;
+                    HorizontalLayout {
+                        spacing: Theme.spacing-xs;
+                        self-name := TextInput {
+                            text <=> UIState.sync-self-name;
+                            font-family: Typography.ui-font;
+                            font-size: Typography.size-ui;
+                            color: Colors.text-primary;
+                            selection-foreground-color: Colors.text-primary;
+                            selection-background-color: Colors.selection;
+                            height: 26px;
+                            vertical-alignment: center;
+                            single-line: true;
+                            horizontal-stretch: 1;
+                            accepted => {
+                                // the name is what the other device's rows say, so
+                                // an accepted-but-refused edit must snap back: the
+                                // callback re-pushes the session's answer
+                                UIState.sync-name-set(UIState.sync-self-name);
+                            }
+                        }
+                        Button {
+                            text: "改名";
+                            clicked => {
+                                UIState.sync-name-set(UIState.sync-self-name);
+                            }
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: Theme.spacing-xs;
+                        Text {
+                            text: "本机地址";
+                            font-family: Typography.ui-font;
+                            font-size: Typography.size-caption;
+                            color: Colors.text-muted;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            text: UIState.sync-self-address == ""
+                                ? "未联网 — 其他设备找不到本机"
+                                : UIState.sync-self-address;
+                            font-family: Typography.mono-font;
+                            font-size: Typography.size-caption;
+                            color: UIState.sync-self-address == ""
+                                ? Colors.text-muted
+                                : Colors.text-secondary;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            overflow: elide;
+                        }
+                    }
+                }
+            }
             HorizontalLayout {
                 spacing: Theme.spacing-sm;
                 Text {
@@ -317,6 +421,23 @@ export component SettingsDialog inherits PopupWindow {
                         border-radius: 9px;
                         background: Colors.surface-overlay;
                         animate x { duration: Theme.duration-fast; }
+                    }
+                }
+            }
+            // The cadence, as the four settings that make sense on a laptop: a
+            // round costs a few milliseconds per device when they are all on the
+            // desk, and the wait is what a user notices when it is too slow.
+            // Only while auto-sync is on: with the switch off the interval is a
+            // number that changes nothing, and a dead control is a question.
+            if UIState.sync-auto : HorizontalLayout {
+                spacing: Theme.spacing-xs;
+                for secs in [30, 60, 300, 1800] : IntervalChip {
+                    label: secs == 30 ? "30 秒"
+                        : secs == 60 ? "1 分钟"
+                        : secs == 300 ? "5 分钟" : "30 分钟";
+                    selected: UIState.sync-interval == secs;
+                    picked => {
+                        UIState.sync-interval-set(secs);
                     }
                 }
             }
@@ -359,6 +480,17 @@ export component SettingsDialog inherits PopupWindow {
                         }
                     }
                 }
+                // The address it was last reached at. Hand pairing is the only
+                // door a network without working broadcasts has, and a round that
+                // fails says "the address moved to another device" — a sentence the
+                // user can only act on if the number is on the screen.
+                if row.paired : Text {
+                    text: row.ip;
+                    font-family: Typography.mono-font;
+                    font-size: Typography.size-caption;
+                    color: Colors.text-muted;
+                    overflow: elide;
+                }
             }
             HorizontalLayout {
                 spacing: Theme.spacing-sm;
@@ -394,12 +526,74 @@ export component SettingsDialog inherits PopupWindow {
                     }
                 }
             }
-            if UIState.sync-status != "" : Text {
-                text: UIState.sync-status;
+            if UIState.sync-status != "" : HorizontalLayout {
+                spacing: Theme.spacing-xs;
+                // A round in flight is a spinner's job, not the sentence's: the
+                // status line says what happened, and this says that something
+                // is still waiting for an answer. A Text rather than a drawn
+                // dot: Rectangle has no vertical-alignment, so a bullet in the
+                // row's own font is the only way this sits on the same line.
+                if UIState.sync-busy : Text {
+                    text: "●";
+                    font-size: Typography.size-caption;
+                    color: Colors.accent;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: UIState.sync-status;
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-caption;
+                    color: Colors.text-muted;
+                    horizontal-stretch: 1;
+                    wrap: word-wrap;
+                }
+            }
+            // The log, newest first: "what moved, and what refused" is the one
+            // thing a user can check without opening another app, and a failure
+            // that only ever lived in the status line was a failure they had to
+            // catch happening to see at all.
+            Text {
+                text: "最近记录";
+                font-size: Typography.size-caption;
+                font-weight: Typography.weight-semibold;
+                color: Colors.text-muted;
+            }
+            if UIState.sync-log.length == 0 : Text {
+                text: "还没有记录 — 每一轮同步、配对与失败都会留在这里。";
                 font-family: Typography.ui-font;
                 font-size: Typography.size-caption;
                 color: Colors.text-muted;
                 wrap: word-wrap;
+            }
+            for line in UIState.sync-log : HorizontalLayout {
+                spacing: Theme.spacing-xs;
+                Text {
+                    text: line.when;
+                    font-family: Typography.mono-font;
+                    font-size: Typography.size-caption;
+                    color: Colors.text-muted;
+                    vertical-alignment: top;
+                    width: 68px;
+                    overflow: elide;
+                }
+                Text {
+                    text: line.peer;
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-caption;
+                    color: Colors.text-secondary;
+                    vertical-alignment: top;
+                    width: 96px;
+                    overflow: elide;
+                }
+                Text {
+                    text: line.message;
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-caption;
+                    color: line.ok ? Colors.text-muted : Colors.danger;
+                    vertical-alignment: top;
+                    horizontal-stretch: 1;
+                    wrap: word-wrap;
+                }
             }
 
             Rectangle { height: 1px; background: Colors.border; }

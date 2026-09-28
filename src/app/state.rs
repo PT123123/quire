@@ -337,6 +337,11 @@ pub struct AppState {
     /// number 3 lights up. Two kinds in one set is not a shape worth copying, so
     /// the set carries its kind and every reader refuses the wrong half.
     org_selection: RefCell<OrgSelection>,
+    /// The peers table **as last written to the file**, with `last_seen` zeroed
+    /// out (see `sync_set_peers` for why that field is the whole question).
+    /// `None` until the first announcement, which reads the stored row itself
+    /// rather than assuming an empty table.
+    sync_peers_written: RefCell<Option<String>>,
 }
 
 /// The picked rows and which kind they are (ADR-0111). Empty is not a state: the
@@ -747,17 +752,23 @@ impl AppState {
             },
             None => None,
         };
+        // `settings` are not a fact about the pages. `persisted` below is the load
+        // filtered to "there is a library here to open", which is the right gate for
+        // the document and for seeding the built-in library — and the wrong one for
+        // the settings table: a library whose last page was taken (a merge from a
+        // desktop peer speaks for the whole library, ADR-0122) would come back with
+        // no theme, no 配对 and no device id, and an id minted on the next start is
+        // a *new device* to every peer that knew this one.
+        let settings_source = loaded.as_ref().map(|s| s.settings.clone());
         let persisted = loaded.filter(|s| !s.pages.is_empty());
         let mut restored_settings: HashMap<String, String> = HashMap::new();
         let mut restored_recents: Vec<i32> = Vec::new();
         let mut restored_current: Option<i32> = None;
         let mut restored_home = false;
+        if let Some(rows) = settings_source {
+            restored_settings = rows.into_iter().collect();
+        }
         if let Some(state0) = &persisted {
-            restored_settings = state0
-                .settings
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
             restored_recents = state0
                 .meta
                 .get("recents")
@@ -1083,6 +1094,7 @@ impl AppState {
             org_pending: RefCell::new(None),
             org_delete_token: Cell::new(0),
             org_selection: RefCell::new(OrgSelection::default()),
+            sync_peers_written: RefCell::new(None),
         };
         // restore persisted recents before the first open marks its page
         let state = Rc::new(state);
@@ -1696,7 +1708,22 @@ impl AppState {
         // …and the window cache's content half is spent with it (see
         // `db_content_stamp`): whatever the change was, what a database cell
         // paints may have moved, and no other part of the cache key can see it.
-        self.db_content_stamp.set(self.db_content_stamp.get() + 1);
+        // One batch is excepted: a settings row. The sync pump writes one every
+        // time a peer announces itself — every four seconds, for as long as the
+        // other device is on the network — and nothing a `settings` cell holds can
+        // move a database value (the record template lives on the database
+        // *entity*, ADR-0086, and `sync.peers` / `sync.shadow.*` are nobody else's
+        // input). Spending the stamp there keeps it ahead of every open window, so
+        // the next read of a table or gallery misses and re-queries while the
+        // editor has recorded nothing but somebody else's address. (Zoom is safe
+        // to exempt for a different reason: a new viewport changes `wanted`
+        // itself, so the cache key already sees it.)
+        let settings_only = changes
+            .iter()
+            .all(|c| matches!(c, Change::SettingSet { .. }));
+        if !settings_only {
+            self.db_content_stamp.set(self.db_content_stamp.get() + 1);
+        }
         if let Some(p) = &self.persistence {
             p.record(changes);
         }
@@ -14721,6 +14748,62 @@ fn fuzzy_subsequence(query: &str, target: &str) -> bool {
 // in the settings table — device-local by policy (the snapshot never carries
 // settings rows), which is exactly what these keys want.
 
+/// Whether a peer of this `kind` describes its library *complete* on the wire.
+///
+/// It matters because the merge reads a row missing from a peer's snapshot as a
+/// deletion — that is how removals travel between two peers — and the Android
+/// shell has no databases and answers `attachments` empty (its own store holds
+/// neither, and `crate::sync::unsyncable` there refuses to start the engine on a
+/// library that does). Believing that silence would delete every database record
+/// and every attachment this device has, on the second cycle, which is the bug
+/// this answers: a peer that cannot carry a collection is *silent* about it, and
+/// silence is answered by keeping this library's own rows.
+///
+/// An unknown kind is silent too. The failure mode that leaves is a collection
+/// that does not sync — recoverable, visible in the log — where the other one is
+/// not.
+fn peer_carries_the_whole_library(kind: &str) -> bool {
+    matches!(kind, "windows" | "linux" | "macos")
+}
+
+/// Store an attachment whose bytes arrived but that [`AttachmentStore::import_bytes`]
+/// could not take (a non-image, or a picture that will not decode): the file
+/// under a name *this device* owns, and the row that points at it.
+///
+/// The peer's own `file` and `thumb` are network input, and joining them onto the
+/// attachments folder writes at whatever path they hold — `..\..\…` reaching out of
+/// it. `{id}.{ext}` is the shape the store mints for a picked picture, from an id
+/// this session allocated. Nothing else arrives with the bytes, so the row claims
+/// exactly the one file there now is: `thumb` cleared, `bytes` counted from the
+/// buffer.
+///
+/// `None` when the write failed, which is the answer the caller must take: an
+/// attachment this device *advertises* is one a peer stops sending (see
+/// `Job::ListLocalAttachments`), so a row without bytes behind it is a picture
+/// that stays broken through every later cycle rather than a gap that refills.
+fn sync_stored_attachment(
+    store: &crate::services::attachment_store::AttachmentStore,
+    row: &crate::services::sync::model::SAttachment,
+    data: &[u8],
+) -> Option<crate::core::types::Attachment> {
+    let ext: String = row
+        .mime
+        .split_once('/')
+        .map(|(_, sub)| sub.chars().filter(|c| c.is_ascii_alphanumeric()).collect())
+        .unwrap_or_default();
+    let mut att = row.to_core();
+    att.file = format!(
+        "{}.{}",
+        row.id,
+        if ext.is_empty() { "bin".to_string() } else { ext }
+    );
+    att.thumb = String::new();
+    att.bytes = data.len() as i64;
+    std::fs::create_dir_all(store.dir()).ok()?;
+    std::fs::write(store.dir().join(&att.file), data).ok()?;
+    Some(att)
+}
+
 impl AppState {
     // ---- settings-backed state the engine and the dialog read ----
 
@@ -14764,9 +14847,81 @@ impl AppState {
             .unwrap_or_default()
     }
 
+    /// The peers in the order the dialog wants them: paired first (what the user
+    /// came back for), then the loudest — a peer that announced a second ago is
+    /// the one it can act on — then by name so two rows do not trade places
+    /// between refreshes while a pointer is on one. The stored order is left alone;
+    /// this is a view of it.
+    pub fn sync_peers_ordered(&self) -> Vec<crate::services::sync::engine::PeerRecord> {
+        let mut peers = self.sync_peers();
+        peers.sort_by(|a, b| {
+            b.paired
+                .cmp(&a.paired)
+                .then(b.last_seen.cmp(&a.last_seen))
+                .then(a.name.cmp(&b.name))
+        });
+        peers
+    }
+
+    /// What kind of device this peer is. The record the engine hands over is
+    /// authoritative on a pull (it came out of the peers table) and carries no
+    /// kind on an inbound push (`sync::server` has only the snapshot to name the
+    /// sender by), so the table is asked first and the record is the fallback.
+    /// Empty means nobody ever said, which [`peer_carries_the_whole_library`]
+    /// reads as the conservative answer.
+    fn sync_peer_kind(&self, peer: &crate::services::sync::engine::PeerRecord) -> String {
+        self.sync_peers()
+            .into_iter()
+            .find(|p| p.id == peer.id)
+            .map(|p| p.kind)
+            .filter(|k| !k.is_empty())
+            .unwrap_or_else(|| peer.kind.clone())
+    }
+
     pub fn sync_set_peers(&self, peers: &[crate::services::sync::engine::PeerRecord]) {
         let json = serde_json::to_string(peers).unwrap_or_else(|_| "[]".into());
-        self.record_setting("sync.peers", &json);
+        // `last_seen` is the one field the four-second announcement moves, and it
+        // is the field nobody needs on disk: both readers of it are about *now*
+        // (the auto-cycle's sixty-second recency gate and the dialog's fifteen-
+        // second online dot), the in-memory table answers both, and the next beat
+        // refills it. Recording it anyway meant one SQLite transaction every four
+        // seconds per listening device — and, because a durable write is what arms the
+        // periodic snapshot, a whole-file copy every ten minutes of a laptop that
+        // has not been touched. So: the table is written into memory always, and
+        // only a change something would still want after a restart reaches the
+        // file — a peer added or dropped, an address or name or kind moved, a
+        // pairing decided, a round that succeeded (`last_sync`).
+        let durable: Vec<crate::services::sync::engine::PeerRecord> = peers
+            .iter()
+            .map(|p| crate::services::sync::engine::PeerRecord {
+                last_seen: 0,
+                ..p.clone()
+            })
+            .collect();
+        let key = serde_json::to_string(&durable).unwrap_or_else(|_| "[]".into());
+        // Read the baseline *before* the table is overwritten — the first call of a
+        // session has to compare against what the session loaded, and inserting
+        // first would make every first call look like a beat it already kept.
+        let written = self.sync_peers_written.borrow().clone().unwrap_or_else(|| {
+            // …which is the stored row projected the same way, so a restart does
+            // not spend a write on the beat that arrives four seconds later.
+            let durable: Vec<crate::services::sync::engine::PeerRecord> = self
+                .sync_peers()
+                .into_iter()
+                .map(|p| crate::services::sync::engine::PeerRecord {
+                    last_seen: 0,
+                    ..p
+                })
+                .collect();
+            serde_json::to_string(&durable).unwrap_or_else(|_| "[]".into())
+        });
+        self.settings
+            .borrow_mut()
+            .insert("sync.peers".into(), json.clone());
+        *self.sync_peers_written.borrow_mut() = Some(key.clone());
+        if written != key {
+            self.record_setting("sync.peers", &json);
+        }
     }
 
     pub fn sync_upsert_peer(&self, rec: crate::services::sync::engine::PeerRecord) {
@@ -14819,7 +14974,15 @@ impl AppState {
                 name: name.to_string(),
                 kind: kind.to_string(),
                 ip: ip.to_string(),
-                port,
+                // `0` is the same "nothing was said about the port" the branch
+                // above reads that way, and here it would mint a row whose address
+                // cannot be dialled at all: every Quire listens on `SYNC_PORT`, so
+                // that is the answer when the caller has nothing to offer.
+                port: if port == 0 {
+                    crate::services::sync::SYNC_PORT
+                } else {
+                    port
+                },
                 paired: paired.unwrap_or(false),
                 last_seen: now,
                 last_sync: String::new(),
@@ -14893,6 +15056,37 @@ impl AppState {
         self.record_setting("sync.auto", if on { "1" } else { "0" });
     }
 
+    pub fn sync_set_interval(&self, seconds: u64) {
+        self.record_setting("sync.interval", &seconds.max(15).to_string());
+    }
+
+    /// What the other device gets to call this one. An empty name is not a
+    /// rename: the row would answer the default the first time it is read again,
+    /// which is a name the user never chose coming back on its own.
+    pub fn sync_set_device_name(&self, name: &str) {
+        let name = name.trim();
+        if name.is_empty() {
+            return;
+        }
+        self.record_setting("sync.device-name", name);
+    }
+
+    /// The address a peer dials: this device's own LAN address with the sync
+    /// port, which is what 「按 IP 添加」 on the other device needs.
+    ///
+    /// A UDP socket *connected* to an off-machine address picks the interface the
+    /// route would use, and its own end is the address a peer can reach — no
+    /// packet is sent, and no peer has to exist yet. The target is RFC 5737's
+    /// documentation range, so it is never routable on a LAN even by accident.
+    /// `None` is a machine with no route to answer with, and the dialog says it
+    /// has no address rather than showing a guess.
+    pub fn sync_self_address(&self) -> Option<String> {
+        let port = crate::services::sync::SYNC_PORT;
+        let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+        socket.connect(("192.0.2.1", port)).ok()?;
+        Some(format!("{}:{}", socket.local_addr().ok()?.ip(), port))
+    }
+
     fn sync_shadow(&self, peer_id: &str) -> Option<crate::services::sync::model::SyncSnapshot> {
         self.sync_setting(&format!("sync.shadow.{peer_id}"))
             .and_then(|v| crate::services::sync::model::SyncSnapshot::from_json(&v).ok())
@@ -14907,14 +15101,31 @@ impl AppState {
 
     // ---- export ----
 
-    /// The whole workspace as the wire sees it: pages from the tree, blocks
-    /// (with their marks) from the document, attachment rows from the map,
-    /// and the database layer's schema from the in-memory catalog plus its
-    /// records and cell values read straight out of the store.
-    pub fn sync_export(&self) -> crate::services::sync::model::SyncSnapshot {
+    /// The whole workspace as the wire sees it.
+    ///
+    /// **A snapshot this build cannot complete is an error, never a shorter one.**
+    /// The merge reads a *missing* row as a deletion — that is how removals travel
+    /// between two peers — so a snapshot that quietly left out one database's
+    /// records because a query failed is a snapshot that tells the peer "the user
+    /// deleted every row of it", and the peer's answer then deletes them here. A
+    /// failed read is therefore returned, and the caller drops the reply channel
+    /// (`Job::ExportSnapshot` in `app::controller`): the peer's cycle fails loudly,
+    /// and nobody's library is described by a document that lies about it. This is
+    /// the Android shell's rule, ported back.
+    ///
+    /// The write queue is flushed first for the same reason: the §三十九 half below
+    /// reads its records and cells **out of the store** (unlike pages, blocks,
+    /// attachments and the organizer, which are read from memory), and a row still
+    /// sitting in the debounce queue is a row this snapshot would swear does not
+    /// exist.
+    pub fn sync_export(&self) -> Result<crate::services::sync::model::SyncSnapshot, String> {
         use crate::services::sync::model::{
-            SAttachment, SBlock, SNote, SPage, STask, STaskList, SValue, SyncSnapshot,
+            SAttachment, SBlock, SNote, SPage, SRecord, STask, STaskList, SValue, SyncSnapshot,
         };
+        if let Some(p) = &self.persistence {
+            p.force_flush()
+                .map_err(|e| format!("未能把待写入的更改落盘，本次快照没有导出：{e}"))?;
+        }
         let mut snap = SyncSnapshot::default();
         let me = self.sync_self_info();
         snap.device_id = me.id;
@@ -14957,44 +15168,55 @@ impl AppState {
 
         let catalog = self.databases.borrow().clone();
         snap.databases = crate::services::sync::model::catalog_schema(&catalog);
+        // The §三十九 half reads its rows and cells out of the store, so it is
+        // the half that can fail halfway and describe a library it did not
+        // finish reading. `records_of` is one query per database rather than the
+        // point read per row the listing uses (ADR-0067), which is what makes
+        // propagating the failure cheap instead of a reason to swallow it.
         if let Some(repo) = &self.repo {
             for row in &mut snap.databases {
                 let db_id = crate::core::database::DatabaseId(row.id);
-                let list = match repo.records_named(db_id, "", usize::MAX) {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
-                let ids: Vec<crate::core::database::RecordId> = list
+                let records = repo.records_of(db_id).map_err(|e| {
+                    format!("数据库 {} 的记录读不出来，本次快照没有导出：{e}", row.id)
+                })?;
+                let ids: Vec<crate::core::database::RecordId> =
+                    records.iter().map(|r| r.id).collect();
+                row.records = records
                     .iter()
-                    .map(|(id, _)| crate::core::database::RecordId(*id))
+                    .map(|rec| SRecord {
+                        id: rec.id.0,
+                        db: rec.db.0,
+                        page: rec.page.map(|p| p.0),
+                        ord: rec.ord.0,
+                    })
                     .collect();
-                for rid in &ids {
-                    if let Ok(Some(rec)) = repo.record(*rid) {
-                        row.records.push(crate::services::sync::model::SRecord {
-                            id: rec.id.0,
-                            db: rec.db.0,
-                            page: rec.page.map(|p| p.0),
-                            ord: rec.ord.0,
-                        });
-                    }
-                }
                 for prop in &row.properties {
                     let kind = crate::core::database::PropertyKind::try_from_str(&prop.kind);
                     if kind.map(|k| k.is_computed() || k.is_derived()).unwrap_or(true) {
                         continue;
                     }
                     let pid = crate::core::database::PropertyId(prop.id);
-                    if let Ok(vals) = repo.values_of(&ids, pid) {
-                        for (rid, v) in vals {
-                            row.values.push(SValue::from_core(
-                                crate::core::database::RecordId(rid),
-                                pid,
-                                &v,
-                            ));
-                        }
+                    let vals = repo.values_of(&ids, pid).map_err(|e| {
+                        format!(
+                            "数据库 {} 的属性 {} 读不出来，本次快照没有导出：{e}",
+                            row.id, prop.id
+                        )
+                    })?;
+                    for (rid, v) in vals {
+                        row.values.push(SValue::from_core(
+                            crate::core::database::RecordId(rid),
+                            pid,
+                            &v,
+                        ));
                     }
                 }
             }
+        } else if !snap.databases.is_empty() {
+            // Memory mode — an empty catalog and nothing to read. A database
+            // with a schema but no store to read its rows from is the one case
+            // this export must not describe, because it could only describe it
+            // as having no rows.
+            return Err("有数据库却没有可读的仓库：本次快照没有导出".to_string());
         }
 
         // SPEC §四十一's three collections, straight out of the in-memory
@@ -15009,7 +15231,7 @@ impl AppState {
             snap.tasks = catalog.tasks.iter().map(STask::from).collect();
             snap.lists = catalog.lists.iter().map(STaskList::from).collect();
         }
-        snap
+        Ok(snap)
     }
 
     // ---- apply ----
@@ -15024,13 +15246,14 @@ impl AppState {
         bytes: &[(u64, Vec<u8>)],
         peer: &crate::services::sync::engine::PeerRecord,
     ) -> Result<crate::services::sync::model::SyncSnapshot, String> {
-        let local = self.sync_export();
+        let local = self.sync_export()?;
         let shadow = self.sync_shadow(&peer.id);
         let peer_name = if remote.device.is_empty() {
             peer.name.clone()
         } else {
             remote.device.clone()
         };
+        let peer_kind = self.sync_peer_kind(peer);
 
         // the merge draws fresh ids from the session's own watermarks, so a
         // renumbered row can never collide with what this session mints next
@@ -15111,10 +15334,33 @@ impl AppState {
         let outcome = crate::services::sync::merge::merge(&local, shadow.as_ref(), remote, &peer_name, &mut ctx);
         let conflicts = outcome.conflicts.clone();
         let att_remap = outcome.attachment_remap.clone();
-        let merged = outcome.merged;
+        let mut merged = outcome.merged;
+        // A peer that cannot carry these two collections says nothing with them,
+        // and the merge cannot tell that silence from "every row was deleted" —
+        // see `peer_carries_the_whole_library`. Answering with this library's own
+        // rows makes the diff below a no-op for both collections, and the merged
+        // snapshot this call returns (which is what gets pushed back and stored as
+        // the shadow) stays a complete description of this device.
+        let mut gate_kept = 0usize;
+        if !peer_carries_the_whole_library(&peer_kind) {
+            gate_kept = local.databases.len() + local.attachments.len();
+            merged.databases = local.databases.clone();
+            merged.attachments = local.attachments.clone();
+        }
         drop(ctx);
         drop(doc_guard);
         drop(ws_guard);
+        // The round said 已同步 and the two libraries still differ by a whole
+        // layer — so the gate's own work is a line the sync page has to show, in
+        // the same place the phone says its half ("本机不保存这些"). Counted before
+        // the drops above, written after them: `sync_log_push` reaches `record`.
+        if gate_kept > 0 {
+            self.sync_log_push(
+                &peer_name,
+                true,
+                &format!("对方版本不带数据库与附件 — 本机保留了 {gate_kept} 项，没有同步过去"),
+            );
+        }
 
         // ---- attachments: bytes on disk first, then the rows ----
         let mut byte_map: std::collections::HashMap<u64, &[u8]> = std::collections::HashMap::new();
@@ -15127,6 +15373,7 @@ impl AppState {
             byte_map.insert(final_id, data);
         }
         let mut att_changes: Vec<Change> = Vec::new();
+        let mut att_missing = 0usize;
         {
             let mut atts = self.attachments.borrow_mut();
             for row in &merged.attachments {
@@ -15143,29 +15390,65 @@ impl AppState {
                     } else {
                         None
                     };
-                    let row_final = stored.unwrap_or_else(|| {
-                        // a file (or an undecodable "image"): write the raw
-                        // bytes under the row's own names
-                        let dir = self.store.dir();
-                        let _ = std::fs::create_dir_all(dir);
-                        if !row.file.is_empty() {
-                            let _ = std::fs::write(dir.join(&row.file), data);
-                        }
-                        row.to_core()
-                    });
+                    // A picture that will not decode is stored as the file it is;
+                    // a file that could not be written stores no row, for the
+                    // reason in `sync_stored_attachment`.
+                    let Some(row_final) =
+                        stored.or_else(|| sync_stored_attachment(&self.store, row, data))
+                    else {
+                        continue;
+                    };
                     atts.insert(row.id as i64, row_final.clone());
                     att_changes.push(Change::AttachmentAdded(row_final));
+                } else {
+                    // No bytes and no row here yet: nothing lands. The row is what a
+                    // peer uses to decide it has already sent a file, so inventing one
+                    // now would be the cycle that never fetches the bytes. It is also
+                    // the case that leaves a picture broken forever while the round
+                    // says 已同步 — the engine asks 「哪些附件本机已有」 by the
+                    // *integer* id, so a peer whose row sits under an id this device
+                    // hands to a different file is never asked for its bytes, and the
+                    // merge then renumbers it under a fresh id. Counted here, said
+                    // once per round below (the core half is in `docs/ROADMAP.md`).
+                    att_missing += 1;
                 }
-                // no bytes and none stored: the row still lands (a picture
-                // block renders its missing-file state; the bytes arrive on
-                // the next cycle that fetches them)
             }
         }
         if !att_changes.is_empty() {
             self.record(att_changes);
         }
+        if att_missing > 0 {
+            self.sync_log_push(
+                &peer_name,
+                true,
+                &format!(
+                    "对端有 {att_missing} 个附件没有把文件带过来 — 本机存不下它们，那些图片会一直显示不出"
+                ),
+            );
+        }
 
         // ---- pages: inserts and field diffs; deletes decided by the merge ----
+        //
+        // The merge answers row by row and the tree is one object, so a merged page
+        // list is not automatically a buildable tree. Two shapes reach here: a page
+        // filed inside a page that is **not** here — `delete_page` takes a subtree
+        // with it, so a parent the peer deleted removes the child this side kept,
+        // and the kept child is then re-inserted under a parent that no longer
+        // exists, which `Workspace::attach` answers by unwrapping a lookup it
+        // expects to be there, on the UI thread — and two devices that each nested
+        // the other's page, which `move_page` refuses (correctly) but which this
+        // loop used to answer by recording the move anyway, so the store held a
+        // cycle the memory tree did not: a restart reads `roots` empty and the whole
+        // library disappears from the sidebar while every row is still on disk.
+        //
+        // So the parent is asked about *before* the tree is touched: an impossible
+        // one becomes the top level, a refused move leaves this device's own place
+        // standing, and what was actually built is written back into the merged row.
+        // That row is the answer this device pushes and the shadow it stores — an
+        // assertion it cannot keep would be argued again in every later round.
+        let mut tree_repairs: Vec<(u64, Option<u64>, u64)> = Vec::new();
+        let mut tree_orphaned = 0usize;
+        let mut tree_refused = 0usize;
         let merged_page_ids: std::collections::HashSet<u64> =
             merged.pages.iter().map(|p| p.id).collect();
         let local_page_ids: Vec<i32> = self
@@ -15185,7 +15468,14 @@ impl AppState {
         for sp in &merged.pages {
             let pid = sp.id as i32;
             if !self.workspace.borrow().contains(pid) {
-                let core = sp.to_core();
+                let mut core = sp.to_core();
+                if let Some(parent) = core.parent {
+                    if !self.workspace.borrow().contains(parent.0 as i32) {
+                        core.parent = None;
+                        tree_orphaned += 1;
+                        tree_repairs.push((sp.id, None, sp.ord));
+                    }
+                }
                 self.workspace.borrow_mut().insert_persisted(core.clone());
                 self.page_order
                     .borrow_mut()
@@ -15200,15 +15490,37 @@ impl AppState {
             }
             let cur_parent = cur.parent.map(|v| v as u64);
             if cur_parent != sp.parent || self.page_order.borrow().get(&pid).copied().map(|k| k.0) != Some(sp.ord) {
-                self.workspace.borrow_mut().move_page(pid, sp.parent.map(|v| v as i32), None);
-                self.page_order
-                    .borrow_mut()
-                    .insert(pid, crate::core::OrderKey(sp.ord));
-                self.record(vec![Change::PageMoved {
-                    id: crate::core::PageId(sp.id),
-                    parent: sp.parent.map(crate::core::PageId),
-                    order: crate::core::OrderKey(sp.ord),
-                }]);
+                let mut want = sp.parent.map(|v| v as i32);
+                if let Some(w) = want {
+                    if !self.workspace.borrow().contains(w) {
+                        want = None;
+                        tree_orphaned += 1;
+                    }
+                }
+                if self.workspace.borrow_mut().move_page(pid, want, None) {
+                    let order = crate::core::OrderKey(sp.ord);
+                    self.page_order.borrow_mut().insert(pid, order);
+                    self.record(vec![Change::PageMoved {
+                        id: crate::core::PageId(sp.id),
+                        parent: want.map(|v| crate::core::PageId(v as u64)),
+                        order,
+                    }]);
+                    if want.map(|v| v as u64) != sp.parent {
+                        tree_repairs.push((sp.id, want.map(|v| v as u64), sp.ord));
+                    }
+                } else {
+                    // the move cannot be built here — this device's own place
+                    // stands, and the answer says that instead of what was refused
+                    let keep_ord = self
+                        .page_order
+                        .borrow()
+                        .get(&pid)
+                        .copied()
+                        .map(|k| k.0)
+                        .unwrap_or(sp.ord);
+                    tree_repairs.push((sp.id, cur_parent, keep_ord));
+                    tree_refused += 1;
+                }
             }
             if cur.favorite != sp.favorite {
                 self.workspace.borrow_mut().set_favorite(pid, sp.favorite);
@@ -15248,35 +15560,74 @@ impl AppState {
             }
         }
 
+        // What this device actually built replaces what the peer described, in the
+        // snapshot it answers with and in the shadow written from it.
+        for (id, parent, ord) in &tree_repairs {
+            if let Some(p) = merged.pages.iter_mut().find(|p| p.id == *id) {
+                p.parent = *parent;
+                p.ord = *ord;
+            }
+        }
+        if tree_orphaned + tree_refused > 0 {
+            let mut why: Vec<String> = Vec::new();
+            if tree_orphaned > 0 {
+                why.push(format!(
+                    "{tree_orphaned} 个页面对端放在本机没有的页面里 — 已放在顶层"
+                ));
+            }
+            if tree_refused > 0 {
+                why.push(format!(
+                    "{tree_refused} 个页面的父子关系在本机构不成树（两边各自把对方装进了对方）— 本机保持原样"
+                ));
+            }
+            self.sync_log_push(&peer_name, true, &why.join("；"));
+        }
+
         // ---- blocks: one batch per page, applied to the document and the
         // store through the same raw-Change path an import uses ----
+        //
+        // Both halves read one library-wide snapshot instead of the page being
+        // visited. A block the peer moved to another page is absent from the page
+        // it left and present on the page it joined, and a page-local test handled
+        // that as two separate rounds of business: delete the row on the page it
+        // left, re-insert the same id on the page it joined. `blocks.id` is UNIQUE,
+        // so the insert failed and took the whole batch down with it, while the
+        // in-memory document — whose insert only checks the destination page —
+        // kept a copy on both. One snapshot answers "does this id exist here at
+        // all", and `sync_block_diff` turns a page change into `BlockMovedToPage`.
+        let merged_present: std::collections::HashSet<u64> =
+            merged.blocks.iter().map(|b| b.id).collect();
+        let local_all: std::collections::HashMap<u64, crate::services::sync::model::SBlock> = {
+            let doc = self.doc.borrow();
+            doc.all_blocks()
+                .map(|b| (b.id.0, crate::services::sync::model::SBlock::from(b)))
+                .collect()
+        };
         for page in &merged.pages {
-            let pid = crate::core::PageId(page.id);
             if !self.workspace.borrow().contains(page.id as i32) {
                 continue;
             }
             let mut batch: Vec<Change> = Vec::new();
-            let local_rows: std::collections::HashMap<u64, crate::services::sync::model::SBlock> = {
-                let doc = self.doc.borrow();
-                doc.page_blocks(pid)
+            let local_rows: std::collections::HashMap<u64, &crate::services::sync::model::SBlock> =
+                local_all
                     .iter()
-                    .map(|b| (b.id.0, crate::services::sync::model::SBlock::from(b)))
-                    .collect()
-            };
+                    .filter(|(_, b)| b.page == page.id)
+                    .map(|(id, b)| (*id, b))
+                    .collect();
             let merged_here: Vec<&crate::services::sync::model::SBlock> = merged
                 .blocks
                 .iter()
                 .filter(|b| b.page == page.id)
                 .collect();
-            let merged_ids: std::collections::HashSet<u64> =
-                merged_here.iter().map(|b| b.id).collect();
 
             // deletes, children before their parents (both cascades recurse,
-            // but listing the subtree bottom-up keeps the memory step honest)
+            // but listing the subtree bottom-up keeps the memory step honest).
+            // Absence from this page is not a delete — only absence from the
+            // whole merged library is.
             let mut gone: Vec<u64> = local_rows
                 .keys()
                 .copied()
-                .filter(|id| !merged_ids.contains(id))
+                .filter(|id| !merged_present.contains(id))
                 .collect();
             gone.sort_unstable_by(|a, b| {
                 let depth = |mut id: u64| -> usize {
@@ -15296,7 +15647,10 @@ impl AppState {
             }
 
             for mb in &merged_here {
-                match local_rows.get(&mb.id) {
+                // the library-wide map, not this page's rows: an id that lives
+                // here but on another page is a move, and `sync_block_diff` says
+                // so. Only an id the library has never seen is an insert.
+                match local_all.get(&mb.id) {
                     None => batch.push(Change::BlockInserted(mb.to_core())),
                     Some(lb) => {
                         if *lb != **mb {
@@ -15507,6 +15861,52 @@ impl AppState {
                     });
                 }
             }
+
+            // Schema rows the merge dropped, last: the batch above is in
+            // dependency order (cells, then records), and a column or view is
+            // only deletable while its database still holds it. Without these
+            // three the merge would be half a two-way sync between two desktops
+            // — a database deleted on one device would come back from the other
+            // on the next cycle, because nothing here ever said so.
+            //
+            // `AttachmentDeleted` is deliberately *not* among them: an attachment
+            // row has bytes beside it, an in-memory book this session keeps by
+            // hand, and picture blocks that point at it. A false deletion there
+            // is a lost file rather than a stale row, so the delete stays out and
+            // the row survives one more cycle than it should.
+            let merged_db_ids: std::collections::HashSet<u64> =
+                merged.databases.iter().map(|d| d.id).collect();
+            let merged_prop_ids: std::collections::HashSet<u64> = merged
+                .databases
+                .iter()
+                .flat_map(|d| d.properties.iter().map(|p| p.id))
+                .collect();
+            let merged_view_ids: std::collections::HashSet<u64> = merged
+                .databases
+                .iter()
+                .flat_map(|d| d.views.iter().map(|v| v.id))
+                .collect();
+            for d in &local.databases {
+                for p in &d.properties {
+                    if !merged_prop_ids.contains(&p.id) {
+                        batch.push(Change::PropertyDeleted {
+                            id: crate::core::database::PropertyId(p.id),
+                        });
+                    }
+                }
+                for v in &d.views {
+                    if !merged_view_ids.contains(&v.id) {
+                        batch.push(Change::ViewDeleted {
+                            id: crate::core::database::ViewId(v.id),
+                        });
+                    }
+                }
+                if !merged_db_ids.contains(&d.id) {
+                    batch.push(Change::DatabaseDeleted {
+                        id: crate::core::database::DatabaseId(d.id),
+                    });
+                }
+            }
             if !batch.is_empty() {
                 self.record(batch);
             }
@@ -15622,7 +16022,19 @@ fn sync_block_diff(
 ) {
     use crate::core::types::BlockId;
     let id = BlockId(mb.id);
-    if lb.parent != mb.parent || lb.ord != mb.ord {
+    // A page change carries its own parent and order: on the page it joins the
+    // block may sit under a different parent and at a different place. This is
+    // the one change that re-keys the block in both the document and the store,
+    // so it replaces `BlockMoved` rather than riding along after it — the same
+    // shape the core's own move-a-subtree command uses.
+    if lb.page != mb.page {
+        batch.push(Change::BlockMovedToPage {
+            id,
+            page: crate::core::types::PageId(mb.page),
+            parent: mb.parent.map(BlockId),
+            order: crate::core::OrderKey(mb.ord),
+        });
+    } else if lb.parent != mb.parent || lb.ord != mb.ord {
         batch.push(Change::BlockMoved {
             id,
             parent: mb.parent.map(BlockId),
@@ -21921,6 +22333,12 @@ mod tests {
         }
     }
 
+    /// The peers' ids, in order — how the sync tests say *which* rows and in
+    /// what sequence without spelling out eight fields each time.
+    fn peer_ids(peers: &[crate::services::sync::engine::PeerRecord]) -> Vec<&str> {
+        peers.iter().map(|p| p.id.as_str()).collect()
+    }
+
     /// The whole two-device dance, through the session's own export/apply:
     /// A's new page lands on B, B's rename of it comes back to A, and the
     /// two halves agree about the rows — which is the one thing the merge
@@ -21950,7 +22368,7 @@ mod tests {
         assert!(line > 0);
 
         let merged_b = b
-            .sync_apply_remote(&a.sync_export(), &[], &pa)
+            .sync_apply_remote(&a.sync_export().expect("A exports its own library"), &[], &pa)
             .expect("A's snapshot merges into B");
         assert!(merged_b.pages.iter().any(|p| p.title == "From the desk"));
         let landed = b
@@ -21972,12 +22390,12 @@ mod tests {
 
         // …and A agrees with B once (which is what arms the shadow the next
         // merge resolves against), then B renames the page
-        a.sync_apply_remote(&b.sync_export(), &[], &pb)
+        a.sync_apply_remote(&b.sync_export().expect("B exports its own library"), &[], &pb)
             .expect("B's first answer merges into A");
         b.rename_page(landed, "Renamed on the phone");
 
         let merged_a = a
-            .sync_apply_remote(&b.sync_export(), &[], &pb)
+            .sync_apply_remote(&b.sync_export().expect("B exports its own library"), &[], &pb)
             .expect("B's snapshot merges into A");
         assert!(
             merged_a.pages.iter().any(|p| p.title == "Renamed on the phone"),
@@ -21991,6 +22409,844 @@ mod tests {
             .find(|p| p.id == page)
             .map(|p| p.title.clone());
         assert_eq!(on_a.as_deref(), Some("Renamed on the phone"));
+    }
+
+    /// The address a peer dials, as the sync page shows it: the port belongs on the
+    /// end, because the line is there to be read out to someone typing it into the
+    /// other device's add row, and an address without it reaches a closed port. A
+    /// machine with no route answers `None`, which is a legitimate result rather than
+    /// a failure, so the shape is asserted only when there is an address to shape.
+    #[test]
+    fn a_self_address_carries_the_port_it_was_found_on() {
+        let a = super::AppState::new(&plain_args(), None);
+        let port = crate::services::sync::SYNC_PORT;
+        if let Some(addr) = a.sync_self_address() {
+            let suffix = format!(":{port}");
+            assert!(addr.ends_with(&suffix), "{addr} should name the sync port");
+            let ip = addr.trim_end_matches(&suffix);
+            assert!(!ip.is_empty() && !ip.contains(' '), "{addr} starts with an address");
+        }
+    }
+
+    /// A peer row the table has never seen is minted from whatever the caller knows,
+    /// and a caller that knows nothing about the port passes `0` — the same「没有说到
+    /// 端口」the existing-row branch already reads that way. Written out verbatim it
+    /// is a row whose address cannot be dialled by anything, so a new row takes the
+    /// one port every Quire listens on instead.
+    #[test]
+    fn a_peer_row_minted_without_a_port_gets_the_sync_port() {
+        let a = super::AppState::new(&plain_args(), None);
+        a.sync_note_device("dev-blank", "Blank", "windows", "192.168.1.9", 0, Some(true));
+        let row = a
+            .sync_peers()
+            .into_iter()
+            .find(|p| p.id == "dev-blank")
+            .expect("the row landed in the table");
+        assert_eq!(row.port, crate::services::sync::SYNC_PORT);
+
+        // The control: a caller that does name a port is not second-guessed, so the
+        // fallback is about the silence and not a blanket rewrite of the column.
+        a.sync_note_device(
+            "dev-other",
+            "Other",
+            "android",
+            "192.168.1.8",
+            5900,
+            Some(true),
+        );
+        let row = a
+            .sync_peers()
+            .into_iter()
+            .find(|p| p.id == "dev-other")
+            .expect("the second row landed too");
+        assert_eq!(row.port, 5900, "a named port is kept as named");
+    }
+
+    /// **A settings row alone does not spend the database window cache.**
+    ///
+    /// `record` spent the content stamp on every batch, and the sync pump records
+    /// one per announcement — every four seconds for every peer on the network, for
+    /// as long as the laptop sits open with the editor idle. Nothing a `settings`
+    /// cell holds can move a database value (the record template lives on the
+    /// database *entity*, ADR-0086), so the stamp stayed ahead of every open window
+    /// and the next read of any table or gallery missed it on the beat of somebody
+    /// else's broadcast.
+    #[test]
+    fn a_settings_row_alone_does_not_spend_the_database_cache() {
+        let dir = crate::testing::ScratchDir::new("stamp-settings");
+        let s = super::AppState::new(&plain_args(), Some(scratch_repo(&dir)));
+        s.create_page(None);
+        let block = a_database(&s);
+
+        let after_db = s.db_content_stamp.get();
+        s.record_setting("sync.peers", "[]");
+        s.record_setting("sync.shadow.dev-x", "{}");
+        assert_eq!(
+            s.db_content_stamp.get(),
+            after_db,
+            "two settings rows, no stamp spent — an announcement must not re-query every view"
+        );
+
+        // The control: the exemption is about settings and not a blanket "the stamp
+        // is dead", so a change a cell can actually read still moves it.
+        a_row(&s, block);
+        assert!(
+            s.db_content_stamp.get() > after_db,
+            "a record added through the ordinary path still spends the cache"
+        );
+    }
+
+    /// **A peer's announcement buys no disk write when nothing durable moved.**
+    ///
+    /// The listener hands the pump a `Discovered` job for every beat of every
+    /// device on the network — the announcer fires every four seconds — and each one
+    /// went through `sync_note_device`, which stored the whole table. The only field
+    /// a beat moves is `last_seen`, and both of its readers are about *now* (the
+    /// auto-cycle's sixty-second gate, the dialog's fifteen-second online dot), so
+    /// the in-memory table answers them. Persisting it anyway meant a SQLite
+    /// transaction every four seconds per listening device and — since a durable write
+    /// is what arms the periodic snapshot — a whole-file copy every ten minutes of a
+    /// laptop nobody is touching.
+    #[test]
+    fn a_peer_beat_that_changes_nothing_durable_writes_nothing() {
+        let dir = crate::testing::ScratchDir::new("peers-beat");
+        let s = super::AppState::new(&plain_args(), Some(scratch_repo(&dir)));
+        s.create_page(None);
+        let pending = || s.persistence.as_ref().expect("a session with a repo").pending_len();
+        // The table as the **file** has it, which is what the exemption is about.
+        let on_disk = || {
+            use quire_core::core::Repository as _;
+            scratch_repo(&dir)
+                .load()
+                .ok()
+                .and_then(|state| state.settings.get("sync.peers").cloned())
+                .and_then(|v| serde_json::from_str::<Vec<crate::services::sync::engine::PeerRecord>>(&v).ok())
+                .unwrap_or_default()
+        };
+
+        s.sync_note_device("dev-a", "Phone", "android", "192.168.1.5", 0, Some(true));
+        s.persistence_force_flush();
+        assert_eq!(on_disk().len(), 1, "a pairing is a durable fact — it reaches the file");
+
+        // The beat: same device, same address, nothing decided.
+        let kept = on_disk()[0].last_seen;
+        s.sync_note_device("dev-a", "Phone", "android", "192.168.1.5", 0, None);
+        s.sync_note_device("dev-a", "Phone", "android", "192.168.1.5", 0, None);
+        assert_eq!(
+            pending(),
+            0,
+            "two announcements that move only `last_seen` must queue no write"
+        );
+
+        // …and freshness still lands where its two readers look: in memory. The
+        // +120 is what makes the next two lines a claim about the file rather than
+        // about a clock that has not moved yet.
+        let mut beat = s.sync_peers()[0].clone();
+        beat.last_seen = kept + 120;
+        s.sync_upsert_peer(beat);
+        assert_eq!(
+            s.sync_peers()[0].last_seen,
+            kept + 120,
+            "the in-memory table still carries the sighting"
+        );
+        assert_eq!(pending(), 0, "…without the queue growing");
+        assert_eq!(
+            on_disk()[0].last_seen, kept,
+            "and the file still says the beat it was never asked to keep"
+        );
+
+        // The controls: each of these is a fact a restart would still want.
+        s.sync_note_device("dev-a", "Phone", "android", "192.168.1.9", 0, None);
+        assert_eq!(pending(), 1, "the address moved");
+        s.persistence_force_flush();
+        assert_eq!(on_disk()[0].ip, "192.168.1.9", "…and landed");
+        s.sync_note_device("dev-a", "Pixel", "android", "192.168.1.9", 0, None);
+        assert_eq!(pending(), 1, "the name moved");
+        s.persistence_force_flush();
+        s.sync_note_device("dev-a", "Pixel", "windows", "192.168.1.9", 0, None);
+        assert_eq!(pending(), 1, "the kind moved — it gates the whole-library claim");
+        s.persistence_force_flush();
+        s.sync_note_device("dev-a", "Pixel", "windows", "192.168.1.9", 5900, None);
+        assert_eq!(pending(), 1, "a named port is a different address to dial");
+        s.persistence_force_flush();
+        assert_eq!(on_disk()[0].port, 5900, "…and landed");
+        s.sync_note_device("dev-b", "Laptop", "windows", "192.168.1.7", 0, Some(true));
+        assert_eq!(pending(), 1, "a new peer is a new row");
+        s.persistence_force_flush();
+        assert_eq!(on_disk().len(), 2, "…and landed");
+        s.sync_note_synced("dev-b", true);
+        assert_eq!(pending(), 1, "a round that succeeded is the table's 上次同步");
+        s.persistence_force_flush();
+        assert!(
+            !on_disk()
+                .into_iter()
+                .find(|p| p.id == "dev-b")
+                .expect("the second row is on the file")
+                .last_sync
+                .is_empty(),
+            "…and landed on the row that synced"
+        );
+        // …and a round that did not: `last_seen` moves, `last_sync` does not.
+        s.sync_note_synced("dev-b", false);
+        assert_eq!(pending(), 0, "a failed round says nothing the file needs to keep");
+    }
+
+    /// **A restart does not turn the first beat into a write.**
+    ///
+    /// The stored row carries the `last_seen` of the last *durable* change, so the
+    /// baseline the first announcement compares against is that row projected the
+    /// same way — otherwise the exemption would only move the write from every beat
+    /// to the first one after each start.
+    #[test]
+    fn another_session_does_not_replay_the_beat_it_just_loaded() {
+        let dir = crate::testing::ScratchDir::new("peers-restart");
+        let repo = scratch_repo(&dir);
+        let first = super::AppState::new(&plain_args(), Some(repo.clone()));
+        first.create_page(None);
+        first.sync_note_device("dev-a", "Phone", "android", "192.168.1.5", 0, Some(true));
+        first.persistence_force_flush();
+        let stored = first.sync_peers();
+        drop(first);
+        assert_eq!(stored.len(), 1, "the control: the pairing was written");
+
+        let second = super::AppState::new(&plain_args(), Some(repo.clone()));
+        let pending = || second.persistence.as_ref().expect("a session with a repo").pending_len();
+        second.persistence_force_flush();
+        assert_eq!(
+            second.sync_peers(),
+            stored,
+            "the row came back as it was written, `last_seen` and all"
+        );
+
+        second.sync_note_device("dev-a", "Phone", "android", "192.168.1.5", 0, Some(true));
+        assert_eq!(
+            pending(),
+            0,
+            "the first beat of a new session is not a durable change"
+        );
+        // The exemption is per field, not per session: a new address still gets
+        // through on a cold start, and the file is what says so.
+        second.sync_note_device("dev-a", "Phone", "android", "192.168.1.6", 0, Some(true));
+        assert_eq!(pending(), 1, "…and a moved address is not a beat");
+        second.persistence_force_flush();
+        let on_disk: Vec<crate::services::sync::engine::PeerRecord> = {
+            use quire_core::core::Repository as _;
+            scratch_repo(&dir)
+                .load()
+                .ok()
+                .and_then(|state| state.settings.get("sync.peers").cloned())
+                .and_then(|v| serde_json::from_str(&v).ok())
+                .unwrap_or_default()
+        };
+        assert_eq!(on_disk.iter().map(|p| p.ip.as_str()).collect::<Vec<_>>(), ["192.168.1.6"]);
+        assert_eq!(
+            on_disk[0].last_seen,
+            second.sync_peers()[0].last_seen,
+            "a durable write carries the sighting it happened to be made with"
+        );
+    }
+
+    /// **The dialog shows the rows a user can act on first.**
+    ///
+    /// The stored table is in discovery order — whoever announced first is row
+    /// zero — and the dialog has no scroll, so the pairing a user came for could be
+    /// below a stack of machines that are not even on the network.
+    ///
+    /// This one function is under test, so the table is placed in the session
+    /// directly rather than arriving through `sync_note_device`: that stamps
+    /// `last_seen` with the wall clock, which is a second question from which row
+    /// sits on top. Threading the seed through it would put a clock reading inside a
+    /// comparison between two rows. The sightings below are therefore plain
+    /// integers: the assertions hold on any machine, whatever its clock says.
+    #[test]
+    fn the_dialog_puts_the_rows_it_can_act_on_first() {
+        use crate::services::sync::engine::PeerRecord;
+        let s = super::AppState::new(&plain_args(), None);
+        let row = |id: &str, name: &str, paired: bool, last_seen: u64| PeerRecord {
+            id: id.into(),
+            name: name.into(),
+            kind: "windows".into(),
+            ip: "127.0.0.1".into(),
+            port: crate::services::sync::SYNC_PORT,
+            paired,
+            last_seen,
+            last_sync: String::new(),
+        };
+        // Seeded in discovery order, which is deliberately not the order wanted.
+        let rows = vec![
+            row("dev-a", "Beta desk", true, 1_700_000_400), // paired, heard a while ago
+            row("dev-b", "Kettle", false, 1_700_000_490), // a stranger, asleep by now
+            row("dev-c", "Zeta laptop", false, 1_700_000_495), // the most recent sighting…
+            row("dev-d", "Aardvark", true, 1_700_000_460), // paired, the loudest paired
+            row("dev-e", "Handwritten", true, 0), // paired, never announced at all
+            // …and one heard in the same second as `dev-c`, so only the name can
+            // tell them apart. A row that traded places with its neighbour on every
+            // refresh is a pointer chasing a moving target.
+            row("dev-f", "Alpha phone", false, 1_700_000_495),
+        ];
+        s.settings.borrow_mut().insert(
+            "sync.peers".into(),
+            serde_json::to_string(&rows).unwrap_or_default(),
+        );
+
+        assert_eq!(
+            peer_ids(&s.sync_peers()),
+            ["dev-a", "dev-b", "dev-c", "dev-d", "dev-e", "dev-f"],
+            "the control: the stored table really is in the order it was discovered, so the\n         assertion below cannot be true by accident"
+        );
+        assert_eq!(
+            peer_ids(&s.sync_peers_ordered()),
+            // paired first, then the most recent sighting (which is what the
+            // dialog's online dot is a threshold on), then by name
+            ["dev-d", "dev-a", "dev-e", "dev-f", "dev-c", "dev-b"],
+            "paired before discovered, heard-of before asleep, then stable by name"
+        );
+        // The view is a view: the session's own rows did not move, so the merge and
+        // the durable key above still see what they saw before.
+        assert_eq!(
+            peer_ids(&s.sync_peers()),
+            ["dev-a", "dev-b", "dev-c", "dev-d", "dev-e", "dev-f"],
+            "…and asking for the ordered view did not reorder the table"
+        );
+    }
+
+    /// **A file with settings and no pages still opens as this device.**
+    ///
+    /// `persisted` is the load filtered to "there are pages to open", which is the
+    /// right gate for the document and for the built-in library's seed — and it was
+    /// also gating `settings`. A merge from a desktop peer can legitimately take the
+    /// last page (ADR-0122 says a desktop speaks for the whole library), and the
+    /// restart after that lost the theme, the pairings, the merge shadows **and this
+    /// device's id** — and an id minted fresh is a *new device* to every peer that
+    /// knew this one, so 配对 breaks from both ends at once. The same lost rows also
+    /// un-deleted the built-in library, whose "already seeded" flag is a settings row.
+    #[test]
+    fn an_empty_library_with_settings_behind_it_keeps_its_identity() {
+        use crate::services::sync::engine::PeerRecord;
+        use quire_core::core::Repository as _;
+        let dir = crate::testing::ScratchDir::new("identity-empty");
+        let repo = scratch_repo(&dir);
+        {
+            let peers = serde_json::to_string(&[PeerRecord {
+                id: "dev-a".into(),
+                name: "Phone".into(),
+                kind: "android".into(),
+                ip: "192.168.1.5".into(),
+                port: crate::services::sync::SYNC_PORT,
+                paired: true,
+                last_seen: 1_700_000_000,
+                last_sync: "2026-09-27T22:00:00Z".into(),
+            }])
+            .unwrap();
+            repo.apply(&[
+                crate::core::persistence::Change::SettingSet {
+                    key: "sync.device-id".into(),
+                    value: "windows-kept-id".into(),
+                },
+                crate::core::persistence::Change::SettingSet {
+                    key: "sync.device-name".into(),
+                    value: "客厅的电脑".into(),
+                },
+                crate::core::persistence::Change::SettingSet {
+                    key: "sync.peers".into(),
+                    value: peers,
+                },
+                crate::core::persistence::Change::SettingSet {
+                    key: "theme".into(),
+                    value: "amber".into(),
+                },
+                // The library was seeded and then emptied — which is what a merge
+                // from a desktop peer does to it (ADR-0122), and the state this
+                // test is about. Without the row the start below would seed five
+                // pages and the assertions would be about a library that has pages.
+                crate::core::persistence::Change::SettingSet {
+                    key: super::SEEDED_BUILTIN_TEMPLATES.into(),
+                    value: "1".into(),
+                },
+            ])
+            .expect("the settings rows land");
+        }
+        assert!(
+            repo.load().ok().map(|s| s.pages.is_empty()).unwrap_or(false),
+            "the control: this really is a file with settings and no pages"
+        );
+
+        let s = super::AppState::new(&plain_args(), Some(repo));
+        assert_eq!(
+            s.template_list().len(),
+            0,
+            "the built-in library the last session deleted stays deleted — the flag \
+             that says so is a settings row, and this is the assertion that dies when \
+             settings are dropped for having no pages beside them"
+        );
+        // Settle anything the start queued (it should queue nothing) before asking
+        // whether a beat queues anything.
+        s.persistence_force_flush();
+        assert_eq!(
+            s.sync_setting("sync.device-id").as_deref(),
+            Some("windows-kept-id"),
+            "the stored id is read, not a second one minted beside it"
+        );
+        assert_eq!(
+            s.sync_self_info().id,
+            "windows-kept-id",
+            "and the identity the engine announces is the stored one"
+        );
+        assert_eq!(s.theme_setting(), "amber", "the palette survives too");
+        let peers = s.sync_peers();
+        assert_eq!(peers.len(), 1, "the pairing is still there");
+        assert_eq!(peers[0].last_sync, "2026-09-27T22:00:00Z", "…with when it last worked");
+
+        // And the beat after a restart is still not a write (the two halves meet
+        // here: the table was restored, so its projection is the baseline).
+        let pending = || s.persistence.as_ref().expect("a session with a repo").pending_len();
+        s.sync_note_device("dev-a", "Phone", "android", "192.168.1.5", 0, Some(true));
+        assert_eq!(pending(), 0, "a restored pairing is not re-recorded by a beat");
+    }
+
+    /// **An export that cannot read its own rows says so instead of answering.**
+    ///
+    /// The one library this shell must not describe is a schema with no store
+    /// behind it: the only thing it could say is "this database has no records",
+    /// and a peer merges that as every record deleted. The pump's half of the rule
+    /// is to drop the reply channel rather than send the shorter snapshot (see
+    /// `handle_sync_job`), so the peer's round fails and nothing is agreed. The
+    /// control below is the same session with nothing to lose, which is what makes
+    /// the refusal a verdict about the records rather than about memory mode.
+    #[test]
+    fn an_export_that_cannot_read_its_records_refuses_to_answer() {
+        let a = super::AppState::new(&plain_args(), None);
+        a.create_page(None);
+        assert!(
+            a.sync_export().is_ok(),
+            "control: with no database in it, a store-less session can still answer"
+        );
+        a_database(&a);
+        let err = a
+            .sync_export()
+            .expect_err("a database whose rows nobody can read is not a snapshot");
+        assert!(err.contains("没有导出"), "and it names the round it refused: {err}");
+    }
+
+    /// **A peer's silence about a collection it cannot carry is not a deletion.**
+    ///
+    /// The Android shell exports no `databases` and no `attachments` — it has
+    /// neither store — and the merge cannot tell that silence from "the user
+    /// deleted every row of them". Two rounds are needed to see the hazard at
+    /// all: the first arms the shadow with this library's own database, and it is
+    /// the *second* one whose empty answer would otherwise take it out.
+    #[test]
+    fn a_phone_that_carries_no_databases_does_not_delete_this_ones() {
+        let dir = crate::testing::ScratchDir::new("gate-phone");
+        let a = super::AppState::new(&plain_args(), Some(scratch_repo(&dir)));
+        a.create_page(None);
+        a_database(&a);
+        let mut phone = peer("dev-phone", "Phone");
+        phone.kind = "android".into();
+
+        // Round one: the phone agrees to everything here, including the database
+        // it will never show — which is exactly what arms the shadow.
+        let full = a.sync_export().expect("A exports its own library");
+        a.sync_apply_remote(&full, &[], &phone)
+            .expect("the first round runs");
+        assert!(
+            !a.databases.borrow().databases.is_empty(),
+            "this library has a database to lose"
+        );
+
+        // Round two: the same library as the phone can hold it, minus the two
+        // collections it strips at its own door.
+        let mut silent = full.clone();
+        silent.databases.clear();
+        silent.attachments.clear();
+        let merged = a
+            .sync_apply_remote(&silent, &[], &phone)
+            .expect("the second round runs");
+
+        assert!(
+            !merged.databases.is_empty(),
+            "the answer pushed back is still a complete description of this library"
+        );
+        assert!(
+            !a.databases.borrow().databases.is_empty(),
+            "and the database survived the round"
+        );
+        // …and the gate said so out loud. A round that reports 已同步 while the two
+        // libraries differ by a whole layer needs the line that names the layer:
+        // it is the difference between a documented limitation and a bug report.
+        let log = a.sync_log();
+        assert!(
+            log.iter().any(|l| l.ok && l.message.contains("保留了")),
+            "the gate left its count in the log the sync page draws: {log:?}"
+        );
+    }
+
+    /// The same silence from a peer that *can* carry the collection is a deletion,
+    /// and now lands. This is the assertion that keeps the gate above from having
+    /// become a blanket "never delete anything over a sync": two desktops agree,
+    /// because both of them speak.
+    #[test]
+    fn a_desktop_that_dropped_a_database_takes_it_out_of_this_one_too() {
+        let dir = crate::testing::ScratchDir::new("gate-desktop");
+        let a = super::AppState::new(&plain_args(), Some(scratch_repo(&dir)));
+        a.create_page(None);
+        a_database(&a);
+        let desk = peer("dev-other", "Other desk");
+
+        let full = a.sync_export().expect("A exports its own library");
+        a.sync_apply_remote(&full, &[], &desk)
+            .expect("the first round runs");
+        let mut gone = full.clone();
+        gone.databases.clear();
+        let merged = a
+            .sync_apply_remote(&gone, &[], &desk)
+            .expect("the deletion merges");
+
+        assert!(merged.databases.is_empty(), "the merge read it as a delete");
+        assert!(
+            a.databases.borrow().databases.is_empty(),
+            "and the schema delete reached the session, not just the answer"
+        );
+        // The control for the log line above: two peers that both speak for the
+        // whole library have nothing to explain, and a gate that spoke every round
+        // would spend the fifty lines of the log on rounds that kept nothing back.
+        assert!(
+            !a.sync_log().iter().any(|l| l.message.contains("保留了")),
+            "a desktop peer's silence meant a deletion, and was logged as one"
+        );
+    }
+
+    /// A block that moved to another page is one row with a different `page`, and
+    /// the apply diffs **one page at a time** — so read page-locally the row is
+    /// missing from the page it left (a delete) and new on the page it joined (an
+    /// insert). The insert is the one that cannot happen: `blocks.id` is UNIQUE, so
+    /// the destination page's batch failed and took every other change in it down
+    /// with it, while the document's own insert only looks at the page it was handed
+    /// and left a copy of the block on both. Which of the two the user ends up with
+    /// depends on the order the export put the pages in, so both directions are run
+    /// here.
+    #[test]
+    fn a_block_that_moved_pages_survives_the_round_either_way() {
+        for backwards in [true, false] {
+            let dir = crate::testing::ScratchDir::new(if backwards {
+                "moved-block-backwards"
+            } else {
+                "moved-block-forwards"
+            });
+            let s = super::AppState::new(&plain_args(), Some(scratch_repo(&dir)));
+            let one = s.create_page(None);
+            s.rename_page(one, "One");
+            let two = s.create_page(None);
+            s.rename_page(two, "Two");
+            // the paragraph starts on `two` and is moved to `one` going backwards,
+            // and the other way round going forwards
+            s.open_page.set(if backwards { two } else { one });
+            let bid = a_line(&s) as u64;
+            let to = if backwards { one } else { two };
+
+            let desk = peer("dev-desk", "Desk");
+            let full = s.sync_export().expect("export");
+            s.sync_apply_remote(&full, &[], &desk)
+                .expect("the first round arms the shadow");
+
+            let mut moved = full.clone();
+            let mut touched = 0;
+            for b in &mut moved.blocks {
+                if b.id == bid {
+                    b.page = to as u64;
+                    touched += 1;
+                }
+            }
+            assert_eq!(touched, 1, "the block is on the snapshot to move");
+
+            let merged = s
+                .sync_apply_remote(&moved, &[], &desk)
+                .expect("the move merges");
+            assert!(
+                merged
+                    .blocks
+                    .iter()
+                    .any(|b| b.id == bid && b.page == to as u64),
+                "the answer put it on the other page ({backwards})"
+            );
+            let in_doc = s
+                .doc
+                .borrow()
+                .block(crate::core::BlockId(bid))
+                .cloned()
+                .unwrap_or_else(|| panic!("the moved block is still in the document ({backwards})"));
+            assert_eq!(
+                in_doc.page.0,
+                to as u64,
+                "and on the page the peer put it ({backwards})"
+            );
+        }
+    }
+
+    /// The merge decides row by row and the tree is one object, so a merged page
+    /// list can name a parent that is not here. This is the ordinary two-device
+    /// shape that does it: 归档 with a child 地图, the peer deletes 归档 (its own
+    /// delete took the subtree out of its snapshot), and this side renamed 地图 in
+    /// the meantime — so 地图 is the row both sides touched and stays, while its
+    /// parent goes. `delete_page` takes the subtree with it, so 地图 is gone from
+    /// the session too and the next loop re-inserts it under a page id nothing
+    /// holds, which `Workspace::attach` answered with `.expect` **on the UI
+    /// thread**: the app did not mis-sync, it stopped.
+    #[test]
+    fn a_parent_the_peer_deleted_takes_the_child_it_kept_to_the_top() {
+        let dir = crate::testing::ScratchDir::new("parent-deleted");
+        let repo = scratch_repo(&dir);
+        let s = super::AppState::new(&plain_args(), Some(repo.clone()));
+        let archive = s.create_page(None);
+        s.rename_page(archive, "归档");
+        let atlas = s.create_page(None);
+        s.rename_page(atlas, "地图");
+        assert!(s.move_page(atlas, Some(archive)), "地图 is filed inside 归档");
+        s.open_page.set(atlas);
+        let line = a_line(&s) as u64;
+
+        let desk = peer("dev-nest", "Nest");
+        let shared = s.sync_export().expect("export");
+        s.sync_apply_remote(&shared, &[], &desk)
+            .expect("the first round arms the shadow");
+
+        // 地图 edited here, 归档 (and with it the peer's 地图) gone there
+        s.rename_page(atlas, "地图，这里改过");
+        let mut there = shared.clone();
+        there.pages.retain(|p| p.id != archive as u64 && p.id != atlas as u64);
+
+        let merged = s
+            .sync_apply_remote(&there, &[], &desk)
+            .expect("the round runs instead of panicking");
+
+        let ws = s.workspace.borrow();
+        assert!(!ws.contains(archive), "the parent really did go");
+        let node = ws.get(atlas).cloned().expect("the edited child survives");
+        assert_eq!(node.parent, None, "and nothing files it in a page that is gone");
+        assert_eq!(node.title, "地图，这里改过", "with this side's own edit");
+        drop(ws);
+        assert!(
+            s.doc.borrow().block(crate::core::BlockId(line)).is_some(),
+            "and the page's rows came back with it — the cascade dropped the whole page"
+        );
+        let row = merged
+            .pages
+            .iter()
+            .find(|p| p.id == atlas as u64)
+            .expect("the answer carries the child");
+        assert_eq!(
+            row.parent, None,
+            "the snapshot this device pushes and stores as its shadow cannot assert a parent it did not build"
+        );
+        assert!(
+            s.sync_log()
+                .iter()
+                .any(|l| l.message.contains("放在顶层") && l.ok),
+            "and the sync page says what it did"
+        );
+    }
+
+    /// Two devices that each nested the other's page describe a cycle, and no tree
+    /// can be built from it. `move_page` refuses the second half — correctly, and
+    /// with its whole subtree — but the apply used to record the refused move
+    /// anyway, so the memory tree said one thing and `pages.parent` said the other:
+    /// a restart reads `by_parent`, finds no root for either page and the sidebar
+    /// empties while every row is still on disk.
+    #[test]
+    fn two_devices_that_each_nested_the_others_page_keep_their_own_trees() {
+        use quire_core::core::Repository as _;
+        let dir = crate::testing::ScratchDir::new("tree-cycle");
+        let repo = scratch_repo(&dir);
+        let s = super::AppState::new(&plain_args(), Some(repo.clone()));
+        let x = s.create_page(None);
+        s.rename_page(x, "甲");
+        let y = s.create_page(None);
+        s.rename_page(y, "乙");
+        assert!(s.move_page(x, Some(y)), "this side put 甲 inside 乙");
+
+        let desk = peer("dev-cycle", "Cycle");
+        let shared = s.sync_export().expect("export");
+        s.sync_apply_remote(&shared, &[], &desk)
+            .expect("the first round arms the shadow");
+
+        // the peer's answer puts 乙 inside 甲 as well
+        let mut cycle = shared.clone();
+        let mut touched = 0;
+        for p in &mut cycle.pages {
+            if p.id == y as u64 {
+                p.parent = Some(x as u64);
+                touched += 1;
+            }
+        }
+        assert_eq!(touched, 1, "乙 is on the snapshot to nest");
+
+        let merged = s
+            .sync_apply_remote(&cycle, &[], &desk)
+            .expect("the round runs");
+
+        let ws = s.workspace.borrow();
+        assert_eq!(
+            ws.get(y).cloned().expect("乙 is here").parent,
+            None,
+            "this device's own tree stands — the cycle was refused, not half-applied"
+        );
+        assert_eq!(
+            ws.get(x).cloned().expect("甲 is here").parent,
+            Some(y),
+            "including the move this device made"
+        );
+        drop(ws);
+        let row = merged
+            .pages
+            .iter()
+            .find(|p| p.id == y as u64)
+            .expect("the answer carries 乙");
+        assert_eq!(
+            row.parent, None,
+            "and it stops asserting the nesting it could not build, so no later round argues about it"
+        );
+        assert!(
+            s.sync_log()
+                .iter()
+                .any(|l| l.message.contains("不成树") && l.ok),
+            "with a line saying which half was refused"
+        );
+
+        // the store has to read the tree the session holds, or a restart finds no
+        // root for either page
+        s.persistence_force_flush();
+        let on_disk = repo.load().expect("the library reads back");
+        for page in &on_disk.pages {
+            let id = page.id.0 as i32;
+            assert_eq!(
+                page.parent.map(|v| v.0 as i32),
+                s.workspace.borrow().get(id).map(|n| n.parent).unwrap_or(None),
+                "page {id} is filed the same way on disk as in the session"
+            );
+        }
+        // …and the control that the round-trip test above could actually fail:
+        // 甲 is a child on disk, so the loop is not reading an empty table.
+        assert_eq!(
+            on_disk
+                .pages
+                .iter()
+                .find(|p| p.id.0 as i32 == x)
+                .and_then(|p| p.parent)
+                .map(|v| v.0 as i32),
+            Some(y),
+            "the child's own parent was written, so the comparison above had something to read"
+        );
+    }
+
+    /// The gate's own table, asserted beside the function: whose silence means
+    /// "nothing changed here" and whose means "everything was deleted".
+    #[test]
+    fn only_a_desktop_peer_speaks_for_the_whole_library() {
+        assert!(super::peer_carries_the_whole_library("windows"));
+        assert!(super::peer_carries_the_whole_library("macos"));
+        assert!(super::peer_carries_the_whole_library("linux"));
+        assert!(
+            !super::peer_carries_the_whole_library("android"),
+            "a phone that carries no databases says nothing about them"
+        );
+        // an unannounced kind is the conservative answer: keep this library's
+        // rows and let the next round say more
+        assert!(!super::peer_carries_the_whole_library(""));
+        assert!(!super::peer_carries_the_whole_library("symbian"));
+    }
+
+    /// The name a peer's attachment row carries is network input, and this is the
+    /// one path that writes a file from it: `../../escape.png` would put bytes
+    /// anywhere the process can reach. The stored name is therefore rebuilt from
+    /// the id and the mime, and from nothing else.
+    #[test]
+    fn a_stored_attachment_never_writes_where_its_name_points() {
+        use crate::services::sync::model::SAttachment;
+
+        let dir = crate::testing::ScratchDir::new("attachment-name");
+        let store = crate::services::attachment_store::AttachmentStore::for_db(Some(
+            &dir.path().join("library.db"),
+        ));
+        let row = SAttachment {
+            id: 77,
+            name: "photo".into(),
+            file: "../../escape.png".into(),
+            thumb: "../../escape-thumb.png".into(),
+            mime: "image/png".into(),
+            bytes: 4,
+            width: 0,
+            height: 0,
+        };
+        let stored = super::sync_stored_attachment(&store, &row, b"png-byt")
+            .expect("the file lands");
+
+        assert_eq!(stored.file, "77.png", "named by its id and its mime");
+        assert_eq!(stored.mime, "image/png");
+        assert!(stored.thumb.is_empty(), "no preview is claimed for a raw file");
+        assert_eq!(stored.bytes, 7, "and the size is the bytes actually stored");
+        assert!(
+            store.dir().join("77.png").is_file(),
+            "inside the store's own folder"
+        );
+        assert!(
+            !dir.path().join("escape.png").exists(),
+            "and not one folder up, where the name pointed"
+        );
+
+        // A mime this build cannot name an extension for still stores, as `.bin`:
+        // refusing the file would be the peer believing it had sent it.
+        let opaque = SAttachment {
+            mime: "weird".into(),
+            ..row.clone()
+        };
+        let stored = super::sync_stored_attachment(&store, &opaque, b"x")
+            .expect("an unnameable mime is not a reason to lose a file");
+        assert_eq!(stored.file, "77.bin");
+    }
+
+    /// **A row that arrives with no file behind it is counted, not swallowed.**
+    ///
+    /// The engine asks 「哪些附件本机已有」 by the *integer* id, so a peer whose row
+    /// happens to sit on an id this device hands to a different file is never fetched
+    /// for — and the merge then renumbers that row under a fresh id. Nothing lands
+    /// here (a row with no bytes is the promise a later round will never fetch), so
+    /// without this line the round says 已同步 over a picture that will stay broken
+    /// on every round for as long as both devices are paired.
+    #[test]
+    fn a_row_that_arrives_without_its_file_is_said_out_loud() {
+        let dir = crate::testing::ScratchDir::new("att-no-bytes");
+        let (sender, _repo, _page, pics) = session_with_pictures(&dir, 1);
+        let snap = sender
+            .sync_export()
+            .expect("the sender exports the library with its picture");
+        assert_eq!(snap.attachments.len(), 1, "one row, id {}", pics[0].0);
+
+        let other = crate::testing::ScratchDir::new("att-no-bytes-b");
+        let b = super::AppState::new(&plain_args(), Some(scratch_repo(&other)));
+        b.create_page(None);
+
+        let merged = b
+            .sync_apply_remote(&snap, &[], &peer("dev-desk", "Other desk"))
+            .expect("the round runs");
+
+        assert!(
+            b.attachments.borrow().is_empty(),
+            "no bytes, no row — inventing one is the cycle that never fetches the file"
+        );
+        // The control that keeps the log line from being a tautology: the row really
+        // is in the merged answer this device pushes back, which is precisely the
+        // assertion this library cannot keep.
+        assert_eq!(
+            merged.attachments.len(),
+            1,
+            "the merged snapshot still names the attachment this side cannot show"
+        );
+        let log = b.sync_log();
+        assert!(
+            log.iter()
+                .any(|l| l.ok && l.message.contains("附件没有把文件带过来")),
+            "and the round said how many it kept back: {log:?}"
+        );
     }
 
     #[test]

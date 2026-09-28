@@ -90,6 +90,133 @@ either of them: `cargo check --target aarch64-linux-android` has not been run in
   `net.git-fetch-with-cli = true`, so `git` does the fetch. `--workspace` is still
   on `just check`'s three lines but is now decoration, not load-bearing.
 
+## Sync backlog owned by `quire-core` (opened 2026-09-28)
+
+ADR-0121…0123 and the Compose shell's ADR-0024/0025 fixed everything a shell can
+fix alone. What is left is in `quire-core::services::sync`, and none of it can be
+delivered from this checkout: the crate is a git dependency **at a pinned rev**
+(`fbfdaca`), so a core change is commit → push → bump → both shells rebuilt, and
+that is one decision the user has to make rather than an edit I can land. Each
+item below was read out of the pinned source (and the first is *proven* by a
+probe), with what each shell does in the meantime.
+
+1. **A pushed snapshot carries no attachment bytes.** `server.rs:97-101` answers
+   `Job::ApplyRemote { bytes: Vec::new(), .. }`, so a device that only ever
+   *receives* pushes stores blocks naming attachments it has no file for. The
+   desktop's apply is deliberately correct about this (`state.rs:15312` — no
+   bytes, no row invented, because the row is what tells a peer the file already
+   crossed), so the gap closes on the receiver's own next pull; the honest cost
+   is that an inbound picture paints as a missing image for one cycle. The core
+   change is a fetch loop inside the push handler, or a `POST /sync/attachment`
+   the sender can push bytes with.
+2. **One unreadable attachment aborts the whole round.** `engine.rs:381-389`: any
+   non-200 from `/sync/attachment/<id>` is `return fail` — so a peer whose file
+   vanished between export and fetch stops *pages, notes and tasks* from crossing
+   too, including deletions. The desktop made its half loud on purpose
+   (`controller.rs:403`: "本机没有附件 N 的文件 — 对端本轮同步会失败") precisely so
+   a picture is never silently advertised as sent; the fix is to skip that one
+   row, keep the cycle, and let the shells' log line say which.
+3. **The skip list is not a capability bit.** `ListLocalAttachments` only says
+   which ids *this* device already holds, so a device that stores no attachments
+   at all (the Compose build, which trims them at its door and answers empty at
+   `sync.rs:665`) still downloads every one of the peer's attachment bytes on
+   every cycle and throws them away — bandwidth scaling with the desktop's
+   library, for rows it cannot keep. A `carries_attachments` flag on
+   `DeviceInfo` would let the engine skip step ④ entirely, the same question the
+   desktop's `peer_carries_the_whole_library` gate already asks at merge level.
+4. **An inbound push cannot name the sender's kind.** `server.rs:87` builds its
+   `PeerRecord` from the snapshot body, which has `device_id` and `device` but no
+   `kind`, so `kind` is `""` and `paired: true` is minted on the strength of the
+   sender's own word. Both shells now gate on their own peers table (desktop
+   `sync_peer_kind` + the unpaired-push refusal at `controller.rs:421-435`,
+   Compose `sync.rs:686-703`), which leaves one hole: a peer that is paired but
+   whose row has no kind — a device added by hand through `ProbeAdd`, or one that
+   pushed before it was ever announced — reads as the conservative answer, i.e. a
+   desktop's databases and attachments are dropped from *its* push. Add `kind` to
+   `SyncSnapshot` (additive, `#[serde(default)]`, no version bump per ADR-0102's
+   own argument) and the shells' lookup becomes a check instead of a substitute.
+5. **A push records the ephemeral source port as the peer's sync port.**
+   `server.rs:89-92` takes `stream.peer_addr().port()`, which is the sender's
+   outbound socket port (some random 49xxx), not `SYNC_PORT`; any peer row written
+   from that record names an address that cannot be dialled back. Both shells
+   already re-read the table rather than trusting it, and the desktop's
+   `a_self_address_carries_the_port_it_was_found_on` pins the shape — the core
+   should fall back to `SYNC_PORT` unless an announcement said otherwise.
+6. **`/sync/snapshot` and `/sync/attachment/<id>` answer anyone on the LAN.**
+   No shared secret, no token — the read-only HTTP share has run on the same
+   policy since M8, so sync inherits it rather than adding a second rule; the
+   pairing handshake is trust-on-first-use (`pair_with`'s own comment says a code
+   "would only matter on a network the user does not already control"). A device
+   id + a per-pairing token in the snapshot would be the smallest honest step.
+7. **Two rows with the same integer id end up sharing one 唯一 ID.**
+   `merge.rs:99-127` collapses `uuid` **keyed by the row's integer id, and only
+   over `local` and `remote`** — the shadow never enters — and it runs before
+   `merge_flat` decides whether the two rows are the same row. Proven against the
+   pinned rev with a throwaway probe (two devices, each holding one note with id
+   `1`, different titles, different uuids, no shadow): the merge correctly keeps
+   both rows and renumbers the remote to a fresh id, and **both come out carrying
+   the desktop's uuid**. So §四十一's 唯一 ID stops being unique after one sync,
+   which is what a `ref_note` reference and the clipboard's `local:<uuid>`
+   identity resolve through — a comment written on one device can point at the
+   other device's note forever. The collapse is right for its stated cases
+   (`a_uuid_is_collapsed_across_the_two_sides_before_the_decision` covers all
+   three: blank adopts, both-set picks the smaller, both-blank mints); the hole is
+   that it treats "same id" as "same row" *before* the pass that exists precisely
+   because same id may not mean same row. Fix: collapse only keys the merge will
+   not renumber (or consult the shadow for the id's previous owner), and mint a
+   fresh uuid for a renumbered row. No shell can paper over this — the shells only
+   see the merged rows.
+8. **A logged conflict is settled a second time, silently, one round later.**
+   Each side answers a conflict by keeping its own copy *and* writing that copy
+   into its own shadow (`state.rs:15913` / Compose `sync.rs:706`, both inside the
+   apply, so the pull and the push round write it the same way); the loser's
+   shadow therefore says "we agreed on my version", and in the next round the
+   winner's copy reads as a one-sided remote edit. Proven against the pinned rev
+   with a throwaway probe of three merges over one note (id 1, shadow "shared
+   older", A "A's edit", B "B's edit"): round 1 logs
+   `changed on both sides — kept this device's copy` on **both** sides, and round
+   2 answers `conflicts: []` with B holding **A's edit**. The row count in the log
+   stays true; what is missing is a way to say "this row was decided twice, and
+   the second decision was nobody's". `MergeOutcome` reporting the conflicted keys
+   — so a shell can keep the *old* shadow value for them, or show a "two versions"
+   panel the user resolves — is the fix, and it is a product decision about which
+   copy wins. Note the two readings are opposite in effect: keeping the old shadow
+   makes the divergence **permanent and re-logged every round**, which is honest
+   but has no UI; today's behaviour converges, which is nice, on an argument
+   nobody won.
+9. **The fetch decision is keyed by integer id, so a collision never fetches the
+   file.** `engine.rs:368-390` asks the shell 「which attachment ids live here
+   already」 and skips every remote row whose *id* is in that list — but identity in
+   the merge is the 唯一 ID, and item 7 showed two devices hand the same integer to
+   different rows. So the remote row that collides is the one the engine does not
+   fetch, and the merge then renumbers it under a fresh local id: the block lands
+   naming an attachment whose bytes no round will bring, and it reads as a missing
+   image on every later round too, with the cycle saying 已同步. The desktop cannot
+   fix this from its side (it does not own the fetch), so it says it out loud — the
+   apply counts rows that arrived with neither bytes nor a local row and logs
+   「对端有 N 个附件没有把文件带过来」, pinned by
+   `a_row_that_arrives_without_its_file_is_said_out_loud`. The core fix is to key
+   the skip list on the row's uuid (or on id *and* uuid), the same identity the
+   merge already insists on.
+
+Three items that are *not* core's and are simply not done yet: a deleted
+attachment still does not cross as a deletion (the desktop's apply deliberately
+emits no `AttachmentDeleted`, ADR-0122 — the bytes and the file live behind an
+id `import_bytes` mints per device, so a delete is a claim about a file the peer
+may not name); `meta` / `settings` rows stay out of the snapshot by policy
+(`sync.peers`, `sync.shadow.<peer>`, theme and window size are device-local;
+per-page `meta` therefore does not travel either, so a page's open/fold state and
+its breadcrumb belong to the machine that wrote them); and the Compose shell's
+attachment gate **reads fail-open** — `sync_unsyncable` there is
+`self.repo.load_attachments().ok()?`, so a database this build cannot read
+answers `None` («nothing stops syncing») rather than an error, the engine starts,
+and the phone syncs a library it has not managed to look at. The outcome is
+nearly harmless (that shell trims attachment rows at its own door, so the read
+was only ever a veto about *its* files), and the honest fix is a line on the
+phone's 同步 page rather than a refusal — deliberately left for a round where the
+device can actually be run, since there is no way to test a read error on a
+working database from here.
+
 ## Explicitly out of scope for v1
 
 Sync, collaboration, cloud, plugin market, AI, multi-process IPC, custom

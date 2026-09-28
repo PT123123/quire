@@ -96,28 +96,83 @@ fn apply_zoom(ui: &AppWindow, state: &Rc<AppState>) {
 // session is `Rc`, so nothing else may touch it), the settings dialog's rows,
 // and the five callbacks that dialog fires.
 
+/// Peer id → the moment the user asked for that round, for the rounds nobody
+/// has answered yet. Two things hang off it: a failure is worth the sticky
+/// notice bar only for a round somebody started by hand (an automatic round
+/// against a device that has just left the network is a log line, and a bar
+/// over the editor for every one of them is how a background feature becomes
+/// the thing the user is trying to get rid of), and a round that never came
+/// back is one to say so about rather than leave holding "正在同步…" forever.
+type Awaited = std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, std::time::Instant>>>;
+
+/// How long a round may take before this says so out loud. The engine's longest
+/// single call is 120 s (an attachment fetch or a push), so a whole cycle with
+/// several pictures can legitimately run past a minute.
+const ROUND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// A device is auto-synced while its announcement is recent. The announcer
+/// speaks every 4 s, so this is the same "在线" the dialog draws (15 s) with
+/// room for a missed beat or two — and a peer that stopped announcing is a peer
+/// whose server has stopped too, which is the round that would only time out.
+const RECENT_ENOUGH_SECS: u64 = 60;
+
 /// Start the engine and the pump. Called once from `wire`.
-fn start_sync(ui: &AppWindow, state: &Rc<AppState>) {
+///
+/// The port is tried here before the engine starts: a listener that cannot bind
+/// dies on its own thread with a line on a stderr nothing reads (`Engine::start`
+/// is the one place that reports it), and a device that cannot be reached is
+/// precisely the failure that would otherwise stay invisible — this side's rows
+/// look healthy while every attempt from the other end times out.
+fn start_sync(ui: &AppWindow, state: &Rc<AppState>, awaited: Awaited) {
     let me = state.sync_self_info();
+    let port = crate::services::sync::SYNC_PORT;
+    if let Err(e) = std::net::TcpListener::bind(("0.0.0.0", port)) {
+        let message = format!("端口 {port} 无法监听 — 本机收不到其他设备的同步：{e}");
+        state.sync_log_push("本机", false, &message);
+        ui.global::<UIState>().set_sync_status(message.into());
+    }
+
     let (job_tx, job_rx) = std::sync::mpsc::channel::<crate::services::sync::engine::Job>();
     let cmd_tx = crate::services::sync::engine::Engine::start(me, job_tx);
 
-    // the dialog's own switch and rows, pushed once at wire time
+    // the dialog's own switch, identity and rows, pushed once at wire time
     {
-        let (auto, _) = state.sync_config();
-        ui.global::<UIState>().set_sync_auto(auto);
-        refresh_sync_ui(&ui.global::<UIState>(), state);
+        let g = ui.global::<UIState>();
+        let (auto, interval) = state.sync_config();
+        g.set_sync_auto(auto);
+        g.set_sync_interval(interval as i32);
+        // The name is pushed here and after an edit only, never from the refresh
+        // pump: it is the `text <=>` of a live TextInput, and rewriting it every
+        // five seconds would erase whatever the user is mid-way through typing.
+        g.set_sync_self_name(state.sync_self_info().name.into());
+        refresh_sync_ui(&g, state, &awaited);
     }
 
     {
         let gw = ui_state_weak(ui);
         let s = state.clone();
         let cmd = cmd_tx.clone();
+        let a = awaited.clone();
         ui.global::<UIState>().on_sync_now(move |id| {
             let g = gw.upgrade().unwrap();
-            if let Some(peer) = s.sync_peers().into_iter().find(|p| p.id == id.as_str()) {
-                g.set_sync_status(format!("正在与 {} 同步…", peer.name).into());
-                let _ = cmd.send(crate::services::sync::engine::Cmd::SyncWith(peer));
+            let id = id.as_str().to_string();
+            match s.sync_peers().into_iter().find(|p| p.id == id) {
+                // A discovered-but-unpaired device is not a sync target: the
+                // round would run, the other side would refuse the push (an
+                // unpaired push is dropped on sight), and the peer table would
+                // quietly say "paired" — a pairing the user never agreed to.
+                Some(peer) if peer.paired => {
+                    g.set_sync_status(format!("正在与 {} 同步…", peer.name).into());
+                    a.borrow_mut()
+                        .insert(peer.id.clone(), std::time::Instant::now());
+                    let _ = cmd.send(crate::services::sync::engine::Cmd::SyncWith(peer));
+                }
+                Some(peer) => {
+                    g.set_sync_status(
+                        format!("{} 还没有配对 — 先按「配对」。", peer.name).into(),
+                    );
+                }
+                None => g.set_sync_status("没有这个设备 — 它可能已经离开本网络。".into()),
             }
         });
     }
@@ -125,10 +180,13 @@ fn start_sync(ui: &AppWindow, state: &Rc<AppState>) {
         let gw = ui_state_weak(ui);
         let s = state.clone();
         let cmd = cmd_tx.clone();
+        let a = awaited.clone();
         ui.global::<UIState>().on_sync_pair(move |id| {
             let g = gw.upgrade().unwrap();
             if let Some(peer) = s.sync_peers().into_iter().find(|p| p.id == id.as_str()) {
                 g.set_sync_status(format!("正在请求 {} 配对…", peer.name).into());
+                a.borrow_mut()
+                    .insert(peer.id.clone(), std::time::Instant::now());
                 let _ = cmd.send(crate::services::sync::engine::Cmd::PairWith(peer));
             }
         });
@@ -136,11 +194,46 @@ fn start_sync(ui: &AppWindow, state: &Rc<AppState>) {
     {
         let gw = ui_state_weak(ui);
         let s = state.clone();
+        let a = awaited.clone();
         ui.global::<UIState>().on_sync_forget(move |id| {
             let g = gw.upgrade().unwrap();
+            // a round with a device that is no longer paired can only ever end
+            // in the timeout sweep, so its pending entry goes with the row
+            a.borrow_mut().remove(id.as_str());
             s.sync_forget_peer(&id);
             g.set_sync_status("已忘记设备。".into());
-            refresh_sync_ui(&g, &s);
+            refresh_sync_ui(&g, &s, &a);
+        });
+    }
+    {
+        let gw = ui_state_weak(ui);
+        let s = state.clone();
+        ui.global::<UIState>().on_sync_name_set(move |name| {
+            let g = gw.upgrade().unwrap();
+            s.sync_set_device_name(name.as_str());
+            // read back rather than echoed: a blank name is refused, and the
+            // field has to snap to whatever the device is actually called
+            let saved = s.sync_self_info().name;
+            g.set_sync_self_name(saved.clone().into());
+            g.set_sync_status(
+                if name.trim().is_empty() {
+                    "名称不能为空 — 仍使用当前名称。".to_string()
+                } else {
+                    format!("本机名称已改为「{saved}」。其他设备会在下次广播时看到它。")
+                }
+                .into(),
+            );
+        });
+    }
+    {
+        let gw = ui_state_weak(ui);
+        let s = state.clone();
+        ui.global::<UIState>().on_sync_interval_set(move |secs| {
+            let g = gw.upgrade().unwrap();
+            let secs = (secs as u64).max(15);
+            s.sync_set_interval(secs);
+            g.set_sync_interval(secs as i32);
+            g.set_sync_status(format!("自动同步间隔已设为每 {secs} 秒。").into());
         });
     }
     {
@@ -149,11 +242,12 @@ fn start_sync(ui: &AppWindow, state: &Rc<AppState>) {
         ui.global::<UIState>().on_sync_auto_toggled(move |on| {
             let g = gw.upgrade().unwrap();
             s.sync_set_auto(on);
+            let (_, interval) = s.sync_config();
             g.set_sync_status(
                 if on {
-                    "自动同步已开启 — 已配对设备每分钟同步一次。"
+                    format!("自动同步已开启 — 在线的已配对设备每 {interval} 秒同步一次。")
                 } else {
-                    "自动同步已关闭 — 请手动「立即同步」。"
+                    "自动同步已关闭 — 请手动「立即同步」。".to_string()
                 }
                 .into(),
             );
@@ -162,6 +256,7 @@ fn start_sync(ui: &AppWindow, state: &Rc<AppState>) {
     {
         let gw = ui_state_weak(ui);
         let cmd = cmd_tx.clone();
+        let a = awaited.clone();
         ui.global::<UIState>().on_sync_add(move |text| {
             let g = gw.upgrade().unwrap();
             let text = text.trim().to_string();
@@ -176,6 +271,9 @@ fn start_sync(ui: &AppWindow, state: &Rc<AppState>) {
                 None => (text.clone(), crate::services::sync::SYNC_PORT),
             };
             g.set_sync_status(format!("正在寻找 {ip}:{port} 上的 Quire…").into());
+            // keyed by the address until there is a device to key by: the
+            // engine's `probe_add` answers with the same string on a failure
+            a.borrow_mut().insert(ip.clone(), std::time::Instant::now());
             let _ = cmd.send(crate::services::sync::engine::Cmd::ProbeAdd { ip, port });
         });
     }
@@ -188,6 +286,8 @@ fn start_sync(ui: &AppWindow, state: &Rc<AppState>) {
     let s = state.clone();
     let cmd = cmd_tx.clone();
     let last_auto = std::cell::Cell::new(std::time::Instant::now());
+    let last_refresh = std::cell::Cell::new(std::time::Instant::now());
+    let was_open = std::cell::Cell::new(false);
     let t: &'static slint::Timer = Box::leak(Box::new(slint::Timer::default()));
     t.start(
         slint::TimerMode::Repeated,
@@ -197,16 +297,59 @@ fn start_sync(ui: &AppWindow, state: &Rc<AppState>) {
             let g = ui.global::<UIState>();
             let mut answered = false;
             while let Ok(job) = job_rx.try_recv() {
-                handle_sync_job(&g, &s, job);
+                handle_sync_job(&g, &s, job, &awaited);
                 answered = true;
             }
-            if answered {
-                refresh_sync_ui(&g, &s);
+            // A round the peer never answered is still "in progress" on screen:
+            // say it stopped instead of leaving the dialog holding 正在同步…
+            let stale: Vec<String> = {
+                let waiting = awaited.borrow_mut();
+                waiting
+                    .iter()
+                    .filter(|(_, asked)| asked.elapsed() > ROUND_TIMEOUT)
+                    .map(|(id, _)| id.clone())
+                    .collect()
+            };
+            for id in stale {
+                awaited.borrow_mut().remove(&id);
+                let name = s
+                    .sync_peers()
+                    .into_iter()
+                    .find(|p| p.id == id)
+                    .map(|p| p.name)
+                    .unwrap_or(id);
+                // What this side actually knows is that it stopped waiting: every
+                // step of a round has its *own* HTTP budget (60 s for the snapshot,
+                // 120 s per attachment, 120 s for the push), so a library with a
+                // dozen files to carry can still be working an hour after the dot
+                // went out. Saying 已放弃 would be a verdict on the peer's round
+                // rather than on this dialog's patience — and if the answer does
+                // come, `SyncDone` logs the real outcome under this line.
+                let message =
+                    format!("{name} 五分钟内没有回音 — 本机不再等待（对端可能仍在同步）。");
+                s.sync_log_push("本机", false, &message);
+                g.set_sync_status(message.into());
+            }
+            // The rows say 在线 and 多久前同步过, both of which move without a job
+            // arriving: a device that left the network stops announcing rather
+            // than announcing that it left. Only while the dialog can see it —
+            // rebuilding the models four times a second for a closed popup is
+            // the kind of background cost nobody notices until the fan is.
+            let open = g.get_settings_open();
+            let due = (open && !was_open.get())
+                || (open && last_refresh.get().elapsed().as_secs() >= 5);
+            was_open.set(open);
+            if answered || due {
+                last_refresh.set(std::time::Instant::now());
+                refresh_sync_ui(&g, &s, &awaited);
             }
             let (auto, interval) = s.sync_config();
             if auto && last_auto.get().elapsed().as_secs() >= interval {
                 last_auto.set(std::time::Instant::now());
-                for peer in s.sync_peers().into_iter().filter(|p| p.paired) {
+                let now = crate::services::sync::engine::now_unix();
+                for peer in s.sync_peers().into_iter().filter(|p| {
+                    p.paired && now.saturating_sub(p.last_seen) < RECENT_ENOUGH_SECS
+                }) {
                     let _ = cmd.send(crate::services::sync::engine::Cmd::SyncWith(peer));
                 }
             }
@@ -215,11 +358,29 @@ fn start_sync(ui: &AppWindow, state: &Rc<AppState>) {
 }
 
 /// One engine job, answered on the UI thread.
-fn handle_sync_job(g: &UIState<'_>, state: &Rc<AppState>, job: crate::services::sync::engine::Job) {
+fn handle_sync_job(
+    g: &UIState<'_>,
+    state: &Rc<AppState>,
+    job: crate::services::sync::engine::Job,
+    awaited: &Awaited,
+) {
     use crate::services::sync::engine::Job;
     match job {
         Job::ExportSnapshot { reply } => {
-            let _ = reply.send(state.sync_export());
+            match state.sync_export() {
+                Ok(snap) => {
+                    let _ = reply.send(snap);
+                }
+                // The reply channel is dropped rather than answered: a snapshot
+                // this session cannot finish is not a shorter snapshot — the
+                // reader merges an absent row as a deleted one — so the honest
+                // answer is a failed request (503, see `sync::server`) and that
+                // device's cycle stopping, plus a line here saying why.
+                Err(e) => {
+                    state.sync_log_push("对端", false, &e);
+                    g.set_sync_status(e.into());
+                }
+            }
         }
         Job::ListLocalAttachments { reply } => {
             let ids: Vec<u64> = state.attachments.borrow().keys().map(|k| *k as u64).collect();
@@ -228,11 +389,29 @@ fn handle_sync_job(g: &UIState<'_>, state: &Rc<AppState>, job: crate::services::
         Job::AttachmentBytes { id, reply } => {
             let bytes = {
                 let atts = state.attachments.borrow();
-                atts.get(&(id as i64))
-                    .and_then(|att| std::fs::read(state.store.display_path(att)).ok())
+                atts.get(&(id as i64)).and_then(|att| {
+                    // the display copy first, the original behind it: a
+                    // downscaled raster can be missing while the file the user
+                    // picked is perfectly good, and a 404 here stops the
+                    // *whole* round on the other device
+                    std::fs::read(state.store.display_path(att))
+                        .or_else(|_| std::fs::read(state.store.stored_path(att)))
+                        .ok()
+                })
             };
-            if let Some(bytes) = bytes {
-                let _ = reply.send(bytes);
+            match bytes {
+                Some(bytes) => {
+                    let _ = reply.send(bytes);
+                }
+                // No reply, so the request answers 404 and the peer's round
+                // fails: a silent gap here is a picture the other device will
+                // go on believing it sent. The row is this device's own book,
+                // so the line has to be said here — nowhere else can see it.
+                None => {
+                    let message = format!("本机没有附件 {id} 的文件 — 对端本轮同步会失败");
+                    state.sync_log_push("对端", false, &message);
+                    g.set_sync_status(message.into());
+                }
             }
         }
         Job::ApplyRemote {
@@ -253,11 +432,12 @@ fn handle_sync_job(g: &UIState<'_>, state: &Rc<AppState>, job: crate::services::
                 .iter()
                 .any(|p| p.id == peer.id && p.paired);
             if inbound_push && !known {
-                let message = format!(
-                    "{} 推送了快照但未配对 — 已拒绝",
-                    if peer.name.is_empty() { "未知设备" } else { &peer.name }
-                );
-                state.sync_log_push(&peer.id, false, &message);
+                // The log's own column is 96 px wide and elides, so it gets the
+                // name the sentence gets: a device id would land there as the
+                // unreadable half of a hash the user cannot match to any row.
+                let shown = if peer.name.is_empty() { "未知设备" } else { &peer.name };
+                let message = format!("{shown} 推送了快照但未配对 — 已拒绝");
+                state.sync_log_push(shown, false, &message);
                 g.set_sync_status(message.clone().into());
                 let _ = reply.send(Err(message));
                 return;
@@ -267,7 +447,31 @@ fn handle_sync_job(g: &UIState<'_>, state: &Rc<AppState>, job: crate::services::
                 Ok(_) => {
                     // the workspace moved under the open page: redraw what the
                     // window shows before anything else looks at it
-                    open(g, state, state.open_page.get());
+                    let shown = state.open_page.get();
+                    if state.workspace.borrow().contains(shown) {
+                        open(g, state, shown);
+                    } else {
+                        // …unless the merge deleted the page on screen, which is
+                        // `open_page` sitting at 0 and a window still painting a
+                        // document that no longer exists — the same hole the
+                        // delete dialog's own fallback answers, and for the same
+                        // reason: what is on screen is what the next keystroke
+                        // writes into.
+                        match state.workspace.borrow().first_root() {
+                            Some(fallback) => open(g, state, fallback),
+                            None => {
+                                g.set_page_title("Quire".into());
+                                g.set_page_breadcrumb("".into());
+                                state.blocks.set_vec(Vec::new());
+                                g.set_sidebar_selected_id(0);
+                                // `open_page` is what normally rebuilds the tree,
+                                // and there is no page left to open — so the rows
+                                // of a library the peer emptied would keep drawing
+                                // pages that no longer exist anywhere but here.
+                                state.rebuild_sidebar();
+                            }
+                        }
+                    }
                     state.reproject_blocks();
                     state.db_refresh_page(None);
                     state.sync_log_push(&peer.name, true, "已合并对端更改");
@@ -285,12 +489,18 @@ fn handle_sync_job(g: &UIState<'_>, state: &Rc<AppState>, job: crate::services::
                 &peer.name,
                 &peer.kind,
                 &peer.ip,
-                peer.port,
+                // A push arrives with the socket's *ephemeral* port (the server
+                // only has `peer_addr` to name the sender by), and the peer's
+                // listening port is the one every later round dials: 0 says "the
+                // address moved, the port did not" — `sync_note_device` keeps
+                // what the table already knows for a field it is given nothing in.
+                if inbound_push { 0 } else { peer.port },
                 Some(true),
             );
             let _ = reply.send(result);
         }
         Job::InboundPair { device, ip, reply } => {
+            awaited.borrow_mut().remove(&ip);
             state.sync_note_device(
                 &device.id,
                 &device.name,
@@ -314,6 +524,12 @@ fn handle_sync_job(g: &UIState<'_>, state: &Rc<AppState>, job: crate::services::
             );
         }
         Job::Paired { device, ip } => {
+            // 「按 IP 添加」 waits on the *address*, because that is all there is
+            // to wait on before the other device has said who it is.
+            let mut waiting = awaited.borrow_mut();
+            let probed = waiting.remove(&ip).is_some();
+            waiting.remove(&device.id);
+            drop(waiting);
             state.sync_note_device(
                 &device.id,
                 &device.name,
@@ -324,50 +540,141 @@ fn handle_sync_job(g: &UIState<'_>, state: &Rc<AppState>, job: crate::services::
             );
             state.sync_log_push(&device.name, true, "已配对");
             g.set_sync_status(format!("已与 {} 配对。", device.name).into());
+            // Empty the field only for the door that typed into it, and only when
+            // that address answered: a failed probe keeps the text so the typo is
+            // there to fix, and a pairing the user pressed on a discovered row has
+            // an address half-typed in the box that is nobody else's to wipe.
+            if probed {
+                g.set_sync_add_text("".into());
+            }
         }
         Job::SyncDone {
             peer_id,
             ok,
             message,
         } => {
+            // Whether somebody asked for this round by hand is the whole
+            // difference between a line in the log and a bar over the editor:
+            // an automatic round against a device that has just left the network
+            // fails on schedule, every interval, for as long as it stays paired.
+            let asked = awaited.borrow_mut().remove(&peer_id).is_some();
             state.sync_note_synced(&peer_id, ok);
-            state.sync_log_push(&peer_id, ok, &message);
+            // Resolved *before* the log line: `sync_log_push` writes straight into
+            // the 最近记录 column, which is a name-shaped 96 px slot, and a device
+            // that left the network before its first round has no row to look a
+            // name up in — that case keeps the id and says so in the message.
+            let name = state
+                .sync_peers()
+                .into_iter()
+                .find(|p| p.id == peer_id)
+                .map(|p| p.name)
+                .filter(|n| !n.is_empty())
+                .unwrap_or(peer_id.clone());
+            state.sync_log_push(&name, ok, &message);
             if ok {
-                g.set_sync_status(message.into());
+                // the engine's own line counts the merged rows and the log
+                // carries it; the dialog's one-line status stays in the same
+                // language as the rest of the dialog
+                g.set_sync_status(format!("已与 {name} 同步。").into());
             } else {
+                // the reason is the only actionable text there is, so it goes in
+                // the status even when the notice bar stays away
                 g.set_sync_status(message.clone().into());
-                // a failed round is worth the notice bar: the user asked for
-                // a sync (or left auto on) and nothing moved
-                g.set_db_notice(format!("同步：{message}").into());
+                if asked {
+                    g.set_db_notice(format!("同步：{message}").into());
+                }
             }
         }
         Job::AutoTick => {}
     }
 }
 
-/// The dialog's rows, rebuilt from the peers table and the log.
-fn refresh_sync_ui(g: &UIState<'_>, state: &AppState) {
+/// Howard Hinnant's `days_from_civil`: the inverse of the conversion
+/// `now_rfc3339` uses to write the stamps this reads back, so the sync section
+/// can date its own rows without a date crate.
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// "3 分钟前" from one stored stamp — `"2026-09-23 14:05"`, UTC, written by
+/// `now_rfc3339`.
+///
+/// The age rather than the clock time on purpose: the stamp carries no zone, this
+/// build has no date crate to read one, and a time eight hours off is a wrong
+/// fact on the screen where "a few minutes ago" is not. Anything unparseable is
+/// shown as it arrived rather than guessed at.
+fn sync_age_label(at: &str, now: u64) -> String {
+    let Some((date, time)) = at.split_once(' ') else {
+        return at.to_string();
+    };
+    let mut days = date.split('-').flat_map(|part| part.parse::<i64>().ok());
+    let (Some(y), Some(m), Some(d)) = (days.next(), days.next(), days.next()) else {
+        return at.to_string();
+    };
+    let mut clock = time.split(':').flat_map(|part| part.parse::<i64>().ok());
+    let (Some(h), Some(min)) = (clock.next(), clock.next()) else {
+        return at.to_string();
+    };
+    let then = days_from_civil(y, m, d) * 86_400 + h * 3_600 + min * 60;
+    let secs = (now as i64).saturating_sub(then).max(0) as u64;
+    if secs < 90 {
+        "刚刚".to_string()
+    } else if secs < 3_600 {
+        format!("{} 分钟前", secs / 60)
+    } else if secs < 86_400 {
+        format!("{} 小时前", secs / 3_600)
+    } else {
+        format!("{} 天前", secs / 86_400)
+    }
+}
+
+/// The platform name as the row reads it. A device class ("电脑"/"手机") is not
+/// inferred: `kind` is an OS name, and an OS says nothing about what is carrying
+/// it.
+fn sync_kind_label(kind: &str) -> &'static str {
+    match kind {
+        "windows" => "Windows",
+        "macos" => "macOS",
+        "linux" => "Linux",
+        "android" => "Android",
+        other if other.is_empty() => "未知设备",
+        other => {
+            // an OS this build does not name is shown as the name it gave itself
+            let _ = other;
+            "其他"
+        }
+    }
+}
+
+/// The dialog's rows, its own address, and the log — rebuilt from the session.
+fn refresh_sync_ui(g: &UIState<'_>, state: &AppState, awaited: &Awaited) {
     let now = crate::services::sync::engine::now_unix();
     let rows: Vec<crate::SyncRow> = state
-        .sync_peers()
+        .sync_peers_ordered()
         .into_iter()
         .map(|p| {
             // the announcement cadence is 4 s; a peer heard inside ~15 s is
             // on the network right now
             let online = now.saturating_sub(p.last_seen) < 15;
             let status = if !p.paired {
-                "found · not paired".to_string()
+                "发现 · 还没有配对".to_string()
             } else if p.last_sync.is_empty() {
-                "paired · never synced".to_string()
+                "已配对 · 还没同步过".to_string()
             } else {
-                format!("paired · synced {}", p.last_sync)
+                format!("已配对 · {}同步过", sync_age_label(&p.last_sync, now))
             };
             crate::SyncRow {
                 id: p.id.into(),
                 label: format!(
                     "{} ({})",
-                    if p.name.is_empty() { "Device" } else { &p.name },
-                    if p.kind.is_empty() { "unknown" } else { &p.kind }
+                    if p.name.is_empty() { "设备" } else { &p.name },
+                    sync_kind_label(&p.kind)
                 )
                 .into(),
                 status: status.into(),
@@ -378,6 +685,36 @@ fn refresh_sync_ui(g: &UIState<'_>, state: &AppState) {
         })
         .collect();
     g.set_sync_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
+    // The address is asked for here rather than once at wire time because the
+    // answer moves: a laptop that switches networks gets a new address, and the
+    // number to type into the other device has to be the current one.
+    g.set_sync_self_address(
+        state
+            .sync_self_address()
+            .unwrap_or_default()
+            .into(),
+    );
+    g.set_sync_busy(!awaited.borrow().is_empty());
+    // Newest first, and only the twelve the dialog has room to read: the stored
+    // log is fifty lines precisely so that the tail of it can be shown.
+    let log: Vec<crate::SyncLogRow> = state
+        .sync_log()
+        .into_iter()
+        .rev()
+        .take(12)
+        .map(|line| crate::SyncLogRow {
+            when: sync_age_label(&line.at, now).into(),
+            peer: (if line.peer.is_empty() {
+                "设备"
+            } else {
+                &line.peer
+            })
+            .into(),
+            ok: line.ok,
+            message: line.message.into(),
+        })
+        .collect();
+    g.set_sync_log(slint::ModelRc::new(slint::VecModel::from(log)));
 }
 
 #[cfg(test)]
@@ -437,6 +774,52 @@ mod tests {
         assert_eq!(markdown_convert("# comment", Some(BlockKind::Code)), None);
         assert_eq!(markdown_convert("---", Some(BlockKind::Divider)), None);
     }
+
+    // ─── the sync section's own arithmetic ───────────────────────────────────
+
+    /// Two fixed points, then the ladder: the epoch, a leap-century date, and a
+    /// pre-epoch day (the negative branch of Hinnant's era).
+    #[test]
+    fn days_from_civil_agrees_with_the_epoch() {
+        assert_eq!(days_from_civil(1970, 1, 1), 0);
+        assert_eq!(days_from_civil(1969, 12, 31), -1);
+        // 2000 is a leap century: 10 957 days to Jan 1, then January and February
+        assert_eq!(days_from_civil(2000, 3, 1), 10_957 + 31 + 29);
+        // the same day as the January branch (`m <= 2` shifts the year back)
+        assert_eq!(days_from_civil(2000, 1, 1), 10_957);
+    }
+
+    /// A stored stamp is read as an **age**, never as a clock time — and an
+    /// unparseable one is shown as it arrived rather than guessed at.
+    #[test]
+    fn a_sync_stamp_reads_as_an_age() {
+        let at = days_from_civil(2026, 9, 28) * 86_400 + 14 * 3_600 + 5 * 60;
+        let stamp = "2026-09-28 14:05";
+        assert_eq!(sync_age_label(stamp, at as u64), "刚刚");
+        assert_eq!(sync_age_label(stamp, (at + 59) as u64), "刚刚");
+        assert_eq!(sync_age_label(stamp, (at + 90) as u64), "1 分钟前");
+        assert_eq!(sync_age_label(stamp, (at + 45 * 60) as u64), "45 分钟前");
+        assert_eq!(sync_age_label(stamp, (at + 3 * 3_600) as u64), "3 小时前");
+        assert_eq!(sync_age_label(stamp, (at + 2 * 86_400) as u64), "2 天前");
+        // a stamp from the future is a clock skew, not a negative age
+        assert_eq!(sync_age_label(stamp, (at - 600) as u64), "刚刚");
+        // and what this build cannot read is shown as it was written
+        assert_eq!(sync_age_label("", 0), "");
+        assert_eq!(sync_age_label("尚未同步", 0), "尚未同步");
+        assert_eq!(sync_age_label("2026-09 28 14:05", 0), "2026-09 28 14:05");
+    }
+
+    /// The kind label is the platform the peer named, not a guess about the
+    /// hardware — and an empty kind says what it means.
+    #[test]
+    fn a_peer_kind_becomes_a_platform_word() {
+        assert_eq!(sync_kind_label("windows"), "Windows");
+        assert_eq!(sync_kind_label("android"), "Android");
+        assert_eq!(sync_kind_label(""), "未知设备");
+        assert_eq!(sync_kind_label("freebsd"), "其他");
+    }
+    // The gate itself, and the attachment writer it guards, are tested beside
+    // those functions in `state`'s own tests.
 }
 
 /// The window's `UIState` as a weak handle.
@@ -577,6 +960,13 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
     // that keeps its own clock would commit the first one's rows early.
     let org_delete_timer: &'static slint::Timer =
         Box::leak(Box::new(slint::Timer::default()));
+
+    // The sync rounds asked for and not yet answered. Declared here rather than
+    // inside `start_sync` because the dialog's two open paths rebuild the rows
+    // too, and the busy dot they draw has to know about a round already running.
+    let sync_awaited: Awaited = std::rc::Rc::new(std::cell::RefCell::new(
+        std::collections::HashMap::new(),
+    ));
 
     // ---- shell ----
     {
@@ -762,12 +1152,13 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
     {
         let gw = gw.clone();
         let s = state.clone();
+        let a = sync_awaited.clone();
         ui.global::<UIState>().on_settings_open_requested(move || {
             let g = gw.upgrade().unwrap();
             // the sync section reads the peers table: rebuild its rows on
             // every open, so a device found while the dialog was shut is
             // there when the user looks
-            refresh_sync_ui(&g, &s);
+            refresh_sync_ui(&g, &s, &a);
             g.set_settings_open(true);
         });
     }
@@ -781,7 +1172,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
     }
 
     // LAN sync: the engine's threads and the pump that answers them here
-    start_sync(ui, state);
+    start_sync(ui, state, sync_awaited.clone());
 
     // ---- page tree ----
     {
@@ -839,6 +1230,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
     {
         let gw = gw.clone();
         let s = state.clone();
+        let a = sync_awaited.clone();
         ui.global::<UIState>().on_menu_action(move |action| {
             let g = gw.upgrade().unwrap();
             let id = g.get_menu_node_id();
@@ -1078,7 +1470,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                     }
                 }
                 crate::app::state::MENU_SIDE_SETTINGS => {
-                    refresh_sync_ui(&g, &s);
+                    refresh_sync_ui(&g, &s, &a);
                     g.set_settings_open(true);
                 }
                 crate::app::state::MENU_SIDE_OPEN_NOTE => {

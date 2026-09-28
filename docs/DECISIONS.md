@@ -2,6 +2,172 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0124 · The merged page list is tested for a tree before the tree is touched
+
+**Decision.** `sync_apply_remote`'s page half asks, for every row it is about to
+write, whether the parent it names exists here — **before** calling into
+`Workspace`:
+
+- a page whose merged parent is not in this workspace is inserted or moved **at the
+  top level** (`tree_orphaned`),
+- a `move_page` that returns `false` — the two devices each nested the other's page,
+  so no tree can be built — leaves this device's own parent and order standing and
+  records **nothing** (`tree_refused`), which is what ADR-0048's rule says a command
+  that refused owes you,
+- and both answers are written back into the merged row (`tree_repairs`: the parent
+  actually built, the order actually held), because that row is the snapshot this
+  device pushes back **and** the shadow it stores — an assertion it cannot keep would
+  be argued again in every later round,
+- one sync-log line carries the two counts, `ok: true` (the round did sync; one layer
+  of the tree is a disagreement about a shape, not a failure).
+
+**Context.** The merge decides row by row and the page tree is one object, so a merged
+page list is not automatically a buildable tree, and two shapes reach the tree code
+from ordinary two-device use:
+
+1. **A parent the peer deleted, a child this side edited.** Device B deletes 归档,
+   and its own delete takes the subtree — 地图 is gone from B's snapshot too. Device A
+   renamed 地图 in the meantime, so 地图 is the row both sides touched and the merge
+   keeps it, while 归档 is the row only one side touched and the merge deletes. A's
+   apply runs the deletes first, `delete_page` cascades over the subtree and drops
+   地图's page from the session, and the insert loop then re-inserts it under a page id
+   nothing holds. `Workspace::attach` answers that with
+   `.expect("parent exists")` — on the **UI thread**, because a sync apply is a `Job`
+   the pump drains. So the app did not mis-sync; it stopped. This is now proven by the
+   test rather than argued: with the guard short-circuited,
+   `a_parent_the_peer_deleted_takes_the_child_it_kept_to_the_top` dies at
+   `workspace.rs:156` with `parent exists`.
+2. **A cycle.** A puts 甲 inside 乙, B puts 乙 inside 甲; merged says both, and
+   `move_page` refuses the second half. The apply used to ignore the returned `bool`
+   and record `Change::PageMoved` anyway, so `pages.parent` held a cycle the memory
+   tree did not. `from_persisted` assembles `roots` and every child list out of
+   `by_parent`, and a page whose parent exists but which is not itself reachable from
+   a root is in nobody's list: **a restart finds no root for either page and the
+   sidebar empties while every row is still on disk.** Pinned the same way — the
+   mutation that records a refused move fails the merged-row assertion, and the test
+   also reads the library back off the file to prove the store and the session agree,
+   with a control that 甲 *is* a child on disk so the loop is not reading nothing.
+
+**Consequences.** The two devices keep **opposite trees** and each says so; that is
+the honest answer for a cycle, and deliberately not a rule invented here (an automatic
+winner would be a product decision about whose nesting matters, which is what ADR-0123
+refused for a conflict too). A demoted page keeps its content and becomes visible —
+the alternative, dropping it with its parent, would turn a tree shape into a deletion,
+and deletion is the one outcome this module has been built to avoid. Blocks under a
+demoted page ride along: the page is re-inserted, its rows re-inserted by the block
+half from `merged.blocks`, and the subtree's own children still name it as their
+parent, so nothing else has to move. Not covered, and not claimed: `from_persisted`
+still **silently drops** a child list whose parent row is missing (a library edited by
+hand, or a `pages` table written by a future build), because that is the load path and
+a crash-on-open there would be a worse trade — the load-time version of this shape is
+recorded in `docs/ROADMAP.md`. Same section, same reason, no change: the Compose shell
+writes the whole library with `replace_all` and has no `Workspace` object to panic in.
+
+
+
+## ADR-0123 · A block that changed pages is a move, not a delete and a re-insert
+
+**Decision.** `sync_apply_remote`'s block half reads **one library-wide snapshot** —
+`local_all`, every block of every local page, plus `merged_present`, every id the
+merged snapshot holds — and `sync_block_diff` has a `page` case that emits
+`Change::BlockMovedToPage`. The per-page batches stay (a page is still the unit a
+delete cascades through and the unit `gone` is sorted in), but no verdict about a
+block is taken from one page's rows alone.
+
+**Context.** A block the peer moved to another page is one row with a different
+`page`. Read page-locally it is two unrelated events: missing from the page it left
+(delete), present on the page it joined (an insert of an id that already exists).
+`blocks.id` is UNIQUE, so `insert_block` failed — and `SqliteRepository::apply` runs
+a batch in one transaction and returns on the first error, so that page's *entire*
+batch rolled back: the deletes it had already queued, and every other change in it.
+The in-memory document was meanwhile doing something worse than failing:
+`Document::apply`'s `BlockInserted` only checks the vec of the page it was handed, so
+it pushed a second copy of the block while the first stayed on the old page. Which of
+the two the user ended up with — a vanished paragraph or a duplicated one, plus a
+page whose other edits silently did not commit — depended on the order the export
+happened to put the two pages in.
+
+**Consequences.** A delete now means "absent from the whole merged library", which is
+also the conservative direction for every other block hazard: a truncated export can
+no longer delete a page's worth of blocks by naming only the other pages. Cross-page
+moves carry their destination `parent` and `ord`, because on the page a block joins it
+may sit under a different parent, and that is exactly how the core's own
+move-a-subtree command shapes it — one `BlockMovedToPage` per block of the subtree, so
+a moved parent and its children need no special case here: the snapshot has each
+row's page, and each row is diffed against the library, not against the page.
+Covered by `a_block_that_moved_pages_survives_the_round_either_way`, which runs both
+directions because the order of the two pages *was* the bug. **Honest limit**: the
+undo stack sees this as one raw batch, the same as every other sync apply — an
+apply-then-Ctrl+Z is not a tested path.
+
+## ADR-0122 · A peer that cannot carry a collection says nothing with it
+
+**Decision.** Every collection a snapshot carries has an answer to one question —
+*who may speak for it* — and the answer is per peer, not per protocol.
+`peer_carries_the_whole_library(kind)` says a `windows` / `macos` / `linux` peer's
+empty `databases` is a deletion and every other peer's (Android, and an unannounced
+kind, which is what an inbound push arrives with) is silence. Silence is answered by
+substituting **this library's own rows** into the merged snapshot — before the diff,
+before the snapshot pushed back, and before the shadow is stored — and by saying out
+loud, in the sync log, how many rows were kept that way.
+
+**Context.** The merge is three-way and *absence is one of its three inputs*: a row in
+the shadow and in this library but not in the peer's answer was deleted on the peer.
+That is right between two devices that both hold the layer and catastrophic between a
+desktop and a shell that has no such table, because the shell's empty list is a
+statement about *its* build, not about the user's data. The first round is invisible —
+the shadow is armed with the desktop's own database, so the *second* round is the one
+that deletes it, which is how a feature that "worked when we paired" loses the tables
+an hour later.
+
+**Consequences.** Two halves make it hold, and neither is enough alone. The phone
+trimming `databases` / `attachments` off an inbound snapshot instead of refusing it
+(its ADR-0024) keeps the *round* alive; this gate keeps the *rows*. Substituting into
+`merged` rather than skipping the diff is what makes the answer and the shadow a
+complete description of this device, so the next round cannot read the same silence as
+news; it costs one clone of two vectors per round. Deliberately **not** taken: making
+the gate about *versions* (`SNAPSHOT_VERSION`) rather than kinds — a version says what
+the wire row looks like, not what this build was willing to write, and a future shell
+that carries databases would be refused by a number that has nothing to do with it.
+Also not taken: a "never delete anything over a sync" escape hatch; two desktops do
+agree, and a deletion the user made on one device is a fact the other must learn
+(`a_desktop_that_dropped_a_database_takes_it_out_of_this_one_too` is that assertion).
+`AttachmentDeleted` stays out of the apply for the same class of reason: an attachment
+row has a file beside it and picture blocks pointing at it, so a wrong verdict is a
+lost file rather than a stale row, and the row surviving one extra cycle is the cheap
+mistake.
+
+## ADR-0121 · The sync page has to be able to explain the last round
+
+**Decision.** The 同步 section of the settings dialog shows the five things a user
+needs in order to finish a pairing and to believe it happened: **本机名称** (editable),
+**本机地址** with the port, the automatic switch with its interval as four chips, a
+`●` while a round is in flight, and **最近记录** — the newest twelve of the same
+fifty-line log the engine writes, including the merge's conflicts.
+
+**Context.** Everything the feature was missing was *legibility*, not protocol: the
+device name was minted once and could never be changed, so a LAN with two "Quire on
+Windows" rows is a pairing the user cannot aim at; the address a peer has to be told
+was nowhere on screen while the manual `ip[:port]` row was; the interval was a
+settings row with no door; and a round that merged four conflicts looked exactly like
+a round that merged nothing, because conflicts were counted and thrown away.
+
+**Consequences.** Three rules fell out of the wiring and are worth keeping. A name is
+**pushed to Slint on edit only**, never from the 250 ms refresh pump: it is the
+`text <=>` of a live `TextInput`, so a pump that rewrote it would erase what the user
+was typing. The name's callback returns nothing — the dialog reads the saved value out
+of the global and the status line carries the verdict, which is how every other
+callback in this UI reports; a `-> bool` would have been the first one, and Slint
+`TextInput` has `accepted` and no `editing-finished`, so a rename needs its own 改名
+button. And the "waiting since" map is declared in `wire` rather than inside
+`start_sync`, because the dialog's two open paths rebuild the rows too and the busy dot
+they draw has to know about a round that is already running. The dot's timeout is 300 s:
+the engine's longest single call is 120 s, so a cycle with several pictures can
+legitimately pass a minute, and a dot that lies about a live round teaches the user to
+ignore it. Covered by `a_sync_stamp_reads_as_an_age`, `days_from_civil_agrees_with_the_epoch`,
+`a_peer_kind_becomes_a_platform_word` and the gate/attachment tests in `state`; the
+dialog's own pixels are the usual honest limit — no headless test reaches a click there.
+
 ## ADR-0120 · Every row in the left rail answers a right-click, and a row reports its own y
 
 Decision: the rail's rows are all callable, not only the ones that happen to be a

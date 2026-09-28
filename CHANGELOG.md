@@ -925,6 +925,153 @@ First functional release: a local, single-file-database notes workspace.
   `theme` row opens dark, and a stored "light" still wins — the two platforms
   share that rule
 
+### LAN sync — 对端的沉默、跨页移动与同步页 (ADR-0121…0124)
+- **A peer's silence about a collection it cannot carry is no longer a deletion.**
+  The Android shell exports no `databases` and no `attachments` — it has neither
+  store — and the three-way merge cannot tell that silence from "the user deleted
+  every row of them", so one agreed round and then one empty answer used to take a
+  desktop's tables and pictures out. The answer is a gate on **who may speak for
+  which collection** (`peer_carries_the_whole_library`): a Windows / macOS / Linux
+  peer's empty list is a deletion and lands; an Android peer's, or an unknown kind's,
+  is not, and this library's own rows are answered back — into the diff, into the
+  snapshot pushed back, and into the shadow, so the next round reads the same
+  nothing and keeps reading it as nothing (ADR-0122)
+- The same rule from the other end: the phone **trims an inbound snapshot at its own
+  door** instead of refusing the round, which is what used to make every
+  desktop-initiated sync fail with 409. Trimmed rows stay out of the shadow it
+  agrees to, for the reason above in reverse (its ADR-0024)
+- **A database *block* is not a database row.** The phone's veto read the block and
+  switched this device's sync off for good after a single round with a desktop that
+  had a table anywhere in its library — no server, no announcements, no pairing, and
+  a line telling the user to sync with the desktop they had just synced with. The
+  veto now reads rows only, which is the case it was ever about (its ADR-0025)
+- **An export that cannot read its own records refuses to answer** rather than
+  describing a database it only read half of: the write queue is force-flushed first
+  (the last few seconds of typing were otherwise a peer's "you changed nothing"),
+  `records_of` / `values_of` failures propagate, a schema with no store behind it is
+  refused, and the pump **drops the reply channel** so the peer's round fails instead
+  of merging a shorter snapshot
+- **A block that moved pages is a move** (`BlockMovedToPage`), not a delete on the
+  page it left plus an insert on the page it joined: the id is UNIQUE, so the insert
+  failed and took that page's whole batch down with it while the in-memory document,
+  whose insert only checks the page it was handed, kept a copy on both. The deletes
+  and the field diffs now read one library-wide snapshot (ADR-0123)
+- **A merged page list is tested for a tree before the tree is touched.** The merge
+  decides row by row and the tree is one object, so two shapes reached
+  `Workspace::attach` from ordinary use and each answered with an unwrap on a lookup
+  it expected to be there — on the UI thread, because a sync apply is a `Job` the pump
+  drains. A parent the peer deleted beside a child this side renamed: the delete
+  cascades, the kept child is re-inserted under a page that is gone, and the app
+  stops; with the guard short-circuited the new test dies at `workspace.rs:156`
+  (`parent exists`), so that is a proven crash and not a story. And two devices that
+  each nested the other's page: `move_page` refuses the second half — correctly — while
+  the apply recorded the move anyway, so `pages.parent` held a cycle the memory tree
+  did not, and a restart finds **no root for either page**: an empty sidebar with every
+  row still on disk. A page whose parent is not here now lands at the top level, a
+  refused move leaves this device's own place standing, and what was actually built is
+  written back into the merged row, because that row is the pushed answer and the
+  shadow — an assertion this device cannot keep would be argued again every round
+  (ADR-0124)
+- The schema deletes the merge decided finally land (`PropertyDeleted`,
+  `ViewDeleted`, `DatabaseDeleted`), so a table deleted on one desktop stays deleted;
+  `AttachmentDeleted` is deliberately **not** among them — a false deletion there is
+  a lost file rather than a stale row
+- **An inbound push is refused unless the device is in the peer table as paired**:
+  the core's server marks any sender `paired: true` on the strength of the snapshot
+  naming itself, so this is the only gate there is on either end
+- The round says what it is doing: the port is tried before the engine starts (a
+  listener that cannot bind used to die on a thread nothing reads), a round that runs
+  past five minutes is reported rather than leaving the busy dot lit forever, the
+  automatic cycle only dials peers that announced in the last minute (a silent device
+  is a device whose server stopped too), and a merge that dropped rows the peer
+  cannot carry logs how many it kept
+- The 同步 section of the settings dialog grew the rest of what a user needs to
+  finish a pairing by hand: **本机名称** is editable, the interval is four chips
+  (30 / 60 / 300 / 1800 s) instead of a hidden setting, **本机地址** is shown with the
+  port and says 未联网 when there is no route, a `●` marks a round in flight, and the
+  last twelve log lines — including the merge's conflicts, which were previously
+  invisible — are listed under 最近记录 (ADR-0121). Each paired row now also prints
+  the address it was last reached at, because 「the address moved to another device」
+  is a sentence the user can only act on with the number on screen; the 按 IP 添加
+  field empties itself when *that* probe paired (a failed one keeps the text, and a
+  pairing pressed on a discovered row does not wipe somebody's half-typed address);
+  and a rejected push or an unanswered round logs the peer's **name** rather than its
+  device id, since the log's peer column is 96 px and elides a hash into nonsense
+- A round that keeps an attachment row back says how many it kept: an inbound row
+  with neither bytes nor a local copy lands as nothing (a row is the promise a peer
+  uses to decide a file already crossed), which left the cycle reporting 已同步 over
+  a picture that stays missing every round — the apply now counts those rows and
+  logs 对端有 N 个附件没有把文件带过来
+- Three more from the same read-through: a peer row **minted** by `sync_note_device`
+  kept whatever port the caller handed it, and `0` is the shell's own word for
+  「nothing was said」 — so the existing-row branch fell back while a new row stored
+  an address nobody can dial (a new row now takes `SYNC_PORT`, and a caller that *did*
+  name a port is still not second-guessed); a merge that took the library's **last**
+  page redrew the editor but not the tree, because `open_page` is what normally
+  rebuilds it and there was no page left to open, so the rail kept listing pages that
+  exist nowhere but there; and the five-minute sweep said 本轮同步已放弃, which is a
+  verdict on the peer's round rather than on this dialog's patience — every step of a
+  round carries its own HTTP budget (60 s for the snapshot, 120 s per attachment,
+  120 s for the push), so a dozen files to carry can still be working long after the
+  dot went out. It now says the machine stopped waiting, and a late `SyncDone` still
+  logs the real outcome under it
+- Sync no longer keeps an idle machine's databases paying for somebody else's
+  broadcast. `record` spent a database-cache stamp on **every** change batch, and the sync
+  pump records a `sync.peers` settings row each time a peer announces itself (every four
+  seconds), so the stamp was always newer than any open window and the next read of every
+  table and gallery on screen missed the cache while the editor had recorded nothing but an
+  address. A batch that is *only* settings now leaves the cache alone (ADR-0086: the record
+  template lives on the database entity, so no setting can move a cell); batches that carry
+  rows still spend it exactly as before, and zoom is unaffected either way because a new
+  viewport changes the cached window itself. See `docs/PERFORMANCE.md`, §M2.5p
+- A peer's announcement no longer reaches the file at all. `sync_note_device` stored the
+  whole peers table on every beat, and the only field a beat moves is `last_seen` — which
+  both of its readers want *now*, from memory (the auto-cycle's sixty-second gate, the
+  dialog's fifteen-second online dot). The cost was a SQLite transaction every four
+  seconds per listening device, and because a durable write is what arms the periodic
+  snapshot, a **whole-file copy every ten minutes** of a laptop nobody is touching. The
+  table is now written into memory always and recorded only when something a restart would
+  still want moved: a peer added or dropped, an address, name, kind or port corrected, a
+  pairing decided, a round that succeeded
+- The same read caught a stranger one: the load path read `settings` only when the file
+  had **pages**, so a library whose last page was taken — which a merge from a desktop
+  peer can legitimately do (ADR-0122) — came back from the next start with no theme, no
+  pairings, no merge shadows and **no device id**; the id it minted then is a *new device*
+  to every peer that knew this one, so 配对 breaks from both sides at once, and the
+  built-in library the last session deleted came back (its 「already seeded」 flag is a
+  settings row too). Settings are read from the load now, whatever the page count is
+- New tests: `an_export_that_cannot_read_its_records_refuses_to_answer`,
+  `a_block_that_moved_pages_survives_the_round_either_way` (both directions),
+  `a_phone_that_carries_no_databases_does_not_delete_this_ones` (+ its log line),
+  `a_desktop_that_dropped_a_database_takes_it_out_of_this_one_too` (the control),
+  `only_a_desktop_peer_speaks_for_the_whole_library`,
+  `a_stored_attachment_never_writes_where_its_name_points`,
+  `a_parent_the_peer_deleted_takes_the_child_it_kept_to_the_top`,
+  `two_devices_that_each_nested_the_others_page_keep_their_own_trees` (+ its store
+  round-trip and the control that says that round-trip had rows to read),
+  `a_self_address_carries_the_port_it_was_found_on`,
+  `a_row_that_arrives_without_its_file_is_said_out_loud` (+ the control that the row
+  really is in the merged answer),
+  `a_peer_row_minted_without_a_port_gets_the_sync_port` (+ its named-port control),
+  `a_settings_row_alone_does_not_spend_the_database_cache` (+ its added-row control),
+  `a_peer_beat_that_changes_nothing_durable_writes_nothing` (+ six durable-fact controls,
+  each read back out of the file rather than off the queue),
+  `another_session_does_not_replay_the_beat_it_just_loaded` (+ its moved-address control on
+  the cold start), `an_empty_library_with_settings_behind_it_keeps_its_identity` (+ the
+  control that the file it opens really has settings and no pages).
+  **Still open, and written up as nine items in `docs/ROADMAP.md` §"Sync backlog owned
+  by `quire-core`"**: everything that needs a `quire-core` change — the push carries no
+  attachment bytes, one unreadable file fails a whole round, an inbound push cannot name
+  its sender's kind and records an ephemeral port, `GET /sync/snapshot` answers anyone
+  who asks, a merge re-keying two distinct rows leaves them sharing one 唯一 ID, a pair
+  of rows that share an integer id means the file is never fetched for, and a logged
+  conflict is re-decided silently one round later. The last three were proven
+  against the pinned rev by throwaway probes or by reading the fetch loop, not by
+  guessing.
+- Correction to the section above while passing through: discovery is **5879**, not
+  46000, and the automatic cycle runs on the interval the user chose, not a fixed
+  minute
+
 ### Build & test
 - `just check`: `cargo check --all-targets`, the whole test suite, a release
   build. Visual regression and the RAM/CPU scenes run from

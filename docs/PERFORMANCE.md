@@ -2028,3 +2028,69 @@ request names, and this fixture gives it exactly one to look at. D9's line above
 "the picker popup's own behaviour, which is UI that does not exist yet" — is the thing D10
 built; its pixels are on record (`docs/REPORT_TRACK3.md` §D10, 32 database scenes) and its
 keyboard is not.
+
+## M2.5p · the content stamp stopped being spent by a peer's broadcast (2026-09-28, sync read-through)
+
+D9 §3 published the two ends of the content stamp: a refresh that recorded **nothing**
+costs the count query alone (**13.3 / 29.0 / 59.0 µs**), and a refresh after *any* recorded
+change re-reads the window — **0.35 – 1.0 ms** for a row-shaped view (D8's switch arm), and
+**+5.5 – 18.1 ms** more when the layout is grouped, because the `GROUP BY` tallies are the
+one per-refresh term that grows with the table.
+
+`record` spent that stamp on *every* change batch, and the sync pump records a `sync.peers`
+settings row each time a peer announces itself — every four seconds, for as long as the
+other device is on the network and this laptop is open. So with pairing enabled and nobody
+typing, the stamp was always newer than any open window, and D9's 29 µs arm was unreachable:
+every scroll of a table re-read it, every board or calendar re-ran its `GROUP BY`. A batch
+that carries *only* settings no longer spends the stamp (ADR-0086: the record template is a
+document on the `databases` row, and no key in `settings` — theme, `window.*`, `ui.zoom`,
+`sidebar.closed`, `lan.share`, `notes.auto_input`, `sync.*` — can move a database cell).
+
+Two things that are **not** covered by the exemption, both checked rather than assumed:
+
+* A batch that mixes a settings row with anything else still spends it — the predicate is
+  `all(SettingSet)`, not `any` — and no site writes such a batch today (`record_window_size`
+  pairs two settings rows; the builtin-template seeding records its flag in its *own* batch,
+  after the template pages, which each spent the stamp on their way in), so the exemption's
+  blast radius is exactly the announcement path; and
+* zoom and window-size changes do not need the stamp at all. The cache key's `wanted`
+  window *is* derived from the viewport (`ViewGeometry::new(row_height, viewport)`), so a
+  resize or a Ctrl+= changes `wanted` and misses on its own — the test
+  `a_settings_row_alone_does_not_spend_the_database_cache` holds the stamp still across two
+  settings rows and then asserts an added record moves it.
+
+**What this does not measure**: no probe was re-run for this note (the user asked for a
+code-only pass), so the saving is the arithmetic of D8/D9's published arms against the
+announcement beat — 15 stamps spent per paired peer per minute, each of which makes the
+next read of every open view miss, while the editor itself recorded nothing — not a fresh
+number. How *often* that turns into a re-read depends on what the user does with the page
+(scroll, switch view, dial the calendar's month, or simply have a sync round apply rows),
+and the frame the re-read paints, and whether a real paired device on a quiet network
+announces on that exact four-second beat, are all unmeasured here.
+
+### · the same beat on disk, and the snapshot it armed
+
+The announcement had a second, larger invoice. `sync_note_device` stored the whole peers
+table every time a `Discovered` job came in, and `PersistenceService::write` arms the
+periodic snapshot on *any* successful durable write — the desktop attaches one
+(`with_database_snapshots`, 10-minute minimum interval, riding the flush tick). So an idle
+laptop with a paired device on the network was:
+
+| what | was | now |
+|---|---|---|
+| SQLite transactions from sync alone, per listening peer | one per 4 s (15/min) | one per *durable* change to the table |
+| whole-file database snapshot | every 10 min, forever | only after the session wrote something it needs protected |
+
+The field being written is the point: a beat moves `last_seen` and nothing else, and its
+two readers (`RECENT_ENOUGH_SECS = 60` for the auto-cycle, 15 s for the dialog's online dot)
+both ask *now* of the in-memory table. The projection that decides "did anything durable
+move" zeroes `last_seen` on both sides of the comparison, which is also what keeps the first
+beat after a restart from being a write — `another_session_does_not_replay_the_beat_it_just_loaded`.
+
+**Not measured either**: the per-transaction cost is D9's batched `cell_write` floor
+(17 – 33 µs for a write batched into a transaction) plus the commit, and the snapshot's cost
+is the one this file already publishes for `backup::snapshot` — **22.7 – 48.9 ms** of
+`VACUUM INTO` for a 2.28 MB workspace, growing with the library (the M8 arm above). What is
+arithmetic rather than measurement is the *count*: 15 transactions per minute, and one
+whole-file copy per ten minutes, neither of which the user's session asked for.
+
