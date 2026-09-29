@@ -16,7 +16,7 @@ rusqlite = { version = "0.40.2", features = ["bundled"] }
 
 [package]
 name = "quire"
-version = "0.1.12"
+version = "0.1.13"
 edition = "2021"
 description = "A local, GPU-accelerated, Notion-like document app built with Rust + Slint"
 # three binaries exist (quire / quire-shot / quire-typing); this is the app
@@ -95,7 +95,31 @@ required-features = ["software"]
 name = "quire-typing"
 path = "src/bin/quire_typing.rs"
 
+# The dev profile is where this shell's disk went (ADR-0134). Slint's generated
+# code plus a full `debug = 2` made a single `libquire-*.rlib` 978 MB, and because
+# a renderer switch (`just shot` builds with `software`, everything else with the
+# default `femtovg`) is a *different feature set*, cargo treats each as a distinct
+# unit and never reclaims the old one: 26 copies of the same crate, 63 GB.
+#
+# `debug = 1` (line tables only) keeps the debugger able to step through the UI
+# and keeps a panic backtrace's function names, which is what a developer
+# actually uses this build for, and drops the bulk of the artifact. It is a
+# line-tables-plus-some, not `debug = 0`: the visual work in this shell is done by
+# reading a backtrace out of a log file (docs/DECISIONS.md), and with `0` the
+# frames would be unresolved. `incremental` is left on — it is the whole reason
+# this directory was worth keeping, and it costs a fraction of what the debug
+# info did.
+[profile.dev]
+debug = 1
+
 [profile.release]
 codegen-units = 1
 lto = "thin"
 strip = "debuginfo"
+
+# Same reasoning for the *release* profile's test builds: `just check` compiles
+# the test targets in dev, but a release test run would otherwise carry the same
+# 978 MB per unit. Not the dominant cost (7.6 GB for the whole release tree), so
+# it is left at the default rather than tuned.
+[profile.test]
+debug = 1
