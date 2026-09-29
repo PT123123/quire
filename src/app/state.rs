@@ -15179,8 +15179,14 @@ impl AppState {
             SAttachment, SBlock, SNote, SPage, SRecord, STask, STaskList, SValue, SyncSnapshot,
         };
         if let Some(p) = &self.persistence {
+            // **This machine** failed to flush, whatever asked for the snapshot.
+            // The wording says so, because the log puts the *other* device's name
+            // in its own column: a reader saw "Android" beside this sentence and
+            // took the phone for the culprit, when the writer that lost the race
+            // was the one reading it. The peer is named by the caller, so a message
+            // about our own disk must not borrow their name.
             p.force_flush()
-                .map_err(|e| format!("未能把待写入的更改落盘，本次快照没有导出：{e}"))?;
+                .map_err(|e| format!("本机未能把待写入的更改落盘，本次快照没有导出：{e}"))?;
         }
         let mut snap = SyncSnapshot::default();
         let me = self.sync_self_info();

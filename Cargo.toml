@@ -34,7 +34,11 @@ default-run = "quire"
 # `SNAPSHOT_VERSION` to 4 — so the phone's pin moves with this one, and a device
 # left on the previous rev refuses to sync rather than half-understanding. It also
 # drops the by-hand "add by IP" door, whose row and callback this shell no longer has.
-quire-core = { git = "https://github.com/PT123123/quire-core.git", rev = "5a6b103103d399368e93cd77df9011f050af80ea" }
+#
+# `bc6f55a` adds core ADR-0005 (a `busy_timeout`), which is a fix rather than a
+# change: the wire format, the snapshot version and the merge are all untouched, so
+# a peer on the previous rev still syncs with this one.
+quire-core = { git = "https://github.com/PT123123/quire-core.git", rev = "bc6f55a" }
 image = { workspace = true }
 rfd = "0.17.2"
 rusqlite = { workspace = true }

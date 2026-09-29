@@ -157,20 +157,13 @@ fn start_sync(ui: &AppWindow, state: &Rc<AppState>, awaited: Awaited) {
             let g = gw.upgrade().unwrap();
             let id = id.as_str().to_string();
             match s.sync_peers().into_iter().find(|p| p.id == id) {
-                // A discovered-but-unpaired device is not a sync target: the
-                // round would run, the other side would refuse the push (an
-                // unpaired push is dropped on sight), and the peer table would
-                // quietly say "paired" — a pairing the user never agreed to.
-                Some(peer) if peer.paired => {
+                // Any heard device is a target (ADR-0128). The row exists because
+                // it announced, so there is nothing left to ask before dialling it.
+                Some(peer) => {
                     g.set_sync_status(format!("正在与 {} 同步…", peer.name).into());
                     a.borrow_mut()
                         .insert(peer.id.clone(), std::time::Instant::now());
                     let _ = cmd.send(crate::services::sync::engine::Cmd::SyncWith(peer));
-                }
-                Some(peer) => {
-                    g.set_sync_status(
-                        format!("{} 还没有配对 — 先按「配对」。", peer.name).into(),
-                    );
                 }
                 None => g.set_sync_status("没有这个设备 — 它可能已经离开本网络。".into()),
             }
@@ -187,7 +180,8 @@ fn start_sync(ui: &AppWindow, state: &Rc<AppState>, awaited: Awaited) {
             if targets.is_empty() {
                 g.set_sync_status(
                     if absent.is_empty() {
-                        "还没有配对任何设备 — 先在设置里配对一台。".to_string()
+                        "还没有别的设备出现在这个网络上 — 打开另一台设备就会自动同步。"
+                            .to_string()
                     } else {
                         format!(
                             "{} 不在本网络上 — 它重新广播后就会自动同步。",
@@ -217,21 +211,6 @@ fn start_sync(ui: &AppWindow, state: &Rc<AppState>, awaited: Awaited) {
                 status.push_str(&format!("（{} 不在本网络上，已跳过）", absent.join("、")));
             }
             g.set_sync_status(status.into());
-        });
-    }
-    {
-        let gw = ui_state_weak(ui);
-        let s = state.clone();
-        let cmd = cmd_tx.clone();
-        let a = awaited.clone();
-        ui.global::<UIState>().on_sync_pair(move |id| {
-            let g = gw.upgrade().unwrap();
-            if let Some(peer) = s.sync_peers().into_iter().find(|p| p.id == id.as_str()) {
-                g.set_sync_status(format!("正在请求 {} 配对…", peer.name).into());
-                a.borrow_mut()
-                    .insert(peer.id.clone(), std::time::Instant::now());
-                let _ = cmd.send(crate::services::sync::engine::Cmd::PairWith(peer));
-            }
         });
     }
     {
@@ -288,7 +267,7 @@ fn start_sync(ui: &AppWindow, state: &Rc<AppState>, awaited: Awaited) {
             let (_, interval) = s.sync_config();
             g.set_sync_status(
                 if on {
-                    format!("自动同步已开启 — 在线的已配对设备每 {interval} 秒同步一次。")
+                    format!("自动同步已开启 — 本网络上的设备每 {interval} 秒同步一次。")
                 } else {
                     "自动同步已关闭 — 请手动「立即同步」。".to_string()
                 }
@@ -375,21 +354,26 @@ fn start_sync(ui: &AppWindow, state: &Rc<AppState>, awaited: Awaited) {
     );
 }
 
-/// The peers one round dials, and the paired ones it had to leave out.
+/// The peers one round dials, and the ones it had to leave out.
 ///
 /// The same list the periodic round walks and the 刷新 button dials, so the two
 /// can never be different rounds: a rule that lives in both places is a rule
-/// that will be changed in one of them. A peer qualifies when it is paired and
-/// still announcing — `RECENT_ENOUGH_SECS`, the same window the dialog draws as
+/// that will be changed in one of them. A peer qualifies when it is **still
+/// announcing** — `RECENT_ENOUGH_SECS`, the same window the dialog draws as
 /// 在线 — because a device that stopped announcing has stopped listening too,
 /// and the only outcome of dialling it is the round that times out.
 ///
-/// The second half is the pairs the user can see but this cannot reach. The
+/// There is no `paired` filter, and that is ADR-0128 rather than an omission: a
+/// row only exists here at all because its announcement was heard, so asking
+/// again whether it is trusted asks the same question twice and can only
+/// disagree with itself.
+///
+/// The second half is the peers the user can see but this cannot reach. The
 /// periodic round drops them silently (nobody is waiting on a background tick);
 /// the button cannot, because the press was a request for *this* round and a
 /// request that quietly skipped a device is the one that looks like it worked.
 fn peers_due_for_a_round(
-    state: &Rc<AppState>,
+    state: &AppState,
 ) -> (
     Vec<crate::services::sync::engine::PeerRecord>,
     Vec<String>,
@@ -397,7 +381,7 @@ fn peers_due_for_a_round(
     let now = crate::services::sync::engine::now_unix();
     let mut targets = Vec::new();
     let mut absent = Vec::new();
-    for peer in state.sync_peers().into_iter().filter(|p| p.paired) {
+    for peer in state.sync_peers() {
         if now.saturating_sub(peer.last_seen) < RECENT_ENOUGH_SECS {
             targets.push(peer);
         } else {
@@ -470,23 +454,23 @@ fn handle_sync_job(
             bytes,
             reply,
         } => {
-            // An *inbound push* arrives without a kind (the server has only
-            // the snapshot to name the sender by, see `sync::server`), and it
-            // is refused unless the device is in the peers table as paired —
-            // otherwise anything on the network could write into this
-            // library. The pull half always carries a full record from the
-            // table, which only holds paired peers the user can see.
+            // **No pairing gate.** A device that announced itself on this LAN is
+            // a device we sync with (ADR-0128): the announcement already carries
+            // its id, name, kind and port in cleartext every four seconds, so a
+            // pairing step was never a credential — it was a question asked
+            // twice. What replaces it is not "trust anything", it is the
+            // announcement itself: `Job::Discovered` records the sender, and this
+            // branch is reached by a device that has therefore already been heard
+            // from. A push from an address we have *never* heard is still refused
+            // below, which is the one distinction left standing.
             let inbound_push = peer.kind.is_empty();
-            let known = state
-                .sync_peers()
-                .iter()
-                .any(|p| p.id == peer.id && p.paired);
-            if inbound_push && !known {
-                // The log's own column is 96 px wide and elides, so it gets the
-                // name the sentence gets: a device id would land there as the
-                // unreadable half of a hash the user cannot match to any row.
+            let heard = state.sync_peers().iter().any(|p| p.id == peer.id);
+            if inbound_push && !heard {
+                // Still refused, and the log's own column is 96 px wide and
+                // elides, so it gets the name the sentence gets: a device id would
+                // land there as the unreadable half of a hash no row can match.
                 let shown = if peer.name.is_empty() { "未知设备" } else { &peer.name };
-                let message = format!("{shown} 推送了快照但未配对 — 已拒绝");
+                let message = format!("{shown} 推送了快照，但它从未在网络上广播过 — 已拒绝");
                 state.sync_log_push(shown, false, &message);
                 g.set_sync_status(message.clone().into());
                 let _ = reply.send(Err(message));
@@ -558,6 +542,11 @@ fn handle_sync_job(
             let _ = reply.send(result);
         }
         Job::InboundPair { device, ip, reply } => {
+            // The wire endpoint a peer may still POST to (core's `/sync/pair` is
+            // part of the snapshot protocol and stays for a device on an older
+            // build). Nothing here decides anything: the device is recorded the
+            // same way an announcement records it, which is the whole point of
+            // ADR-0128 — there is no longer a second, stricter way in.
             state.sync_note_device(
                 &device.id,
                 &device.name,
@@ -566,23 +555,30 @@ fn handle_sync_job(
                 device.port,
                 Some(true),
             );
-            state.sync_log_push(&device.name, true, "已配对");
-            g.set_sync_status(format!("{} 请求配对，现已信任。", device.name).into());
+            state.sync_log_push(&device.name, true, "已加入");
+            g.set_sync_status(format!("{} 现在会与本机自动同步。", device.name).into());
             let _ = reply.send(true);
         }
         Job::Discovered { device, ip } => {
+            // Hearing a device is the whole of admitting it (ADR-0128). The row
+            // is written with `paired: true` so the target rule and the inbound
+            // gate both agree on what "a device we sync with" means, and so the
+            // two shells answer the same question the same way — the alternative
+            // is one shell filtering on `paired` and the other on "have we heard
+            // it", which is the kind of asymmetry that only shows up as a device
+            // that syncs with one and not the other.
             state.sync_note_device(
                 &device.id,
                 &device.name,
                 &device.kind,
                 &ip,
                 device.port,
-                None,
+                Some(true),
             );
         }
         Job::Paired { device, ip } => {
-            // A pairing the user asked for is answered by device id, and the id is
-            // what the round in flight is keyed by once the peer has said who it is.
+            // A pairing a *device on an older build* answered. The id is what the
+            // round in flight is keyed by once the peer has said who it is.
             awaited.borrow_mut().remove(&device.id);
             state.sync_note_device(
                 &device.id,
@@ -592,8 +588,8 @@ fn handle_sync_job(
                 device.port,
                 Some(true),
             );
-            state.sync_log_push(&device.name, true, "已配对");
-            g.set_sync_status(format!("已与 {} 配对。", device.name).into());
+            state.sync_log_push(&device.name, true, "已加入");
+            g.set_sync_status(format!("{} 现在会与本机自动同步。", device.name).into());
         }
         Job::SyncDone {
             peer_id,
@@ -709,12 +705,15 @@ fn refresh_sync_ui(g: &UIState<'_>, state: &AppState, awaited: &Awaited) {
             // the announcement cadence is 4 s; a peer heard inside ~15 s is
             // on the network right now
             let online = now.saturating_sub(p.last_seen) < 15;
-            let status = if !p.paired {
-                "发现 · 还没有配对".to_string()
-            } else if p.last_sync.is_empty() {
-                "已配对 · 还没同步过".to_string()
+            // The row says when this device last had a round with it, which is the
+            // only fact here the user can act on. "Paired" is gone from the
+            // wording because it no longer names a state anything can be in
+            // (ADR-0128): every row on this list is synced with, and the only
+            // question is whether it is on the network right now.
+            let status = if p.last_sync.is_empty() {
+                "还没同步过".to_string()
             } else {
-                format!("已配对 · {}同步过", sync_age_label(&p.last_sync, now))
+                format!("{}同步过", sync_age_label(&p.last_sync, now))
             };
             crate::SyncRow {
                 id: p.id.into(),
@@ -732,9 +731,11 @@ fn refresh_sync_ui(g: &UIState<'_>, state: &AppState, awaited: &Awaited) {
         })
         .collect();
     g.set_sync_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
-    // read back off the table, not off `rows`: a peer is what pairing makes it,
-    // and the flag the 刷新 button asks is exactly "is there one of those".
-    g.set_sync_has_paired(state.sync_peers().iter().any(|p| p.paired));
+    // "Is there anything to sync with" is the same question the target rule
+    // answers, so it is asked of the same function: a row that is not currently
+    // announcing is a device that has left, and offering a round with it would
+    // only produce the timeout the status line already knows how to explain.
+    g.set_sync_has_peers(!peers_due_for_a_round(state).0.is_empty());
     // The address is asked for here rather than once at wire time because the
     // answer moves: a laptop that switches networks gets a new address, and the
     // number to type into the other device has to be the current one.
@@ -869,20 +870,24 @@ mod tests {
         assert_eq!(sync_kind_label("freebsd"), "其他");
     }
 
-    /// **One round dials the paired peers, and only those.**
+    /// **One round dials every device in the peer book, whatever `paired` says.**
     ///
-    /// The rule is the whole content of the 刷新 button, and the branch that
-    /// matters is the one a discovered-but-unpaired device exercises: it is a
-    /// row the user can see, and dialling it would run a round the other side
-    /// refuses (an unpaired push is dropped on sight) and leave the peer table
-    /// claiming a pairing nobody made. A device that has never been paired is
-    /// the one shape a test can build from the public surface, because
-    /// `sync_note_device` stamps `last_seen` with now on every call — an
-    /// *offline* paired peer, the other half of the rule, is only reachable by
-    /// writing the peers table behind the type's back, and is left to the real
-    /// two-device run that can produce one honestly.
+    /// This is the shape of ADR-0128 stated as a test. The rule used to filter on
+    /// `paired`, and the branch that matters is the second row here: a device
+    /// whose flag is clear is one an *older build* left in the book — a device
+    /// that had announced but was never paired. With the filter gone it is a
+    /// target, and that is the upgrade path rather than a detail: nothing rewrites
+    /// that flag any more, so a book that still has one would otherwise leave
+    /// those devices invisible forever.
+    ///
+    /// What is *not* asserted here is the offline half. `sync_note_device` stamps
+    /// `last_seen` with now on every call, so a departed device is only reachable
+    /// by writing the peers table behind the type's back — that is the compose
+    /// side's `every_device_in_the_peer_book_is_a_rounds_candidate`, which drives
+    /// the same three cases against a book it can rewrite, and here the two
+    /// shells' rules are the same function called on the same inputs.
     #[test]
-    fn one_round_dials_the_paired_peers_and_leaves_the_rest_named() {
+    fn one_round_dials_every_device_the_book_holds() {
         let args = crate::app::state::HandleArgs {
             blocks: 0,
             auto_exit_secs: 0.0,
@@ -892,23 +897,26 @@ mod tests {
             code: 0,
         };
         let state = AppState::new(&args, None);
-        state.sync_note_device("dev-paired", "Tablet", "android", "192.168.1.8", 5878, Some(true));
-        state.sync_note_device("dev-found", "Phone", "android", "192.168.1.9", 5878, None);
+        state.sync_note_device("dev-heard", "Tablet", "android", "192.168.1.8", 5878, Some(true));
+        state.sync_note_device("dev-stale", "Phone", "android", "192.168.1.9", 5878, Some(false));
         let (targets, absent) = peers_due_for_a_round(&state);
-        let ids: Vec<&str> = targets.iter().map(|p| p.id.as_str()).collect();
-        assert_eq!(ids, vec!["dev-paired"], "the discovered device is not a target");
+        let mut ids: Vec<&str> = targets.iter().map(|p| p.id.as_str()).collect();
+        ids.sort();
+        assert_eq!(
+            ids,
+            vec!["dev-heard", "dev-stale"],
+            "a row an older build left unpaired is a device, not a stranger"
+        );
         assert!(
-            absent.iter().all(|n| n != "Phone"),
-            "a peer that was left out is named, and the unpaired one is not one of them: {absent:?}"
+            absent.is_empty(),
+            "both just announced, so neither is named as absent: {absent:?}"
         );
 
-        // The control the button's own visibility depends on: with nothing paired
-        // there is no button, and with something paired there is. `sync-has-paired`
-        // reads the table rather than the row list for exactly this reason.
-        assert!(state.sync_peers().iter().any(|p| p.paired));
+        // The control the 刷新 button's own visibility depends on: no devices means
+        // no targets, and `sync-has-peers` is asked of this same function, so the
+        // button cannot be on screen while a round would be empty.
+        assert!(!peers_due_for_a_round(&state).0.is_empty());
     }
-    // The gate itself, and the attachment writer it guards, are tested beside
-    // those functions in `state`'s own tests.
 }
 
 /// The window's `UIState` as a weak handle.

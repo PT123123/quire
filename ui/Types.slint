@@ -641,24 +641,23 @@ export global UIState {
     // LAN sharing (read-only server on :5877); persisted, restart applies
     in-out property <bool> lan-sharing: false;
     callback toggle-lan-sharing();
-    // LAN sync (crate::services::sync): the paired/discovered devices, the last line the
-    // engine said, and the switch that lets the periodic round run by itself.
+    // LAN sync (crate::services::sync): the devices on this network, the last line
+    // the engine said, and the switch that lets the periodic round run by itself.
     // The rows are Rust-built from the peers table (settings row "sync.peers").
     in-out property <[SyncRow]> sync-rows;
-    // Whether any of the rows above is paired — a discovered-but-unpaired device
-    // is a row the user pairs from the settings dialog, not a round anybody can
-    // start. The 笔记/任务 刷新 button asks this rather than the row count, so it
-    // is not on screen when it could only fail. Filled by `refresh_sync_ui` from
-    // the same pass that builds the rows, so it cannot drift from them.
-    in-out property <bool> sync-has-paired: false;
+    // Whether there is anything to sync with at all — the 笔记/任务 刷新 button
+    // asks this rather than the row count, because a row this device cannot
+    // reach (a laptop that left the building) is not a round anybody can start.
+    // Filled by `refresh_sync_ui` from the same pass that builds the rows, so it
+    // cannot drift from them.
+    in-out property <bool> sync-has-peers: false;
     in-out property <string> sync-status: "";
     in-out property <bool> sync-auto: true;
     callback sync-now(string);       // peer id: one pull-merge-push now
-    // No peer id: a round with every paired device that is still on the network.
-    // The 笔记/任务 刷新 button is this — a manual round with everything, which
-    // is the one thing the periodic timer does that a single `sync-now` cannot.
+    // No peer id: a round with every device still on the network. The 笔记/任务
+    // 刷新 button is this — a manual round with everything, which is the one
+    // thing the periodic timer does that a single `sync-now` cannot.
     callback sync-now-all();
-    callback sync-pair(string);      // peer id: ask a discovered device to pair
     callback sync-forget(string);    // peer id: drop it from the table
     callback sync-auto-toggled(bool);
     // This device's own half of the section, so the other one can be recognised

@@ -2,6 +2,70 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0128 · A device on this LAN is a device we sync with; notes are cards; a selected filter is not an accent
+
+Four things, three of them one decision.
+
+**配对 is gone.** There is no 配对 button, no 发起配对, no `sync-pair` callback,
+and no `paired` filter anywhere in the target rule. `Job::Discovered` records an
+announced device with `paired: true`, and the inbound-push gate in
+`handle_sync_job` asks the only question still standing: **have we ever heard
+this id?** A push from an address that never announced is still refused. The
+per-peer 立即同步 row, the peers table, `SyncRow.paired` on the wire and core's
+`/sync/pair` endpoint all stay — a peer on an older build still sends them — but
+nothing in this shell's own UI produces one.
+
+**The desktop's notes are cards.** The row was a transparent rectangle with a
+hover fill: a list. It now has `Colors.surface`, a 1 px `Colors.border` and
+`Theme.radius-lg` — the `OrgBoardCard` recipe, and the shape the Compose shell
+has drawn every note with since its inbox arrived. The 6 px gap is the
+`ListView`'s `spacing`, not row padding, because the row's height is computed from
+what it draws and padding it would make that arithmetic mean something else.
+Task rows are deliberately left as they are.
+
+**A selected filter chip is neutral.** 全部笔记 is lit by default, so a blue plate
+with a saturated blue border and blue text on that plate was three signals for
+something the user already knew. Selected is now `surface-hover` with a
+`border-strong` edge and `text-primary` for the label. The accent keeps its job —
+a round in flight, the 清除筛选 affordance — rather than spending itself on a
+filter that is simply on.
+
+Context: 去掉配对功能，只要拿到软件的在局域网内的就自动互相拉推. The reason this is
+cheap to do is the thing worth recording: **the announcement was never a
+credential.** `DeviceInfo` is an unkeyed JSON string — `{id, name, kind, port}` —
+broadcast to `255.255.255.255:5879` every four seconds, and the listener writes
+whatever arrives into the peer book. So a pairing step was a question asked
+twice, and the honest security boundary was always "anything on this broadcast
+domain" — pairing did not narrow it, it only delayed it. A reader should know
+that this widens the blast radius from *a process that announces itself* to
+*anything at all that can reach 5878*; on a home or office LAN that is the set of
+devices already trusted to be on the network, and that is the trade the user
+chose. The option weighed and not taken was keeping pairing behind a setting
+(default off), which preserves the door at the cost of two code paths and a
+second answer to "is this device trusted" that can drift from the first.
+
+The `busy_timeout` fix (core ADR-0005) and the message that named the wrong
+device came out of the same report and are recorded there: a line reading
+「Android 未能把待写入的更改落盘」 was the *desktop* failing to flush, in a log whose
+adjacent column is the peer's name. The wording now says 本机.
+
+Consequences:
+
+- `peers_due_for_a_round` and `sync-has-peers` are both asked the same question,
+  so the 刷新 button cannot be on screen while a round would come out empty.
+- A peer book written by an older build can hold rows with `paired: false` — a
+  device that had announced and was never paired. Nothing rewrites that flag now,
+  so **this is the upgrade path**: without the filter change those devices would be
+  invisible forever. `one_round_dials_every_device_the_book_holds` pins it.
+- The row's status line no longer says 已配对, because there is no longer a state
+  it could distinguish; it says when the last round was, which is the fact the
+  user can act on.
+- The address is shown only while a device is 在线, which is the only time it can
+  be dialled.
+- Not done: a task-row card (asked for and scoped to notes only), and a 刷新 on
+  the 页面 area (pages already re-project through the same path — desktop
+  ADR-0127).
+
 ## ADR-0127 · 笔记 and 任务 carry a 刷新, and a round that lands re-projects them
 
 **Decision.** Both organizer tabs get a 刷新 button — a text button on desktop, a

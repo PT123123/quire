@@ -461,13 +461,11 @@ export component SettingsDialog inherits PopupWindow {
                         horizontal-stretch: 1;
                         overflow: elide;
                     }
-                    if !row.paired : Button {
-                        text: "配对";
-                        clicked => {
-                            UIState.sync-pair(row.id);
-                        }
-                    }
-                    if row.paired : Button {
+                    // One verb per row now. 「配对」 is gone (ADR-0128): a device
+                    // on this list announced itself and is therefore already
+                    // synced with, so a button that only changed a flag the list
+                    // no longer shows was a control over nothing.
+                    Button {
                         text: "立即同步";
                         clicked => {
                             UIState.sync-now(row.id);
@@ -481,10 +479,10 @@ export component SettingsDialog inherits PopupWindow {
                     }
                 }
                 // The address it was last reached at. Devices are found by the
-                // engine's broadcast and paired from the row above, and a round that
-                // fails says "the address moved to another device" — a sentence the
-                // user can only act on if the number is on the screen.
-                if row.paired : Text {
+                // engine's broadcast, and a round that fails says "the address
+                // moved to another device" — a sentence the user can only act on
+                // if the number is on the screen.
+                if row.online : Text {
                     text: row.ip;
                     font-family: Typography.mono-font;
                     font-size: Typography.size-caption;

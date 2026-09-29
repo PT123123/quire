@@ -426,11 +426,21 @@ component OrgFilterChip inherits Rectangle {
     max-width: 100000px;
     border-radius: 12px;
     border-width: 1px;
-    border-color: root.selected || root.accent ? Colors.accent : Colors.border;
+    // **A selected chip is a state, not an emphasis.** It used to be a blue
+    // plate with a saturated blue border and blue text on that plate — three
+    // signals at once, for the one thing the user already knows, because 全部笔记
+    // is lit by default. Selected is now the surface one step up from the page,
+    // with the border that already separates every unselected chip, and the label
+    // in the text colour rather than the accent's. The accent keeps its job:
+    // things that want attention now (a round in flight) rather than a filter
+    // that is simply on.
+    border-color: root.excluded
+        ? Colors.danger
+        : root.selected || root.accent ? Colors.border-strong : Colors.border;
     background: root.excluded
         ? Colors.danger.with-alpha(0.12)
         : root.selected || root.accent
-        ? Colors.accent-soft
+        ? Colors.surface-hover
         : (ta.has-hover ? Colors.hover-fill : Colors.background);
     animate background { duration: Theme.duration-instant; }
 
@@ -443,7 +453,7 @@ component OrgFilterChip inherits Rectangle {
             font-family: Typography.ui-font;
             font-size: Typography.size-caption;
             color: root.excluded ? Colors.danger
-                : root.selected || root.accent ? Colors.accent-text
+                : root.selected || root.accent ? Colors.text-primary
                 : Colors.text-secondary;
             vertical-alignment: center;
             overflow: elide;
@@ -1153,10 +1163,10 @@ export component OrganizerArea inherits Rectangle {
                             // dialog because that is where a note is read *and*
                             // written, so a row that arrived from another device
                             // while you were in the list is the moment the button
-                            // is worth pressing. Drawn only with a peer to dial:
-                            // a 刷新 that can only say "还没有配对任何设备" is a
+                            // is worth pressing. Drawn only with a device to dial:
+                            // a 刷新 that can only say "还没有别的设备" is a
                             // button in the way.
-                            if UIState.sync-has-paired : OrgButton {
+                            if UIState.sync-has-peers : OrgButton {
                                 label: "刷新";
                                 font-size: Typography.size-caption;
                                 clicked => { UIState.sync-now-all(); }
@@ -1390,23 +1400,54 @@ export component OrganizerArea inherits Rectangle {
                         // field a captured note does not even have.
                         if UIState.org-tab == 0 : ListView {
                             vertical-stretch: 1;
+                            // One item = one card *plus its gutter*. The `ListView`
+                            // takes no `spacing` and Slint's `margin` is not
+                            // dependable here, so the gap is a transparent wrapper
+                            // and the card inside it: the item's height is the card
+                            // plus 6 px, and the card is anchored to the top of that
+                            // box, which is what leaves the 6 px below it and
+                            // nothing above (the first card would otherwise sit a
+                            // gutter lower than every other).
                             for row[i] in UIState.note-rows : Rectangle {
                                 // As tall as what it draws — the board card's own
-                                // idiom — because a note with no title is a row with
+                                // idiom — because a note with no title is a card with
                                 // one line fewer, and the fixed 62 px these rows
                                 // used to be left that line as a gap under every
-                                // captured note. A row with neither title nor body
-                                // is still one line: 无标题.
+                                // captured note. A card with neither title nor body
+                                // is still one line: 无标题. The 2px is the border
+                                // itself, which the box has to be tall enough to
+                                // draw or the line is clipped.
                                 height: 12px + 16px
                                     + (row.title != "" ? 18px : 0px)
                                     + (row.excerpt != "" ? 16px : 0px)
                                     + (row.title == "" && row.excerpt == "" ? 16px : 0px)
                                     + (row.tags != "" ? 16px : 0px)
-                                    + 8px;
-                                border-radius: Theme.radius-md;
+                                    + 8px + 2px + 6px;
+                                background: transparent;
+
+                                Rectangle {
+                                    x: 0px;
+                                    y: 0px;
+                                    width: parent.width;
+                                    height: parent.height - 6px;
+                                border-radius: Theme.radius-lg;
+                                // **A card, not a divider-separated row.** The
+                                // Compose shell has drawn every note this way since
+                                // its inbox arrived, and the two shells are meant to
+                                // look the same; the desktop had a transparent row
+                                // with a hover fill, which is a list, not a set of
+                                // notes. The recipe is the board card's own
+                                // (`OrgBoardCard`): an opaque `surface` and a plain
+                                // `border` — theme-neutral, so a card reads as paper
+                                // rather than as a coloured row.
+                                border-width: 1px;
+                                border-color: row.selected || row.picked
+                                    ? Colors.accent
+                                    : (note-ta.has-hover ? Colors.border-strong : Colors.border);
                                 background: row.selected || row.picked
                                     ? Colors.surface-selected
-                                    : (note-ta.has-hover ? Colors.hover-fill : transparent);
+                                    : Colors.surface;
+                                animate border-color { duration: Theme.duration-instant; }
 
                                 VerticalLayout {
                                     padding-top: 6px;
@@ -1575,6 +1616,7 @@ export component OrganizerArea inherits Rectangle {
                                         clicked => { UIState.org-bin-purged(row.id); }
                                     }
                                 }
+                            }
                             }
                         }
                     }

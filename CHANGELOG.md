@@ -5,20 +5,39 @@
 First functional release: a local, single-file-database notes workspace.
 
 ### 笔记 / 任务 (organizer)
-- **刷新 in both tabs: one round with every paired device, right now**
+- **配对 is gone: a device on this LAN is a device we sync with** (ADR-0128).
+  Open a second copy of Quire on the same network and the two find each other and
+  start syncing — no 配对 button, no 发起配对, no 发起配对 row. The 同步 section is
+  now one list of 本网络上的设备, and the row's status line says when the last
+  round was rather than repeating 已配对 on every line. A push from an address this
+  device has never heard is still refused
+- **The 笔记 list is a set of cards, not a set of rows.** Each note is now a
+  rounded plate with a border and its own surface, matching what the Android shell
+  has always drawn. The 6 px gap is the list's own spacing, so a card's height
+  still means "what it draws". Task rows are unchanged
+- **「全部笔记」 no longer shouts.** The selected filter chip was a blue plate with
+  a blue border and blue text on that plate, and it is lit by default; it is now a
+  neutral raised surface with a plain border. The accent colour goes back to
+  meaning "this needs attention now"
+- **The refresh button follows the same rule**: shown only when there is a device
+  actually on the network to sync with, and it names the ones it had to skip
+- **刷新 in both tabs: one round with every device on the network, right now**
   (ADR-0127). It is a sync round, not a reload of the local list — a list that is
   correct but missing a note from another device looks identical to one that was
-  never refreshed, and the round is the only thing that makes it complete. Drawn
-  only when a paired device exists, so it is not a button that can only fail
-- The rule for *which* devices one round dials is now one function
-  (`peers_due_for_a_round`), shared with the periodic auto-sync — a hand-started
-  round and a background one can no longer disagree about who is reachable. A
-  paired device that is not currently on the network is **named in the status
-  line as skipped** rather than silently dropped
+  never refreshed, and the round is the only thing that makes it complete
 - **A round that lands now redraws 笔记 and 任务.** It previously redrew pages,
   blocks and databases but not the organizer, so merging three new notes left the
   tabs drawing the list as it was before the pull — which is why the 同步
   section's 立即同步 button worked and then showed you nothing
+
+### 修复
+- **The line reading 「Android 未能把写入的更改落盘」 was this machine, not the
+  phone** (core ADR-0005). A sync round makes the receiving side flush its own
+  write queue, and the flush could lose a race against the app's own background
+  writer and fail — with no `busy_timeout` set, a collision failed *immediately*
+  rather than waiting its turn. The core now waits (5 s, SQLite's own default for
+  a busy handler), and the message says 本机 so the device named beside it is not
+  blamed for it
 
 ### Editor
 - Block editor: paragraphs, headings 1–3, bullet / numbered / to-do lists,
