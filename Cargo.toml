@@ -38,7 +38,17 @@ default-run = "quire"
 # `bc6f55a` adds core ADR-0005 (a `busy_timeout`), which is a fix rather than a
 # change: the wire format, the snapshot version and the merge are all untouched, so
 # a peer on the previous rev still syncs with this one.
-quire-core = { git = "https://github.com/PT123123/quire-core.git", rev = "bc6f55a" }
+#
+# `db0e95f` adds core ADR-0006: every open now repairs a file that reached the
+# current schema version without the objects that version implies, and refuses
+# one it cannot repair. A library that is missing its FTS tables had been
+# failing **every** write inside one transaction, so this shell was saving
+# nothing at all on such a file — including `sync.device-id`, which re-minted on
+# every launch (shell ADR-0142). A fix rather than a change in the same sense as
+# the rev above: the wire format, the snapshot version and the merge are all
+# untouched, so the phone's pin does not move and a peer on the previous rev
+# still syncs with this one.
+quire-core = { git = "https://github.com/PT123123/quire-core.git", rev = "db0e95f" }
 image = { workspace = true }
 rfd = "0.17.2"
 rusqlite = { workspace = true }

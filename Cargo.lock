@@ -3903,7 +3903,7 @@ dependencies = [
 [[package]]
 name = "quire-core"
 version = "0.1.0"
-source = "git+https://github.com/PT123123/quire-core.git?rev=bc6f55a#bc6f55a6c8b28d01357b808210cf6fa85b1efc84"
+source = "git+https://github.com/PT123123/quire-core.git?rev=db0e95f#db0e95fc7710f4fd6010617cadc2492325e79d75"
 dependencies = [
  "image",
  "rusqlite",

@@ -2,6 +2,583 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0142 · A write this shell cannot complete is said out loud, and a library that will not take writes is not left to look healthy
+
+Decision: two halves, and neither is optional. `AppState` grows
+`persistence_pending()` and `persistence_last_error()`, and the debounced flush
+hook reads the error after every attempt and puts it in the notice bar. The
+search-index repair that makes such a write possible at all is
+`quire-core` ADR-0006, and the shell's pinned rev moves with it.
+
+Context: `persistence_force_flush` has always carried the comment *"errors
+surface through take_last_error on the next call"* — and **nothing in this shell
+ever made that call.** `take_last_error` had zero call sites. So a library that
+refused every write failed in complete silence: no notice, no log line, and a
+window indistinguishable from one that was saving. On the library this was found
+on, the only visible symptom was a *peer* device complaining that the address
+moved to another device — a message about the other end of a sync, pointing at
+the wrong machine entirely.
+
+That symptom is what made it survivable for so long, and it is worth recording
+why: the one thing the user could see was downstream of this one. `sync.device-id`
+is a settings row, so a session that could not write anything re-minted its own
+identity on every launch, and the phone dutifully filed each one as a new device
+that had stolen the old one's address. Five dead entries, one laptop.
+
+The cause was a schema the shell never checked: no FTS tables, at the current
+`user_version`. `apply` keeps the search mirror in the same transaction as the
+rows it indexes, so every batch rolled back. Nothing after that was a sync bug
+at all — notes, tasks, window size and theme were equally unsaveable, which is
+why the backups from 13:23 to 22:44 were byte-identical.
+
+Consequences: the notice line is only rewritten when the text changes, so a
+library that refuses every write does not restate itself four times a second.
+The error is taken only when there is a window to take it into — a headless
+session has none, and dropping the diagnosis on the floor to keep a string
+would trade a visible failure for an invisible one. The regression test covers
+the half that had none: every other test in `persistence_test.rs` writes with
+`repo.apply` directly, so `record_setting` → `record` → debounce → file — the
+path `sync.device-id` actually rides — had never been exercised. The phone's
+five dead peers are a separate, manual cleanup: they are rows in another
+device's database, and a desktop that can finally write its own id is what
+stops new ones from appearing.
+
+## ADR-0141 · The two clamps agree, and the desktop's aggressiveness is unconditional
+
+ADR-0140 landed the aggressive desktop; this closes the two places it had not
+actually reached, and records why the desktop needs **no** Wi-Fi condition where
+the Android shell does.
+
+**The `sync.interval` floor was applied twice, with two different numbers.**
+`sync_set_interval` floored to 10 (`state.rs`), but `on_sync_interval_set` — the
+UI callback, which is the path every click on a chip actually takes — floored to
+15 (`controller.rs`). So choosing the 「10 秒」 chip stored **15**, and the chip the
+user had just pressed did not describe the interval that was saved. Two clamps
+that disagree is not a harmless redundancy: the stricter one wins on the write
+path and the looser one is a comment.
+
+**The Slint property default was still 60.** `UIState.sync-interval` is
+overwritten from the settings row in `start_sync` before the first paint, so the
+stale value was cosmetic — but it is the value a reader of `Types.slint` takes as
+the app's answer, and it was wrong by the same factor the ADR above was written
+to correct.
+
+**Why this shell is aggressive unconditionally.** The Android shell now runs its
+aggressive 10 秒 cadence *because* it is on Wi-Fi, and its stored interval off it
+(compose ADR-0032). That condition is not a refinement worth copying here: a
+desktop has no metered link to be careful with. It is either on a LAN or it is
+not, and "not" is already handled by `peers_due_for_a_round` — a peer that has
+stopped announcing is not dialled, so the aggressive interval costs nothing when
+there is no peer to spend it on. Detecting the desktop's transport would add a
+dependency and a failure mode to answer a question that the peer list already
+answers. The two shells are therefore *the same number* on a home LAN, reached
+by different routes — which is the parity that matters, not identical policy
+code.
+
+**Consequences.** Every interval written by the UI is floored at 10, in one place
+that agrees with the other. The desktop keeps its aggressive cadence with no
+transport check, and the shells stay byte-identical in the round they perform.
+
+
+The desktop's cadence starts at **10 秒** (was 30 秒), 10 秒 is the **default**
+(was 60 秒), and the floor a stored interval is clamped to drops from 15 to 10.
+The notes page's 刷新 button is drawn **with or without a peer on the LAN**.
+
+**Context.** The reference's preset list is "10 秒 / 1 分 / 5 分 / 30 分", and the
+Android shell already offers exactly that and defaults to the 10 秒 end
+(`Sync.kt`: `listOf("10 秒" to 10L, "1 分" to 60L, ...)`). The desktop offered the
+same four minus the fast end and defaulted to 60 秒 — the slowest shape of the
+same feature, on the device that is always on and always plugged in. A round
+costs a few milliseconds per device when they are all on the desk; the wait is
+what a user notices when it is too slow. An aggressive desktop is also the point
+of "automatic": a 10-second round is a change a user can actually watch arrive.
+
+**刷新's gate was the same mistake in the other direction.** The button rendered
+only `if UIState.sync-has-peers`: a 刷新 that could only answer "还没有别的设备"
+was read as a button in the way. On a quiet network it read as **no 刷新 at all**
+— and a quiet network is the one moment a user is apt to press it (their other
+device went silent and they want to know why). A round with no peers is a safe
+empty round, which is what ADR-0127's rule ("a 刷新 that hides is no 刷新") was
+already about; the gate was the part of it that was never shipped.
+
+**Rejected: keeping the gate and counting on the sync page.** The sync page is a
+destination the user visits; the notes page is where a row that arrived while
+you were in the list is worth pressing the button. Nothing was saved by hiding
+it — a peer-less round costs nothing.
+
+**Consequences.** The desktop dials the LAN every 10 seconds by default. The UDP
+discovery cadence (every 4 s) is unchanged; an interval below 10 is still
+clamped. Existing libraries with a stored `sync.interval` keep it (the setting
+wins over the default); the default only answers libraries that never chose one.
+
+## ADR-0139 · A deploy lands in the archive alone; the workshop's in-place install path is gone
+
+`just deploy-workshop` now writes **one** destination:
+`C:\workshop\quire-desktop-<version>\quire.exe`. The bare in-place install at
+`C:\workshop\quire-desktop\quire.exe` is removed, both from the recipe and from
+the disk.
+
+**Context.** The workshop is one folder per release of several applications
+(`<name>-<version>`), which makes it a **record of what was built**. The deploy
+flow also kept a second destination — the install path the app was run from —
+and every deploy overwrote it in place, which is why the flow asked any instance
+living there to end its own session first (ADR-0105's channel, the same route
+the tray's exit uses): Windows will not replace a running exe. The install path
+created the exact problem the archive never has: a deploy fighting a running
+exe, a locked file, a folder whose only purpose was to be overwritten. The
+archive folder is new every release, because the bump names it — so nothing is
+ever overwritten there and no running instance is ever in the way. A folder that
+exists to be overwritten while its exe runs is a folder the graceful-exit dance
+exists to defend; removing the folder removes the dance's only reason.
+
+**Rejected: keeping the install path and only dropping the quit.** The
+overwrite is precisely what needs the quit — the two were one mechanism, and
+keeping the destination while dropping its guard would fight a running exe the
+first time the user ran the "install". The single-instance arbitration
+(ADR-0136) is untouched: it answers *which instance wins* by version over
+ADR-0105's pipe, and it never depended on the workshop path.
+
+**Consequences.** A deploy no longer closes anyone's window. The old
+`C:\workshop\quire-desktop` folder and the instance running from it were cleaned
+up once at this change (the instance was asked to leave through its own `--quit`
+door first). The app is run from wherever the user launches it; the workshop
+keeps saying, per folder, what was built when.
+
+## ADR-0138 · The 笔记 tag filter is a column again, and the header bar is only what is left
+
+The 笔记 half gets its **right-hand tag column** back, and the tag chips come out
+of the list header's bar. The bar keeps exactly three things: 搜索笔记, 排序 and
+回收站.
+
+**This partly reverses ADR-0118**, and the reason is worth stating carefully
+because ADR-0118 was right about half of it. That ADR removed the whole nav column
+on the reasoning that its two tabs (笔记 / 任务) were a second copy of the left
+sidebar's pinned rows. They were, and they are gone for good — the tabs are the
+sidebar's rows now, and they stay there. What the ADR also removed, as collateral,
+was the column's *other* half: 标签 as a tree, with a `↑ 上级` row, a count per tag
+and 反向筛选 on each row. That half was never a duplicate of anything, and the
+chip row it was replaced with cannot hold it.
+
+**A tag path is a hierarchy, and a chip row is a strip.** The chips had to sit in
+a `ScrollView` because the tag set is data; a set that scrolls horizontally hides
+half the tags behind a scrollbar, and the one piece of context that says *which
+path you are inside* — the `↑` chip — is itself one of the things scrolled off.
+The column shows one level of the path with an explicit way out of it, which is
+what a nav is for. It is on the **right** for ADR-0112's reason: that is the side
+the reference puts it on, and the side a right-handed pointer reaches without
+crossing the rows it is filtering.
+
+**The bar is not left empty.** Removing the chips would have left 搜索 next to
+排序 with a hole between them, so the bar is now a two-block row — the needle on
+the left, 排序 and 回收站 on the right — and 排序 keeps its end-of-bar position for
+the reason ADR-0133 gave: it reorders the list rather than narrowing it, so it
+belongs beside the door rather than among the filters.
+
+**The 任务 half is untouched.** It still owns its own column with the smart views,
+the lists and its own `OrgTagColumn`. The two halves' columns are never on screen
+together, and both mount the *same* `OrgTagColumn` component, so there is one
+implementation of include / exclude / 清除筛选 rather than two.
+
+**Rejected: a narrow floating tag popover** off a 标签 button in the bar. Smaller
+than a column, and it would have been the change of least resistance — the chips
+could have stayed. It is wrong on the same ground the column is right: a filter
+over a list wants to stay open while the list is read, and a popover that closes
+when the pointer leaves is a filter you cannot read a filtered list through. It
+also re-creates the problem ADR-0118 was solving, in a worse place — a chip row
+that has to scroll.
+
+**Consequences.** The 笔记 list loses ~208 px of width to the column, so at 1280 px
+the cards are narrower than they were. That is the same trade ADR-0112 already
+made and the same one the reference makes; the alternative is a tag filter with no
+hierarchy. The `notes-filter` screenshot scene is unaffected — it drives
+`org_exclude_toggled` directly, which is the point of photographing a state
+through the call the ⊖ control makes.
+
+## ADR-0137 · A single click selects a note; opening it and reading 详细信息 are right-click
+
+A single click on a note card now **selects the row and stops there**. The note
+page (title, body, comments) is reached by right-click → 打开, and its 详细信息
+block by right-click → 详细信息. Neither pops up on a click any more.
+
+**Why.** A click used to raise the note page *over* the list, which meant a list
+of notes could not be scanned: every card you looked at replaced the ones you were
+looking at, and reading a list meant opening and closing five notes to compare two
+of them. The 浮层 was correct about being an overlay (ADR-0118) and wrong about
+what opens it. The two asks are now two words rather than one gesture that had to
+guess between them — and 详细信息 in particular was unreachable by click at all,
+since the disclosure it names is *below* the body, off the visible card.
+
+**The mechanism is one line of projection, and it is the interesting part.**
+`org-note-detail` is a `NoteRow`, and the overlay's gate reads `org-note-detail.id
+>= 0`. So the note that is *open* and the note that is *highlighted* were the same
+value, and a click could not be separated from an open without separating those
+two. They are now separate: `org-selected-note` is set by the context menu's 打开 /
+详细信息 and by the capture layer's ➤, and is what the gate reads; the highlight is
+`org_notes`' own `selected` flag on the row, which is what a click sets. Four
+writers, none of them a click.
+
+**The drafts are not loaded on a click.** `org_load_drafts` moved with the open
+path. They are the page's own fields, so loading them on a click would commit
+whatever the page last had half-typed into a note the user only pointed at.
+
+**A right-click *does* move the highlight**, which it deliberately did not before.
+Every verb in the menu acts on the note the menu was opened for, and a click no
+longer selects — so a right-click on a row that was never clicked would otherwise
+have acted on whichever note happened to be open. The highlight follows the
+question. The context menu's two doors (⋯ and right-click) were already one
+handler, so this is one line rather than two.
+
+**Rejected: opening on double-click.** It keeps the old behaviour reachable and
+needs no menu change. It fails on the same ground the click did — a double-click
+still replaces the list you are reading — and it makes the note's own page a
+gesture to discover when the menu row that says 「打开」 is right there under the
+pointer. **Rejected: a 详情 button on each card.** It would put a control on every
+row to serve a question only some rows are asked, and it is the hover-only
+affordance this file's header comment already rules out.
+
+**Consequences.** `org_note_detail` projects `selected: false` — the open note is
+identified by the overlay, not by a row lighting up, since the highlighted row is
+a different note as often as not. The 笔记 page is reachable in exactly two ways,
+and both are visible without knowing a gesture.
+
+## ADR-0136 · One instance, and a newer build replaces an older one
+
+The desktop shell is **single-instance**, and which instance wins is decided by
+comparing two version strings. A launch that is not the one session says so and
+exits.
+
+| running | launching | what happens |
+|---|---|---|
+| nothing | any | this process becomes the session |
+| `v` | `v` | 已在运行 dialog, this launch exits |
+| `older` | `newer` | the old one is asked to quit, this process starts |
+| `newer` | `older` | 已有更新版本 dialog, this launch exits |
+
+**It reuses ADR-0105's channel rather than adding a second mechanism.** That pipe
+was built so a deploy could end a running session through the app's own exit
+route — flush, clean-exit record, files released — instead of killing it. A
+version check needs to know *who* is running, so the protocol grew a second ask:
+`version\n` → `version <v>\n`, answered by a server that does **not** act on it.
+One pipe, one name, one claim, and the replacement path is the same graceful exit
+a deploy already uses rather than a kill. This is what makes a new build land on a
+running install: the old exe lets go of its own files first.
+
+**The claim runs before logging, the database and the window.** Order is the rule,
+not a preference. A launch that is going to be told to go away must not open the
+database first — that is a second writer on a file a live instance holds — and
+must not draw a window, because the user asked for one app.
+
+**`on_quit` is the caller's, not the module's**, and it answers `false` until the
+event loop is running. The claim happens before the window exists, so a peer that
+asks to be replaced in that window is told honestly that nothing accepted, rather
+than this process posting a quit to a loop that has not started. A deploy reads
+`err` as "still running" and refuses to overwrite — which is the safe direction.
+
+**The notice is a `MessageBoxW`, and that is forced.** There is no window, no tray
+icon and no toast band at claim time, and the release build has no console: a
+`println!` would be a rule the user never learns about. One hand-declared
+user32 call, the same no-crate rule `platform::mod` already states for the
+clipboard.
+
+**Rejected: a named mutex as a separate instance guard.** It is the textbook
+answer and it would be a second source of truth next to the pipe, which is already
+a first-instance-or-nothing claim (`FILE_FLAG_FIRST_PIPE_INSTANCE`). Worse, a
+mutex alone cannot answer *which version* is running, which is the whole question.
+**Rejected: comparing the exe's file timestamp or a `--newer` flag.** A deploy
+would have to pass it, so the property would hold only when the caller remembered;
+the version is already stamped into the binary by `build.rs` and is the one thing
+both peers are certain to agree on. **Rejected: a real update check** (polling
+GitHub for a newer release). That is a network feature, a settings toggle and a
+scheduled poll — a different decision, and not one that should be implied by the
+word "new version".
+
+**Consequences.** Launching a downgraded build is refused rather than allowed. That
+is deliberate — a downgrade must not displace a newer install — and the dialog
+names the running version so it is visible rather than mysterious. A build whose
+version string is not three dot-separated numbers compares as `0` per component
+rather than being rejected, so a hand-edited `Cargo.toml` degrades to "these look
+the same" (a prompt, which is safe) instead of panicking on a launch. The old
+`--quit` door is unchanged: it still runs before any of this and still reports
+through the exit code.
+
+## ADR-0135 · The settings dialog's text is selectable, because the strings a user needs are the ones it could not give
+
+Every value in the settings dialog is a **`TextInput` with `read-only: true`**
+rather than a `Text`, and the data folder wraps instead of eliding.
+
+**Why this and not a 复制 button.** The strings in this dialog are the ones a user
+is asked for *about* the app: the version, the renderer, and above all the data
+folder. A Slint `Text` cannot be focused, cannot hold a selection, and Ctrl+C over
+it reaches whatever focused input was last — which in a dialog whose only other
+input is a 0×0 Escape proxy is nothing at all. So the one string a person needed
+was the one string they could not take away. A per-row 复制 button would fix the
+copy and leave the text unselectable, and would need a row-level hit target for a
+value most rows never need copied.
+
+**`read-only` is exactly the right size of primitive.** It is focusable, it takes
+a selection, it answers Ctrl+A and Ctrl+C, and it refuses everything else — so a
+click cannot turn a read-only line into an editable one. Slint 1.18 routes
+`Copy` and `SelectAll` *before* the read-only check and refuses `Paste` / `Cut` /
+`Undo` / `Redo` / character input behind it (`i-slint-core` `items/text.rs`), and
+that ordering is the split this depends on.
+
+**The caret is kept.** It is the affordance: a line of text with no caret is a
+label, and a label is exactly what these rows used to be. No border and no fill
+are added, because field chrome says "edit me" and the only affordance on offer is
+select-and-copy.
+
+**The data folder wraps.** It was `no-wrap` + `elide` in a 400 px card, so the tail
+— which is the part that identifies the folder — was cut off, *and* the visible
+part was unselectable. A selected-then-copied elision is worse than no text at
+all: it looks right and is wrong.
+
+**Rejected: making the whole dialog one big selectable block.** It would make the
+section headings, the shortcut table and the button labels copyable too, and a
+click anywhere would place a caret in chrome. **Rejected: a context menu with 复制
+on the value rows.** A right-click menu on a value is three gestures to reach a
+string a click-drag and Ctrl+C reaches in two, and it is not discoverable on a row
+that looks like a label.
+
+**Consequences.** Tab order now walks the dialog's values, which is correct for
+them and slightly noisy for the rest; Escape still reaches the focus proxy. Rows
+that are a *label* (设置, 外观, 存储, 版本, 渲染器) are still plain `Text` — they
+are chrome, and copying a heading is not a thing anyone needs.
+
+## ADR-0134 · The build tree is swept, not cleaned, and a shot is not a rebuild
+
+`target/` reached **71 GB**, of which 63.6 GB was `debug` and none of it was the
+app. Four changes: `[profile.dev]` sets `debug = 1`; `just shot` builds into its
+own `target-shot`; a new `just sweep` deletes the caches without touching
+`deps/`; a new `just size` prints the tree. One sweep reclaimed it to 7.6 GB
+(the release tree, kept), and the machine went from 104 GB free to 161 GB.
+
+**Why it grew.** Two causes, and neither is cargo misbehaving — cargo is doing
+exactly what it is specified to do.
+
+*Slint plus full debug info is a ~1 GB library.* With no `[profile.dev]` the
+default is `debug = 2`, so `libquire-*.rlib` was **978 MB** each. This crate
+generates a large amount of code from `.slint` at build time, which is what the
+bytes are.
+
+*A feature switch mints a new unit, and cargo never takes the old one back.*
+`just shot` builds with `--features software`; everything else uses the default
+`femtovg`. Those are different feature sets, so cargo computes a different
+compilation unit for each — and a unit is keyed on that set, not on the source.
+The `.fingerprint` directory showed **26 `quire` units** where there is one
+crate: `["default","femtovg"]` nineteen times and `["default","femtovg","software"]`
+seven times, spanning 2026-09-23 to 09-29. Alternating between `just run` and
+`just shot` does not reuse either build; it mints a new 900 MB library and keeps
+the old one. `target/debug/build` is the same leak from the other end: 15 copies
+of `build_script_build`, 250 MB each (the executable plus two 96 MB pdbs), 3.7 GB
+of the same program, because `build.rs` compiles the whole Slint tree.
+
+**`debug = 1`, not `0`.** Line tables only. `0` would be smaller still and is the
+wrong trade: a backtrace's function names survive at `1` and do not at `0`, and
+reading a backtrace out of the log is how this shell's UI work is diagnosed. The
+debugger can still step. `incremental` is deliberately left on — it is the whole
+reason the tree was worth keeping.
+
+**`target-shot` rather than a flag.** A shared directory is what let the two
+feature sets accumulate in the first place. Separate directories do not just save
+space, they stop the churn: a shot no longer invalidates the app build, so the
+two stop evicting each other. The cost is a second copy of the dependency graph
+once built, which is bounded — the old behaviour's cost was unbounded. `just
+clean` removes it.
+
+**`just sweep` rather than `cargo clean`.** `cargo clean` is all-or-nothing: it
+takes the 7.6 GB release tree with it, and the next `just deploy-workshop` pays a
+cold build of a crate whose `[profile.release]` is `codegen-units = 1` — a few
+minutes, for no gain. Sweep removes only `incremental/` and `build/`, the two
+directories keyed on unit identity that grow without bound. The next build links
+instead of recompiling. **It is not a replacement for `just clean`**, and it is
+deliberately conservative about what it counts: a parent's `build` cache contains
+its children's, so the script walks victims shortest-path-first and skips a
+directory already inside one it deleted, or the freed total double-counts. It
+refuses to run while a build holds the directory rather than pulling files out
+from under one. It exits non-zero and does nothing if one is running — that is
+the "are you sure" this recipe has, and it is there because the alternative
+failure is a corrupted build. The busy check watches `cargo` alone and **not**
+`rustc`, which is a deliberate and slightly surprising choice: a build killed
+mid-flight leaves a `rustc` behind that has lost its parent, reports no image
+path, and survives a force kill — one has been resident on this machine since
+15:18, idle and unkillable. Including `rustc` in the test would mean the recipe
+never runs again, on this machine or any other with the same residue. A *live*
+cargo's `rustc` children are covered by the cargo check anyway.
+
+**`cache.auto-clean-frequency` is a separate, smaller thing.** `$CARGO_HOME` held
+2.8 GB of registry cache that nothing pruned. `auto-clean-frequency` (stabilized
+in Rust 1.88) has cargo drop untouched sources on whichever build crosses the
+interval. It is set to one day in `.cargo/config.toml`; the ages are cargo's
+defaults, and only the frequency is set because "never" is the default and
+"never" was the problem. It is a *global* cache concern and does nothing about
+`target/`.
+
+**What was rejected.** *`cargo +nightly -Zgc`* was the obvious first move and is
+what the dry run used to measure the reclaimable figure (64.3 GB). It does not
+do this: `-Zgc` garbage-collects `$CARGO_HOME`, not `target/`, so on this
+checkout it was a no-op dressed as a solution, and requiring nightly for the
+project's default toolchain was the wrong dependency. *`cargo-sweep`* is the tool
+built for exactly the mtime-based staleness this needs, and would be the right
+answer for a *multi-user* cache — but it wants `-Z mtime-on-use` on every
+invocation, and a threshold-based tool that deletes by age is the wrong shape for
+a tree whose growth is caused by identity, not age: a unit built this morning and
+never used again is exactly as dead as one from last month, and an age threshold
+cannot tell them apart. *Setting `debug = 0` outright* was rejected for the
+backtrace reason above. *A shared build cache* (`sccache`, not installed here)
+would cut rebuild *time* and is the right answer to a different problem; it does
+not shrink the directory, because the artifacts are what the cache is made of.
+
+**Consequences.** The tree is ~7.6 GB and stays near there, but the growth is now
+visible and bounded rather than silent: `just size` shows the count and the
+oldest date per directory, which is what makes a repeat visit attributable. The
+one-off cost is that `target/debug` is empty, so the next `cargo run` is a full
+debug build; `target/release` was never touched, so `just deploy-workshop` and
+`just release-publish` are unaffected. `just shot` now pays its own first build.
+If a future renderer needs a fourth feature set, it wants its own target
+directory too — the rule is one directory per feature set, and that is the part
+to carry forward.
+
+## ADR-0133 · 笔记 is measured in ActivityWatch's pixels, not in ones that read well
+
+The 笔记 card's geometry is now the reference's, number for number, and the
+numbers are written out in `OrganizerArea.slint` beside the code that uses them
+so they can be checked against `aw-qtui/src/inboxpage.cpp` without a diff:
+
+| | was | now | the reference's own line |
+|---|---|---|---|
+| list insets | 14 / 14 / 12 / 10 | 20 / 20 / 16 / 16 | `listLay->setContentsMargins(si(20), 0, si(20), si(16))`, `toolbar->…(si(20), si(16), si(16), si(12))` |
+| card gutter | 6 below, none above | 5 above, 6 below | `wrapLay->setContentsMargins(si(20), si(5), si(20), si(6))` |
+| card padding | 6 / 6 / 8 / 8 | 10 / 10 / 14 / 10 | `lay->setContentsMargins(si(14), si(10), si(10), si(12))` |
+| header↔body gap | 2 px | 6 px | `m_col->setSpacing(si(6))` |
+| search field | 170 px | 240 px | `m_search->setFixedWidth(si(240))` |
+| 刷新 | a 30 px word | a 30 px ⟳ box | `btnRefresh->setFixedSize(si(30), si(30))` |
+
+Two of these are not taste. The **20 px list inset** is what makes a card read as
+a card: at 14 px the header's left edge and the cards' left edge were 6 px apart,
+so the header read as chrome *beside* the list rather than as its top, and the
+first glyph of a note landed 22 px in where the reference's lands 34 px in. The
+**5/6 gutter** is the difference between a stack of separate notes and a column of
+boxes sharing edges — the old 6 px was there but the card's own 8 px padding
+ate the air, so cards sat as close to their own text as to their neighbour.
+
+**The sort box is new** and is the reference's `sortBox` (108 px, the three orders
+最新创建 / 最新更新 / 按内容). It is a **separate property and a separate callback**
+from 任务's `org-sort`, not a fourth slot of it: the two halves' orders have
+nothing in common, and one three-slot control whose meaning changes with the tab
+is a control nobody can read. 置顶 is **not** a mode — a pinned note stays at the
+top under all three, because that is what pinning means and making it a mode would
+reorder the list the moment a reader picked a different order.
+
+**The empty state is drawn instead of the list**, never over it: an empty
+`ListView` is zero pixels tall, so the alternative was the ＋ floating in a void.
+It carries a `filtered` flag, because "you have no notes" and "this filter matched
+none of the ninety you have" are different sentences and showing the first to a
+reader with ninety notes is a page lying.
+
+Context: 这个笔记界面一点都不像是activitywatch，边缘布局等细节. That complaint is about
+the **edges**, and the edges were the part this shell had never copied — the card
+*itself* (surface, border, radius) had been, which is why the cards looked like
+ActivityWatch's and the list around them did not. Reading `inboxpage.cpp` and
+`widgets.cpp:422` (NoteCard) rather than eyeballing the app is what turned "it
+doesn't look like it" into a list of nine numbers.
+
+Consequences: the notes half's card stack is now photographable as a **diff**
+against the old baseline, so `notes`, `notes-sort` and `notes-empty` joined the
+sweep (`benchmarks/scripts/sweep.ps1`) with their dark twins. Each card's height
+is still written out as a sum in two places — the item box and the card's own
+content — and they must stay in step: a `Text` in a `VerticalLayout` takes its
+*preferred* height, which is not the 20 px these lines are now pinned to, so
+without the explicit `height` every card grew a sliver of empty background under
+its last line. That duplication is a known cost of `ListView` taking no `spacing`
+and Slint's `margin` not being dependable here, and it is the next thing a
+reviewer should look at if a card's height is ever wrong again.
+
+**Two things the sweep caught that reading the reference did not.** The sort list
+is drawn by the **area**, not by the sort box: the box sits in the 30 px filter
+bar and a `HorizontalLayout` gives a child only its own box to paint in, so the
+first `notes-sort` shot showed three coloured slivers and no words. And the
+search field needed a **fill at rest** (`surface-hover` + a focus ring) — it was
+an invisible rectangle with 搜索笔记 floating in it, which is a box nobody
+believes is clickable. Both are the reason the numbers here came from a sweep
+rather than from a screenshot: the complaint was "不像", and the diff is what
+turns that into two specific defects.
+
+## ADR-0132 · 同步 is a destination, not a settings section
+
+**The 同步 section left the settings popup and became `ui/components/SyncPage.slint`,
+a third top-level area with its own row in the rail.** The three boxes it holds —
+设备 (a seven-column table), 统计 (what this device carries and what the last
+round moved) and 日志 (the record of every round) — are three things a user goes
+back to *look at*, which is the reference's own shape (`aw-qtui/syncpage.cpp`: a
+top-level page with a tab widget). A 400 px popup that has to scroll cannot hold
+any of them; what it did hold was two lines per device and a 立即同步 button, which
+is what made the section read as "特别特别简陋".
+
+**The columns are the reference's, split apart.** `SyncRow` grew `kind` and
+`port` beside `label` because `setColumnWidth(0, 180)` sits beside
+`setColumnWidth(1, 70)` there — the platform is a fact about the device, not a
+bracket on its name. `port` rides with `ip` as one `ip:port` string rather than
+its own column, because every Quire listens on 5878 and a constant is punctuation.
+`last-seen` is new, and it is a **second reader of the same fact** rather than a
+new one: `last_sync` is an RFC 3339 *string* and `last_seen` is a *unix second*
+(`PeerRecord`'s own doc), so `seen_age_label` is the same ladder asked of a number,
+with one case the string reader cannot have — `0` is the table's "never heard
+from", not 1970.
+
+**统计's "变化" column is a delta over the stored shadow**, keyed by the
+**logical uuid**, and it is deliberately *not* `PartialEq` on the row. That was the
+first implementation and it was wrong in a way the tests caught immediately: an
+`SNote`'s `id` is a **per-device row number**, so deriving equality over it reports
+every note on every device as changed, always. The comparison is now
+`moved_rows(theirs, mine, key, content)` with a `content` that skips `id` and keeps
+`rev` — so "changed" means the same thing the merge means when it settles a row by
+`org::rev`. It also counts **both directions**: a row only this device holds is one
+about to go *out*, and a count that only looked at the peer's side reported "0 变化"
+on exactly the occasion the number exists for — the user wrote something and
+pressed 立即同步.
+
+**What the page deliberately does not have**, because the engine cannot answer it
+honestly: no 配对 button (ADR-0128 — a device is on the list *because* it
+announced), no address field to type into (ADR-0128 again, the 按 IP 添加 door was
+already deleted from the Android shell), and no 安全码 column. The shadow is
+encrypted with the device key and this shell has nothing to show a user who could
+check such a code against the other screen, so a column of hex would be a number
+nobody could act on.
+
+**The three doors to one round are one function.** `start_round_with_every_peer`
+is called by the 笔记 list's 刷新, the page's 立即同步全部, and (through
+`invoke_sync_now_all`) the 同步 rail row's right-click. It is deliberately *not*
+the periodic round: that one dials the same target list (`peers_due_for_a_round`,
+shared) but drops absent devices silently, because nobody is waiting on a
+background tick — whereas a hand-started round that quietly skipped a device is the
+one that looks like it worked. The 250 ms pump that rebuilt the models for an open
+popup now also counts the page as open.
+
+Context: 目前quire-desktop的同步设置还是特别特别简陋，且没有刷新按钮. Two separate things
+were true there. The section was too small for its content, which this ADR fixes
+by moving it. And **there was no refresh** — but the reason is worth recording,
+because it is not an oversight: the 笔记 list's 刷新 button is drawn only when
+`sync-has-peers` is true, and that flag asks `peers_due_for_a_round` rather than
+the row count, so with no device on the LAN the button was correctly absent. A
+button that could only answer "还没有别的设备" is a button in the way. The 同步
+page's ⟳ is different and always present, because there it re-reads the *peers
+table* (discovery is a UDP broadcast every four seconds, so the row is already
+there and the press only shows it sooner) — two different questions, two
+different buttons.
+
+Consequences: `active-area` is now a three-value string, and `SidebarItem`'s `lit`
+had to learn the third value — it already suppressed the page tree's lit row for
+`"organizer"` and a stale lit page row beside a lit 同步 row would say the window
+is in two places at once. The 同步 scenes are seeded through `sync_note_device` and
+`sync_log_push` — the functions a real announcement and a real round go through —
+because a hand-built `SyncRow` would be a scene photographing a table no code path
+can create. `sync_stats_model` calls `sync_export` **once** for the whole page
+rather than once per peer; the first draft called it per peer, and the export is
+the expensive part of a refresh that runs every five seconds while the page is
+open. `AppState::sync_shadow` was made public as `sync_shadow_for_peer` for the
+statistics box — it is the only record on the machine of what the *other* device
+held, so it is the only honest source for "what the last round moved".
+
 ## ADR-0128 · A device on this LAN is a device we sync with; notes are cards; a selected filter is not an accent
 
 Four things, three of them one decision.

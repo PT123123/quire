@@ -1761,6 +1761,30 @@ impl AppState {
         }
     }
 
+    /// Is a recorded batch still waiting for its quiet period (or for a retry)?
+    ///
+    /// A `true` here long after the user stopped typing means the write is not
+    /// landing: the batch is queued, the file does not have it, and the only
+    /// other question is whether the last attempt failed.
+    pub fn persistence_pending(&self) -> bool {
+        self.persistence.as_ref().is_some_and(|p| p.has_pending())
+    }
+
+    /// The most recent deferred write failure, if the queue is still retrying.
+    ///
+    /// [`Self::persistence_force_flush`]'s comment used to say errors "surface
+    /// through take_last_error on the next call" — and nothing in the shell
+    /// ever made that call, so a library that refused every write failed in
+    /// complete silence: no notice, no log line, and a session that looked
+    /// healthy while losing everything it recorded. This is the reader that
+    /// makes that sentence true.
+    pub fn persistence_last_error(&self) -> Option<String> {
+        self.persistence
+            .as_ref()
+            .and_then(|p| p.take_last_error())
+            .map(|e| e.to_string())
+    }
+
     /// Does the page on screen refuse edits right now (SPEC §三十八 "lock")?
     /// One question, asked at the one funnel every document command passes,
     /// rather than at each of the ~70 call sites that would otherwise have to
@@ -4871,6 +4895,13 @@ impl AppState {
                 -1,
                 false,
             )],
+            // The 同步 page is a place, so its row's menu is the way there plus
+            // the round itself — the same two verbs the page's own toolbar
+            // carries, and the same ones the note list's 刷新 offers.
+            ROW_PINNED_SYNC => vec![
+                row(MENU_SIDE_OPEN_SYNC, "打开同步", "sync", false, -1, false),
+                row(MENU_SIDE_SYNC_NOW, "立即同步全部", "refresh", false, -1, false),
+            ],
             _ => Vec::new(),
         };
         self.menu.set_vec(rows);
@@ -5346,7 +5377,7 @@ pub const PAGE_CHINESE: i32 = 112;
 pub const PAGE_SCRATCHPAD: i32 = 113;
 
 pub const ROW_NEW_PAGE: i32 = -2;
-/// The four rows the rail pins above the tree — 笔记 / 任务 / 搜索 / 设置. They are
+/// The rows the rail pins above the tree — 笔记 / 任务 / 同步 / 搜索 / 设置. They are
 /// hardcoded in `Sidebar.slint` rather than coming from the page model, so they
 /// need ids of their own to travel on `menu-node-id` when one of them is asked
 /// for its menu. Negative like `ROW_NEW_PAGE` and the Workspace header, so a real
@@ -5355,6 +5386,10 @@ pub const ROW_PINNED_NOTE: i32 = -10;
 pub const ROW_PINNED_TASK: i32 = -11;
 pub const ROW_PINNED_SEARCH: i32 = -12;
 pub const ROW_PINNED_SETTINGS: i32 = -13;
+/// 同步 is a pinned row like the other two places (ADR-0132): it is a
+/// destination the user walks to, not a panel over whatever is open — which is
+/// exactly why it is a row and not a second settings section.
+pub const ROW_PINNED_SYNC: i32 = -14;
 
 // Context-menu action ids.
 pub const MENU_NEW_SUBPAGE: i32 = 1;
@@ -5412,6 +5447,11 @@ pub const MENU_SIDE_OPEN_NOTE: i32 = 33;
 pub const MENU_SIDE_NEW_NOTE: i32 = 34;
 pub const MENU_SIDE_OPEN_TASK: i32 = 35;
 pub const MENU_SIDE_OPEN_SEARCH: i32 = 36;
+/// The 同步 row's two items (ADR-0132). In the same gap as the rest, and above
+/// the organizer's range so the one dispatcher can still tell the two families
+/// apart by number.
+pub const MENU_SIDE_OPEN_SYNC: i32 = 37;
+pub const MENU_SIDE_SYNC_NOW: i32 = 38;
 
 // ─── SPEC §四十一: the organizer's task menu ────────────────────────────────
 //
@@ -7352,7 +7392,16 @@ impl AppState {
                 Vec::new()
             }
         } else {
-            self.org_notes(&query, &tag, &excluded, note_id as i64)
+            self.org_notes(
+                &query,
+                &tag,
+                &excluded,
+                note_id as i64,
+                match &ui {
+                    Some(g) => g.get_org_note_sort(),
+                    None => 1,
+                },
+            )
         };
         let mut tasks = if bin {
             if tab == 1 {
@@ -7753,6 +7802,7 @@ impl AppState {
         tag: &str,
         excluded: &BTreeSet<String>,
         selected: i64,
+        sort: i32,
     ) -> Vec<NoteRow> {
         let needle = query.trim().to_lowercase();
         let hidden = self.org_pending_ids(false);
@@ -7772,13 +7822,38 @@ impl AppState {
             // reference's toolbar reads: 仅显示 narrows, 排除 removes.
             .filter(|n| !tag_excluded(&n.tags, excluded))
             .collect();
-        // Pinned first, then most recently edited: the order a quick-note list
-        // is read in, and the one every note app opens on.
+        // The three orders the reference's sort box offers (最新创建 / 最新更新 /
+        // 按内容), and the pinned-first rule that is on for all of them.
+        //
+        // 置顶 is **not** folded into the sort modes: a pinned note stays at the
+        // top under every one of them, because that is what pinning means and
+        // making it a mode would mean the list reorders itself the moment a
+        // reader picks a different order. It is also why the default is not
+        // "pinned then newest" as one fixed rule any more — the newest-first
+        // default the list had is now the user *choosing* 最新更新, which is the
+        // same thing the reference asks for.
+        //
+        // 按内容 sorts on the text the row actually shows, title before excerpt,
+        // so the list is ordered by what is on screen rather than by a field the
+        // reader cannot see. Both are compared case-folded: an ASCII
+        // `to_lowercase` is enough for a list the user typed, and a locale-aware
+        // collation is not available in this crate.
         notes.sort_by(|a, b| {
-            b.pinned
-                .cmp(&a.pinned)
-                .then(b.edited.cmp(&a.edited))
-                .then(b.id.cmp(&a.id))
+            b.pinned.cmp(&a.pinned).then_with(|| match sort {
+                // 最新创建
+                0 => b.created.cmp(&a.created).then(b.id.cmp(&a.id)),
+                // 最新更新 — the list's own default and the order it had before
+                // the sort box existed.
+                1 => b.edited.cmp(&a.edited).then(b.id.cmp(&a.id)),
+                // 按内容
+                _ => {
+                    let key = |n: &Note| {
+                        let head = if n.title.is_empty() { &n.body } else { &n.title };
+                        format!("{}\u{1}{}", n.title.to_lowercase(), head.to_lowercase())
+                    };
+                    key(a).cmp(&key(b)).then(b.edited.cmp(&a.edited))
+                }
+            })
         });
         notes
             .into_iter()
@@ -7856,9 +7931,25 @@ impl AppState {
     }
 
     fn org_note_detail(&self, selected: i64) -> NoteRow {
+        // **The open note's identity is the one thing the overlay gate does not
+        // read** (ADR-0137). The gate is `org-note-detail.id >= 0`, so a
+        // projection that filled `id` for the *highlighted* row would make a
+        // plain click raise the note page — which is exactly what a click is no
+        // longer allowed to do. The highlighted row is its own thing: it is what
+        // `org_notes` marks `selected` on, and it is the only place a click
+        // shows up now.
+        //
+        // `selected` therefore names the note the page is *open* for, and nothing
+        // else writes it. It is set by the context menu's 打开 / 详细信息 and by
+        // the capture layer, and cleared by ✕ — a set with four writers rather
+        // than one per click.
         let catalog = self.organizer.borrow();
         match catalog.note(NoteId(selected.max(0) as u64)) {
-            Some(note) => Self::org_note_row(note, true),
+            // `false`, not `true`: this is the *open* note, and the page's own
+            // fields (the pin star, the 转为待办 and 垃圾桶 icons) are the only
+            // things that should read as "this is open". A row that is merely
+            // highlighted is a different state and is styled as one.
+            Some(note) => Self::org_note_row(note, false),
             None => NoteRow {
                 id: -1,
                 ..NoteRow::default()
@@ -15080,6 +15171,14 @@ impl AppState {
             .unwrap_or_default()
     }
 
+    /// Drop the stored log. The 同步 page's 清空日志 (ADR-0132): the only
+    /// destructive verb on that page, and it removes the *record* only — a round
+    /// still in flight logs its outcome when it lands, which is why this is a
+    /// clear rather than a "stop recording" switch.
+    pub fn sync_log_clear(&self) {
+        self.record_setting("sync.log", "[]");
+    }
+
     pub fn sync_log_push(&self, peer: &str, ok: bool, message: &str) {
         let mut log = self.sync_log();
         log.push(crate::services::sync::engine::LogLine {
@@ -15103,8 +15202,12 @@ impl AppState {
         let interval = self
             .sync_setting("sync.interval")
             .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(60)
-            .max(15);
+            // The aggressive end of the reference's cadence: the Android shell
+            // offers 10 秒 as its fastest preset and defaults to it, and a
+            // desktop is always on and always plugged in — a 10-second round is
+            // the whole point of "automatic" (ADR-0140).
+            .unwrap_or(10)
+            .max(10);
         (auto, interval)
     }
 
@@ -15113,7 +15216,7 @@ impl AppState {
     }
 
     pub fn sync_set_interval(&self, seconds: u64) {
-        self.record_setting("sync.interval", &seconds.max(15).to_string());
+        self.record_setting("sync.interval", &seconds.max(10).to_string());
     }
 
     /// What the other device gets to call this one. An empty name is not a
@@ -15146,6 +15249,17 @@ impl AppState {
     fn sync_shadow(&self, peer_id: &str) -> Option<crate::services::sync::model::SyncSnapshot> {
         self.sync_setting(&format!("sync.shadow.{peer_id}"))
             .and_then(|v| crate::services::sync::model::SyncSnapshot::from_json(&v).ok())
+    }
+
+    /// What one peer last showed us, as this device stored it.
+    ///
+    /// Public because the 同步 page's 同步统计 box is built from it (ADR-0132):
+    /// the shadow is the only record of what the *other* device held, so it is
+    /// the only thing on the machine from which "what the last round moved" can
+    /// honestly be computed. The merge itself keeps using the private one — this
+    /// is a read, and a read has no business rewriting the stored copy.
+    pub fn sync_shadow_for_peer(&self, peer_id: &str) -> Option<crate::services::sync::model::SyncSnapshot> {
+        self.sync_shadow(peer_id)
     }
 
     fn sync_store_shadow(&self, peer_id: &str, snap: &crate::services::sync::model::SyncSnapshot) {
@@ -23765,14 +23879,14 @@ mod tests {
         state.org_note_title(note, "会议记录".into());
         state.org_note_body(note, "关于同步".into());
         state.org_note_tags(note, "会议, 核心".into());
-        let found = state.org_notes("同步", "", &BTreeSet::new(), -1);
+        let found = state.org_notes("同步", "", &BTreeSet::new(), -1, 1);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].id, note as i32);
-        assert_eq!(state.org_notes("这个词不存在", "", &BTreeSet::new(), -1).len(), 0);
+        assert_eq!(state.org_notes("这个词不存在", "", &BTreeSet::new(), -1, 1).len(), 0);
         // the tag column's filter is the other needle: a note is found by a tag
         // it carries, and only by that tag
-        assert_eq!(state.org_notes("", "会议", &BTreeSet::new(), -1).len(), 1);
-        assert_eq!(state.org_notes("", "不存在的标签", &BTreeSet::new(), -1).len(), 0);
+        assert_eq!(state.org_notes("", "会议", &BTreeSet::new(), -1, 1).len(), 1);
+        assert_eq!(state.org_notes("", "不存在的标签", &BTreeSet::new(), -1, 1).len(), 0);
         // and the chip row's own counts, which the inbox one folds a dangling
         // list into
         let lists = state.org_lists(0, -1);
@@ -23799,10 +23913,10 @@ mod tests {
 
         // `项目` is a subtree — the tag itself and everything under it — while `项目2`
         // is a different tag that only *looks* nested.
-        assert_eq!(state.org_notes("", "项目", &BTreeSet::new(), -1).len(), 3);
-        assert_eq!(state.org_notes("", "项目/工作", &BTreeSet::new(), -1).len(), 1);
-        assert_eq!(state.org_notes("", "项目2", &BTreeSet::new(), -1).len(), 1);
-        assert_eq!(state.org_notes("", "", &BTreeSet::new(), -1).len(), 4, "the empty path is no filter");
+        assert_eq!(state.org_notes("", "项目", &BTreeSet::new(), -1, 1).len(), 3);
+        assert_eq!(state.org_notes("", "项目/工作", &BTreeSet::new(), -1, 1).len(), 1);
+        assert_eq!(state.org_notes("", "项目2", &BTreeSet::new(), -1, 1).len(), 1);
+        assert_eq!(state.org_notes("", "", &BTreeSet::new(), -1, 1).len(), 4, "the empty path is no filter");
 
         // The column starts at the top level…
         assert_eq!(
@@ -23925,10 +24039,10 @@ mod tests {
         let (state, _repo) = org_session();
         let note = state.org_create_note().unwrap();
         state.org_note_title(note, "会议记录".into());
-        assert_eq!(state.org_notes("", "", &BTreeSet::new(), -1).len(), 1);
+        assert_eq!(state.org_notes("", "", &BTreeSet::new(), -1, 1).len(), 1);
 
         state.org_defer_delete(vec![note], false, "已删除笔记「会议记录」".into());
-        assert!(state.org_notes("", "", &BTreeSet::new(), -1).is_empty(), "the row is off screen");
+        assert!(state.org_notes("", "", &BTreeSet::new(), -1, 1).is_empty(), "the row is off screen");
         assert!(
             state.organizer().note(NoteId(note as u64)).is_some(),
             "the row is still in the catalog — that is what makes it undoable for free"
@@ -23958,14 +24072,14 @@ mod tests {
         assert_eq!(repo.load_organizer().unwrap().notes.len(), 2);
 
         state.org_defer_delete(vec![gone], false, "已删除笔记「删掉」".into());
-        assert_eq!(state.org_notes("", "", &BTreeSet::new(), -1).len(), 1);
+        assert_eq!(state.org_notes("", "", &BTreeSet::new(), -1, 1).len(), 1);
         assert!(state.org_undo_pending());
         assert!(
             !state.org_undo_pending(),
             "one bar, one take-back: the second click has nothing left to undo"
         );
 
-        let rows = state.org_notes("", "", &BTreeSet::new(), -1);
+        let rows = state.org_notes("", "", &BTreeSet::new(), -1, 1);
         assert_eq!(rows.len(), 2, "both rows are back on screen");
         assert!(rows.iter().any(|r| r.id == gone as i32));
         state.persistence_force_flush();
@@ -24026,7 +24140,7 @@ mod tests {
         // bar: after the window closes, taking them back is two Ctrl+Zs.
         assert!(state.undo_org().is_some());
         assert!(state.undo_org().is_some());
-        assert_eq!(state.org_notes("", "", &BTreeSet::new(), -1).len(), 2);
+        assert_eq!(state.org_notes("", "", &BTreeSet::new(), -1, 1).len(), 2);
         assert!(
             state.organizer().notes.iter().all(|n| !n.is_trashed()),
             "and the two undos took both rows back out of the bin"
@@ -24089,7 +24203,7 @@ mod tests {
         assert_eq!(state.org_smart_counts_of("", &dates), [0, 1, 0, 2, 0]);
         assert_eq!(state.org_view_header(3, list, "", &dates).1, "2 项待办");
         assert_eq!(state.org_progress(), (0, 2));
-        assert_eq!(state.org_notes("", "", &BTreeSet::new(), -1).len(), 2);
+        assert_eq!(state.org_notes("", "", &BTreeSet::new(), -1, 1).len(), 2);
         assert_eq!(tags(&state), vec![("项目".to_string(), 2)]);
 
         // A task pending: all six task-side answers drop it together.
@@ -24101,7 +24215,7 @@ mod tests {
         assert_eq!(state.org_view_header(3, list, "", &dates).1, "1 项待办");
         assert_eq!(state.org_progress(), (0, 1));
         assert_eq!(
-            state.org_notes("", "", &BTreeSet::new(), -1).len(),
+            state.org_notes("", "", &BTreeSet::new(), -1, 1).len(),
             2,
             "the note half is untouched by a task batch"
         );
@@ -24110,7 +24224,7 @@ mod tests {
         // A note pending: the list and the tag subtree drop it the same way.
         state.org_defer_delete(vec![hidden_note], false, "已删除笔记「要删的笔记」".into());
         assert_eq!(
-            state.org_notes("", "", &BTreeSet::new(), -1)
+            state.org_notes("", "", &BTreeSet::new(), -1, 1)
                 .iter()
                 .map(|r| r.id)
                 .collect::<Vec<_>>(),
@@ -24232,7 +24346,7 @@ mod tests {
         let token = state.org_defer_delete(ids.clone(), false, "已移入回收站：3 条笔记".into());
         org_project(&state);
         assert!(
-            state.org_notes("", "", &BTreeSet::new(), -1).is_empty(),
+            state.org_notes("", "", &BTreeSet::new(), -1, 1).is_empty(),
             "one bar covers all three rows"
         );
         assert!(state.org_commit_pending(token));
@@ -24244,12 +24358,12 @@ mod tests {
         assert_eq!(binned.len(), 3, "nothing left the file");
         assert!(binned.iter().all(|n| n.is_trashed()), "{binned:?}");
         assert!(
-            state.org_notes("", "", &BTreeSet::new(), -1).is_empty(),
+            state.org_notes("", "", &BTreeSet::new(), -1, 1).is_empty(),
             "and a binned row is on no list"
         );
 
         assert!(state.undo_org().is_some());
-        assert_eq!(state.org_notes("", "", &BTreeSet::new(), -1).len(), 3, "one undo returned the batch");
+        assert_eq!(state.org_notes("", "", &BTreeSet::new(), -1, 1).len(), 3, "one undo returned the batch");
         let catalog = state.organizer();
         for (id, title) in ids.iter().zip(["第一条", "第二条", "第三条"]) {
             let note = catalog
@@ -24277,7 +24391,7 @@ mod tests {
 
         // The two halves are two answers about one catalog: `b` is on no list, and
         // it is the bin's whole contents.
-        assert_eq!(state.org_notes("", "", &BTreeSet::new(), -1).len(), 1);
+        assert_eq!(state.org_notes("", "", &BTreeSet::new(), -1, 1).len(), 1);
         assert_eq!(state.org_bin_counts(), (1, 0));
         assert_eq!(
             state.org_bin_notes("", -1).iter().map(|r| r.id as i64).collect::<Vec<_>>(),
@@ -24292,7 +24406,7 @@ mod tests {
         // 恢复: back on the list, out of the bin, one step.
         assert!(state.org_restore_note(b).is_some());
         assert_eq!(state.org_bin_counts(), (0, 0));
-        assert_eq!(state.org_notes("", "", &BTreeSet::new(), -1).len(), 2);
+        assert_eq!(state.org_notes("", "", &BTreeSet::new(), -1, 1).len(), 2);
         assert!(state.undo_org().is_some(), "and Ctrl+Z bins it again");
         assert_eq!(state.org_bin_counts(), (1, 0));
 
@@ -24578,9 +24692,9 @@ mod tests {
 
         let hidden = |path: &str| {
             let set: BTreeSet<String> = [path.to_string()].into_iter().collect();
-            state.org_notes("", "", &set, -1).len()
+            state.org_notes("", "", &set, -1, 1).len()
         };
-        assert_eq!(state.org_notes("", "", &BTreeSet::new(), -1).len(), 4);
+        assert_eq!(state.org_notes("", "", &BTreeSet::new(), -1, 1).len(), 4);
         assert_eq!(hidden("项目"), 1, "the parent takes its whole subtree");
         assert_eq!(hidden("项目/工作"), 2, "…and a child takes only its own");
         assert_eq!(hidden("项目2"), 3, "项目2 is a different tag, not a subtree");

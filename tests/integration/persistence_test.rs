@@ -235,6 +235,92 @@ fn title_at(path: &Path) -> Option<String> {
     .ok()
 }
 
+/// The gap the suite above never covered: a settings row written through the
+/// **state** funnel (`record_setting` → `record` → the debounce → the flush),
+/// rather than handed to `repo.apply` by the test itself.
+///
+/// Every other check here writes with `repo.apply` directly, so the whole
+/// shell-side half of the settings path — `record_setting` → `AppState::record`
+/// → `PersistenceService` → the file — had no test at all. That is the path
+/// `sync.device-id` rides, and the one that decides whether a device keeps the
+/// identity it minted last session.
+#[test]
+fn a_settings_row_written_through_the_state_reaches_the_file() {
+    use quire::app::state::{AppState, HandleArgs};
+
+    let (_dir, path) = temp_db("state-settings");
+    // A **loaded** document, not an empty file: the two are not the same code
+    // path, and only the loaded one has ever been in this state in the field.
+    let repo = seeded(&path);
+    let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0, pictures: 0, marks: 0, code: 0 };
+    let state = AppState::new(&args, Some(repo.clone()));
+
+    state.record_setting("probe.state-path", "in");
+    state.persistence_force_flush();
+
+    let landed = rusqlite::Connection::open_with_flags(
+        &path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()
+    .and_then(|c| {
+        c.query_row(
+            "SELECT value FROM settings WHERE key = 'probe.state-path'",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .ok()
+    });
+    assert_eq!(
+        landed.as_deref(),
+        Some("in"),
+        "a settings row recorded through AppState must be in the file after the flush"
+    );
+}
+
+/// Diagnostic: open a **copy of the real user library** and push one settings
+/// row through the whole state funnel, printing whatever `apply` says. Run
+/// with `--ignored --nocapture` against a path passed in `QUIRE_REAL_DB`.
+#[test]
+#[ignore]
+fn diagnose_real_library() {
+    use quire::app::state::{AppState, HandleArgs};
+
+    let real = std::env::var("QUIRE_REAL_DB").expect("set QUIRE_REAL_DB");
+    let (_dir, copy) = temp_db("diagnose");
+    std::fs::copy(&real, &copy).expect("copy the real library");
+    println!("real   = {real}");
+    println!("copy   = {}", copy.display());
+
+    let repo = Arc::new(SqliteRepository::open(&copy).expect("the copy opens"));
+    let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0, pictures: 0, marks: 0, code: 0 };
+    let state = AppState::new(&args, Some(repo.clone()));
+
+    println!("device id seen by the session = {:?}", state.sync_self_info().id);
+    state.record_setting("probe.diagnose", "in");
+    println!("has_pending before flush = {}", state.persistence_pending());
+    state.persistence_force_flush();
+    println!("has_pending after  flush = {}", state.persistence_pending());
+    println!("last_error = {:?}", state.persistence_last_error());
+
+    let landed = rusqlite::Connection::open_with_flags(
+        &copy,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .unwrap()
+    .query_row("SELECT value FROM settings WHERE key = 'probe.diagnose'", [], |r| {
+        r.get::<_, String>(0)
+    });
+    println!("landed = {landed:?}");
+
+    // And the same write with the repository's own hands, no state layer.
+    let direct = repo.apply(&[Change::SettingSet {
+        key: "probe.direct".into(),
+        value: "in".into(),
+    }]);
+    println!("direct repo.apply = {direct:?}");
+}
+
 #[test]
 fn settings_storage_row_reports_the_folder_and_snapshots_on_demand() {
     use quire::app::state::{AppState, HandleArgs};

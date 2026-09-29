@@ -176,41 +176,7 @@ fn start_sync(ui: &AppWindow, state: &Rc<AppState>, awaited: Awaited) {
         let a = awaited.clone();
         ui.global::<UIState>().on_sync_now_all(move || {
             let g = gw.upgrade().unwrap();
-            let (targets, absent) = peers_due_for_a_round(&s);
-            if targets.is_empty() {
-                g.set_sync_status(
-                    if absent.is_empty() {
-                        "还没有别的设备出现在这个网络上 — 打开另一台设备就会自动同步。"
-                            .to_string()
-                    } else {
-                        format!(
-                            "{} 不在本网络上 — 它重新广播后就会自动同步。",
-                            absent.join("、")
-                        )
-                    }
-                    .into(),
-                );
-                return;
-            }
-            let names: Vec<String> = targets.iter().map(|p| p.name.clone()).collect();
-            a.borrow_mut().extend(
-                targets
-                    .iter()
-                    .map(|p| (p.id.clone(), std::time::Instant::now())),
-            );
-            for peer in targets {
-                let _ = cmd.send(crate::services::sync::engine::Cmd::SyncWith(peer));
-            }
-            // A device that is paired but not answering right now is said out
-            // loud rather than left to the timeout sweep five minutes later: the
-            // user pressed 刷新 because something was missing, and a refresh
-            // that silently skipped a device is the round that looks like it
-            // worked.
-            let mut status = format!("正在与 {} 同步…", names.join("、"));
-            if !absent.is_empty() {
-                status.push_str(&format!("（{} 不在本网络上，已跳过）", absent.join("、")));
-            }
-            g.set_sync_status(status.into());
+            start_round_with_every_peer(&g, &s, &cmd, &a);
         });
     }
     {
@@ -252,7 +218,9 @@ fn start_sync(ui: &AppWindow, state: &Rc<AppState>, awaited: Awaited) {
         let s = state.clone();
         ui.global::<UIState>().on_sync_interval_set(move |secs| {
             let g = gw.upgrade().unwrap();
-            let secs = (secs as u64).max(15);
+            // The same floor as `sync_set_interval` (ADR-0140). Two clamps that
+            // disagree is how a 10 秒 chip ends up stored as 15.
+            let secs = (secs as u64).max(10);
             s.sync_set_interval(secs);
             g.set_sync_interval(secs as i32);
             g.set_sync_status(format!("自动同步间隔已设为每 {secs} 秒。").into());
@@ -273,6 +241,39 @@ fn start_sync(ui: &AppWindow, state: &Rc<AppState>, awaited: Awaited) {
                 }
                 .into(),
             );
+        });
+    }
+
+    {
+        let gw = ui_state_weak(ui);
+        let s = state.clone();
+        let a = awaited.clone();
+        // 打开 the page: rebuild from the peers table on the way in, so a device
+        // that announced while the user was in a document is on screen when they
+        // arrive. This is the same read the settings dialog did on its own open,
+        // and it moved here with the section (ADR-0132).
+        ui.global::<UIState>().on_sync_open_requested(move || {
+            let g = gw.upgrade().unwrap();
+            g.set_sync_self_name(s.sync_self_info().name.into());
+            let (auto, interval) = s.sync_config();
+            g.set_sync_auto(auto);
+            g.set_sync_interval(interval as i32);
+            refresh_sync_ui(&g, &s, &a);
+            g.set_active_area("sync".into());
+        });
+    }
+    {
+        let gw = ui_state_weak(ui);
+        let s = state.clone();
+        let a = awaited.clone();
+        // 清空日志: the one destructive verb on this page. It removes the stored
+        // record and nothing else — a round in flight still logs its outcome,
+        // which is why this is a clear and not a switch.
+        ui.global::<UIState>().on_sync_log_cleared(move || {
+            let g = gw.upgrade().unwrap();
+            s.sync_log_clear();
+            refresh_sync_ui(&g, &s, &a);
+            g.set_sync_status("同步记录已清空。".into());
         });
     }
 
@@ -330,10 +331,12 @@ fn start_sync(ui: &AppWindow, state: &Rc<AppState>, awaited: Awaited) {
             }
             // The rows say 在线 and 多久前同步过, both of which move without a job
             // arriving: a device that left the network stops announcing rather
-            // than announcing that it left. Only while the dialog can see it —
-            // rebuilding the models four times a second for a closed popup is
-            // the kind of background cost nobody notices until the fan is.
-            let open = g.get_settings_open();
+            // than announcing that it left. Only while something can see it —
+            // rebuilding the models four times a second for a closed dialog or a
+            // page the user is not on is the kind of background cost nobody
+            // notices until the fan is. The 同步 page counts as open for this
+            // purpose even though it is an area rather than a popup (ADR-0132).
+            let open = g.get_settings_open() || g.get_active_area() == "sync";
             let due = (open && !was_open.get())
                 || (open && last_refresh.get().elapsed().as_secs() >= 5);
             was_open.set(open);
@@ -389,6 +392,58 @@ fn peers_due_for_a_round(
         }
     }
     (targets, absent)
+}
+
+/// A round with every device still on the network, right now.
+///
+/// The **one** definition of that round (ADR-0132), called from all three doors
+/// that ask for it: the 笔记 list's 刷新, the 同步 page's 立即同步全部, and the
+/// 同步 sidebar row's right-click. They are the same request — "go and get it" —
+/// and three copies of this is three places a device can be quietly left out of.
+///
+/// It is deliberately *not* the same function as the periodic round below: that
+/// one dials the same target list (`peers_due_for_a_round`, shared) but drops the
+/// absent devices silently, because nobody is waiting on a background tick. A
+/// hand-started round cannot do that — the press was a request for *this* round,
+/// and a request that quietly skipped a device is the one that looks like it
+/// worked.
+fn start_round_with_every_peer(
+    g: &UIState<'_>,
+    state: &Rc<AppState>,
+    cmd: &std::sync::mpsc::Sender<crate::services::sync::engine::Cmd>,
+    awaited: &Awaited,
+) {
+    let (targets, absent) = peers_due_for_a_round(state);
+    if targets.is_empty() {
+        g.set_sync_status(
+            if absent.is_empty() {
+                "还没有别的设备出现在这个网络上 — 打开另一台设备就会自动同步。".to_string()
+            } else {
+                format!(
+                    "{} 不在本网络上 — 它重新广播后就会自动同步。",
+                    absent.join("、")
+                )
+            }
+            .into(),
+        );
+        return;
+    }
+    let names: Vec<String> = targets.iter().map(|p| p.name.clone()).collect();
+    awaited.borrow_mut().extend(
+        targets
+            .iter()
+            .map(|p| (p.id.clone(), std::time::Instant::now())),
+    );
+    for peer in targets {
+        let _ = cmd.send(crate::services::sync::engine::Cmd::SyncWith(peer));
+    }
+    // The device that is stored but not answering is said out loud rather than
+    // left to the timeout sweep five minutes later.
+    let mut status = format!("正在与 {} 同步…", names.join("、"));
+    if !absent.is_empty() {
+        status.push_str(&format!("（{} 不在本网络上，已跳过）", absent.join("、")));
+    }
+    g.set_sync_status(status.into());
 }
 
 /// One engine job, answered on the UI thread.
@@ -677,6 +732,34 @@ fn sync_age_label(at: &str, now: u64) -> String {
     }
 }
 
+/// An announcement age, from a **unix second** rather than a stamp string.
+///
+/// A second reader rather than a second format: `last_seen` is stored as unix
+/// seconds (the field's own doc, `PeerRecord`), so the only question is whether
+/// the same ladder applies — and it does, because it is the same "how long ago"
+/// question, just asked of a number instead of a string. A device is announced
+/// every four seconds, so this column is what separates "on the network" from
+/// "a row that is still stored", and it is the one that most needs to be live:
+/// a device's dot is already `online`, and this is the same fact in words.
+fn seen_age_label(last_seen: u64, now: u64) -> String {
+    // 0 is the peers table's "never heard from" (the column's own doc), and it
+    // is not a stamp from 1970: a row that has never been heard from is not a
+    // device that was last seen at the epoch.
+    if last_seen == 0 {
+        return "从未".to_string();
+    }
+    let secs = now.saturating_sub(last_seen);
+    if secs < 90 {
+        "刚刚".to_string()
+    } else if secs < 3_600 {
+        format!("{} 分钟前", secs / 60)
+    } else if secs < 86_400 {
+        format!("{} 小时前", secs / 3_600)
+    } else {
+        format!("{} 天前", secs / 86_400)
+    }
+}
+
 /// The platform name as the row reads it. A device class ("电脑"/"手机") is not
 /// inferred: `kind` is an OS name, and an OS says nothing about what is carrying
 /// it.
@@ -695,7 +778,13 @@ fn sync_kind_label(kind: &str) -> &'static str {
     }
 }
 
-/// The dialog's rows, its own address, and the log — rebuilt from the session.
+/// The page's rows, its own address, its statistics and the log — rebuilt from
+/// the session.
+///
+/// One pass, deliberately: the device table, the 同步统计 box and the log all
+/// describe the same round, and a refresh that filled them from three different
+/// moments is how a page ends up saying a device is online in one box and gone
+/// in the next.
 fn refresh_sync_ui(g: &UIState<'_>, state: &AppState, awaited: &Awaited) {
     let now = crate::services::sync::engine::now_unix();
     let rows: Vec<crate::SyncRow> = state
@@ -717,14 +806,17 @@ fn refresh_sync_ui(g: &UIState<'_>, state: &AppState, awaited: &Awaited) {
             };
             crate::SyncRow {
                 id: p.id.into(),
-                label: format!(
-                    "{} ({})",
-                    if p.name.is_empty() { "设备" } else { &p.name },
-                    sync_kind_label(&p.kind)
-                )
-                .into(),
+                // The name on its own, and the platform in its own column: they
+                // are separate facts and the reference's table keeps them apart
+                // (`setColumnWidth(0, 180)` beside `setColumnWidth(1, 70)`), so
+                // joining them here would put a bracket back in the column the
+                // page is trying to widen.
+                label: if p.name.is_empty() { "设备" } else { &p.name }.into(),
+                kind: sync_kind_label(&p.kind).into(),
                 status: status.into(),
                 ip: p.ip.into(),
+                port: p.port as i32,
+                last_seen: seen_age_label(p.last_seen, now).into(),
                 paired: p.paired,
                 online,
             }
@@ -736,6 +828,7 @@ fn refresh_sync_ui(g: &UIState<'_>, state: &AppState, awaited: &Awaited) {
     // announcing is a device that has left, and offering a round with it would
     // only produce the timeout the status line already knows how to explain.
     g.set_sync_has_peers(!peers_due_for_a_round(state).0.is_empty());
+    g.set_sync_stats(sync_stats_model(state, now));
     // The address is asked for here rather than once at wire time because the
     // answer moves: a laptop that switches networks gets a new address, and the
     // number to type into the other device has to be the current one.
@@ -746,13 +839,14 @@ fn refresh_sync_ui(g: &UIState<'_>, state: &AppState, awaited: &Awaited) {
             .into(),
     );
     g.set_sync_busy(!awaited.borrow().is_empty());
-    // Newest first, and only the twelve the dialog has room to read: the stored
-    // log is fifty lines precisely so that the tail of it can be shown.
-    let log: Vec<crate::SyncLogRow> = state
-        .sync_log()
+    // Newest first, and **all** of it rather than the twelve the dialog had room
+    // for: the page scrolls (ADR-0132), so a limit here would be a limit on what
+    // the user is allowed to read about their own rounds.
+    let stored = state.sync_log();
+    g.set_sync_log_total(stored.len() as i32);
+    let log: Vec<crate::SyncLogRow> = stored
         .into_iter()
         .rev()
-        .take(12)
         .map(|line| crate::SyncLogRow {
             when: sync_age_label(&line.at, now).into(),
             peer: (if line.peer.is_empty() {
@@ -766,6 +860,244 @@ fn refresh_sync_ui(g: &UIState<'_>, state: &AppState, awaited: &Awaited) {
         })
         .collect();
     g.set_sync_log(slint::ModelRc::new(slint::VecModel::from(log)));
+}
+
+/// The 同步统计 box: what this device carries, and what the last round with each
+/// peer moved.
+///
+/// The first half is **one** export — the same `SyncSnapshot` a round would push,
+/// so the numbers on screen are the numbers that would go on the wire rather than
+/// a second count taken from the catalog by a different rule. (An earlier draft
+/// called `sync_export` once per peer; the export is the expensive part of this
+/// page and it does not change between peers.)
+///
+/// The second half is read out of each peer's stored **shadow**: the shadow is
+/// what this device last saw that peer hold, so a difference between the shadow
+/// and this device's own export is "what the last round moved" — and it is the
+/// only figure available that is not this device's opinion of its own data.
+///
+/// A device with no shadow says so rather than reporting every row as a
+/// discrepancy: it has never answered, there is nothing to compare against, and
+/// a wall of zeroes-with-minus would be the page describing a round that did not
+/// happen.
+fn sync_stats_model(state: &AppState, now: u64) -> slint::ModelRc<crate::SyncStat> {
+    let mut stats: Vec<crate::SyncStat> = Vec::new();
+    // `local` marks the first half of the box: this device's own counts, above
+    // the divider, as against one pair of lines per peer below it. A field
+    // rather than two models because Slint has no slice — the page cannot ask a
+    // delegate for "rows 0..7".
+    let mut add = |label: String, value: String, local: bool| {
+        stats.push(crate::SyncStat {
+            label: label.into(),
+            value: value.into(),
+            local,
+        });
+    };
+
+    let me = state.sync_self_info();
+    // The wire calls a task's list `lists`; this app has called the same thing
+    // 清单 everywhere else, so the page keeps the app's word and the count is
+    // the snapshot's.
+    let mine = match state.sync_export() {
+        Ok(snap) => {
+            add(
+                "本机设备".into(),
+                format!("{} · {}", me.name, sync_kind_label(&me.kind)),
+                true,
+            );
+            add("笔记".into(), format!("{} 条", snap.notes.len()), true);
+            add("任务".into(), format!("{} 条", snap.tasks.len()), true);
+            add("清单".into(), format!("{} 个", snap.lists.len()), true);
+            add("页面".into(), format!("{} 个", snap.pages.len()), true);
+            add("附件".into(), format!("{} 个", snap.attachments.len()), true);
+            add("总计".into(), format!("{} 行", snap.row_count()), true);
+            Some(snap)
+        }
+        // A library that cannot produce a snapshot cannot sync either, and the
+        // page says so *where the numbers would have been* rather than showing a
+        // wall of zeroes that reads like an empty device.
+        Err(e) => {
+            add("本机设备".into(), format!("{} · 无法导出", me.name), true);
+            add("出错".into(), e, true);
+            None
+        }
+    };
+
+    if let Some(mine) = mine {
+        for peer in state.sync_peers() {
+            let name = if peer.name.is_empty() { "设备" } else { &peer.name };
+            let Some(shadow) = state.sync_shadow_for_peer(&peer.id) else {
+                add(
+                    format!("{name} · 对比"),
+                    if peer.last_sync.is_empty() {
+                        "还没有同步过".into()
+                    } else {
+                        format!("{}，没有对比记录", sync_age_label(&peer.last_sync, now))
+                    },
+                    false,
+                );
+                continue;
+            };
+            let notes = moved_rows(&shadow.notes, &mine.notes, note_key, note_content);
+            let tasks = moved_rows(&shadow.tasks, &mine.tasks, task_key, task_content);
+            add(
+                format!("{name} · 笔记"),
+                format!(
+                    "对端 {} · 本机 {} · 变化 {}",
+                    shadow.notes.len(),
+                    mine.notes.len(),
+                    notes
+                ),
+                false,
+            );
+            add(
+                format!("{name} · 任务"),
+                format!(
+                    "对端 {} · 本机 {} · 变化 {}",
+                    shadow.tasks.len(),
+                    mine.tasks.len(),
+                    tasks
+                ),
+                false,
+            );
+        }
+    }
+    slint::ModelRc::new(slint::VecModel::from(stats))
+}
+
+/// How many rows differ between a peer's stored shadow and this device's own
+/// copy, keyed by the **logical** uuid rather than the integer id.
+///
+/// The uuid is the cross-device key the whole merge is built on (`SNote::uuid`:
+/// an id is a per-device row number, so counting differences by id would report
+/// every single row as changed on every device). A row present on one side and
+/// absent on the other counts as moved — that is a note the other device has and
+/// this one does not, which is exactly what a round is for — and so does a row
+/// present on both whose `rev` differs, which is the revision the merge itself
+/// settles on.
+///
+/// Rows whose uuid is blank fall back to their position in the snapshot: a note
+/// written before the column existed is not a row to skip counting, and two
+/// devices holding the same library list the same rows in the same order
+/// (`row_count`'s own order is the export's), so position is the next best key
+/// after the uuid and is the only one left.
+///
+/// The two functions are **key** and **content**, and neither is `PartialEq` on
+/// the row. That is the whole point: `SNote`'s `id` is a *per-device* row number,
+/// so deriving `PartialEq` over it says all three notes changed on every device
+/// that renumbered them — which is every device. `content` therefore skips `id`
+/// and keeps the row's revision, which is the field the merge itself settles on
+/// (`org::rev`: a millisecond stamp and a device), so "changed" here means the
+/// same thing "one side wins" means there.
+fn moved_rows<T, K, C>(theirs: &[T], mine: &[T], key: K, content: C) -> usize
+where
+    K: Fn(&T) -> &str,
+    C: Fn(&T) -> String,
+{
+    // One helper for the index rather than a closure: a closure returning a
+    // borrow of its argument is exactly the lifetime a `Fn` cannot express
+    // (`'1` outliving `'2` is the classic case), and a nested `fn` can name the
+    // lifetime it hands back. `T` is bound here rather than taken from the
+    // outer generic, which is what makes the returned `&T` well-formed.
+    fn index<'r, T, K, C>(
+        rows: &'r [T],
+        key: &K,
+        content: &C,
+    ) -> std::collections::HashMap<String, String>
+    where
+        K: Fn(&T) -> &str,
+        C: Fn(&T) -> String,
+    {
+        rows.iter()
+            .enumerate()
+            .map(|(i, row)| {
+                let k = key(row);
+                (
+                    if k.is_empty() {
+                        format!("#{i}")
+                    } else {
+                        k.to_string()
+                    },
+                    content(row),
+                )
+            })
+            .collect()
+    }
+    let a = index(theirs, &key, &content);
+    let b = index(mine, &key, &content);
+    // Three cases, and the distinction between the middle one and the outer two
+    // is the whole meaning of 变化.
+    //
+    //  - a key on one side only: a row that is about to travel **in** (only the
+    //    shadow has it) or **out** (only this device has it). Counted once, from
+    //    whichever side it is on, because it is one row.
+    //  - a key on both sides with different content: a row **both** devices are
+    //    about to see change hands. It is counted **once**, not twice — a user
+    //    reads "变化 1" as one note was touched, and "变化 2" for a single edit
+    //    is the number that makes the column look like a count of disagreements
+    //    rather than of rows.
+    //
+    // The direction asymmetry this replaced only looked at the peer's side, so a
+    // note the user had just written and pressed 立即同步 on reported "0 变化" —
+    // which is the one moment the number exists to answer.
+    let mut moved = 0usize;
+    for (k, row) in &a {
+        match b.get(k) {
+            // only the shadow has it — it is coming in
+            None => moved += 1,
+            // on both sides and the content differs — one row, one count
+            Some(mine_row) if mine_row != row => moved += 1,
+            Some(_) => {}
+        }
+    }
+    for k in b.keys() {
+        // only this device has it — it is going out. Already-counted keys are
+        // the `Some(_)` and `Some(..)` arms above, so every key still missing
+        // from the shadow is a genuine addition.
+        if !a.contains_key(k) {
+            moved += 1;
+        }
+    }
+    moved
+}
+
+/// A note's logical key: the uuid, and nothing else. A named `fn` rather than a
+/// closure because a closure returning a borrow of its argument cannot express
+/// the lifetime it hands back.
+fn note_key(n: &crate::services::sync::model::SNote) -> &str {
+    n.uuid.as_str()
+}
+
+/// A task's logical key, same rule as [`note_key`].
+fn task_key(t: &crate::services::sync::model::STask) -> &str {
+    t.uuid.as_str()
+}
+
+/// A note's content as the 统计 box compares it: everything but the row's
+/// per-device `id`.
+///
+/// `rev` is kept and everything else is kept too, because a row whose title
+/// changed and whose stamp did not is still a row the user edited, and a delta
+/// that only watched `rev` would call a note edited on a device whose clock has
+/// not ticked a millisecond as unchanged.
+fn note_content(n: &crate::services::sync::model::SNote) -> String {
+    format!(
+        "{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}",
+        n.uuid, n.title, n.body, n.pinned, n.rev, n.edited, n.tags.join(","),
+    )
+}
+
+/// A task's content, same rule and same reason as [`note_content`].
+///
+/// `list` is a per-device id like `id` and is therefore *excluded* — a task in
+/// the inbox on one device and in a list on the other is a row that moved, and
+/// the revision is what says so.
+fn task_content(t: &crate::services::sync::model::STask) -> String {
+    format!(
+        "{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}",
+        t.uuid, t.title, t.notes, t.done, t.priority, t.due.clone().unwrap_or_default(),
+        t.tags.join(","), t.rev, t.edited,
+    )
 }
 
 #[cfg(test)]
@@ -858,6 +1190,142 @@ mod tests {
         assert_eq!(sync_age_label("", 0), "");
         assert_eq!(sync_age_label("尚未同步", 0), "尚未同步");
         assert_eq!(sync_age_label("2026-09 28 14:05", 0), "2026-09 28 14:05");
+    }
+
+    /// An announcement age is the same ladder asked of a **unix second**
+    /// (ADR-0132's 最后在线 column), and its one extra case is the one the
+    /// stamp-string reader cannot have: `0` is the peers table's "never heard
+    /// from", not a timestamp from 1970.
+    #[test]
+    fn an_announcement_age_reads_as_an_age_and_says_never() {
+        let now = 1_800_000_000u64;
+        assert_eq!(seen_age_label(0, now), "从未");
+        assert_eq!(seen_age_label(now, now), "刚刚");
+        assert_eq!(seen_age_label(now - 3, now), "刚刚");
+        assert_eq!(seen_age_label(now - 90, now), "1 分钟前");
+        assert_eq!(seen_age_label(now - 45 * 60, now), "45 分钟前");
+        assert_eq!(seen_age_label(now - 3 * 3_600, now), "3 小时前");
+        assert_eq!(seen_age_label(now - 2 * 86_400, now), "2 天前");
+        // a stamp from the future is clock skew between two devices, and reads
+        // as "just now" rather than as a negative age
+        assert_eq!(seen_age_label(now + 600, now), "刚刚");
+    }
+
+    /// `civil_from_days` exists only to write a stamp `sync_age_label` can read
+    /// back, so the pair is tested as a **round trip** — which is the property
+    /// the 同步 scene's `last_sync` column depends on. Checked across the two
+    /// boundaries a scene can straddle: a leap day, and a year turn.
+    #[test]
+    fn a_stamp_written_by_the_scene_reads_back_as_the_same_day() {
+        for (y, m, d) in [
+            (2026, 9, 29),
+            (2026, 1, 1),
+            (2024, 2, 29), // a leap day
+            (2025, 12, 31), // a year turn, walked back across the boundary
+            (1970, 1, 1),
+        ] {
+            let days = days_from_civil(y, m, d);
+            let stamp = format!("{} 12:00", civil_from_days(days));
+            let now = (days * 86_400 + 12 * 3_600) as u64;
+            assert_eq!(
+                sync_age_label(&stamp, now),
+                "刚刚",
+                "{y}-{m}-{d} round-tripped"
+            );
+        }
+    }
+
+    /// The 同步统计 box's "变化" column: rows are compared by the **logical**
+    /// uuid and by their content-without-the-id, because an id is a per-device
+    /// row number and two devices that hold the same notes number them
+    /// differently. The first assertion here is the one that matters: without
+    /// skipping `id`, the same three notes read as three changes.
+    #[test]
+    fn a_delta_counts_by_uuid_and_not_by_row_id() {
+        let note = |id: u64, uuid: &str| crate::services::sync::model::SNote {
+            id,
+            uuid: uuid.into(),
+            title: String::new(),
+            body: String::new(),
+            pinned: false,
+            tags: Vec::new(),
+            created: 0,
+            edited: 0,
+            ref_note: None,
+            deleted_at: None,
+            rev: String::new(),
+        };
+
+        // The same three notes, renumbered — which is what a second device
+        // looks like. Nothing moved.
+        let theirs = vec![note(7, "a"), note(3, "b"), note(9, "c")];
+        let mine = vec![note(1, "a"), note(2, "b"), note(4, "c")];
+        assert_eq!(
+            moved_rows(&theirs, &mine, note_key, note_content),
+            0,
+            "same notes, other ids"
+        );
+
+        // One edited, one added on this side, one deleted on the other side.
+        // Each is counted from whichever side it is on, which is why 变化 is
+        // symmetric — see `moved_rows`.
+        let mut edited = mine.clone();
+        edited[0].title = "改过的标题".into();
+        let mut grown = mine.clone();
+        grown.push(note(5, "d"));
+        assert_eq!(
+            moved_rows(&theirs, &edited, note_key, note_content),
+            1,
+            "one row changed"
+        );
+        assert_eq!(
+            moved_rows(&theirs, &grown, note_key, note_content),
+            1,
+            "one row is new here"
+        );
+        assert_eq!(
+            moved_rows(&theirs, &mine[..2], note_key, note_content),
+            1,
+            "one row is gone here"
+        );
+        // a device that has answered nothing is not a device where three
+        // notes vanished — it is one where this device holds three it has yet
+        // to send, and the number is the same either way
+        assert_eq!(moved_rows(&theirs, &[], note_key, note_content), 3);
+        assert_eq!(moved_rows(&[], &mine, note_key, note_content), 3);
+    }
+
+    /// A row with no uuid — a note written before the column existed — is
+    /// compared by its position rather than skipped, because a row that is
+    /// missing from the count is a row the 统计 box under-reports.
+    #[test]
+    fn a_delta_counts_a_row_that_has_no_uuid() {
+        let note = |id: u64| crate::services::sync::model::SNote {
+            id,
+            uuid: String::new(),
+            title: String::new(),
+            body: String::new(),
+            pinned: false,
+            tags: Vec::new(),
+            created: 0,
+            edited: 0,
+            ref_note: None,
+            deleted_at: None,
+            rev: String::new(),
+        };
+        // Both sides two blank-uuid rows that are identical: nothing moved.
+        assert_eq!(
+            moved_rows(&[note(1), note(2)], &[note(8), note(9)], note_key, note_content),
+            0,
+            "position is the fallback key, and the ids are still not the content"
+        );
+        // One differs: one moved, not two.
+        let mut changed = note(8);
+        changed.title = "x".into();
+        assert_eq!(
+            moved_rows(&[note(1), note(2)], &[note(8), changed], note_key, note_content),
+            1
+        );
     }
 
     /// The kind label is the platform the peer named, not a guess about the
@@ -1327,6 +1795,9 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
     {
         let gw = gw.clone();
         let s = state.clone();
+        // `a` is a clone of the one `Awaited` the pump drains, so a round
+        // started from a menu is the round the pump will time out — the same
+        // discipline every other callback in this file follows.
         let a = sync_awaited.clone();
         ui.global::<UIState>().on_menu_action(move |action| {
             let g = gw.upgrade().unwrap();
@@ -1382,15 +1853,19 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                             action == crate::app::state::MENU_ORG_NOTE_PIN,
                         );
                     }
-                    // 打开 and 详细信息 are one move — the note is what the detail
-                    // pane shows either way — and the second opens the disclosure
-                    // under its body, which is the thing its name promises.
+                    // 打开 and 详细信息 are the only two ways the note page is
+                    // reached now (ADR-0137) — a single click selects and stops
+                    // there — and they differ in one thing: 详细信息 opens the
+                    // disclosure under the body, which is the thing its name
+                    // promises, while 打开 leaves it closed. The refresh and the
+                    // draft load both happen at the end of this range, which is
+                    // what fills the overlay's gate and its fields.
                     crate::app::state::MENU_ORG_NOTE_OPEN
                     | crate::app::state::MENU_ORG_NOTE_DETAILS => {
                         g.set_org_selected_note(id);
-                        if action == crate::app::state::MENU_ORG_NOTE_DETAILS {
-                            g.set_org_note_details_open(true);
-                        }
+                        g.set_org_note_details_open(
+                            action == crate::app::state::MENU_ORG_NOTE_DETAILS,
+                        );
                     }
                     // 复制内容 is the smallest unit 复制 hands an AI: one note with
                     // its 唯一 ID on a line of its own, which is the name a 指令
@@ -1587,6 +2062,21 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                     s.set_search_query("");
                     g.set_search_focus(0);
                     g.set_search_open(true);
+                }
+                // 打开同步: through the same callback the sidebar row uses, so
+                // the menu item and the row cannot open the page differently —
+                // the one that rebuilds the peers table on the way in.
+                crate::app::state::MENU_SIDE_OPEN_SYNC => {
+                    g.invoke_sync_open_requested();
+                }
+                // 立即同步全部 from the rail's row: the **same** round the 笔记
+                // list's 刷新 and the 同步 page's own button start, by invoking
+                // the callback rather than re-dialing the peers here. The engine
+                // command channel lives in `start_sync`, not in this function, so
+                // reaching for it from the menu dispatcher is what would make a
+                // second copy of the round; the callback is the one door.
+                crate::app::state::MENU_SIDE_SYNC_NOW => {
+                    g.invoke_sync_now_all();
                 }
                 crate::app::state::MENU_NEW_SUBPAGE => {
                     let new_id = s.create_page(Some(id));
@@ -2503,14 +2993,35 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
     {
         let t: &'static slint::Timer = Box::leak(Box::new(slint::Timer::default()));
         let sw = std::rc::Rc::downgrade(&state);
+        let gw = ui_state_weak(ui);
         state.install_flush_hook(Box::new(move || {
             let sw = sw.clone();
+            let gw = gw.clone();
             t.start(
                 slint::TimerMode::SingleShot,
                 std::time::Duration::from_millis(600),
                 move || {
-                    if let Some(s) = sw.upgrade() {
-                        s.persistence_force_flush();
+                    let Some(s) = sw.upgrade() else {
+                        return;
+                    };
+                    s.persistence_force_flush();
+                    // A refused write used to be invisible from here. The batch
+                    // went back on the queue, `take_last_error` was never called
+                    // by anything in this shell, and a session that had stopped
+                    // saving *anything* looked exactly like one that was saving:
+                    // no notice, no log line, and the same window on screen.
+                    // Say it where the user already looks for storage trouble —
+                    // and only when the line changes, so a library that refuses
+                    // every write does not rewrite the same words four times a
+                    // second for as long as it stays broken.
+                    let Some(g) = gw.upgrade() else {
+                        return;
+                    };
+                    if let Some(error) = s.persistence_last_error() {
+                        let line = format!("保存失败 — 这次的改动没有写入资料库：{error}");
+                        if g.get_db_notice().as_str() != line {
+                            g.set_db_notice(line.into());
+                        }
                     }
                 },
             );
@@ -4973,19 +5484,25 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
     {
         let gw = gw.clone();
         let s = state.clone();
+        // A single click **selects** a note and nothing more (ADR-0137). It used to
+        // raise the note page — title, body, comments and all — which made the
+        // list unusable for what a list is for: reading and choosing. Reaching
+        // the page is now the context menu's 打开, and 详细信息 is its own row, so
+        // the two asks are two words rather than one gesture that guessed.
+        //
+        // The drafts are deliberately **not** loaded. They are the page's own
+        // fields; loading them on a click would commit whatever the page last had
+        // half-typed into a note the user only pointed at.
         ui.global::<UIState>().on_org_note_selected(move |id| {
             let g = gw.upgrade().unwrap();
-            org_commit_field(&g, &s);
-            // While 多选 is on, a tap picks rather than opens (ADR-0111) — the
-            // same route on purpose, so the detail pane cannot be moved by a pick.
+            // While 多选 is on, a tap picks rather than selects — the same route on
+            // purpose, so a pick cannot also move the highlight.
             if g.get_org_selecting() {
                 s.org_selection_toggle(id as i64, false);
-                org_refresh(&g, &s);
-                return;
+            } else {
+                g.set_org_selected_note(id);
             }
-            g.set_org_selected_note(id);
             org_refresh(&g, &s);
-            org_load_drafts(&g, &s);
         });
     }
     {
@@ -5030,18 +5547,25 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
     {
         let gw = gw.clone();
         let s = state.clone();
-        // A note row's ⋯ **and** its right-click (ADR-0115). Anchored the way a task
-        // row's own is: the popup's top-left goes just left of the button and below
-        // its top, clamped so the seven rows still fit on the window.
+        // A note row's ⋯ **and** its right-click (ADR-0115) — the two doors to one
+        // menu.
         //
-        // Unlike the task's, this does **not** move the selection. A task row's ⋯
-        // is also that row's "open", so it lights the detail pane on the way past;
-        // a note's menu has 打开 as a row of its own, and a right-click is a
-        // question about a row rather than a decision to leave the one being read.
+        // Unlike the task row's, this **does** move the highlight, and it is the
+        // reason it can (ADR-0137). A right-click is a decision about *this* row,
+        // and every verb in the menu acts on the note the menu was opened for —
+        // but a click no longer selects, so a user who right-clicks a row they
+        // have not clicked first would otherwise be acting on whichever note
+        // happened to be open. The highlight follows the question.
+        //
+        // Anchored the way a task row's own is: the popup's top-left goes just
+        // left of the button and below its top, clamped so the seven rows still
+        // fit on the window.
         ui.global::<UIState>().on_org_note_menu_requested(move |id, x, y| {
             let g = gw.upgrade().unwrap();
             org_commit_field(&g, &s);
             g.set_menu_node_id(id);
+            g.set_org_selected_note(id);
+            org_refresh(&g, &s);
             s.fill_org_note_menu(id);
             g.set_menu_rows(s.menu_model());
             let menu_h = g.get_menu_rows().row_count() as f32 * 30.0 + 8.0;
@@ -5418,6 +5942,19 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         ui.global::<UIState>().on_org_sort_picked(move |slot| {
             let g = gw.upgrade().unwrap();
             g.set_org_sort(slot);
+            org_refresh(&g, &s);
+        });
+    }
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        // The 笔记 half's own sort (最新创建 / 最新更新 / 按内容). Its own
+        // property and its own callback: the two halves' orders have nothing in
+        // common, and one control whose meaning changes with the tab is a
+        // control nobody can read.
+        ui.global::<UIState>().on_org_note_sort_picked(move |slot| {
+            let g = gw.upgrade().unwrap();
+            g.set_org_note_sort(slot);
             org_refresh(&g, &s);
         });
     }
@@ -8144,6 +8681,112 @@ fn org_scene_open(g: &UIState<'_>, state: &Rc<AppState>, tab: i32) {
     org_show(g, state, tab);
 }
 
+/// Plant a peers table and a log for the 同步 scenes (ADR-0132).
+///
+/// Through `sync_note_device` — the function a real UDP announcement goes
+/// through — and `sync_log_push`, so every row in the table and every line in
+/// the log is one the engine could have written. That is the whole rule a scene
+/// has (`apply_scene_body`'s own comment): a scene photographs a state the
+/// commands could produce, and a hand-built `SyncRow` would be a picture of a
+/// table no code path can create.
+///
+/// The three devices are chosen to make the page's three states visible at once:
+/// one **online** (announced seconds ago, synced recently — the lit dot and a
+/// real 上次同步), one **offline but stored** (announced two days ago, synced
+/// last week — the hollow dot, and a 最后在线 that is not 刚刚), and one **never
+/// synced** (announced now, no `last_sync` — the row whose 最后同步 column says
+/// 还没同步过). One device per state is what makes a table scene worth taking:
+/// a table of three identical rows cannot show that the three columns are
+/// answering three different questions.
+fn sync_scene_seed(state: &Rc<AppState>, scene: &str) {
+    let now = crate::services::sync::engine::now_unix();
+    let day = 86_400;
+    // (id, name, kind, ip, seconds since last announcement, has-synced)
+    let devices: [(&str, &str, &str, &str, u64, bool); 3] = [
+        ("scene-phone", "Pixel", "android", "192.168.1.24", 3, true),
+        ("scene-laptop", "Laptop", "windows", "192.168.1.9", 2 * day, true),
+        ("scene-tablet", "平板", "", "192.168.1.31", 5, false),
+    ];
+    for (id, name, kind, ip, ago, synced) in devices {
+        state.sync_note_device(id, name, kind, ip, 0, None);
+        // `last_seen` is what `sync_note_device` stamps with *now*, so the age is
+        // walked back by writing the table directly afterwards. That is the one
+        // field a scene cannot reach through the announcement path, because a
+        // device that announced two days ago has long since left the table's
+        // memory of "just heard" — and the offline row is the whole point of the
+        // scene.
+        if ago > 0 {
+            let mut peers = state.sync_peers();
+            if let Some(p) = peers.iter_mut().find(|p| p.id == id) {
+                p.last_seen = now.saturating_sub(ago);
+                state.sync_set_peers(&peers);
+            }
+        }
+        if synced {
+            // A stamp the age reader can parse: `now_rfc3339`'s own format,
+            // walked back by a day so the column reads 1 天前 rather than 刚刚.
+            let at = crate::services::sync::engine::now_rfc3339();
+            let (date, clock) = at.split_once(' ').unwrap_or((at.as_str(), "00:00"));
+            let mut parts = date.split('-');
+            let (y, m, d) = (
+                parts.next().unwrap_or("2026"),
+                parts.next().unwrap_or("01"),
+                parts.next().unwrap_or("01"),
+            );
+            let yesterday = days_from_civil(
+                y.parse().unwrap_or(2026),
+                m.parse().unwrap_or(1),
+                d.parse().unwrap_or(1),
+            ) - 1;
+            let civil = civil_from_days(yesterday);
+            let mut peers = state.sync_peers();
+            if let Some(p) = peers.iter_mut().find(|p| p.id == id) {
+                p.last_sync = format!("{} {}", civil, clock);
+                state.sync_set_peers(&peers);
+            }
+        }
+    }
+    // The log, for the 日志 scene and for the status line on the other two. Newest
+    // last, which is the order the writer keeps, so the page's own reverse is
+    // what puts the failure at the top — a scene where the newest line is not the
+    // one on screen would be a scene proving nothing about the order.
+    let lines: [(&str, bool, &str); 5] = [
+        ("Pixel", true, "同步完成：笔记 4 条、任务 2 条"),
+        ("Pixel", true, "同步完成：附件 2 个"),
+        ("Laptop", false, "拉取失败：连接超时"),
+        ("Pixel", true, "同步完成：笔记 1 条"),
+        ("本机", true, "端口 5878 已在监听"),
+    ];
+    for (peer, ok, message) in lines {
+        state.sync_log_push(peer, ok, message);
+    }
+    // The status line and the 同步中 dot: `sync` photographs a round in flight,
+    // because a page whose only button is 立即同步全部 and whose status line is
+    // always empty cannot be reviewed for the half of its job that is saying
+    // "something is still waiting for an answer".
+    if scene == "sync" {
+        state.sync_log_push("Pixel", true, "同步进行中");
+    }
+}
+
+/// The inverse of [`days_from_civil`], for a scene that has to write a stamp the
+/// age reader can parse. Civil-from-days is Hinnant's algorithm, the same one
+/// `days_from_civil` implements, so a round trip through the two is exact for
+/// every date this can produce.
+fn civil_from_days(z: i64) -> String {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if m <= 2 { y + 1 } else { y };
+    format!("{year:04}-{m:02}-{d:02}")
+}
+
 fn apply_scene_body(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
     let g = ui.global::<UIState>();
     match scene {
@@ -8154,7 +8797,8 @@ fn apply_scene_body(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
         // and every one of them goes through the *real* write path
         // (`org_create_*` / `org_*_set`), so a scene cannot photograph a state
         // the commands could not produce.
-        "notes" | "notes-detail" | "notes-search" | "notes-info" | "notes-reply" => {
+        "notes" | "notes-detail" | "notes-search" | "notes-info" | "notes-reply"
+        | "notes-sort" | "notes-empty" => {
             let ids = org_scene_seed(state);
             org_scene_open(&g, state, 0);
             if scene == "notes-reply" {
@@ -8187,6 +8831,54 @@ fn apply_scene_body(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
                 g.set_org_query("会议".into());
                 org_refresh(&g, state);
             }
+            if scene == "notes-sort" {
+                // The sort list **open**, over a full list. A closed box is
+                // 108 px of pill and photographs as almost nothing; what the
+                // control costs and what it drops onto the rows beneath is only
+                // visible with the list down, and that is what a reviewer needs
+                // to see. The seeded notes are all written in the same second,
+                // so the *order* is whatever the seed's ids give — the scene is
+                // about the control, not about the order.
+                g.set_org_query("".into());
+                g.set_org_note_sort_open(true);
+                org_refresh(&g, state);
+            }
+            if scene == "notes-empty" {
+                // The empty state, reached the way a user reaches it: a needle
+                // that matches nothing. It is the same picture as a device with
+                // no notes, and the `filtered` flag is what tells the two apart
+                // — photographing it *filtered* is what proves the flag works,
+                // because an unfiltered empty state is the one every first run
+                // already sees.
+                g.set_org_query("这个短语没有任何笔记包含它".into());
+                org_refresh(&g, state);
+            }
+        }
+        // 同步 (ADR-0132). The three boxes, and the page as it is actually
+        // entered. Unlike the organizer these have no rows to plant through a
+        // write path: a device on the peers table is something only a *real*
+        // announcement can put there, and faking one would be a scene
+        // photographing a state the engine cannot produce. So `sync_note_device`
+        // — the very function a real announcement goes through — is what seeds
+        // them, and a peer that is "online" is one whose `last_seen` is stamped
+        // now rather than a week ago.
+        "sync" | "sync-stats" | "sync-log" => {
+            sync_scene_seed(state, scene);
+            g.set_active_area("sync".into());
+            if scene == "sync-stats" {
+                g.set_sync_tab(1);
+            }
+            if scene == "sync-log" {
+                g.set_sync_tab(2);
+            }
+            // The models, filled here rather than left to the pump. The seed
+            // wrote the peers table through `sync_note_device`, but a scene is a
+            // *state* and the shot binary renders one frame and exits — the
+            // 250 ms timer that would normally notice `active-area == "sync"`
+            // never fires, so a scene that relied on it photographed an empty
+            // table over a full one. `Awaited` is empty, which is what an idle
+            // page looks like anyway.
+            refresh_sync_ui(&g, state, &Default::default());
         }
         "tasks" | "tasks-detail" | "tasks-list" | "tasks-overdue" | "tasks-board" => {
             let ids = org_scene_seed(state);
@@ -8410,6 +9102,29 @@ fn apply_scene_body(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
         }
         "dark-notes-capture-suggest" => {
             apply_scene_body(ui, state, "notes-capture-suggest");
+        }
+        // ADR-0133's two new notes shapes, dark. `notes-sort` is a list hanging
+        // over the cards and `notes-empty` is a centred plate on the page
+        // background — neither of which the light twin's own colours can judge,
+        // because a dropdown's shadow and an empty state's grey are the two
+        // things a dark palette gets wrong first.
+        "dark-notes-sort" => {
+            apply_scene_body(ui, state, "notes-sort");
+        }
+        "dark-notes-empty" => {
+            apply_scene_body(ui, state, "notes-empty");
+        }
+        // ADR-0132's three 同步 boxes, dark. The page is a *table* on one of them
+        // and a list of sentences on another, and a table drawn for a light
+        // palette is a table whose row fill and dot read wrong on the dark one.
+        "dark-sync" => {
+            apply_scene_body(ui, state, "sync");
+        }
+        "dark-sync-stats" => {
+            apply_scene_body(ui, state, "sync-stats");
+        }
+        "dark-sync-log" => {
+            apply_scene_body(ui, state, "sync-log");
         }
         "dark-tasks-list-menu" => {
             apply_scene_body(ui, state, "tasks-list-menu");

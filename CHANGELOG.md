@@ -1,10 +1,147 @@
 # Changelog
 
+## 构建 (unreleased)
+
+### 存储
+
+- **桌面端其实一直在保存不了任何东西** (ADR-0142). 真实库缺 FTS 索引表
+  (`search_pages`), 而 `apply` 把搜索镜像和被索引的行放在**同一个事务**里,
+  所以每一批写入都以 `no such table: search_pages` 失败并整体回滚。笔记、
+  任务、窗口尺寸、主题、设备 id —— 没有一样存得进去, 而库照常打开、
+  `integrity_check` 照样通过、版本号照样是"最新"
+- **`sync.device-id` 每次启动重新铸造只是症状.** 它是一个 settings 行; 写不进去
+  就每次启动都是新身份, 手机端于是把同一台电脑记成 5 台新设备, 报
+  "the address moved to another device" —— 唯一能看到的现象, 却指向了错的机器
+- **写失败不再静默** (ADR-0142). `take_last_error` 此前在整个桌面端**没有任何一处
+  调用**, `persistence_force_flush` 的注释说错误会浮现, 但那句话一直是假的。现在
+  防抖 flush 每次尝试后都会读取它并写进通知栏; 同一个库的 5 份备份
+  (13:23–22:44) 内容逐字节相同, 就是它静默了九个小时的样子
+- 索引表由 `quire-core` ADR-0006 修复: 每次打开都校验并回放可重放的迁移步,
+  修不好就**拒绝打开**, 而不是把一个会拒绝所有写入的文件交出去
+- `state.rs` 新增 `persistence_pending()` / `persistence_last_error()`;
+  `persistence_test.rs` 补上此前**完全没有覆盖**的
+  `record_setting` → `record` → 防抖 → 落库 整条路径的测试
+
+### 单实例
+
+- **桌面端现在是单实例的** (ADR-0136). 重复启动同一版本会弹窗提示并退出本次启动,
+  不会再出现两个窗口抢同一个数据库
+- **新版本会替换旧版本.** 启动的版本比正在运行的版本新时, 旧版本通过它自己的退出
+  通道 (ADR-0105) 优雅退出 — 落盘、写下 clean-exit 记录、释放 exe 文件 — 然后新版本
+  继续启动。这正是 `just deploy-workshop` 一直在手动做的事, 现在程序自己会做
+- **旧版本不会顶掉新版本.** 正在运行的版本更新时, 本次启动弹窗说明并退出
+- 判定发生在日志、数据库和窗口**之前**: 会被劝退的启动不会先打开数据库
+
+### 笔记
+
+- **单击笔记卡片只选中, 不再弹出笔记页** (ADR-0137). 笔记页 (标题 / 正文 / 评论) 现在
+  只能通过右键 → 打开 进入, 详细信息 通过右键 → 详细信息。之前每点一张卡片就把它
+  盖在列表上, 列表没法浏览
+- **详细信息不再藏在正文下面**, 而是右键菜单里独立的一项 — 它以前够不着, 因为它在
+  浮层里要往下滚才看得到
+- **标签筛选搬回右侧栏** (ADR-0138). 笔记页的标签列回来了: 全部笔记、标签树、每个
+  标签的计数、反向筛选、清除筛选。顶栏那一行只留 搜索笔记 / 排序 / 回收站。标签是
+  一棵树, 而 chip 条只能横向滚动 — 滚掉一半标签的筛选器不是筛选器
+- 标签列的选中行改成中性抬起的底色 + 2px 强调色竖条, 不再是一整块蓝底
+
+### 设置
+
+- **设置里的文字可以复制了** (ADR-0135). 版本、渲染器、数据文件夹、快捷键、开关
+  说明 —— 全部是可选中的只读输入框, 选中后 Ctrl+C。数据文件夹改成换行显示, 以前是
+  截断的且无法选中
+
+### 同步
+
+- **桌面端同步更激进** (ADR-0140). 默认间隔从 60 秒改为 10 秒, 预设加回 10 秒档 —
+  Android 端一直有的那一档 (10 秒 / 1 分钟 / 5 分钟 / 30 分钟) — 下限从 15 秒降到
+  10 秒。桌面一直开着、一直插着电, 一个回合每台设备只花几毫秒, 等才是用户能感到的
+- **笔记页的刷新按钮不再隐身** (ADR-0140). 之前只在有已配对设备时才画, 一个
+  没有设备可拨的回合是安全的空回合 — 在网络安静时隐藏的刷新按钮读起来就是没有
+  刷新按钮
+- **10 秒 那档现在是它字面上的意思** (ADR-0141). 同一条间隔被钳了两次, 两个数字:
+  store 那层钳 10, 而点按钮走的回调钳 15 — 所以选了「10 秒」存下来的是 15。桌面端
+  一直激进, 不需要像 Android 端那样加 Wi-Fi 判断: 没有可省流量的链路, 而「没在局域
+  网上」这件事 peer 列表已经答了 (60 秒没广播的设备根本不会被拨)。所以在家庭局域网
+  上, 两端跑的是同一个 10 秒, 只是走的路不同
+
+### 部署
+
+- **`just deploy-workshop` 只留版本归档** (ADR-0139). C:\workshop 现在每个版本一个
+  `quire-desktop-<version>` 文件夹; 会被每个版本覆盖、因此需要先请运行中的实例退出的
+  裸 `quire-desktop` 安装路径没有了。版本文件夹每次都是新的, 没有什么被覆盖, 也没有
+  运行中的实例挡路
+
+### 构建
+
+- **`target` was 71 GB; it is 7.6 GB** (ADR-0134). Nothing was wrong with the code
+  — cargo was keeping every build unit it had ever made for this crate, and with
+  a ~1 GB library. One sweep reclaimed it, and the machine went from 104 GB free
+  to 161 GB
+- **`just sweep` — clean the caches, keep incrementality.** `cargo clean` takes
+  the release tree with it and the next deploy pays a cold `codegen-units = 1`
+  build. `sweep` deletes only `incremental/` and `build/`, the two directories
+  keyed on unit identity that grow without bound; the next build links instead
+  of recompiling
+- **`just size` — where the disk went.** The tree largest-first, with each
+  directory's file count and newest date, so a repeat visit is comparable
+- **`just shot` builds into its own `target-shot`.** It needs `--features
+  software` while the app needs the default `femtovg`, and two feature sets are
+  two compilation units to cargo — so alternating between the two minted a new
+  ~900 MB library every time and kept the old one (26 copies, 63 GB). Separate
+  directories stop the churn as well as the growth
+- **`[profile.dev]` sets `debug = 1`.** Line tables only: a backtrace's function
+  names survive, which is how UI work here is diagnosed, and the artifacts are
+  far smaller
+- **`$CARGO_HOME`'s 2.8 GB registry cache is now auto-cleaned**
+  (`cache.auto-clean-frequency`, stable since Rust 1.88)
+
 ## 0.1.0 — Windows RC (in progress)
 
 First functional release: a local, single-file-database notes workspace.
 
+### 同步 (a page of its own)
+- **同步 is now a destination, not a settings section** (ADR-0132). It has its own
+  row in the sidebar between 任务 and 搜索, and three boxes — 设备 / 统计 / 日志 —
+  instead of two lines per device inside a 400 px popup that had to scroll. The
+  reference app makes it a page too, and a device table, its statistics and its log
+  are things you go to *look at*
+- **The device table carries what the row used to hide.** 设备 / 类型 / IP:端口 /
+  最后在线 / 最后同步, with an online dot and the two verbs (立即同步 / 忘记) per row.
+  立即同步 is disabled for a device that is not on the network, because dialling
+  one is the round that times out
+- **统计 says what a round moves.** What this device carries (笔记 / 任务 / 清单 /
+  页面 / 附件 / 总计) and, per device, 对端 … 本机 … 变化 … — the 变化 count is a
+  delta against the stored shadow, keyed by the 唯一 ID rather than the row number,
+  because a row number is per-device and would report every note as changed
+- **⟳ on the 同步 page re-reads the device list**, and 立即同步全部 starts a round
+  with every device on the network. They are separate buttons because they answer
+  different questions: "is anything there?" and "go and get it"
+- **The log is the whole record, not the last twelve lines**, and it has a
+  清空日志. A popup had no room for more; a page scrolls
+- **Three doors, one round.** The 笔记 list's 刷新, the page's 立即同步全部 and the
+  同步 row's right-click all start the same round through one function, so they
+  cannot become three different rounds. A device that is stored but not answering
+  is still named in the status line rather than silently skipped
+- 配对 stays gone (ADR-0128): a device is on this list because it announced
+  itself, and the 按 IP 添加 door stays gone for the same reason. No 安全码 column
+  either — the shadow is encrypted with the device key and this shell has nothing
+  to show you that you could check against the other screen
+
 ### 笔记 / 任务 (organizer)
+- **The 笔记 list is measured in ActivityWatch's pixels** (ADR-0133). The list
+  insets are 20/20/16/16, a card sits in a 5-above/6-below gutter, and its padding
+  is 10/10/14/10 — the reference's own numbers from `inboxpage.cpp`, which is what
+  makes a card read as a card in a column rather than as a row with a border drawn
+  round it. The search field is 240 px, and the age line and the body are 6 px
+  apart
+- **A sort box on 笔记** (最新创建 / 最新更新 / 按内容), the reference's three orders.
+  It is separate from 任务's sort rather than a fourth choice in it, because the
+  two halves' orders have nothing in common. 置顶 is not a sort mode — a pinned
+  note stays at the top under all three
+- **刷新 is now a ⟳ button** instead of a word, matching the reference's 30 px box
+- **An empty 笔记 list explains itself** — 还没有笔记 / 点击右下角 ＋ 新建一条 — and
+  says something different when a filter matched nothing, so a search that found
+  no rows does not tell you that you have no notes
 - **配对 is gone: a device on this LAN is a device we sync with** (ADR-0128).
   Open a second copy of Quire on the same network and the two find each other and
   start syncing — no 配对 button, no 发起配对, no 发起配对 row. The 同步 section is
