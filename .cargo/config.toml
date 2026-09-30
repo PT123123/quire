@@ -9,3 +9,13 @@
 # problem rather than a client one.
 [net]
 git-fetch-with-cli = true
+
+# The global download cache under $CARGO_HOME is 2.8 GB on this machine and
+# nothing was ever pruning it. `auto-clean-frequency` (stabilized in Rust 1.88)
+# makes cargo drop registry sources and index entries it has not touched in
+# three months, on whatever build happens to cross the interval — so the
+# cache stops being a thing that only grows. The ages are the cargo defaults;
+# only the frequency is set here, because "never" is the default and "never" is
+# the problem.
+[cache]
+auto-clean-frequency = "1 day"

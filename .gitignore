@@ -1,6 +1,11 @@
 /target
 /target-skia
 /target-wgpu
+# the screenshot tool's own tree (`just shot` builds it with --features software,
+# which is a different feature set and therefore a different unit from every other
+# build here — ADR-0134's reason for the extra directories). `just clean` removes
+# it; 16 GB of it was sitting untracked and one `git add -A` away from a commit.
+/target-shot
 /.scratch
 /.build
 /appdata

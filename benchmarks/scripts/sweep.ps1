@@ -109,7 +109,24 @@ $all = @(
     # list's header. "notes", "notes-filter" and "notes-detail" photograph those
     # three as themselves; the 标签建议 tray is the one shape nothing drew, so it is
     # the one new scene (with the dark twin the rest of the layer carries).
-    "notes-capture-suggest", "dark-notes-capture-suggest"
+    "notes-capture-suggest", "dark-notes-capture-suggest",
+    # ADR-0133: the notes half's card metrics and the two controls the plain list
+    # did not have. "notes" is the card stack itself (20/20/16/16 list insets,
+    # 5/6 gutters, 14/10 card padding) so the change is measured against the
+    # baseline; "notes-sort" is the sort list *open*, which is the only way to see
+    # what it costs and what it covers; "notes-empty" is the empty state, and it
+    # is swept *filtered* because an unfiltered one is what every first run
+    # already sees and proves nothing about the `filtered` branch.
+    "notes-sort", "notes-empty", "dark-notes-sort", "dark-notes-empty",
+    # ADR-0132: 同步 is a page now, not a settings section, so it is swept as
+    # three shapes (the device table, the statistics box, the log) rather than as
+    # a state of "settings" — a popup that used to hold two of them cannot be
+    # photographed as what it is.
+    "sync", "sync-stats", "sync-log",
+    "dark-sync", "dark-sync-stats", "dark-sync-log",
+    # The dialog itself, still swept: it is where 外观 / 局域网共享 / 存储 / 快捷键
+    # live, and ADR-0132 removed a section from it.
+    "settings", "dark-settings"
 )
 $targets = if ($Scenes -eq "") { $all } else { $Scenes -split ',' }
 

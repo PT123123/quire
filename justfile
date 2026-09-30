@@ -28,9 +28,18 @@ check:
 
 # headless visual shot: software-rendered PNG of the real UI, no window.
 # Scene names: default dark palette search-notes menu rename settings dialog empty
+#
+# The separate `--target-dir` is the point of this recipe (ADR-0134). `software`
+# is a *different feature set* from the default `femtovg`, so cargo sees the two
+# builds as unrelated units: sharing one target directory meant it kept every
+# unit it had ever produced for this crate, and because the app's rlib is ~1 GB
+# with debug info, alternating between `just run` and `just shot` accumulated 26
+# copies of the same library — 63 GB of the shell's 71. `target-shot` is its own
+# directory, so a shot no longer invalidates the app build and the two do not
+# compete for the same space; `just clean` removes it.
 shot scene="default":
-    cargo build --features software --bin quire-shot
-    .\target\debug\quire-shot.exe --out .scratch\shots\latest.bmp --scene {{ scene }}
+    cargo build --features software --bin quire-shot --target-dir target-shot
+    .\target-shot\debug\quire-shot.exe --out .scratch\shots\latest.bmp --scene {{ scene }}
     powershell -NoProfile -ExecutionPolicy Bypass -File benchmarks\scripts\shot2png.ps1
 
 # package the release exe into a zip (M8-lite; installer comes later)
@@ -38,18 +47,15 @@ dist:
     cargo build --release
     powershell -NoProfile -ExecutionPolicy Bypass -File benchmarks\scripts\dist.ps1
 
-# deploy a release into the workshop, in two places: the archive folder
-# C:\workshop\quire-desktop-<version>\quire.exe and the install
-# C:\workshop\quire-desktop\quire.exe — the path the app is *run* from, which
-# every deploy overwrites in place. The name is `quire-desktop`, the shell: the
-# workshop lists one folder per release of several applications, and a bare
-# `quire-<version>` would not say which of the two shells put it there. The
-# script bumps [package] version's patch, builds, commits and pushes the bump,
-# then asks any instance running from the install path to end its own session
-# through the app's quit channel and waits for it — asked, never killed, because
-# a killed session loses the flush and the clean-exit record (ADR-0105) — and
-# only then copies. The bump has to precede the build because build.rs stamps
-# the exe's version block from that same key.
+# deploy a release into the workshop's archive: one folder per release,
+# C:\workshop\quire-desktop-<version>\quire.exe. The name is `quire-desktop`,
+# the shell: the workshop lists one folder per release of several applications,
+# and a bare `quire-<version>` would not say which of the two shells put it
+# there. The script bumps [package] version's patch, builds, and commits and
+# pushes the bump; the archive folder is new every release, so nothing is ever
+# overwritten and no running instance is ever in the way (ADR-0139). The bump
+# has to precede the build because build.rs stamps the exe's version block from
+# that same key.
 #
 # The build is ~2m30s, and that is one crate's codegen rather than a cold cache:
 # the bump invalidates the whole `quire` crate, and `[profile.release]`'s
@@ -89,7 +95,23 @@ verify-portable:
 verify-install:
     powershell -NoProfile -ExecutionPolicy Bypass -File install\verify-installer.ps1
 
-# remove build artifacts: ./target + skia/wgpu benchmark target dirs
+# remove every build artifact: ./target plus the benchmark and screenshot dirs
 clean:
     cargo clean
-    Remove-Item -Recurse -Force target-skia, target-wgpu -ErrorAction SilentlyContinue
+    Remove-Item -Recurse -Force target-shot, target-skia, target-wgpu -ErrorAction SilentlyContinue
+
+# drop what a build can regenerate *without* giving up incrementality (ADR-0134).
+#
+# `cargo clean` is all-or-nothing: it throws away the 7.6 GB release tree and
+# the next `just deploy-workshop` pays a full rebuild. This recipe instead
+# removes only the two things that grow without bound — the incremental caches
+# (7.5 GB of them, one directory per unit per session) and the per-unit build
+# script output (`target/debug/build`, 6.7 GB, of which 15 near-identical
+# 250 MB `build_script_build` copies were the bulk). The compiled artifacts stay,
+# so the next build is a link, not a recompile.
+sweep:
+    powershell -NoProfile -ExecutionPolicy Bypass -File install\sweep.ps1
+
+# what `target` is made of, largest first — for when it is big again
+size:
+    powershell -NoProfile -ExecutionPolicy Bypass -File install\size.ps1

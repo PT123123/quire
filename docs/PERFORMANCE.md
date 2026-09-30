@@ -2049,8 +2049,9 @@ document on the `databases` row, and no key in `settings` — theme, `window.*`,
 Two things that are **not** covered by the exemption, both checked rather than assumed:
 
 * A batch that mixes a settings row with anything else still spends it — the predicate is
-  `all(SettingSet)`, not `any` — and no site writes such a batch today (`record_window_size`
-  pairs two settings rows; the builtin-template seeding records its flag in its *own* batch,
+  `all(SettingSet)`, not `any` — and no site writes such a batch today
+  (`record_window_geometry` writes four settings rows and nothing else; the
+  builtin-template seeding records its flag in its *own* batch,
   after the template pages, which each spent the stamp on their way in), so the exemption's
   blast radius is exactly the announcement path; and
 * zoom and window-size changes do not need the stamp at all. The cache key's `wanted`
