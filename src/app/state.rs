@@ -138,6 +138,12 @@ pub struct AppState {
     ui: RefCell<Option<slint::Weak<crate::UIState<'static>>>>,
     /// Persisted recent-page ids, restored before first open.
     recents_restored: Cell<Vec<i32>>,
+    /// The two sidebar sections' fold (收藏 / 最近). Session-only: a restart
+    /// starts collapsed — the tree, the thing people open by, first. Lives
+    /// here rather than on UIState because the headless rebuilds (tests, the
+    /// first frame) must reach it too.
+    pub favorites_open: Cell<bool>,
+    pub recents_open: Cell<bool>,
     /// Startup notices (abort banner, backup restore, library move) — more
     /// than one can queue; the controller drains them as one line and shows
     /// it once in the shell.
@@ -1062,6 +1068,8 @@ impl AppState {
             base_scale: Cell::new(1.0),
             restore_geometry: RefCell::new(None),
             recents_restored: Cell::new(restored_recents),
+            favorites_open: Cell::new(false),
+            recents_open: Cell::new(false),
             ui: RefCell::new(None),
             db_notice: RefCell::new(
                 abort_notice
@@ -1204,30 +1212,56 @@ impl AppState {
         let push = |rows: &mut Vec<SidebarNode>, y: &mut i32, node: SidebarNode| {
             let mut n = node;
             n.y = *y;
-            *y += if n.kind == "header" { 26 } else { 28 };
+            // A replica row (收藏 / 最近) is one step shorter than a tree row:
+            // a shortcut reads quieter than the page it re-lists, and the
+            // SidebarItem paints the same 24 px the projection reserves here.
+            *y += if n.kind == "header" {
+                26
+            } else if n.kind == "favorite" || n.kind == "recent" {
+                24
+            } else {
+                28
+            };
             rows.push(n);
         };
 
+        // The two sections fold, and the fold is the UI's fact, not the
+        // workspace's: the toggle wrote it here, session-only.
+        let favorites_open = self.favorites_open.get();
+        let recents_open = self.recents_open.get();
+
         let favorites = ws.favorites();
         if !favorites.is_empty() {
-            push(&mut rows, &mut y, header("收藏"));
-            for (id, title) in favorites {
-                push(
-                    &mut rows,
-                    &mut y,
-                    leaf_row(id, &title, "favorite", false, icon_mark(&ws, id)),
-                );
+            push(
+                &mut rows,
+                &mut y,
+                header("收藏", HEADER_FAVORITES_ID, favorites_open),
+            );
+            if favorites_open {
+                for (id, title) in favorites {
+                    push(
+                        &mut rows,
+                        &mut y,
+                        leaf_row(id, &title, "favorite", false, icon_mark(&ws, id)),
+                    );
+                }
             }
         }
         let recents = ws.recents();
         if !recents.is_empty() {
-            push(&mut rows, &mut y, header("最近"));
-            for (id, title) in recents.iter().take(MAX_RECENTS) {
-                push(
-                    &mut rows,
-                    &mut y,
-                    leaf_row(*id, title, "recent", false, icon_mark(&ws, *id)),
-                );
+            push(
+                &mut rows,
+                &mut y,
+                header("最近", HEADER_RECENTS_ID, recents_open),
+            );
+            if recents_open {
+                for (id, title) in recents.iter().take(MAX_RECENTS) {
+                    push(
+                        &mut rows,
+                        &mut y,
+                        leaf_row(*id, title, "recent", false, icon_mark(&ws, *id)),
+                    );
+                }
             }
         }
 
@@ -1580,6 +1614,17 @@ impl AppState {
     }
 
     pub fn set_ui(&self, ui: slint::Weak<crate::UIState<'static>>) {        *self.ui.borrow_mut() = Some(ui);
+    }
+
+    /// Flips one of the two sidebar sections' fold (the headers 收藏 / 最近).
+    /// The id is one of the `HEADER_*_ID` constants — the same space the tree's
+    /// rows use, which is what the click reported.
+    pub fn sidebar_section_toggled(&self, id: i32) {
+        match id {
+            HEADER_FAVORITES_ID => self.favorites_open.set(!self.favorites_open.get()),
+            HEADER_RECENTS_ID => self.recents_open.set(!self.recents_open.get()),
+            _ => {}
+        }
     }
 
     /// Word/char counts for the editor footer (display-only push).
@@ -4987,13 +5032,6 @@ impl AppState {
                 -1,
                 false,
             )],
-            // The 同步 page is a place, so its row's menu is the way there plus
-            // the round itself — the same two verbs the page's own toolbar
-            // carries, and the same ones the note list's 刷新 offers.
-            ROW_PINNED_SYNC => vec![
-                row(MENU_SIDE_OPEN_SYNC, "打开同步", "sync", false, -1, false),
-                row(MENU_SIDE_SYNC_NOW, "立即同步全部", "refresh", false, -1, false),
-            ],
             _ => Vec::new(),
         };
         self.menu.set_vec(rows);
@@ -5469,7 +5507,7 @@ pub const PAGE_CHINESE: i32 = 112;
 pub const PAGE_SCRATCHPAD: i32 = 113;
 
 pub const ROW_NEW_PAGE: i32 = -2;
-/// The rows the rail pins above the tree — 笔记 / 任务 / 同步 / 搜索 / 设置. They are
+/// The rows the rail pins above the tree — 笔记 / 任务 / 搜索 / 设置. They are
 /// hardcoded in `Sidebar.slint` rather than coming from the page model, so they
 /// need ids of their own to travel on `menu-node-id` when one of them is asked
 /// for its menu. Negative like `ROW_NEW_PAGE` and the Workspace header, so a real
@@ -5478,10 +5516,13 @@ pub const ROW_PINNED_NOTE: i32 = -10;
 pub const ROW_PINNED_TASK: i32 = -11;
 pub const ROW_PINNED_SEARCH: i32 = -12;
 pub const ROW_PINNED_SETTINGS: i32 = -13;
-/// 同步 is a pinned row like the other two places (ADR-0132): it is a
-/// destination the user walks to, not a panel over whatever is open — which is
-/// exactly why it is a row and not a second settings section.
-pub const ROW_PINNED_SYNC: i32 = -14;
+
+/// The two sidebar section headers that fold (the `SidebarItem`'s `is-section`
+/// test repeats the literals). 收藏 / 最近 default collapsed — the tree is the
+/// library's index, the sections are shortcuts on top of it — and the id is
+/// what the header's click reports so the controller knows which fold to flip.
+pub const HEADER_FAVORITES_ID: i32 = -15;
+pub const HEADER_RECENTS_ID: i32 = -16;
 
 // Context-menu action ids.
 pub const MENU_NEW_SUBPAGE: i32 = 1;
@@ -5539,11 +5580,6 @@ pub const MENU_SIDE_OPEN_NOTE: i32 = 33;
 pub const MENU_SIDE_NEW_NOTE: i32 = 34;
 pub const MENU_SIDE_OPEN_TASK: i32 = 35;
 pub const MENU_SIDE_OPEN_SEARCH: i32 = 36;
-/// The 同步 row's two items (ADR-0132). In the same gap as the rest, and above
-/// the organizer's range so the one dispatcher can still tell the two families
-/// apart by number.
-pub const MENU_SIDE_OPEN_SYNC: i32 = 37;
-pub const MENU_SIDE_SYNC_NOW: i32 = 38;
 
 // ─── SPEC §四十一: the organizer's task menu ────────────────────────────────
 //
@@ -5617,13 +5653,13 @@ pub const PAGE_FONT_BASE: i32 = 700_000;
 /// that moves a page to the top level. Page rows target themselves.
 pub const WORKSPACE_HEADER_ID: i32 = -100;
 
-fn header(label: &str) -> SidebarNode {
+fn header(label: &str, id: i32, expanded: bool) -> SidebarNode {
     SidebarNode {
-        id: -1,
+        id,
         label: label.into(),
         kind: "header".into(),
         depth: 0,
-        expanded: false,
+        expanded,
         has_children: false,
         selected: false,
         y: 0,
@@ -17090,7 +17126,8 @@ fn org_strip_lead(line: &str) -> String {
 mod tests {
     use super::{
         mock_commands, palette_action, start_stop, FindHits, Lang, NavHistory, NavStop,
-        CMD_NAV_BACK, CMD_NAV_FORWARD, CMD_OPEN_HTML, CMD_PAGE_BASE, NAV_MAX, PaletteAction,
+        CMD_NAV_BACK, CMD_NAV_FORWARD, CMD_OPEN_HTML, CMD_PAGE_BASE, HEADER_FAVORITES_ID,
+        NAV_MAX, PaletteAction,
     };
     use crate::app::workspace::Workspace;
     use crate::core::persistence::Change;
@@ -19335,6 +19372,11 @@ mod tests {
         use slint::Model as _;
 
         let state = AppState::new(&plain_args(), None);
+        // The 收藏 section folds and defaults closed, so its rows are not in
+        // the model until it is opened — which is what the rows this test
+        // reads need.
+        state.sidebar_section_toggled(HEADER_FAVORITES_ID);
+        state.rebuild_sidebar();
         // A page can be in the sidebar twice — as a favorite or a recent, and
         // as its own tree row — and the two answer differently, so the lookup
         // is by both id and kind.

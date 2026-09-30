@@ -1,7 +1,10 @@
 // Integration tests: exercise the workspace model and the state projection
 // through the public crate API, the way a future `core/` consumer would.
 
-use quire::app::state::{core_page_id, AppState, HandleArgs, BLOCK_PARAGRAPH, PAGE_GETTING_STARTED};
+use quire::app::state::{
+    core_page_id, AppState, HandleArgs, HEADER_FAVORITES_ID, HEADER_RECENTS_ID,
+    BLOCK_PARAGRAPH, PAGE_GETTING_STARTED,
+};
 use quire::app::workspace::Workspace;
 use slint::Model;
 
@@ -53,6 +56,10 @@ fn search_finds_unopened_page_content() {
 fn sidebar_projection_shape() {
     let args = HandleArgs { blocks: 0, auto_exit_secs: 0.0, bench_pages: 0, pictures: 0, marks: 0, code: 0 };
     let state = AppState::new(&args, None);
+    // 收藏 / 最近 fold by default; the section rows this shape asserts on are
+    // only projected while both sections are open.
+    state.sidebar_section_toggled(HEADER_FAVORITES_ID);
+    state.sidebar_section_toggled(HEADER_RECENTS_ID);
     let rows = state.build_sidebar_rows();
     // sections in order, y offsets strictly increasing, no duplicate ids
     let kinds: Vec<&str> = rows.iter().map(|r| r.kind.as_str()).collect();

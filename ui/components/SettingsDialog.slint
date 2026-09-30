@@ -1,10 +1,19 @@
-// Settings popup (M2 scope: appearance + about). Real settings persistence
-// arrives with SQLite in M3.
+// Settings popup: five tabs (外观 / 通用 / 同步 / 快捷键 / 关于) over one
+// searchable card. Real settings persistence arrives with SQLite in M3.
+//
+// The search field at the top filters the card live: what was typed narrows
+// every section and every row to the ones whose keywords match. The match
+// itself is Rust's (`UIState.settings-match` — a .slint expression cannot ask
+// whether one sentence contains another), and because a `visible: false` item
+// keeps its slot in a layout, every filtered element is a conditional (`if`)
+// child instead — the same lesson A4's sweep paid for.
 
 import { Theme } from "../Theme.slint";
 import { Colors } from "../Colors.slint";
 import { Typography } from "../Typography.slint";
+import { Icon } from "../Icons.slint";
 import { Button } from "./Button.slint";
+import { SyncPage } from "./SyncPage.slint";
 import { UIState } from "../Types.slint";
 
 // One palette swatch of the theme picker (ADR: the theme catalog). The card
@@ -54,7 +63,7 @@ component ThemeCard inherits Rectangle {
 // library, and all three used to be a bare `Text`: a `Text` in Slint cannot be
 // focused, cannot hold a selection, and Ctrl+C over it reaches whatever focused
 // input was last — which in a dialog whose only input is the 0×0 Escape proxy
-// is nothing at all. So the one string a person needs was the one string they
+// is nothing at all. So the one string a person needed was the one string they
 // could not take away.
 //
 // A `TextInput` with `read-only` is the fix and it is exactly the right size: it
@@ -76,7 +85,7 @@ component CopyableText inherits Rectangle {
     in property <length> font-size: Typography.size-ui;
     in property <color> ink: Colors.text-primary;
     // Wrapped rather than elided, and off for the short values (a version, a
-    // renderer name). A data folder is a long path in a 400 px card: elided, the
+    // renderer name). A data folder is a long path in a wide card: elided, the
     // half that matters is the tail nobody can see, and a selected-then-copied
     // elision is worse than no text at all — it looks right and is wrong.
     in property <bool> wrap: false;
@@ -132,12 +141,125 @@ component ShortcutRow inherits Rectangle {
     }
 }
 
+// One switch row of the 通用 tab: the label that says what it does, and the
+// 40x22 track with the 18 px knob. A shared component rather than four copies
+// of the same markup, and it carries the row's own search keywords — a row
+// that filters away must take its keywords with it.
+component ToggleRow inherits HorizontalLayout {
+    in property <string> label;
+    in property <string> keywords;
+    in property <bool> on;
+    callback toggled(bool);
+
+    visible: UIState.settings-filter == "" || UIState.settings-match(root.keywords);
+    spacing: Theme.spacing-sm;
+
+    // Copyable (ADR-0135), because a toggle's own label is the text a
+    // user copies when asking which setting is on.
+    CopyableText {
+        text: root.label;
+        font-size: Typography.size-ui;
+        ink: Colors.text-secondary;
+        wrap: true;
+        horizontal-stretch: 1;
+    }
+    Rectangle {
+        width: 40px;
+        height: 22px;
+        border-radius: 11px;
+        background: root.on ? Colors.accent : Colors.border-strong;
+        animate background { duration: Theme.duration-fast; }
+        TouchArea {
+            mouse-cursor: MouseCursor.pointer;
+            clicked => {
+                root.toggled(!root.on);
+            }
+        }
+        Rectangle {
+            x: root.on ? parent.width - self.width - 2px : 2px;
+            y: 2px;
+            width: 18px;
+            height: 18px;
+            border-radius: 9px;
+            background: Colors.surface-overlay;
+            animate x { duration: Theme.duration-fast; }
+        }
+    }
+}
+
+// A section caption + the rule that folds a section away. The keywords are the
+// section's union — every row inside repeats the section's own name, so a
+// caption that matches always has at least one row matching beneath it: a
+// heading with nothing under it is a content bug drawn as chrome.
+component SettingsSection inherits VerticalLayout {
+    in property <string> label;
+    in property <string> keywords;
+    // shown by tab when the field is empty, by the match when it is not
+    in property <bool> open;
+
+    spacing: Theme.spacing-md;
+    Rectangle {
+        height: 1px;
+        background: Colors.border;
+    }
+    Text {
+        text: root.label;
+        font-size: Typography.size-caption;
+        font-weight: Typography.weight-semibold;
+        color: Colors.text-muted;
+    }
+}
+
+// The 外观 / 通用 / 同步 / 快捷键 / 关于 switch. A segmented box rather than
+// five free buttons: the lit quarter *is* the answer, and the box around them
+// says they are alternatives — the same idiom the sync panel's 设备/统计/日志
+// uses. Hidden while the search filters, because a tab is a place and a search
+// result list is not.
+component SettingsTabs inherits Rectangle {
+    in property <int> selected;
+    callback picked(int);
+
+    height: 30px;
+    border-radius: Theme.radius-sm;
+    border-width: 1px;
+    border-color: Colors.border;
+    background: transparent;
+    clip: true;
+
+    HorizontalLayout {
+        for entry[i] in ["外观", "通用", "同步", "快捷键", "关于"] : Rectangle {
+            // A selected box is a **state**, not an emphasis, for ADR-0118's
+            // reason: `surface-selected` is a 22%-accent mix — a saturated
+            // plate. A raised surface with the label in the primary colour says
+            // the same thing quietly.
+            background: root.selected == i ? Colors.surface-hover : transparent;
+            animate background { duration: Theme.duration-instant; }
+            Text {
+                width: parent.width;
+                height: parent.height;
+                text: entry;
+                font-family: Typography.ui-font;
+                font-size: Typography.size-ui;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                color: root.selected == i ? Colors.text-primary : Colors.text-muted;
+            }
+            TouchArea {
+                mouse-cursor: MouseCursor.pointer;
+                clicked => { root.picked(i); }
+            }
+        }
+    }
+}
+
 export component SettingsDialog inherits PopupWindow {
-    width: 400px;
+    // 560 px rather than the 400 it used to be: the 同步 tab moved back in
+    // (ADR-0132's destination, retired as a page) and a device row with its
+    // two verbs needs the room. The theme cards fit four across at this width.
+    width: 560px;
     // The card grows with its sections but never past the window it is drawn
-    // in: once the sync section landed the list outgrew a short window (and a
-    // phone at the touch scale), and a dialog whose bottom rows are off-screen
-    // has no way back — so the content scrolls instead (see the Flickable).
+    // in: a dialog whose bottom rows are off-screen has no way back — so the
+    // content scrolls instead (see the Flickable).
     height: Math.min(
         content-col.preferred-height + Theme.spacing-lg * 2,
         Math.max(UIState.window-h - 80px, 320px)
@@ -153,8 +275,9 @@ export component SettingsDialog inherits PopupWindow {
     property <bool> opened: UIState.settings-open;
     changed opened => {
         if (UIState.settings-open) {
-            // steal focus so Esc reaches the input below
-            focus-proxy.focus();
+            // the search field takes the first focus: it is the one input the
+            // dialog exists to serve now
+            search-input.focus();
         }
     }
 
@@ -208,377 +331,343 @@ export component SettingsDialog inherits PopupWindow {
                     font-size: Typography.size-h3;
                     font-weight: Typography.weight-semibold;
                     color: Colors.text-primary;
-            }
-
-            Text {
-                text: "外观";
-                font-size: Typography.size-caption;
-                font-weight: Typography.weight-semibold;
-                color: Colors.text-muted;
-            }
-            // AW's twelve themes, preceded by the one id that is not a palette
-            // (跟随系统) (ADR: the theme catalog). Each card previews its own
-            // ramp, so the picker reads without a legend. `FlexboxLayout` wraps
-            // by default, which is what this needs: the dialog is a fixed
-            // 400 px and the number of themes is data, not a layout decision.
-            FlexboxLayout {
-                width: parent.width;
-                spacing: Theme.spacing-sm;
-                ThemeCard {
-                    label: "跟随系统";
-                    preview: Colors.page;
-                    ink: Colors.text-primary;
-                    active: UIState.theme == "system";
-                    clicked => {
-                        UIState.set-theme("system");
-                    }
                 }
-                for t in Colors.themes : ThemeCard {
-                    label: t.emoji + " " + t.name;
-                    preview: @linear-gradient(180deg, t.bg, t.grad2);
-                    ink: t.fg;
-                    active: UIState.theme == t.id;
-                    clicked => {
-                        UIState.set-theme(t.id);
-                    }
-                }
-            }
 
-            Rectangle { height: 1px; background: Colors.border; }
-
-            Text {
-                text: "笔记";
-                font-size: Typography.size-caption;
-                font-weight: Typography.weight-semibold;
-                color: Colors.text-muted;
-            }
-            HorizontalLayout {
-                spacing: Theme.spacing-sm;
-                // Copyable (ADR-0135), because a toggle's own label is the text a
-                // user copies when asking which setting is on — and these two are
-                // the only prose in the dialog that is not itself a value.
-                CopyableText {
-                    text: "启动时自动弹出新建笔记输入框";
-                    font-size: Typography.size-ui;
-                    ink: Colors.text-secondary;
-                    wrap: true;
-                    horizontal-stretch: 1;
-                }
-                Rectangle {
-                    width: 40px;
-                    height: 22px;
-                    border-radius: 11px;
-                    background: UIState.org-auto-input ? Colors.accent : Colors.border-strong;
-                    animate background { duration: Theme.duration-fast; }
-                    TouchArea {
-                        mouse-cursor: MouseCursor.pointer;
-                        clicked => {
-                            UIState.org-auto-input = !UIState.org-auto-input;
-                            UIState.org-auto-input-toggled(UIState.org-auto-input);
+                // ── the search field ─────────────────────────────────────
+                // Type and the card narrows: tabs fold away and every section
+                // whose keywords match shows its matching rows. The match is
+                // Rust's; this field only holds what was typed.
+                search-field := Rectangle {
+                    height: 32px;
+                    border-radius: Theme.radius-sm;
+                    background: Colors.background;
+                    border-width: 1px;
+                    border-color: search-input.has-focus ? Colors.accent : Colors.border;
+                    HorizontalLayout {
+                        padding-left: Theme.spacing-sm;
+                        padding-right: Theme.spacing-sm;
+                        spacing: Theme.spacing-sm;
+                        Icon {
+                            vertical-stretch: 0;
+                            cross-axis-self-alignment: center;
+                            width: 14px;
+                            height: 14px;
+                            size: 14px;
+                            name: "search";
+                            color: Colors.text-muted;
+                        }
+                        // the field's body: the input fills it, and the
+                        // placeholder sits over it — a sibling rather than a
+                        // property, because this Slint's TextInput carries no
+                        // placeholder-text
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            height: 28px;
+                            search-input := TextInput {
+                                y: (parent.height - self.preferred-height) / 2;
+                                width: parent.width;
+                                text <=> UIState.settings-filter;
+                                single-line: true;
+                                font-family: Typography.ui-font;
+                                font-size: Typography.size-ui;
+                                color: Colors.text-primary;
+                                selection-foreground-color: Colors.text-primary;
+                                selection-background-color: Colors.selection;
+                                key-pressed(event) => {
+                                    if (event.text == Key.Escape) {
+                                        UIState.settings-close-requested();
+                                        accept
+                                    } else {
+                                        reject
+                                    }
+                                }
+                            }
+                            if UIState.settings-filter == "" && !search-input.has-focus : Text {
+                                width: parent.width;
+                                height: parent.height;
+                                text: "搜索设置…";
+                                font-family: Typography.ui-font;
+                                font-size: Typography.size-ui;
+                                color: Colors.text-muted;
+                                vertical-alignment: center;
+                            }
                         }
                     }
-                    Rectangle {
-                        x: UIState.org-auto-input ? parent.width - self.width - 2px : 2px;
-                        y: 2px;
-                        width: 18px;
-                        height: 18px;
-                        border-radius: 9px;
-                        background: Colors.surface-overlay;
-                        animate x { duration: Theme.duration-fast; }
-                    }
                 }
-            }
 
-            Rectangle { height: 1px; background: Colors.border; }
-
-            Text {
-                text: "快捷键";
-                font-size: Typography.size-caption;
-                font-weight: Typography.weight-semibold;
-                color: Colors.text-muted;
-            }
-            // 全局快捷键: off in a library that never wrote the rows, which is
-            // the default — a keystroke that works in every other application
-            // is the user's to ask for, not the app's to assume.
-            HorizontalLayout {
-                spacing: Theme.spacing-sm;
-                CopyableText {
-                    text: "全局 Alt+N 新建笔记";
-                    font-size: Typography.size-ui;
-                    ink: Colors.text-secondary;
-                    wrap: true;
-                    horizontal-stretch: 1;
+                // the tabs, only when nothing is being searched: a tab is a
+                // place, and a search result list is not
+                if UIState.settings-filter == "" : SettingsTabs {
+                    selected: UIState.settings-tab;
+                    picked(slot) => { UIState.settings-tab = slot; }
                 }
-                Rectangle {
-                    width: 40px;
-                    height: 22px;
-                    border-radius: 11px;
-                    background: UIState.hotkey-alt-n ? Colors.accent : Colors.border-strong;
-                    animate background { duration: Theme.duration-fast; }
-                    TouchArea {
-                        mouse-cursor: MouseCursor.pointer;
-                        clicked => {
-                            UIState.hotkey-alt-n = !UIState.hotkey-alt-n;
-                            UIState.hotkey-alt-n-toggled(UIState.hotkey-alt-n);
+
+                // ── 外观 ─────────────────────────────────────────────────
+                if (UIState.settings-filter == ""
+                    ? UIState.settings-tab == 0
+                    : UIState.settings-match("外观 主题 跟随系统 深色 浅色 配色 theme"))
+                : SettingsSection {
+                    label: "外观";
+                    open: true;
+                    // AW's twelve themes, preceded by the one id that is not a
+                    // palette (跟随系统) (ADR: the theme catalog). Each card
+                    // previews its own ramp, so the picker reads without a
+                    // legend. `FlexboxLayout` wraps by default, which is what
+                    // this needs: the number of themes is data, not a layout
+                    // decision.
+                    FlexboxLayout {
+                        width: parent.width;
+                        spacing: Theme.spacing-sm;
+                        ThemeCard {
+                            label: "跟随系统";
+                            preview: Colors.page;
+                            ink: Colors.text-primary;
+                            active: UIState.theme == "system";
+                            clicked => {
+                                UIState.set-theme("system");
+                            }
+                        }
+                        for t in Colors.themes : ThemeCard {
+                            label: t.emoji + " " + t.name;
+                            preview: @linear-gradient(180deg, t.bg, t.grad2);
+                            ink: t.fg;
+                            active: UIState.theme == t.id;
+                            clicked => {
+                                UIState.set-theme(t.id);
+                            }
                         }
                     }
-                    Rectangle {
-                        x: UIState.hotkey-alt-n ? parent.width - self.width - 2px : 2px;
-                        y: 2px;
-                        width: 18px;
-                        height: 18px;
-                        border-radius: 9px;
-                        background: Colors.surface-overlay;
-                        animate x { duration: Theme.duration-fast; }
-                    }
                 }
-            }
-            HorizontalLayout {
-                spacing: Theme.spacing-sm;
-                CopyableText {
-                    text: "全局 Alt+M 显示主界面";
-                    font-size: Typography.size-ui;
-                    ink: Colors.text-secondary;
-                    wrap: true;
-                    horizontal-stretch: 1;
-                }
-                Rectangle {
-                    width: 40px;
-                    height: 22px;
-                    border-radius: 11px;
-                    background: UIState.hotkey-alt-m ? Colors.accent : Colors.border-strong;
-                    animate background { duration: Theme.duration-fast; }
-                    TouchArea {
-                        mouse-cursor: MouseCursor.pointer;
-                        clicked => {
-                            UIState.hotkey-alt-m = !UIState.hotkey-alt-m;
-                            UIState.hotkey-alt-m-toggled(UIState.hotkey-alt-m);
+
+                // ── 通用 ─────────────────────────────────────────────────
+                if (UIState.settings-filter == ""
+                    ? UIState.settings-tab == 1
+                    : UIState.settings-match("通用 笔记 启动 新建 输入框 快捷键 全局 共享 局域网 存储 数据文件夹 备份 清理 文件夹"))
+                : SettingsSection {
+                    label: "通用";
+                    open: true;
+
+                    ToggleRow {
+                        label: "启动时自动弹出新建笔记输入框";
+                        keywords: "通用 笔记 启动 新建 输入框 自动 弹出";
+                        on: UIState.org-auto-input;
+                        toggled(v) => {
+                            UIState.org-auto-input = v;
+                            UIState.org-auto-input-toggled(v);
                         }
                     }
-                    Rectangle {
-                        x: UIState.hotkey-alt-m ? parent.width - self.width - 2px : 2px;
-                        y: 2px;
-                        width: 18px;
-                        height: 18px;
-                        border-radius: 9px;
-                        background: Colors.surface-overlay;
-                        animate x { duration: Theme.duration-fast; }
+                    ToggleRow {
+                        label: "全局 Alt+N 新建笔记";
+                        keywords: "通用 快捷键 全局 新建笔记 alt+n alt";
+                        on: UIState.hotkey-alt-n;
+                        toggled(v) => {
+                            UIState.hotkey-alt-n = v;
+                            UIState.hotkey-alt-n-toggled(v);
+                        }
                     }
-                }
-            }
-            Text {
-                text: "开启后在任何应用前台都生效；与笔记页的 ＋ 是同一个输入框，含标签建议。";
-                font-size: Typography.size-caption;
-                color: Colors.text-muted;
-                wrap: TextWrap.word-wrap;
-            }
-
-            Rectangle { height: 1px; background: Colors.border; }
-
-            Text {
-                text: "共享";
-                font-size: Typography.size-caption;
-                font-weight: Typography.weight-semibold;
-                color: Colors.text-muted;
-            }
-            HorizontalLayout {
-                spacing: Theme.spacing-sm;
-                CopyableText {
-                    text: "在局域网内只读共享（端口 5877，重启后生效）";
-                    font-size: Typography.size-ui;
-                    ink: Colors.text-secondary;
-                    wrap: true;
-                    horizontal-stretch: 1;
-                }
-                Rectangle {
-                    width: 40px;
-                    height: 22px;
-                    border-radius: 11px;
-                    background: UIState.lan-sharing ? Colors.accent : Colors.border-strong;
-                    animate background { duration: Theme.duration-fast; }
-                    TouchArea {
-                        mouse-cursor: MouseCursor.pointer;
-                        clicked => {
-                            UIState.lan-sharing = !UIState.lan-sharing;
+                    ToggleRow {
+                        label: "全局 Alt+M 显示主界面";
+                        keywords: "通用 快捷键 全局 显示主界面 alt+m alt";
+                        on: UIState.hotkey-alt-m;
+                        toggled(v) => {
+                            UIState.hotkey-alt-m = v;
+                            UIState.hotkey-alt-m-toggled(v);
+                        }
+                    }
+                    if (UIState.settings-filter == ""
+                        || UIState.settings-match("通用 快捷键 全局 任何应用前台 生效"))
+                    : Text {
+                        text: "开启后在任何应用前台都生效；与笔记页的 ＋ 是同一个输入框，含标签建议。";
+                        font-size: Typography.size-caption;
+                        color: Colors.text-muted;
+                        wrap: TextWrap.word-wrap;
+                    }
+                    ToggleRow {
+                        label: "在局域网内只读共享（端口 5877，重启后生效）";
+                        keywords: "通用 共享 局域网 只读 端口 5877 lan";
+                        on: UIState.lan-sharing;
+                        toggled(v) => {
+                            UIState.lan-sharing = v;
                             UIState.toggle-lan-sharing();
                         }
                     }
+
+                    // ── 存储, the one block that is not a toggle ──────────
+                    if (UIState.settings-filter == ""
+                        || UIState.settings-match("通用 存储 数据文件夹 备份 清理 打开文件夹"))
+                    : VerticalLayout {
+                        spacing: Theme.spacing-sm;
+                        HorizontalLayout {
+                            spacing: Theme.spacing-sm;
+                            VerticalLayout {
+                                horizontal-stretch: 1;
+                                spacing: 2px;
+                                CopyableText {
+                                    text: "数据文件夹";
+                                    font-size: Typography.size-ui;
+                                    ink: Colors.text-secondary;
+                                }
+                                // Wrapped, and copyable (ADR-0135) — this is the single most
+                                // copied string in the app, and it used to be the one string
+                                // that could not be copied at all: a `Text`, which cannot hold
+                                // a selection, drawn `no-wrap` with `overflow: elide`, so the
+                                // path was both unselectable and truncated. Wrapping makes the
+                                // whole path visible; the read-only input makes it takeable.
+                                CopyableText {
+                                    text: UIState.storage-available ? UIState.data-dir
+                                        : "内存中运行 — 未挂载数据库";
+                                    font-size: Typography.size-caption;
+                                    ink: UIState.storage-available ? Colors.text-primary : Colors.text-muted;
+                                    mono: true;
+                                    wrap: true;
+                                }
+                            }
+                            // A `visible: false` item keeps its slot in a Slint
+                            // layout, so these three are conditional children
+                            // instead: hidden, they still stole width from the
+                            // label above.
+                            if UIState.storage-available : HorizontalLayout {
+                                spacing: Theme.spacing-sm;
+                                Button {
+                                    text: "打开文件夹";
+                                    clicked => {
+                                        UIState.open-data-folder();
+                                    }
+                                }
+                                Button {
+                                    text: "备份";
+                                    clicked => {
+                                        UIState.backup-now();
+                                    }
+                                }
+                                Button {
+                                    text: "清理";
+                                    clicked => {
+                                        UIState.reclaim-attachments();
+                                    }
+                                }
+                            }
+                        }
+                        // one line about the only button here that deletes anything: the
+                        // notice it reports through is a toast, so the rule has to be
+                        // readable before the click (SPEC §三十七, ADR-0037)
+                        if UIState.storage-available : CopyableText {
+                            text: "清理会删除没有被任何块、撤销步骤或复制块引用的图片和文件。";
+                            font-size: Typography.size-caption;
+                            ink: Colors.text-muted;
+                            wrap: true;
+                        }
+                    }
+                }
+
+                // ── 同步 ─────────────────────────────────────────────────
+                // ADR-0132's destination, back as a tab. The panel carries its
+                // own heading, so the section needs no caption of its own — the
+                // filter keywords still live here, on the door.
+                if (UIState.settings-filter == ""
+                    ? UIState.settings-tab == 2
+                    : UIState.settings-match("同步 局域网 设备 统计 日志 自动同步 间隔 立即同步 端口 5878 本机 淘汰"))
+                : VerticalLayout {
+                    width: parent.width;
+                    spacing: Theme.spacing-md;
                     Rectangle {
-                        x: UIState.lan-sharing ? parent.width - self.width - 2px : 2px;
-                        y: 2px;
-                        width: 18px;
-                        height: 18px;
-                        border-radius: 9px;
-                        background: Colors.surface-overlay;
-                        animate x { duration: Theme.duration-fast; }
+                        height: 1px;
+                        background: Colors.border;
+                    }
+                    SyncPage {}
+                }
+
+                // ── 快捷键 ───────────────────────────────────────────────
+                if (UIState.settings-filter == ""
+                    ? UIState.settings-tab == 3
+                    : UIState.settings-match("快捷键 命令面板 搜索页面 页内查找 新建页面 侧边栏 粗体 斜体 代码 公式 缩进 复制块 保存 放大 缩小 复位 后退 前进"))
+                : SettingsSection {
+                    label: "快捷键";
+                    open: true;
+                    VerticalLayout {
+                        // single column: the two-column grid's right column used to
+                        // escape the card entirely (A4 sweep D2)
+                        spacing: Theme.spacing-xs;
+                        // each row filters on its own words, so a search names
+                        // the chord as well as the verb
+                        if (UIState.settings-filter == "" || UIState.settings-match("快捷键 命令面板 ctrl+k ctrl k"))
+                        : ShortcutRow { keys: "Ctrl+K"; label: "命令面板"; }
+                        if (UIState.settings-filter == "" || UIState.settings-match("快捷键 搜索页面 ctrl+p ctrl p"))
+                        : ShortcutRow { keys: "Ctrl+P"; label: "搜索页面"; }
+                        if (UIState.settings-filter == "" || UIState.settings-match("快捷键 页内查找 ctrl+f ctrl f"))
+                        : ShortcutRow { keys: "Ctrl+F"; label: "页内查找"; }
+                        if (UIState.settings-filter == "" || UIState.settings-match("快捷键 新建页面 ctrl+n ctrl n"))
+                        : ShortcutRow { keys: "Ctrl+N"; label: "新建页面"; }
+                        if (UIState.settings-filter == "" || UIState.settings-match("快捷键 切换侧边栏 ctrl"))
+                        : ShortcutRow { keys: "Ctrl+\\"; label: "切换侧边栏"; }
+                        if (UIState.settings-filter == "" || UIState.settings-match("快捷键 粗体 斜体 代码 公式 ctrl+b ctrl+i ctrl+e ctrl+m"))
+                        : ShortcutRow { keys: "Ctrl+B / I / E / M"; label: "粗体 / 斜体 / 代码 / 公式"; }
+                        if (UIState.settings-filter == "" || UIState.settings-match("快捷键 缩进 取消缩进 tab"))
+                        : ShortcutRow { keys: "Tab / Shift+Tab"; label: "缩进 / 取消缩进"; }
+                        if (UIState.settings-filter == "" || UIState.settings-match("快捷键 复制块 ctrl+d"))
+                        : ShortcutRow { keys: "Ctrl+D"; label: "复制块"; }
+                        if (UIState.settings-filter == "" || UIState.settings-match("快捷键 保存 ctrl+s"))
+                        : ShortcutRow { keys: "Ctrl+S"; label: "立即保存"; }
+                        if (UIState.settings-filter == "" || UIState.settings-match("快捷键 放大 缩小 复位 zoom"))
+                        : ShortcutRow { keys: "Ctrl+= / Ctrl+-"; label: "放大 / 缩小（Ctrl+0 复位）"; }
+                        if (UIState.settings-filter == "" || UIState.settings-match("快捷键 后退 前进 alt"))
+                        : ShortcutRow { keys: "Alt+Left / Right"; label: "后退 / 前进"; }
                     }
                 }
-            }
 
-            // ── LAN sync moved out (ADR-0132) ──────────────────────────────────
-            //
-            // The whole 同步 section — 本机名称 / 本机地址 / the auto switch / the
-            // interval chips / the device rows / the log — used to live here,
-            // between 局域网共享 and 存储, and it was the wrong shape for what it
-            // is. A 400 px card that has to scroll cannot hold a seven-column
-            // device table, a statistics box, or fifty stored log lines; what it
-            // did hold was two lines per device and a 立即同步 button, which is
-            // what made the section read as "特别特别简陋".
-            //
-            // It is now a **destination**: `ui/components/SyncPage.slint`, with
-            // its own row in the rail. The settings row that used to be a second
-            // copy of everything on it is gone rather than left pointing at the
-            // new page — a link that opens a page you could already click in the
-            // sidebar is a row that costs a click to say what the rail says for
-            // free.
-
-            Rectangle { height: 1px; background: Colors.border; }
-
-            Text {
-                text: "存储";
-                font-size: Typography.size-caption;
-                font-weight: Typography.weight-semibold;
-                color: Colors.text-muted;
-            }
-            HorizontalLayout {
-                spacing: Theme.spacing-sm;
-                VerticalLayout {
-                    horizontal-stretch: 1;
-                    spacing: 2px;
-                    CopyableText {
-                        text: "数据文件夹";
-                        font-size: Typography.size-ui;
-                        ink: Colors.text-secondary;
-                    }
-                    // Wrapped, and copyable (ADR-0135) — this is the single most
-                    // copied string in the app, and it used to be the one string
-                    // that could not be copied at all: a `Text`, which cannot hold
-                    // a selection, drawn `no-wrap` with `overflow: elide`, so the
-                    // path was both unselectable and truncated in a 400 px card.
-                    // Wrapping makes the whole path visible; the read-only input
-                    // makes it takeable.
-                    CopyableText {
-                        text: UIState.storage-available ? UIState.data-dir
-                            : "内存中运行 — 未挂载数据库";
-                        font-size: Typography.size-caption;
-                        ink: UIState.storage-available ? Colors.text-primary : Colors.text-muted;
-                        mono: true;
-                        wrap: true;
-                    }
-                }
-                // A `visible: false` item keeps its slot in a Slint layout, so
-                // these three are conditional children instead: hidden, they
-                // still stole width from the label above (it elided two words
-                // earlier) and the caption below them still cost a band of
-                // empty height — both in sweep17's settings.png.
-                if UIState.storage-available : HorizontalLayout {
-                    spacing: Theme.spacing-sm;
-                    Button {
-                        text: "打开文件夹";
-                        clicked => {
-                            UIState.open-data-folder();
+                // ── 关于 ─────────────────────────────────────────────────
+                if (UIState.settings-filter == ""
+                    ? UIState.settings-tab == 4
+                    : UIState.settings-match("关于 版本 渲染器 renderer about"))
+                : SettingsSection {
+                    label: "关于";
+                    open: true;
+                    HorizontalLayout {
+                        Text {
+                            text: "版本";
+                            font-family: Typography.ui-font;
+                            font-size: Typography.size-ui;
+                            color: Colors.text-secondary;
+                            vertical-alignment: center;
+                        }
+                        Rectangle { width: 0px; }
+                        // Copyable (ADR-0135): the version is what a bug report is headed
+                        // with, and the 关于 section is where a user is sent to find it.
+                        CopyableText {
+                            text: "Quire " + UIState.app-version;
                         }
                     }
-                    Button {
-                        text: "备份";
-                        clicked => {
-                            UIState.backup-now();
+                    HorizontalLayout {
+                        Text {
+                            text: "渲染器";
+                            font-family: Typography.ui-font;
+                            font-size: Typography.size-ui;
+                            color: Colors.text-secondary;
+                            vertical-alignment: center;
+                        }
+                        Rectangle { width: 0px; }
+                        // Copyable for the same reason, and mono because it is an
+                        // identifier rather than a sentence. Kept out of the rail's
+                        // footer on purpose: a renderer name is support
+                        // information, not chrome.
+                        CopyableText {
+                            text: UIState.renderer-name;
+                            font-size: Typography.size-caption;
+                            mono: true;
                         }
                     }
+                }
+
+                Rectangle { height: Theme.spacing-xs; }
+                HorizontalLayout {
+                    Rectangle { horizontal-stretch: 1; }
                     Button {
-                        text: "清理";
+                        text: "完成";
                         clicked => {
-                            UIState.reclaim-attachments();
+                            UIState.settings-close-requested();
                         }
                     }
                 }
-            }
-            // one line about the only button here that deletes anything: the
-            // notice it reports through is a toast, so the rule has to be
-            // readable before the click (SPEC §三十七, ADR-0037)
-            if UIState.storage-available : CopyableText {
-                text: "清理会删除没有被任何块、撤销步骤或复制块引用的图片和文件。";
-                font-size: Typography.size-caption;
-                ink: Colors.text-muted;
-                wrap: true;
-            }
-
-            Rectangle { height: 1px; background: Colors.border; }
-
-            Text {
-                text: "快捷键";
-                font-size: Typography.size-caption;
-                font-weight: Typography.weight-semibold;
-                color: Colors.text-muted;
-            }
-            VerticalLayout {
-                // single column: the two-column grid's right column used to
-                // escape the card entirely (A4 sweep D2)
-                spacing: Theme.spacing-xs;
-                ShortcutRow { keys: "Ctrl+K"; label: "命令面板"; }
-                ShortcutRow { keys: "Ctrl+P"; label: "搜索页面"; }
-                ShortcutRow { keys: "Ctrl+F"; label: "页内查找"; }
-                ShortcutRow { keys: "Ctrl+N"; label: "新建页面"; }
-                ShortcutRow { keys: "Ctrl+\\"; label: "切换侧边栏"; }
-                ShortcutRow { keys: "Ctrl+B / I / E / M"; label: "粗体 / 斜体 / 代码 / 公式"; }
-                ShortcutRow { keys: "Tab / Shift+Tab"; label: "缩进 / 取消缩进"; }
-                ShortcutRow { keys: "Ctrl+D"; label: "复制块"; }
-                ShortcutRow { keys: "Ctrl+S"; label: "立即保存"; }
-                ShortcutRow { keys: "Ctrl+= / Ctrl+-"; label: "放大 / 缩小（Ctrl+0 复位）"; }
-                ShortcutRow { keys: "Alt+Left / Right"; label: "后退 / 前进"; }
-            }
-
-            Rectangle { height: 1px; background: Colors.border; }
-
-            Text {
-                text: "关于";
-                font-size: Typography.size-caption;
-                font-weight: Typography.weight-semibold;
-                color: Colors.text-muted;
-            }
-            HorizontalLayout {
-                Text {
-                    text: "版本";
-                    font-family: Typography.ui-font;
-                    font-size: Typography.size-ui;
-                    color: Colors.text-secondary;
-                    vertical-alignment: center;
-                }
-                Rectangle { width: 0px; }
-                // Copyable (ADR-0135): the version is what a bug report is headed
-                // with, and the 关于 section is where a user is sent to find it.
-                CopyableText {
-                    text: "Quire " + UIState.app-version;
-                }
-            }
-            HorizontalLayout {
-                Text {
-                    text: "渲染器";
-                    font-family: Typography.ui-font;
-                    font-size: Typography.size-ui;
-                    color: Colors.text-secondary;
-                    vertical-alignment: center;
-                }
-                Rectangle { width: 0px; }
-                // Copyable for the same reason, and mono because it is an
-                // identifier rather than a sentence.
-                CopyableText {
-                    text: UIState.renderer-name;
-                    font-size: Typography.size-caption;
-                    mono: true;
-                }
-            }
-
-            Rectangle { height: Theme.spacing-xs; }
-            HorizontalLayout {
-                Rectangle { horizontal-stretch: 1; }
-                Button {
-                    text: "完成";
-                    clicked => {
-                        UIState.settings-close-requested();
-                    }
-                }
-            }
             }
         }
     }

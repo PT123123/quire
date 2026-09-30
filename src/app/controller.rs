@@ -363,14 +363,14 @@ fn start_sync(ui: &AppWindow, state: &Rc<AppState>, awaited: Awaited) {
         let gw = ui_state_weak(ui);
         let s = state.clone();
         let a = awaited.clone();
-        // 打开 the page: rebuild from the peers table on the way in, so a device
-        // that announced while the user was in a document is on screen when they
-        // arrive. This is the same read the settings dialog did on its own open,
-        // and it moved here with the section (ADR-0132). The read is preceded by
-        // the 淘汰 the page's own table wants: a row thirty days silent is a
-        // device that is not coming back, and a page that rebuilds on arrival is
-        // the one place that can retire it before the user has to look at it.
-        ui.global::<UIState>().on_sync_open_requested(move || {
+        // The sync panel's ⟳: re-read the peers table on the way in, so a
+        // device that announced while the user was elsewhere is on screen when
+        // they look. This is the same read the settings dialog did on its own
+        // open, and the read is preceded by the 淘汰 the table wants: a row
+        // thirty days silent is a device that is not coming back, and a panel
+        // that rebuilds on arrival is the one place that can retire it before
+        // the user has to look at it.
+        ui.global::<UIState>().on_sync_refresh_requested(move || {
             let g = gw.upgrade().unwrap();
             sync_prune_stale(&s);
             g.set_sync_self_name(s.sync_self_info().name.into());
@@ -378,10 +378,21 @@ fn start_sync(ui: &AppWindow, state: &Rc<AppState>, awaited: Awaited) {
             g.set_sync_auto(auto);
             g.set_sync_interval(interval as i32);
             refresh_sync_ui(&g, &s, &a);
-            // 同步 is the other page the composer does not follow the user to:
-            // the area it was opened over is gone the moment this lands.
-            org_capture_discard(&g);
-            g.set_active_area("sync".into());
+        });
+    }
+    {
+        let gw = ui_state_weak(ui);
+        // The settings search: every filtered row asks whether its keywords
+        // sentence contains what was typed. Pure and cheap — a lowercase
+        // substring test over a sentence the .slint already wrote — and Rust
+        // does it because a .slint expression has no `contains`.
+        ui.global::<UIState>().on_settings_match(move |keywords| {
+            let g = gw.upgrade().unwrap();
+            let filter = g.get_settings_filter();
+            if filter.is_empty() {
+                return true;
+            }
+            keywords.to_lowercase().contains(&filter.to_lowercase())
         });
     }
     {
@@ -454,11 +465,9 @@ fn start_sync(ui: &AppWindow, state: &Rc<AppState>, awaited: Awaited) {
             // The rows say 在线 and 多久前同步过, both of which move without a job
             // arriving: a device that left the network stops announcing rather
             // than announcing that it left. Only while something can see it —
-            // rebuilding the models four times a second for a closed dialog or a
-            // page the user is not on is the kind of background cost nobody
-            // notices until the fan is. The 同步 page counts as open for this
-            // purpose even though it is an area rather than a popup (ADR-0132).
-            let open = g.get_settings_open() || g.get_active_area() == "sync";
+            // rebuilding the models four times a second for a closed dialog is
+            // the kind of background cost nobody notices until the fan is.
+            let open = g.get_settings_open();
             let due = (open && !was_open.get())
                 || (open && last_refresh.get().elapsed().as_secs() >= 5);
             was_open.set(open);
@@ -2007,6 +2016,18 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
     }
 
     {
+        let s = state.clone();
+        // A 收藏 / 最近 header was clicked: flip that section's fold and
+        // rebuild the rows. The fold is session-only state on AppState (the
+        // default is collapsed, and it never reaches the library), which is
+        // also what the headless rebuild reads.
+        ui.global::<UIState>().on_sidebar_section_toggled(move |id| {
+            s.sidebar_section_toggled(id);
+            s.rebuild_sidebar();
+        });
+    }
+
+    {
         let gw = gw.clone();
         let s = state.clone();
         ui.global::<UIState>().on_node_context(move |id, y| {
@@ -2311,21 +2332,6 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                     s.set_search_query("");
                     g.set_search_focus(0);
                     g.set_search_open(true);
-                }
-                // 打开同步: through the same callback the sidebar row uses, so
-                // the menu item and the row cannot open the page differently —
-                // the one that rebuilds the peers table on the way in.
-                crate::app::state::MENU_SIDE_OPEN_SYNC => {
-                    g.invoke_sync_open_requested();
-                }
-                // 立即同步全部 from the rail's row: the **same** round the 笔记
-                // list's 刷新 and the 同步 page's own button start, by invoking
-                // the callback rather than re-dialing the peers here. The engine
-                // command channel lives in `start_sync`, not in this function, so
-                // reaching for it from the menu dispatcher is what would make a
-                // second copy of the round; the callback is the one door.
-                crate::app::state::MENU_SIDE_SYNC_NOW => {
-                    g.invoke_sync_now_all();
                 }
                 crate::app::state::MENU_NEW_SUBPAGE => {
                     let new_id = s.create_page(Some(id));
@@ -9258,17 +9264,17 @@ fn apply_scene_body(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
                 org_refresh(&g, state);
             }
         }
-        // 同步 (ADR-0132). The three boxes, and the page as it is actually
-        // entered. Unlike the organizer these have no rows to plant through a
-        // write path: a device on the peers table is something only a *real*
-        // announcement can put there, and faking one would be a scene
-        // photographing a state the engine cannot produce. So `sync_note_device`
-        // — the very function a real announcement goes through — is what seeds
-        // them, and a peer that is "online" is one whose `last_seen` is stamped
-        // now rather than a week ago.
+        // 同步 (ADR-0132). The three boxes, now on the settings dialog's 同步
+        // tab rather than a page of their own. Unlike the organizer these have
+        // no rows to plant through a write path: a device on the peers table is
+        // something only a *real* announcement can put there, and faking one
+        // would be a scene photographing a state the engine cannot produce. So
+        // `sync_note_device` — the very function a real announcement goes
+        // through — is what seeds them, and a peer that is "online" is one
+        // whose `last_seen` is stamped now rather than a week ago.
         "sync" | "sync-stats" | "sync-log" => {
             sync_scene_seed(state, scene);
-            g.set_active_area("sync".into());
+            g.set_settings_open(true);
             if scene == "sync-stats" {
                 g.set_sync_tab(1);
             }
@@ -9276,12 +9282,12 @@ fn apply_scene_body(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
                 g.set_sync_tab(2);
             }
             // The models, filled here rather than left to the pump. The seed
-            // wrote the peers table through `sync_note_device`, but a scene is a
-            // *state* and the shot binary renders one frame and exits — the
-            // 250 ms timer that would normally notice `active-area == "sync"`
+            // wrote the peers table through `sync_note_device`, but a scene is
+            // a *state* and the shot binary renders one frame and exits — the
+            // 250 ms timer that would normally notice the dialog being open
             // never fires, so a scene that relied on it photographed an empty
             // table over a full one. `Awaited` is empty, which is what an idle
-            // page looks like anyway.
+            // panel looks like anyway.
             refresh_sync_ui(&g, state, &Default::default());
         }
         "tasks" | "tasks-detail" | "tasks-list" | "tasks-overdue" | "tasks-board"

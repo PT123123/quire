@@ -628,6 +628,11 @@ export global UIState {
     in-out property <bool> sidebar-resizing: false;
 
     in-out property <[SidebarNode]> sidebar-rows;
+    // A 收藏 / 最近 header was clicked (the header's id travels, -15 / -16).
+    // The fold itself is session-only state on the Rust side (both sections
+    // default closed — the tree is the library's real index and the two
+    // sections are shortcuts on top of it); Rust flips it and rebuilds the rows.
+    callback sidebar-section-toggled(int);
     in-out property <int> sidebar-selected-id: 0;
     in-out property <int> renaming-id: -1;      // page being renamed inline
     in-out property <length> tree-viewport-y: 0px; // PageTree scroll mirror
@@ -745,12 +750,14 @@ export global UIState {
     in-out property <[SyncLogRow]> sync-log;
     callback sync-name-set(string);
     callback sync-interval-set(int);
-    // The page's own two doors beyond a round: emptying the stored log, and
-    // being opened (which re-reads the peers table, so a device found while the
-    // user was elsewhere is on screen when they arrive). The second one is a
-    // callback rather than a bare property write because the read is Rust's.
+    // The page's own two doors beyond a round: emptying the stored log, and a
+    // re-read of the peers table (the ⟳ button). The second one is a callback
+    // rather than a bare property write because the read is Rust's. It used to
+    // be sync-open-requested, the *page's* door — the page is gone (ADR-0132's
+    // destination moved back into the settings dialog as its 同步 tab), and what
+    // survived is only the refresh.
     callback sync-log-cleared();
-    callback sync-open-requested();
+    callback sync-refresh-requested();
     // true when the workspace has no pages: the empty state grows a CTA
     in-out property <bool> workspace-empty: false;
 
@@ -933,6 +940,19 @@ export global UIState {
     in-out property <string> dialog-message: "";
     in-out property <string> dialog-confirm-label: "删除";
     in-out property <bool> settings-open: false;
+    // The settings dialog's five tabs (外观 / 通用 / 同步 / 快捷键 / 关于), as one
+    // index — the same one-index-per-alternative rule `org-tab` and `sync-tab`
+    // follow. A tab is a *state*, so no five booleans.
+    in-out property <int> settings-tab: 0;
+    // The dialog's search field. Typed text filters the sections and their rows
+    // live; the match itself is Rust's (`settings-match`), because "does this
+    // sentence contain those characters" is a question about text that a .slint
+    // expression cannot answer.
+    in-out property <string> settings-filter: "";
+    // `settings-match(keywords)` — true when the field is empty (everything
+    // shows) or the keywords sentence contains what was typed. Pure: it reads
+    // `settings-filter` and nothing else, so a delegate may call it per row.
+    pure callback settings-match(string) -> bool;
     // picture preview (SPEC §三十七): the attachments id shown full-window,
     // 0 = closed. Clicking a picture opens it; clicking the scrim closes it.
     in-out property <int> preview-attachment: 0;

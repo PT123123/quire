@@ -11,7 +11,6 @@ import { IconButton } from "./IconButton.slint";
 import { Sidebar } from "./Sidebar.slint";
 import { Editor } from "./Editor.slint";
 import { OrganizerArea } from "./OrganizerArea.slint";
-import { SyncPage } from "./SyncPage.slint";
 import { Button } from "./Button.slint";
 import { UIState } from "../Types.slint";
 
@@ -85,15 +84,10 @@ export component AppShell inherits Rectangle {
             // The top-level areas, chosen by `active-area`, and this is the
             // **only** place they are chosen between — the editor is not a child
             // of the organizer nor the other way round, and a keystroke can only
-            // ever reach the one that is mounted.
-            //
-            // 同步 is the third (ADR-0132) and it is a peer of the other two
-            // rather than a panel over them: a device table, its statistics and
-            // its log are things a user goes to *look at*, so it is a place with
-            // its own row in the rail and not a section of the settings popup.
+            // ever reach the one that is mounted. (The 同步 page that used to be
+            // the third area lives on as the settings dialog's 同步 tab.)
             if UIState.active-area == "organizer" : OrganizerArea {}
-            if UIState.active-area == "sync" : SyncPage {}
-            if UIState.active-area != "organizer" && UIState.active-area != "sync" : Editor {}
+            if UIState.active-area != "organizer" : Editor {}
         }
     }
 

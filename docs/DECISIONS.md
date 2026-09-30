@@ -2,6 +2,79 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0144 · The settings dialog is a searchable card of five tabs, and 同步 came home
+
+**The settings popup is now a 560 px card with five tabs — 外观 / 通用 / 同步 /
+快捷键 / 关于 — carried by one integer, `settings-tab`.** One index per
+alternative, the rule `org-tab` and `sync-tab` already follow; a tab is a
+*state*, so there are no five booleans. The tab bar is a segmented box rather
+than five free buttons: the lit segment *is* the answer, and the box around
+them says they are alternatives. Selected is a raised surface with the label
+in the primary colour, not ADR-0118's saturated 22%-accent plate — clicking a
+tab states where you are, it does not shout it.
+
+**A search field above the tabs filters the card live.** Every section and
+every row carries its own keywords sentence, and the match is Rust's:
+`UIState.settings-match` is a pure callback reading `settings-filter`, because
+"does this sentence contain those characters" is a question a .slint
+expression cannot answer. Typed text folds the tab bar away — a tab is a
+place and a search result list is not — and shows only the matching sections
+and rows. Because a `visible: false` item keeps its slot in a Slint layout
+(A4's paid lesson), every filterable element is a conditional child. A
+caption whose keywords match always has a matching row under it: each row
+repeats its section's name in its keywords, and the section's keywords are
+their union — a heading with nothing under it is a content bug drawn as
+chrome. The four switch rows that had been copies of the same markup became
+one `ToggleRow` component, which is also what carries the keywords. Opening
+the dialog focuses the search field — the one input the dialog exists to
+serve now — and Esc closes it.
+
+**ADR-0132's destination is retired: 同步 is the dialog's 同步 tab again.** The
+page bought its independence from a 400 px scrolling card that could not line
+up a seven-column device table, and the card it returns to is a different one:
+five tabs wide, searchable, 560 px. What survived of the page's doors is only
+the ⟳ — a re-read of the peers table, preceded by the 30-day 淘汰 (ADR-0141's
+family) — renamed `sync-open-requested` → `sync-refresh-requested`, because
+there is no longer an *open* to do. The rail's pinned 同步 row (-14) and its
+two menu items (37/38) are gone; `active-area` is a two-value string again and
+`SidebarItem`'s `lit` no longer learns a third; the 250 ms pump that refreshes
+the models is gated on `settings_open` alone again; the sync scenes seed
+through the same `sync_note_device` door but open the dialog. `SyncPage.slint`
+stays, as an embeddable panel: the three boxes 设备 / 统计 / 日志 are unchanged,
+but the seven-column table became two-line 52 px cards — name and the two
+verbs on the first line, 类型 / 地址 / the two ages as one caption line beneath.
+A table that cannot line its columns up is worse than the same facts as a
+card, and the online dot stays in the margin because a row that says 在线
+twice is a row with two sources of truth.
+
+**The sidebar's 收藏 / 最近 sections fold, collapsed by default, for the session
+only.** The two headers carry ids (-15 / -16) for exactly one reason: the
+click has to report *which* fold to flip — a section is not a place and never
+lands in `sidebar-selected-id`. The fold lives on `AppState`, not on UIState,
+because the headless rebuilds (tests, the first frame) must reach it too, and
+it is not persisted: the tree is the library's real index and the two sections
+are shortcuts on top of it. A replica row reads one step quieter than the
+page it re-lists — 24 px, caption label and emoji, the same step the section
+labels use — and the fold is drawn with the tree's own chevron language.
+
+**The renderer name left the rail's footer.** It is support information, not
+chrome, and the 关于 tab has carried the copyable one since ADR-0135.
+
+Context: the settings dialog had grown every one of these sections in a single
+scroll column — 外观, three toggles, 存储, eleven shortcut rows, 关于 — and
+finding anything in it had become a scroll-and-scan. ADR-0132's answer for the
+worst of it (同步) had been to move that content *out*; this ADR's answer is to
+change the container instead, which retires the third `active-area` value and
+the special cases it had taught `lit`, the composer, the pump and the scenes.
+
+Consequences: `sidebar_projection_shape` and the favorite-row lookup test open
+the 收藏 fold before reading the rows they assert on — a collapsed section
+projects its header only, which is the point of the fold and was a silent
+behaviour change if you do not write it down. The 快捷键 tab filters per row,
+so a search may name a chord as well as a verb. And ADR-0132 stands corrected
+rather than deleted: its honest parts — no 配对 button, no address field, the
+delta-over-shadow 统计 — all travelled with the panel.
+
 ## ADR-0143 · The window remembers a rectangle, and a rectangle is only believed once a monitor has agreed to hold it
 
 Decision: the window's geometry is persisted as a **rectangle**

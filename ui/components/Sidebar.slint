@@ -169,23 +169,6 @@ export component Sidebar inherits Rectangle {
                 UIState.org-open-requested(1);
             }
         }
-        // 同步 is a pinned row beside the two areas, for the reason the page is
-        // a destination at all (ADR-0132): a device table you look at is a
-        // place, and a place gets a row. It sits with 笔记 / 任务 rather than
-        // under 设置 because 设置 is a panel over whatever is open and this is
-        // not — a row that both replaced the document and opened a popup would be
-        // the one row in the rail whose two halves disagree about where the
-        // window is.
-        SidebarPinnedRow {
-            icon-name: "sync";
-            label: "同步";
-            // `ROW_PINNED_SYNC` in Rust, in the tree's id space
-            node-id: -14;
-            selected: UIState.active-area == "sync";
-            clicked => {
-                UIState.sync-open-requested();
-            }
-        }
         SidebarPinnedRow {
             icon-name: "search";
             label: "搜索";
@@ -236,13 +219,6 @@ export component Sidebar inherits Rectangle {
                 padding-left: Theme.spacing-xs + 24px;
                 Text {
                     text: UIState.app-version;
-                    font-size: Typography.size-caption;
-                    color: Colors.text-muted;
-                    vertical-alignment: center;
-                    width: 60px;
-                }
-                Text {
-                    text: UIState.renderer-name;
                     font-size: Typography.size-caption;
                     color: Colors.text-muted;
                     vertical-alignment: center;

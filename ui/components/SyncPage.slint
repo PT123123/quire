@@ -1,24 +1,19 @@
-// 局域网同步 (ADR-0132) — the third top-level area, a **destination**.
+// 局域网同步 (ADR-0132) — the settings dialog's 同步 tab, as an embeddable panel.
 //
-// It used to be a section inside the settings popup, and that was the wrong
-// shape for what it is. Three things live here — the device table, what a round
-// moves, and the log of every round — and a 400 px card that has to scroll
-// cannot hold any of them: the device table's own columns (设备 / 类型 / IP /
-// 端口 / 最后在线 / 最后同步 / 状态) are already seven wide, the log is fifty
-// stored lines, and the statistics box needs room to line numbers up. A panel
-// over a document is for a *choice* ("which theme?", "open the folder?"); this
-// is a place the user goes to look at what their devices are doing, which is
-// what the reference app makes it (`aw-qtui/syncpage.cpp`, a top-level page with
-// its own tab widget).
-//
-// The three boxes are the reference's three tabs, kept as three: 设备 is the
-// table, 统计 is what this device carries and what the last round moved, and
+// This used to be a top-level destination with its own row in the rail, and
+// before that a section inside the settings popup; it is a panel again, but the
+// dialog it returns to is a different one — five tabs wide, searchable, and
+// wide enough (560 px) that the boxes fit without the cramming that earned the
+// page its independence in the first place. What a user comes here to *look at*
+// did not change: the device table, what a round moves, and the log of every
+// round. The three boxes are the reference's three tabs, kept as three: 设备 is
+// the table, 统计 is what this device carries and what the last round moved, and
 // 日志 is the record. They are a segmented control rather than three booleans so
 // exactly one is ever true, which is the rule `org-tab` already follows for the
 // notes' 笔记/任务 pair.
 //
-// What this page deliberately does not have, because the engine cannot answer it
-// honestly: no 配对 button (ADR-0128 — a device is on this list *because* it
+// What this panel deliberately does not have, because the engine cannot answer
+// it honestly: no 配对 button (ADR-0128 — a device is on this list *because* it
 // announced itself, so a button that only changed a flag the list no longer
 // shows was a control over nothing), no address field to type into (ADR-0128
 // again — the same reason the 按 IP 添加 door was deleted from the Android
@@ -30,6 +25,11 @@
 // showing; it computes no counts, no ages and no deltas, for the reason
 // `OrganizerArea`'s rows carry: a count spelled in a delegate is a second
 // definition of the thing it is counting.
+//
+// The device rows are two lines rather than the page's seven-column table: a
+// dialog's width cannot line seven columns up, and a device card that says
+// 类型 / 地址 / 最后在线 / 最后同步 in one caption line under its name is the
+// same facts at the width there is.
 
 import { ListView, ScrollView } from "std-widgets.slint";
 import { Theme } from "../Theme.slint";
@@ -186,16 +186,14 @@ component SyncOnlineDot inherits Rectangle {
     border-color: Colors.border-strong;
 }
 
-// One row of the device table. 46 px: a row carries a name, a platform, an
-// address, two ages and two buttons, and the reference's own rows are table rows
-// (`setColumnWidth(0, 180)` beside `setColumnWidth(1, 70)`) rather than 52 px
-// cards — a table that tries to be a list of cards stops being scannable
-// *down its columns*, which is the one thing a table is for.
-//
-// The columns are fixed-width and the *name* is the only elastic one, so the
-// addresses line up as a column: the reference's `horizontalHeaderStretchLast-
-// Section` stretches the last column instead, which is right for a table whose
-// last column is prose and wrong for one whose last column is a 240 px button.
+// One row of the device list, two lines tall. The page's seven-column table
+// needed ~620 px to line its columns up; the dialog gives this panel half of
+// that, and a table that cannot line its columns up is worse than the same
+// facts as a card — so the row is a card: the name (and the two verbs) on the
+// first line, the 类型 / 地址 / ages sentence as one caption line beneath. The
+// online dot stays in the margin before the name: it is the 状态 column's one
+// surviving word, and a row that says 在线 twice is a row with two sources of
+// truth.
 component SyncDeviceRow inherits Rectangle {
     in property <SyncRow> device: {
         id: "", label: "", kind: "", status: "", ip: "", port: 5878,
@@ -204,95 +202,64 @@ component SyncDeviceRow inherits Rectangle {
     callback synced();
     callback forgotten();
 
-    height: 46px;
+    height: 52px;
     border-radius: Theme.radius-sm;
     background: ta.has-hover ? Colors.hover-fill : transparent;
     animate background { duration: Theme.duration-instant; }
 
-    HorizontalLayout {
+    VerticalLayout {
         padding-left: Theme.spacing-sm;
         padding-right: Theme.spacing-sm;
-        spacing: Theme.spacing-sm;
-        cross-axis-alignment: center;
+        padding-top: 6px;
+        padding-bottom: 6px;
+        spacing: 3px;
 
-        // the dot, in the margin before the name — the reference's 状态 column
-        // says the same thing in words, and a table that says it twice is a
-        // table with two sources of truth
-        SyncOnlineDot { online: root.device.online; }
-
-        // 设备 — the elastic column. `max-width` for the reason
-        // `OrganizerArea`'s growing fields carry: a container of elidable text
-        // has a small preferred width and no ceiling above it without this.
-        Text {
-            horizontal-stretch: 1;
-            max-width: 100000px;
-            text: root.device.label;
-            font-family: Typography.ui-font;
-            font-size: Typography.size-ui;
-            font-weight: Typography.weight-medium;
-            color: Colors.text-primary;
-            vertical-alignment: center;
-            overflow: elide;
+        HorizontalLayout {
+            spacing: Theme.spacing-sm;
+            cross-axis-alignment: center;
+            SyncOnlineDot { online: root.device.online; }
+            // 设备 — the elastic column. `max-width` for the reason
+            // `OrganizerArea`'s growing fields carry: a container of elidable
+            // text has a small preferred width and no ceiling above it without
+            // this.
+            Text {
+                horizontal-stretch: 1;
+                max-width: 100000px;
+                text: root.device.label;
+                font-family: Typography.ui-font;
+                font-size: Typography.size-ui;
+                font-weight: Typography.weight-medium;
+                color: Colors.text-primary;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            // 操作 — the two verbs. 立即同步 is the reference's primary button
+            // (secondary because a list of ten devices would otherwise be ten
+            // filled buttons), and it is disabled for a device that is not on
+            // the network: dialling one is the round that times out, and the
+            // button would be offering an outcome it cannot deliver.
+            sync-now-btn := SyncButton {
+                label: "立即同步";
+                enabled: root.device.online;
+                clicked => { root.synced(); }
+            }
+            forget-btn := SyncButton {
+                label: "忘记";
+                danger: true;
+                clicked => { root.forgotten(); }
+            }
         }
-        // 类型
+        // the facts line — what the page spread across four columns, as one
+        // sentence. Elided, because a row that wraps is a row of uneven height.
         Text {
-            width: 72px;
-            text: root.device.kind;
-            font-family: Typography.ui-font;
-            font-size: Typography.size-caption;
-            color: Colors.text-secondary;
-            vertical-alignment: center;
-            overflow: elide;
-        }
-        // IP:端口 — the address the round will actually dial, as one string
-        // rather than two columns, because a port that is 5878 on every Quire
-        // ever built is not a column, it is punctuation.
-        Text {
-            width: 150px;
-            text: root.device.ip == "" ? "—" : root.device.ip + ":" + root.device.port;
-            font-family: Typography.mono-font;
-            font-size: Typography.size-caption;
-            color: Colors.text-muted;
-            vertical-alignment: center;
-            overflow: elide;
-        }
-        // 最后在线 — the announcement age, which is what separates a device on
-        // the network from a row that is merely still stored.
-        Text {
-            width: 84px;
-            text: root.device.last-seen;
+            text: root.device.kind
+                + (root.device.ip == "" ? "" : " · " + root.device.ip + ":" + root.device.port)
+                + (root.device.last-seen == "" ? "" : " · 最后在线 " + root.device.last-seen)
+                + (root.device.status == "" ? "" : " · " + root.device.status);
             font-family: Typography.ui-font;
             font-size: Typography.size-caption;
             color: root.device.online ? Colors.text-secondary : Colors.text-muted;
-            vertical-alignment: center;
             overflow: elide;
-        }
-        // 最后同步 — the one column the user acts on. Rust's sentence, already
-        // the reference's "已配对 · 3 分钟前同步过" minus the 配对 half that no
-        // longer names a state anything can be in (ADR-0128).
-        Text {
-            width: 120px;
-            text: root.device.status;
-            font-family: Typography.ui-font;
-            font-size: Typography.size-caption;
-            color: Colors.text-muted;
-            vertical-alignment: center;
-            overflow: elide;
-        }
-        // 操作 — the two verbs. 立即同步 is the reference's primary button
-        // (secondary because a table of ten devices would otherwise be ten
-        // filled buttons), and it is disabled for a device that is not on the
-        // network: dialling one is the round that times out, and the button
-        // would be offering an outcome it cannot deliver.
-        SyncButton {
-            label: "立即同步";
-            enabled: root.device.online;
-            clicked => { root.synced(); }
-        }
-        SyncButton {
-            label: "忘记";
-            danger: true;
-            clicked => { root.forgotten(); }
         }
     }
     ta := TouchArea {
@@ -397,9 +364,7 @@ export component SyncPage inherits Rectangle {
     // The rule `OrganizerArea` states for itself, and the reason it is written
     // out again here rather than inherited: a `Rectangle` whose content is a
     // layout takes its `max-width` from that layout's preferred width, so the
-    // stretch factor has no room above the ceiling to distribute. With the
-    // ceiling left alone this page came out at its content's preferred width and
-    // the table stopped at 900 px in a 1280 px window.
+    // stretch factor has no room above the ceiling to distribute.
     horizontal-stretch: 1;
     max-width: 100000px;
 
@@ -413,10 +378,9 @@ export component SyncPage inherits Rectangle {
     property <[string]> interval-names: ["10 秒", "1 分钟", "5 分钟", "30 分钟"];
 
     VerticalLayout {
-        padding-left: Theme.spacing-xl;
-        padding-right: Theme.spacing-xl;
-        padding-top: Theme.spacing-lg;
-        padding-bottom: Theme.spacing-lg;
+        // No padding of its own: the embedding context (the settings dialog's
+        // content column) owns the margins, so this panel butts against them
+        // and one spacing layer does not stack on another.
         spacing: Theme.spacing-md;
 
         // ── the title row ────────────────────────────────────────────────
@@ -479,28 +443,24 @@ export component SyncPage inherits Rectangle {
                 icon-name: "refresh";
                 icon-color: Colors.text-secondary;
                 size: 30px;
-                clicked => { UIState.sync-open-requested(); }
+                clicked => { UIState.sync-refresh-requested(); }
             }
         }
 
         Rectangle { height: 1px; background: Colors.border; }
 
         // ── 本机 ──────────────────────────────────────────────────────────
-        // This device's own half, above the table and not inside it: it is not
+        // This device's own half, above the list and not inside it: it is not
         // one of the *other* devices, and a table whose first row is the machine
         // you are sitting at is a table that has to be re-read every time to
-        // find the other rows.
-        //
-        // The address is here for the same reason the settings dialog had it:
-        // it is the number to check a failed round against, and a laptop that
-        // switches networks gets a new one.
+        // find the other rows. Two lines — the name (with the last round's
+        // status sentence at the right, the answer to the button the reader
+        // just pressed) and the address, which is the number to check a failed
+        // round against, and one a laptop that switches networks gets anew.
         HorizontalLayout {
-            height: 30px;
             spacing: Theme.spacing-sm;
-            cross-axis-alignment: center;
-            SyncSectionLabel { label: "本机名称"; horizontal-stretch: 0; }
+            SyncSectionLabel { label: "本机名称"; width: 60px; }
             Rectangle {
-                horizontal-stretch: 0;
                 width: 200px;
                 height: 28px;
                 border-radius: Theme.radius-sm;
@@ -526,24 +486,9 @@ export component SyncPage inherits Rectangle {
                     accepted => { UIState.sync-name-set(self.text); }
                 }
             }
-            SyncSectionLabel { label: "本机地址"; horizontal-stretch: 0; }
-            Text {
-                text: UIState.sync-self-address == ""
-                    ? "未联网 — 其他设备找不到本机"
-                    : UIState.sync-self-address;
-                font-family: Typography.mono-font;
-                font-size: Typography.size-caption;
-                color: UIState.sync-self-address == ""
-                    ? Colors.text-muted : Colors.text-secondary;
-                vertical-alignment: center;
-                horizontal-stretch: 1;
-                overflow: elide;
-            }
-            // The status line, on the right rather than under the controls: it
-            // is the answer to the last press, and the reader's eye is already
-            // on the button they pressed. A `●` while a round is in flight,
-            // because "something is still waiting for an answer" is not the same
-            // sentence as whatever the last one was.
+            // A `●` while a round is in flight, because "something is still
+            // waiting for an answer" is not the same sentence as whatever the
+            // last one was.
             if UIState.sync-busy : Text {
                 text: "●";
                 font-family: Typography.ui-font;
@@ -557,7 +502,23 @@ export component SyncPage inherits Rectangle {
                 font-size: Typography.size-caption;
                 color: Colors.text-muted;
                 vertical-alignment: center;
-                width: 340px;
+                horizontal-stretch: 1;
+                overflow: elide;
+            }
+        }
+        HorizontalLayout {
+            spacing: Theme.spacing-sm;
+            SyncSectionLabel { label: "本机地址"; width: 60px; }
+            Text {
+                text: UIState.sync-self-address == ""
+                    ? "未联网 — 其他设备找不到本机"
+                    : UIState.sync-self-address;
+                font-family: Typography.mono-font;
+                font-size: Typography.size-caption;
+                color: UIState.sync-self-address == ""
+                    ? Colors.text-muted : Colors.text-secondary;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
                 overflow: elide;
             }
         }
@@ -572,75 +533,6 @@ export component SyncPage inherits Rectangle {
         if UIState.sync-tab == 0 : VerticalLayout {
             spacing: Theme.spacing-sm;
             vertical-stretch: 1;
-
-            // The header row. Same columns, same widths as the rows beneath, so
-            // the two are one table — a header whose columns drift from the rows
-            // is a header nobody reads.
-            Rectangle {
-                height: 26px;
-                background: Colors.surface-hover;
-                border-radius: Theme.radius-sm;
-                HorizontalLayout {
-                    padding-left: Theme.spacing-sm;
-                    padding-right: Theme.spacing-sm;
-                    spacing: Theme.spacing-sm;
-                    cross-axis-alignment: center;
-                    Rectangle { width: 8px; height: 8px; }
-                    Text {
-                        horizontal-stretch: 1; max-width: 100000px;
-                        text: "设备";
-                        font-family: Typography.ui-font;
-                        font-size: Typography.size-caption;
-                        font-weight: Typography.weight-semibold;
-                        color: Colors.text-muted;
-                        vertical-alignment: center;
-                    }
-                    Text {
-                        width: 72px; text: "类型";
-                        font-family: Typography.ui-font;
-                        font-size: Typography.size-caption;
-                        font-weight: Typography.weight-semibold;
-                        color: Colors.text-muted;
-                        vertical-alignment: center;
-                    }
-                    Text {
-                        width: 150px; text: "IP";
-                        font-family: Typography.ui-font;
-                        font-size: Typography.size-caption;
-                        font-weight: Typography.weight-semibold;
-                        color: Colors.text-muted;
-                        vertical-alignment: center;
-                    }
-                    Text {
-                        width: 84px; text: "最后在线";
-                        font-family: Typography.ui-font;
-                        font-size: Typography.size-caption;
-                        font-weight: Typography.weight-semibold;
-                        color: Colors.text-muted;
-                        vertical-alignment: center;
-                    }
-                    Text {
-                        width: 120px; text: "最后同步";
-                        font-family: Typography.ui-font;
-                        font-size: Typography.size-caption;
-                        font-weight: Typography.weight-semibold;
-                        color: Colors.text-muted;
-                        vertical-alignment: center;
-                    }
-                    Text {
-                        // 240 px of button row in the header, matching the two
-                        // buttons beneath it, so the header's right edge is the
-                        // table's right edge.
-                        text: "操作";
-                        font-family: Typography.ui-font;
-                        font-size: Typography.size-caption;
-                        font-weight: Typography.weight-semibold;
-                        color: Colors.text-muted;
-                        vertical-alignment: center;
-                        horizontal-stretch: 1;
-                    }
-                }
-            }
 
             if UIState.sync-rows.length == 0 : VerticalLayout {
                 // The empty state, in the reference's own three lines (📝 /
@@ -736,20 +628,20 @@ export component SyncPage inherits Rectangle {
                         clicked => { UIState.sync-interval-set(secs); }
                     }
                 }
-                Rectangle { horizontal-stretch: 1; }
-                Text {
-                    // The port, spelled out where a reader can find it. It is
-                    // constant across every Quire build, which is why it is a
-                    // sentence here and not a column in the table above — and
-                    // the 淘汰 rule is the table's other fine print: the answer
-                    // to "will this dead row ever leave by itself" is yes, at
-                    // thirty days, without anyone pressing anything.
-                    text: "端口 5878 · UDP 广播每 4 秒发现一次 · 30 天没有上线的设备自动淘汰";
-                    font-family: Typography.ui-font;
-                    font-size: Typography.size-caption;
-                    color: Colors.text-muted;
-                    vertical-alignment: center;
-                }
+            }
+            Text {
+                // The port, spelled out where a reader can find it. It is
+                // constant across every Quire build, which is why it is a
+                // sentence here and not a column in the list above — and the
+                // 淘汰 rule is the list's other fine print: the answer to "will
+                // this dead row ever leave by itself" is yes, at thirty days,
+                // without anyone pressing anything. Its own line, because the
+                // cadence row above it is already full.
+                text: "端口 5878 · UDP 广播每 4 秒发现一次 · 30 天没有上线的设备自动淘汰";
+                font-family: Typography.ui-font;
+                font-size: Typography.size-caption;
+                color: Colors.text-muted;
+                overflow: elide;
             }
         }
 
