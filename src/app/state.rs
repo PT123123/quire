@@ -2066,6 +2066,31 @@ impl AppState {
         self.record_setting("ui.zoom", &format!("{zoom}"));
     }
 
+    /// The sidebar's width in logical px (settings row `sidebar.width`), the
+    /// value the right-edge drag handle writes live and releases to here.
+    /// Clamped to the handle's own bounds rather than trusted, and defaulted to
+    /// Theme.slint's metric when the row has never been written: a session that
+    /// never touched the handle draws the rail the design drew.
+    pub fn sidebar_width(&self) -> f32 {
+        self.settings
+            .borrow()
+            .get("sidebar.width")
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|w| w.is_finite())
+            .map(|w| w.clamp(SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX))
+            .unwrap_or(260.0)
+    }
+
+    /// Persist the sidebar width (one batched settings write, like the zoom).
+    pub fn set_sidebar_width(&self, width: f32) {
+        let width = if width.is_finite() {
+            width.clamp(SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX)
+        } else {
+            260.0
+        };
+        self.record_setting("sidebar.width", &format!("{}", width.round() as i32));
+    }
+
     /// The window's own scale factor, as the platform last reported it — the
     /// number `zoom()` multiplies. The controller writes it before it applies a
     /// zoom, and again when a resize shows the platform has re-announced its
@@ -16487,6 +16512,13 @@ const ZOOM_STEPS: [f32; 13] =
     [0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0];
 const ZOOM_MIN: f32 = 0.5;
 const ZOOM_MAX: f32 = 3.0;
+
+/// The drag bounds the sidebar's right-edge handle enforces (Sidebar.slint's
+/// `clamp` uses the same numbers): narrow enough that the rail reads as a rail,
+/// wide enough that a page tree has room to breathe. The same clamp guards the
+/// settings row against a hand-edited value.
+const SIDEBAR_WIDTH_MIN: f32 = 200.0;
+const SIDEBAR_WIDTH_MAX: f32 = 480.0;
 
 /// One rung up (`step > 0`) or down (`step < 0`) from `zoom`. A factor that is
 /// not on the ladder — a settings row someone edited by hand, or one written

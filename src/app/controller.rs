@@ -50,6 +50,12 @@ fn org_card_id(data: &slint::DataTransfer) -> Option<i32> {
         .ok()
 }
 
+/// The root's min-width/min-height (AppWindow.slint's), in logical pixels. Rust
+/// needs the same floor the .slint declares because `apply_zoom` must never hand
+/// Slint a viewport below it — see the comment there.
+const MIN_WINDOW_LOGICAL_W: f32 = 940.0;
+const MIN_WINDOW_LOGICAL_H: f32 = 600.0;
+
 /// Put `AppState::zoom()` on the window (Ctrl + = / Ctrl + -, Ctrl + 0).
 ///
 /// Slint has exactly one lever for this: the window's scale factor, the number
@@ -57,37 +63,109 @@ fn org_card_id(data: &slint::DataTransfer) -> Option<i32> {
 /// the display is Z times denser", and that is what makes it cover the whole
 /// shell in one move — the token ladder in `Theme`, the literal px in every
 /// component, glyph rasterisation and hit-testing all sit on top of that one
-/// number, so nothing under `ui/` has to know zoom exists. The window's
-/// *physical* size does not move: the layout is handed a smaller logical
-/// viewport, which is what zooming in means for a window that is not a
-/// scrollable document view. `base_scale` is the display's own factor, kept
-/// apart from the zoom so that a zoom of exactly 1 stays a no-op and the
-/// platform's number can be recognised when it comes back (see
-/// `on_window_resized` in `wire`).
-fn apply_zoom(ui: &AppWindow, state: &Rc<AppState>) {
+/// number, so nothing under `ui/` has to know zoom exists. `base_scale` is the
+/// display's own factor, kept apart from the zoom so that a zoom of exactly 1
+/// stays a no-op and the platform's number can be recognised when it comes back
+/// (see `on_window_resized` in `wire`).
+///
+/// The zoom is *browser-style*: the logical viewport is what is kept (bounded by
+/// the shell's min window and the monitor's work area) and the window's physical
+/// size follows the factor. The first version held the physical size instead and
+/// let the viewport shrink with the zoom — which put the viewport below the
+/// root's min-width/min-height, and from then on the winit adapter's constraint
+/// enforcement (`adjust_window_size_to_satisfy_constraints`, which re-runs on
+/// every layout-constraint change — a sidebar animation included) "fixed" the
+/// violation by re-sizing the window through the two scale factors' disagreement
+/// (it converts physical→logical with Slint's factor and logical→physical with
+/// winit's own). That pin — min × the platform's factor, redrawn on every
+/// sidebar toggle — is what 0.1.19 shipped. Keeping the viewport at or above the
+/// min makes the clamp inside that enforcement a no-op, and the fight cannot
+/// start.
+///
+/// `initial` marks the session's first call, made by `bind` before the window is
+/// shown: the physical size on the window then is the rectangle the *previous*
+/// session saved, recorded under the previous session's (capped) factor — so
+/// `target`, not the platform's `old`, is the honest divisor. Every later call
+/// reads a window the current factor built.
+fn apply_zoom(ui: &AppWindow, state: &Rc<AppState>, initial: bool) {
     let window = ui.window();
-    let target = state.base_scale() * state.zoom();
-    if (window.scale_factor() - target).abs() < 0.001 {
+    let base = state.base_scale();
+    let old = window.scale_factor();
+    let physical = window.size();
+
+    // The physical space the min window has to fit into at the new factor. A
+    // maximized window's size is the OS's, not ours, so the space it already
+    // fills is the bound; otherwise it is the containing monitor's work area.
+    // No monitor (headless, non-Windows): no cap.
+    let maximized = ui.global::<UIState>().get_window_maximized();
+    let avail: Option<(f64, f64)> = if maximized {
+        Some((physical.width as f64, physical.height as f64))
+            .filter(|(w, h)| *w > 0.0 && *h > 0.0)
+    } else {
+        window_work_area(window).map(|a| (a.width(), a.height()))
+    };
+
+    // Cap the factor so the min window still fits — but only from *above*:
+    // zooming out (target < base) grows the viewport and can never violate the
+    // min, and zoom 1 must stay exactly the platform's own factor even on a
+    // monitor too small for a min-sized window at its scale (the platform
+    // allows that window; so do we).
+    let uncapped = base * state.zoom();
+    let target = match avail {
+        Some((w, h)) => {
+            let cap_w = (w / MIN_WINDOW_LOGICAL_W as f64) as f32;
+            let cap_h = (h / MIN_WINDOW_LOGICAL_H as f64) as f32;
+            uncapped.min(cap_w).min(cap_h).max(base)
+        }
+        None => uncapped,
+    };
+    if (old - target).abs() < 0.001 && !initial {
         return;
     }
+
+    // The new factor on its own resizes nothing: the root item still holds the
+    // viewport that was computed with the old one, so re-derive it here —
+    // bounded below by the shell's min (the adapter's own floor) and above by
+    // what the monitor fits. Before the first paint there is no physical size
+    // and nothing to re-derive — the platform's own resize at show time does it
+    // with `target` already in place.
     window.dispatch_event(slint::platform::WindowEvent::ScaleFactorChanged {
         scale_factor: target,
     });
-    // The new factor on its own resizes nothing: the root item still holds the
-    // viewport that was computed with the old one, so re-announce the physical
-    // size and let Slint derive the logical size from the number it now has.
-    // Before the first paint there is no physical size yet and none to
-    // re-derive — the platform's own resize at show time does it with `target`
-    // already in place.
-    let physical = window.size();
-    if physical.width > 0 && physical.height > 0 {
-        window.dispatch_event(slint::platform::WindowEvent::Resized {
-            size: LogicalSize::new(
-                physical.width as f32 / target,
-                physical.height as f32 / target,
-            ),
-        });
+    if physical.width == 0 || physical.height == 0 {
+        return;
     }
+    let divisor = if initial { target } else { old };
+    let max_w = avail.map_or(f32::MAX, |(w, _)| (w / target as f64) as f32);
+    let max_h = avail.map_or(f32::MAX, |(_, h)| (h / target as f64) as f32);
+    let vw = (physical.width as f32 / divisor)
+        .clamp(MIN_WINDOW_LOGICAL_W, max_w.max(MIN_WINDOW_LOGICAL_W));
+    let vh = (physical.height as f32 / divisor)
+        .clamp(MIN_WINDOW_LOGICAL_H, max_h.max(MIN_WINDOW_LOGICAL_H));
+    window.dispatch_event(slint::platform::WindowEvent::Resized {
+        size: LogicalSize::new(vw, vh),
+    });
+    if maximized {
+        // The OS owns a maximized window's size; the viewport derived above
+        // already fits it, because `target` was capped against this size.
+        return;
+    }
+    window.set_size(slint::PhysicalSize::new(
+        (vw * target).round() as u32,
+        (vh * target).round() as u32,
+    ));
+}
+
+/// The work area of the monitor the window's top-left corner sits on, in
+/// physical pixels — the monitor whose capacity a zoom change must respect.
+/// `None` where no work area claims the corner (and on platforms that cannot
+/// answer): callers treat that as "no cap", not as "no room".
+fn window_work_area(window: &slint::Window) -> Option<Rect> {
+    let pos = window.position();
+    let (x, y) = (pos.x as f64, pos.y as f64);
+    crate::platform::monitors::work_areas()
+        .into_iter()
+        .find(|a| x >= a.left && x < a.right && y >= a.top && y < a.bottom)
 }
 
 // ─── LAN sync (crate::sync) ─────────────────────────────────────────────────
@@ -1538,6 +1616,7 @@ pub fn bind(ui: &AppWindow, state: &Rc<AppState>) {
     g.set_theme(state.theme_setting().into());
     g.set_lan_sharing(state.setting_flag("lan.share"));
     g.set_sidebar_open(!state.setting_flag("sidebar.closed"));
+    g.set_sidebar_width(state.sidebar_width());
     // 笔记's 启动时自动弹出输入框: absent (a library that never touched the row) is
     // on, which is the reference app's own default read the other way round — its
     // `auto_input_on_start` must be *written* to fire. The Android shell reads the
@@ -1568,7 +1647,7 @@ pub fn bind(ui: &AppWindow, state: &Rc<AppState>) {
     // lets a later resize tell this app's number from the platform's and put
     // the zoom back instead of losing it (see the `window-resized` handler).
     state.set_base_scale(ui.window().scale_factor());
-    apply_zoom(ui, state);
+    apply_zoom(ui, state, true);
 }
 
 /// Select a find hit: route through the hit block's editing input, which
@@ -1667,6 +1746,18 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
     }
 
     {
+        // The drag handle wrote the width live; the release is what makes it a
+        // setting. The clamped value goes back to the shell so the rail and the
+        // row can never disagree by the width a drag overshot the bound by.
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_sidebar_resized(move |width| {
+            s.set_sidebar_width(width);
+            gw.upgrade().unwrap().set_sidebar_width(s.sidebar_width());
+        });
+    }
+
+    {
         let gw = gw.clone();
         let s = state.clone();
         ui.global::<UIState>().on_toggle_theme(move || {
@@ -1704,7 +1795,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         ui.global::<UIState>().on_zoom_in(move || {
             if let Some(ui) = ui_w.upgrade() {
                 s.set_zoom(zoom_step(s.zoom(), 1));
-                apply_zoom(&ui, &s);
+                apply_zoom(&ui, &s, false);
             }
         });
     }
@@ -1715,7 +1806,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         ui.global::<UIState>().on_zoom_out(move || {
             if let Some(ui) = ui_w.upgrade() {
                 s.set_zoom(zoom_step(s.zoom(), -1));
-                apply_zoom(&ui, &s);
+                apply_zoom(&ui, &s, false);
             }
         });
     }
@@ -1726,7 +1817,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         ui.global::<UIState>().on_zoom_reset(move || {
             if let Some(ui) = ui_w.upgrade() {
                 s.set_zoom(1.0);
-                apply_zoom(&ui, &s);
+                apply_zoom(&ui, &s, false);
             }
         });
     }
@@ -1755,7 +1846,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
             let s = s.clone();
             Timer::single_shot(Duration::ZERO, move || {
                 if let Some(ui) = ui_w.upgrade() {
-                    apply_zoom(&ui, &s);
+                    apply_zoom(&ui, &s, false);
                 }
             });
         });
@@ -4874,7 +4965,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                 // The height follows the row count so the tall root menu
                 // (and its submenus) never anchor below the window.
                 let scroll = g.get_editor_scroll_y();
-                let edge = if g.get_sidebar_open() { 260.0 } else { 0.0 };
+                let edge = if g.get_sidebar_open() { g.get_sidebar_width() } else { 0.0 };
                 let menu_h = g.get_block_menu_rows().row_count() as f32 * 28.0 + 16.0;
                 let y = (40.0 + handle_y as f32 - scroll + 2.0)
                     .clamp(48.0, (g.get_window_h() - menu_h).max(48.0));
@@ -5145,7 +5236,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                 let count = g.get_slash_items().row_count() as f32;
                 let menu_h = count * 32.0 + 8.0;
                 let scroll = g.get_editor_scroll_y();
-                let edge = if g.get_sidebar_open() { 260.0 } else { 0.0 };
+                let edge = if g.get_sidebar_open() { g.get_sidebar_width() } else { 0.0 };
                 let y = (40.0 + row_bottom as f32 - scroll + 4.0)
                     .clamp(48.0, (g.get_window_h() - menu_h - 8.0).max(48.0));
                 g.set_slash_x(edge + content_x as f32);
@@ -5180,7 +5271,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                     s.open_slash_insert("");
                     let count = g.get_slash_items().row_count() as f32;
                     let menu_h = count * 32.0 + 8.0;
-                    let edge = if g.get_sidebar_open() { 260.0 } else { 0.0 };
+                    let edge = if g.get_sidebar_open() { g.get_sidebar_width() } else { 0.0 };
                     let y = (g.get_window_h() - menu_h - 8.0).max(48.0);
                     g.set_slash_x(edge + 16.0);
                     g.set_slash_y(y);
@@ -7642,7 +7733,7 @@ fn flush_pending_edit(g: &UIState<'_>, state: &Rc<AppState>) {
 fn open_slash_at(g: &UIState<'_>, row_y: f32, row_h: f32, content_x: f32) {
     let menu_h = g.get_slash_items().row_count() as f32 * 32.0 + 8.0;
     let scroll = g.get_editor_scroll_y();
-    let edge = if g.get_sidebar_open() { 260.0 } else { 0.0 };
+    let edge = if g.get_sidebar_open() { g.get_sidebar_width() } else { 0.0 };
     let y = (40.0 + row_y - scroll + row_h + 4.0)
         .clamp(48.0, (g.get_window_h() - menu_h - 8.0).max(48.0));
     g.set_slash_x(edge + content_x);

@@ -619,6 +619,13 @@ export global UIState {
     // persists it as the `theme` settings row; `Theme.dark` is derived from it.
     in-out property <string> theme: "midnight";
     in-out property <bool> sidebar-open: true;
+    // The sidebar's width in logical px. The drag handle on its right edge
+    // writes it live; Rust reads it back on release and persists it as the
+    // `sidebar.width` settings row. `sidebar-resizing` gates the width
+    // animation during the drag — a tween between mouse-move frames is a
+    // rubber band, not a drag.
+    in-out property <float> sidebar-width: 260;
+    in-out property <bool> sidebar-resizing: false;
 
     in-out property <[SidebarNode]> sidebar-rows;
     in-out property <int> sidebar-selected-id: 0;
@@ -939,6 +946,9 @@ export global UIState {
 
     // routed to Rust controller
     callback toggle-sidebar();
+    // Drag released on the sidebar's right-edge handle: Rust persists the
+    // width (the live value already sits in sidebar-width).
+    callback sidebar-resized(float);
     callback toggle-theme();
     callback set-theme(string);
     // Whole-window zoom (Ctrl + = / Ctrl + +, Ctrl + -, Ctrl + 0). The factor

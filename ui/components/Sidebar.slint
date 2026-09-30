@@ -77,7 +77,10 @@ component SidebarPinnedRow inherits Rectangle {
 export component Sidebar inherits Rectangle {
     width: UIState.sidebar-open ? Theme.sidebar-width : 0px;
     clip: true;
-    animate width { duration: Theme.duration-normal; }
+    // The drag writes the width every mouse-move; a tween on each of those
+    // frames is a rubber band, so the animation runs only for the open/close
+    // toggle — which is exactly when sidebar-resizing is off.
+    animate width { duration: UIState.sidebar-resizing ? 0ms : Theme.duration-normal; }
     background: Colors.sidebar;
 
     VerticalLayout {
@@ -248,5 +251,42 @@ export component Sidebar inherits Rectangle {
             }
         }
         Rectangle { height: Theme.spacing-sm; }
+    }
+
+    // ---- right-edge drag handle ----
+    // Declared last so it sits above the tree's own TouchAreas. Its x follows
+    // UIState.sidebar-width — the drag's target, applied instantly — rather
+    // than this sidebar's animated width: the width must not be read back
+    // through something that moves with it. The pointer's offset from the
+    // handle, remembered at press, cancels out of the delta below, so the
+    // width tracks the pointer one-to-one with no jump, and a width pinned at
+    // a clamp bound resumes cleanly when the pointer comes back.
+    Rectangle {
+        width: 6px;
+        height: parent.height;
+        x: UIState.sidebar-width * 1px - self.width;
+        background: ta.has-hover || UIState.sidebar-resizing
+            ? Colors.hover-fill
+            : transparent;
+        ta := TouchArea {
+            property <length> grab-offset;
+            mouse-cursor: MouseCursor.col-resize;
+            pointer-event(event) => {
+                if (event.kind == PointerEventKind.down) {
+                    ta.grab-offset = ta.mouse-x;
+                    UIState.sidebar-resizing = true;
+                }
+                if (event.kind == PointerEventKind.move) {
+                    UIState.sidebar-width = clamp(
+                        UIState.sidebar-width + (ta.mouse-x - ta.grab-offset) / 1px,
+                        200, 480);
+                }
+                if (event.kind == PointerEventKind.up
+                    || event.kind == PointerEventKind.cancel) {
+                    UIState.sidebar-resizing = false;
+                    UIState.sidebar-resized(UIState.sidebar-width);
+                }
+            }
+        }
     }
 }
