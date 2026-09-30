@@ -4134,4 +4134,58 @@ core 遗留里最后两条（`adopt_uuids` 按整型 id 归并 uuid、影子 := 
 - 剩下的：`ref_note` 仍然存整型 id（靠 `remote id → local id` 映射跟随父行）。真正的 AW 式做法是引用直接
   存 uuid，那要动 wire 字段和两端的引用渲染，这次没做。
 
+---
+
+## 单实例 + 笔记交互 + 设置可复制（2026-09-29，ADR-0135…0138）
+
+四刀，都在这一轮一起落地，因为它们互不相关却都落在同一个窗口上。
+
+**ADR-0136 · 单实例**
+- `platform/quit.rs` 的管道协议多了一个 ask：`version\n` → `version <v>\n`，由**不采取行动**的服务端回答
+  （`quit` 是决定，`version` 只是身份问询——服务端若对 `version` 也执行退出，第二次启动会把
+  它只是想识别的那个会话杀掉）。`a_version_request_is_answered_without_ending_the_session` 钉住这一条。
+- `claim(ours, on_quit, announce)` 一次给出结论：同版本 → 提示退出；启动的更新 → 让旧的走 ADR-0105
+  的退出通道然后继续启动；正在运行的更新 → 提示退出；什么都没有 → 本进程成为会话。
+- 判定在 `real_main` 的**第一行**，早于日志、数据库、窗口。`on_quit` 在事件循环起来之前答 `false`，
+  所以那一段窗口里来问的对端听到的是 `err`（"仍在运行"），而 deploy 读到 `err` 就不覆盖 exe。
+- 提示是 `MessageBoxW`（`platform::notify`）：那一刻没有窗口、没有托盘、没有 Slint 后端，而 release
+  构建没有控制台。
+- 新测试：`the_version_comparison_decides_each_direction`（七个方向，含 `0.1.12` vs `0.1` 的补零和
+  非数字段降级）。
+
+**ADR-0137 · 单击只选中**
+- `org-note-detail.id` 现在只由右键菜单的「打开 / 详细信息」和撰写浮层的 ➤ 写；高亮是 `org_notes` 自己
+  的 `selected` 标记。这是把"打开的笔记"和"高亮的笔记"分成两个值的全部改动。
+- 单击不再调 `org_load_drafts`（草稿是浮层的字段，跟着打开路径走）。
+- 右键**会**移动高亮（以前刻意不会）——点击不再选中，不这么做的话右键一条没点过的行会作用到恰好开着的那条。
+- `org_note_detail` 现在投影 `selected: false`：开着的那条由浮层自己表明，不由行点亮。
+
+**ADR-0138 · 标签列回到右边**
+- 笔记这半边多一列 208 px（`全部笔记` + `OrgTagColumn`），表头那行只剩搜索 / 排序 / 回收站。
+- 标签 chips 从表头删掉。任务那半边一行没动，两半挂同一个 `OrgTagColumn`。
+- 顺带把 `OrgNavRow` 的选中态从 `Colors.surface-selected`（22% 强调色）改成 `surface-overlay` + 2px
+  强调色竖条——「全部笔记」是**默认**选中的，默认就响的东西不是状态而是 shout（与 ADR-0128 对
+  筛选 chip 的同一条理由）。这对**任务**那半边的导航列也是同一处修复。
+
+**ADR-0135 · 设置文字可选中**
+- 新组件 `CopyableText`（`read-only: true` 的 `TextInput`），用在版本、渲染器、数据文件夹、快捷键表
+  两列、两条开关说明、清理说明上。数据文件夹改成换行。
+- 依赖 Slint 1.18 把 `Copy` / `SelectAll` 排在 read-only 检查之前（`i-slint-core` `items/text.rs`）。
+- 章节标题和字段名**仍然是纯 `Text`**：它们是 chrome。
+
+**验证**
+- `cargo test --workspace` 全绿（189 + 5 + 14），含 5 条 `platform::quit`。
+- 视觉回归 `notes-filter` / `settings` / `notes-info` 三张实拍：标签树、计数、反向筛选的 ⊖、
+  换行后的数据文件夹、`详细信息` 那一块，都对着。
+
+**没验证的（诚实）**
+- **单实例的三个方向没有在真机上跑过一遍**：需要两个不同版本的 exe 互相当对方的对端，仓库里只有一份。
+  `claim` 的判定逻辑、版本比较的七个方向、以及管道两半的往返都有单测，但"新版本真的把旧版本替换掉、
+  旧版本真的落盘并写下 clean-exit 记录"这一步只有理论保证——第一次 `just deploy-workshop` 撞上一个
+  正在运行的实例时才是它的实机测试。
+- 消息框的文案没有对着一个真人核过。
+- Android 壳（`quire-compose`）这一轮**没动**：单实例是桌面窗口的性质，而标签列 / 单击 / 设置三项
+  按 ADR-0138 之前的约定本就要两端一致——**这一刀只落在桌面上，compose 那一半是欠着的**。
+
+
 

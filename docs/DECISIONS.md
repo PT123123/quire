@@ -2,6 +2,79 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0143 · The window remembers a rectangle, and a rectangle is only believed once a monitor has agreed to hold it
+
+Decision: the window's geometry is persisted as a **rectangle**
+(`window.x` / `window.y` / `window.w` / `window.h`, physical px), a maximized
+window's pre-maximize rectangle is snapshotted when it is maximized
+(`AppState::restore_geometry`, written from `on_window_maximized_changed`), and
+every launch runs the saved rectangle through `platform::monitors::place` before
+it is applied. Work areas come from `EnumDisplayMonitors` + `GetMonitorInfoW` —
+hand-declared FFI, like the clipboard, because user32 is linked for winit anyway.
+The title bar's maximize button also draws 还原 rather than 最大化 while the
+window is maximized.
+
+Context: three defects, all of which only exist with more than one display, and
+none of which a single-monitor machine can show.
+
+- **A maximized session saved the monitor's size.** `main.rs` recorded
+  `Window::size()` at exit, and a maximized window answers with the *monitor's*
+  size. So closing while maximized made the next launch open a window the size
+  of a screen — and on the primary, because the position was never saved at all.
+- **The position was never saved.** A window the user had moved to a secondary
+  display came back on the primary every time, which is the ordinary meaning of
+  "my app forgets where I put it".
+- **A size saved on a large secondary can be larger than the primary's work
+  area.** Then the window opens with its bottom — the ＋ 添加任务 line, the row of
+  window controls' neighbours — off the desk, and nothing in the app can get it
+  back because the title bar is what you would drag it by.
+
+The three are one bug wearing three coats: a saved rectangle was applied as if it
+were a fact about the world rather than a fact about a display that may have
+changed. `place` is the only place that knows the difference, and it is a pure
+function over numbers so the rules are unit-tested without a desktop.
+
+What the platforms already do, checked rather than assumed (winit 0.30.13 /
+Slint 1.18 sources read for this):
+
+- **Maximize is a real `ShowWindow(SW_MAXIMIZE)`** (`window_state.rs`), and
+  winit keeps `WS_CAPTION` on a frameless window and fakes the frame in
+  `WM_NCCALCSIZE` (`adjust_rect`). So Windows still reserves the taskbar: a
+  maximized Quire sits in the work area, on whichever monitor the window
+  overlaps most, and the custom title bar lands inside that work area rather
+  than over the taskbar. The frameless window is therefore not a special case
+  for maximize at all.
+- **Minimize → restore keeps the maximized state.** Slint's backend explicitly
+  refuses to write back the maximized flag while the window is minimized,
+  because `winit::Window::is_maximized()` reports `false` in that state
+  (`winitwindowadapter.rs:1139-1150`). Restoring from the tray or from a hotkey
+  comes back maximized, not restored.
+- **A DPI change does not resize a maximized window.** `WM_DPICHANGED` sets
+  `allow_resize = !MAXIMIZED` (`event_loop.rs:2237`), so dragging a maximized
+  window to a display with a different scale keeps it maximized, and the
+  `window-resized` hook adopts the new factor and puts the zoom back.
+
+Consequences:
+
+- **Physical pixels, still.** Persisting the size in logical pixels would fix
+  the "saved on 150%, restored on 100%" case outright, and it was rejected: the
+  zoom is the window's scale factor, and ADR-0095's whole point is that the
+  window's *physical* size does not move with zoom. Persisting logical size
+  makes the physical window grow with zoom, which reverses that decision to fix
+  a problem it does not have. The clamp covers the cross-DPI case instead: a
+  rectangle that no longer fits anywhere is shrunk to the display it lands on,
+  which is bounded damage rather than an off-desk window.
+- **The pre-ADR-0143 settings rows are not read.** An install that has
+  `window.w` / `window.h` and no `window.x` / `window.y` opens at the platform's
+  default position and size instead. Reading the size back with an invented
+  origin is the state this record exists to prevent, so the first launch after
+  the upgrade forgets the window's position once.
+- **Unverified on a two-monitor machine.** The rules are unit-tested
+  (`platform::monitors`) and the platform behaviour above is read out of the
+  winit and Slint sources, but no physical second display was available here.
+  The one thing that needs eyes on it: `place` centres a window whose monitor
+  is gone, which is a policy, not a fact.
+
 ## ADR-0142 · A write this shell cannot complete is said out loud, and a library that will not take writes is not left to look healthy
 
 Decision: two halves, and neither is optional. `AppState` grows
@@ -2378,7 +2451,7 @@ Consequences:
   carries on, so the app then runs with no tray and no way back to a hidden
   window. `main.rs` prints one line when `AppTray::new()` itself fails; the
   deeper failure is only in the log.
-- **The window state is saved at exit, not at close.** `record_window_size` and
+- **The window state is saved at exit, not at close.** `record_window_geometry` and
   the flush after `ui.run()` still run on the real quit path, which is what the
   clean-exit record (ADR-0018) depends on — a session killed from the task
   manager while hidden is still an unclean exit.
@@ -2429,7 +2502,10 @@ Consequences:
   different zoom lands in the same window. What shrinks is the *logical* viewport:
   at 2× the shell lays out for half the pixels and draws each of them twice as
   large, which is what zooming in means for a window that is not a scrollable
-  document view.
+  document view. Multi-monitor is the other half of this sentence and does not
+  contradict it: the units stay physical, and what handles a rectangle measured
+  on one display and replayed on another is the clamp, not a unit change — see
+  ADR-0143 below for why the logical alternative was not taken.
 - **The floor moves the other way.** The backend applies `min-width` once, at
   creation, with the factor in force then, so the window's minimum in logical
   pixels is `min-width / zoom` — a zoomed-in window can be dragged narrower than
