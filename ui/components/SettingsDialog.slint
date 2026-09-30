@@ -48,37 +48,66 @@ component ThemeCard inherits Rectangle {
     }
 }
 
-// One interval choice of the 同步 section. The dialog has no combo box, and the
-// theme row above already draws its choices this way: a bordered shape whose
-// border and ink say which one is the current answer.
-component IntervalChip inherits Rectangle {
-    in property <string> label;
-    in property <bool> selected;
-    callback picked();
+// A line of the dialog that is **text to be copied, not chrome to be read**
+// (ADR-0135). The version, the renderer and above all the data folder are the
+// three strings a user is asked for when reporting a problem or moving a
+// library, and all three used to be a bare `Text`: a `Text` in Slint cannot be
+// focused, cannot hold a selection, and Ctrl+C over it reaches whatever focused
+// input was last — which in a dialog whose only input is the 0×0 Escape proxy
+// is nothing at all. So the one string a person needs was the one string they
+// could not take away.
+//
+// A `TextInput` with `read-only` is the fix and it is exactly the right size: it
+// is focusable, it takes a selection, it answers Ctrl+A and Ctrl+C, and it
+// refuses every other key — so a click cannot turn a read-only line into an
+// editable one. Slint 1.18 routes Copy and SelectAll before the read-only check
+// (`items/text.rs`), and refuses Paste / Cut / Undo / Redo / character input
+// behind it, which is the split this component depends on.
+//
+// The trade is the one a field has over a label: it draws a caret, and it takes
+// focus. The caret is kept, because it is the affordance — a line of text with
+// no caret is a label, and a label is exactly what these three rows used to be
+// and exactly what the user could not copy from. Nothing else is added on top:
+// the input's own mouse handling places the caret where the click landed and
+// drags a selection from there, so this component declares no `TouchArea` of
+// its own (one would sit above the input and swallow both).
+component CopyableText inherits Rectangle {
+    in property <string> text;
+    in property <length> font-size: Typography.size-ui;
+    in property <color> ink: Colors.text-primary;
+    // Wrapped rather than elided, and off for the short values (a version, a
+    // renderer name). A data folder is a long path in a 400 px card: elided, the
+    // half that matters is the tail nobody can see, and a selected-then-copied
+    // elision is worse than no text at all — it looks right and is wrong.
+    in property <bool> wrap: false;
+    in property <bool> mono: false;
 
-    width: lab.preferred-width + Theme.spacing-sm * 2;
-    height: 24px;
-    border-radius: Theme.radius-md;
-    background: root.selected ? Colors.selection : transparent;
-    border-width: 1px;
-    border-color: root.selected ? Colors.accent : Colors.border;
+    height: wrap
+        ? input.preferred-height + 2px
+        : input.preferred-height;
+    // No border and no fill. A field chrome here would say "edit me", and the
+    // only affordance this row offers is select-and-copy.
+    background: transparent;
+    border-width: 0px;
 
-    lab := Text {
-        x: Theme.spacing-sm;
+    input := TextInput {
+        x: 0;
         y: 0;
+        width: parent.width;
         height: parent.height;
-        text: root.label;
-        font-family: Typography.ui-font;
-        font-size: Typography.size-caption;
-        font-weight: root.selected ? Typography.weight-semibold : Typography.weight-regular;
-        color: root.selected ? Colors.accent : Colors.text-secondary;
+        text: root.text;
+        read-only: true;
+        font-family: root.mono ? Typography.mono-font : Typography.ui-font;
+        font-size: root.font-size;
+        color: root.ink;
+        // The selection is the one piece of state this row has, so it is drawn in
+        // the app's own selection colour rather than the renderer's default —
+        // which is a system accent that would not match the 全部笔记 chip the
+        // user selected two rows away.
+        selection-foreground-color: Colors.text-primary;
+        selection-background-color: Colors.selection;
+        wrap: root.wrap ? word-wrap : no-wrap;
         vertical-alignment: center;
-    }
-    TouchArea {
-        mouse-cursor: MouseCursor.pointer;
-        clicked => {
-            root.picked();
-        }
     }
 }
 
@@ -88,22 +117,17 @@ component ShortcutRow inherits Rectangle {
     height: 20px;
 
     HorizontalLayout {
-        Text {
+        CopyableText {
             width: 108px;
             text: root.keys;
-            font-family: Typography.mono-font;
             font-size: Typography.size-caption;
-            color: Colors.text-secondary;
-            vertical-alignment: center;
-            overflow: elide;
+            ink: Colors.text-secondary;
+            mono: true;
         }
-        Text {
+        CopyableText {
             text: root.label;
-            font-family: Typography.ui-font;
             font-size: Typography.size-ui;
-            color: Colors.text-secondary;
-            vertical-alignment: center;
-            overflow: elide;
+            ink: Colors.text-secondary;
         }
     }
 }
@@ -230,14 +254,15 @@ export component SettingsDialog inherits PopupWindow {
             }
             HorizontalLayout {
                 spacing: Theme.spacing-sm;
-                Text {
-                    text: "打开笔记页时自动弹出输入框";
-                    font-family: Typography.ui-font;
+                // Copyable (ADR-0135), because a toggle's own label is the text a
+                // user copies when asking which setting is on — and these two are
+                // the only prose in the dialog that is not itself a value.
+                CopyableText {
+                    text: "启动时自动弹出新建笔记输入框";
                     font-size: Typography.size-ui;
-                    color: Colors.text-secondary;
-                    vertical-alignment: center;
+                    ink: Colors.text-secondary;
+                    wrap: true;
                     horizontal-stretch: 1;
-                    wrap: word-wrap;
                 }
                 Rectangle {
                     width: 40px;
@@ -267,6 +292,90 @@ export component SettingsDialog inherits PopupWindow {
             Rectangle { height: 1px; background: Colors.border; }
 
             Text {
+                text: "快捷键";
+                font-size: Typography.size-caption;
+                font-weight: Typography.weight-semibold;
+                color: Colors.text-muted;
+            }
+            // 全局快捷键: off in a library that never wrote the rows, which is
+            // the default — a keystroke that works in every other application
+            // is the user's to ask for, not the app's to assume.
+            HorizontalLayout {
+                spacing: Theme.spacing-sm;
+                CopyableText {
+                    text: "全局 Alt+N 新建笔记";
+                    font-size: Typography.size-ui;
+                    ink: Colors.text-secondary;
+                    wrap: true;
+                    horizontal-stretch: 1;
+                }
+                Rectangle {
+                    width: 40px;
+                    height: 22px;
+                    border-radius: 11px;
+                    background: UIState.hotkey-alt-n ? Colors.accent : Colors.border-strong;
+                    animate background { duration: Theme.duration-fast; }
+                    TouchArea {
+                        mouse-cursor: MouseCursor.pointer;
+                        clicked => {
+                            UIState.hotkey-alt-n = !UIState.hotkey-alt-n;
+                            UIState.hotkey-alt-n-toggled(UIState.hotkey-alt-n);
+                        }
+                    }
+                    Rectangle {
+                        x: UIState.hotkey-alt-n ? parent.width - self.width - 2px : 2px;
+                        y: 2px;
+                        width: 18px;
+                        height: 18px;
+                        border-radius: 9px;
+                        background: Colors.surface-overlay;
+                        animate x { duration: Theme.duration-fast; }
+                    }
+                }
+            }
+            HorizontalLayout {
+                spacing: Theme.spacing-sm;
+                CopyableText {
+                    text: "全局 Alt+M 显示主界面";
+                    font-size: Typography.size-ui;
+                    ink: Colors.text-secondary;
+                    wrap: true;
+                    horizontal-stretch: 1;
+                }
+                Rectangle {
+                    width: 40px;
+                    height: 22px;
+                    border-radius: 11px;
+                    background: UIState.hotkey-alt-m ? Colors.accent : Colors.border-strong;
+                    animate background { duration: Theme.duration-fast; }
+                    TouchArea {
+                        mouse-cursor: MouseCursor.pointer;
+                        clicked => {
+                            UIState.hotkey-alt-m = !UIState.hotkey-alt-m;
+                            UIState.hotkey-alt-m-toggled(UIState.hotkey-alt-m);
+                        }
+                    }
+                    Rectangle {
+                        x: UIState.hotkey-alt-m ? parent.width - self.width - 2px : 2px;
+                        y: 2px;
+                        width: 18px;
+                        height: 18px;
+                        border-radius: 9px;
+                        background: Colors.surface-overlay;
+                        animate x { duration: Theme.duration-fast; }
+                    }
+                }
+            }
+            Text {
+                text: "开启后在任何应用前台都生效；与笔记页的 ＋ 是同一个输入框，含标签建议。";
+                font-size: Typography.size-caption;
+                color: Colors.text-muted;
+                wrap: TextWrap.word-wrap;
+            }
+
+            Rectangle { height: 1px; background: Colors.border; }
+
+            Text {
                 text: "共享";
                 font-size: Typography.size-caption;
                 font-weight: Typography.weight-semibold;
@@ -274,14 +383,12 @@ export component SettingsDialog inherits PopupWindow {
             }
             HorizontalLayout {
                 spacing: Theme.spacing-sm;
-                Text {
+                CopyableText {
                     text: "在局域网内只读共享（端口 5877，重启后生效）";
-                    font-family: Typography.ui-font;
                     font-size: Typography.size-ui;
-                    color: Colors.text-secondary;
-                    vertical-alignment: center;
+                    ink: Colors.text-secondary;
+                    wrap: true;
                     horizontal-stretch: 1;
-                    wrap: word-wrap;
                 }
                 Rectangle {
                     width: 40px;
@@ -308,257 +415,22 @@ export component SettingsDialog inherits PopupWindow {
                 }
             }
 
-            Rectangle { height: 1px; background: Colors.border; }
-
-            // ── LAN sync (crate::sync): the devices this library syncs with,
-            // one line each, and the two doors into a new pairing — the
-            // announcements the engine hears, or an address typed by hand.
-            Text {
-                text: "同步";
-                font-size: Typography.size-caption;
-                font-weight: Typography.weight-semibold;
-                color: Colors.text-muted;
-            }
-            // This device's own half. The address is the reason this card
-            // exists: pairing by hand means typing this address into the other
-            // device, and until now the only way to learn it was to know your
-            // own LAN address — the phone's 同步 page shows its own, and this
-            // one did not.
-            HorizontalLayout {
-                spacing: Theme.spacing-sm;
-                Text {
-                    text: "本机名称";
-                    font-family: Typography.ui-font;
-                    font-size: Typography.size-ui;
-                    color: Colors.text-secondary;
-                    vertical-alignment: center;
-                    width: 76px;
-                }
-                VerticalLayout {
-                    horizontal-stretch: 1;
-                    spacing: 2px;
-                    HorizontalLayout {
-                        spacing: Theme.spacing-xs;
-                        self-name := TextInput {
-                            text <=> UIState.sync-self-name;
-                            font-family: Typography.ui-font;
-                            font-size: Typography.size-ui;
-                            color: Colors.text-primary;
-                            selection-foreground-color: Colors.text-primary;
-                            selection-background-color: Colors.selection;
-                            height: 26px;
-                            vertical-alignment: center;
-                            single-line: true;
-                            horizontal-stretch: 1;
-                            accepted => {
-                                // the name is what the other device's rows say, so
-                                // an accepted-but-refused edit must snap back: the
-                                // callback re-pushes the session's answer
-                                UIState.sync-name-set(UIState.sync-self-name);
-                            }
-                        }
-                        Button {
-                            text: "改名";
-                            clicked => {
-                                UIState.sync-name-set(UIState.sync-self-name);
-                            }
-                        }
-                    }
-                    HorizontalLayout {
-                        spacing: Theme.spacing-xs;
-                        Text {
-                            text: "本机地址";
-                            font-family: Typography.ui-font;
-                            font-size: Typography.size-caption;
-                            color: Colors.text-muted;
-                            vertical-alignment: center;
-                        }
-                        Text {
-                            text: UIState.sync-self-address == ""
-                                ? "未联网 — 其他设备找不到本机"
-                                : UIState.sync-self-address;
-                            font-family: Typography.mono-font;
-                            font-size: Typography.size-caption;
-                            color: UIState.sync-self-address == ""
-                                ? Colors.text-muted
-                                : Colors.text-secondary;
-                            vertical-alignment: center;
-                            horizontal-stretch: 1;
-                            overflow: elide;
-                        }
-                    }
-                }
-            }
-            HorizontalLayout {
-                spacing: Theme.spacing-sm;
-                Text {
-                    text: "与本网络上的其他 Quire 设备同步（端口 5878）";
-                    font-family: Typography.ui-font;
-                    font-size: Typography.size-ui;
-                    color: Colors.text-secondary;
-                    vertical-alignment: center;
-                    horizontal-stretch: 1;
-                    wrap: word-wrap;
-                }
-                Rectangle {
-                    width: 40px;
-                    height: 22px;
-                    border-radius: 11px;
-                    background: UIState.sync-auto ? Colors.accent : Colors.border-strong;
-                    animate background { duration: Theme.duration-fast; }
-                    TouchArea {
-                        mouse-cursor: MouseCursor.pointer;
-                        clicked => {
-                            UIState.sync-auto = !UIState.sync-auto;
-                            UIState.sync-auto-toggled(UIState.sync-auto);
-                        }
-                    }
-                    Rectangle {
-                        x: UIState.sync-auto ? parent.width - self.width - 2px : 2px;
-                        y: 2px;
-                        width: 18px;
-                        height: 18px;
-                        border-radius: 9px;
-                        background: Colors.surface-overlay;
-                        animate x { duration: Theme.duration-fast; }
-                    }
-                }
-            }
-            // The cadence, as the four settings that make sense on a laptop: a
-            // round costs a few milliseconds per device when they are all on the
-            // desk, and the wait is what a user notices when it is too slow.
-            // Only while auto-sync is on: with the switch off the interval is a
-            // number that changes nothing, and a dead control is a question.
-            if UIState.sync-auto : HorizontalLayout {
-                spacing: Theme.spacing-xs;
-                for secs in [30, 60, 300, 1800] : IntervalChip {
-                    label: secs == 30 ? "30 秒"
-                        : secs == 60 ? "1 分钟"
-                        : secs == 300 ? "5 分钟" : "30 分钟";
-                    selected: UIState.sync-interval == secs;
-                    picked => {
-                        UIState.sync-interval-set(secs);
-                    }
-                }
-            }
-            for row in UIState.sync-rows : VerticalLayout {
-                spacing: 2px;
-                Text {
-                    text: row.label + (row.online ? " · 在线" : "");
-                    font-family: Typography.ui-font;
-                    font-size: Typography.size-ui;
-                    color: Colors.text-primary;
-                    overflow: elide;
-                }
-                HorizontalLayout {
-                    spacing: Theme.spacing-xs;
-                    Text {
-                        text: row.status;
-                        font-family: Typography.ui-font;
-                        font-size: Typography.size-caption;
-                        color: Colors.text-muted;
-                        vertical-alignment: center;
-                        horizontal-stretch: 1;
-                        overflow: elide;
-                    }
-                    // One verb per row now. 「配对」 is gone (ADR-0128): a device
-                    // on this list announced itself and is therefore already
-                    // synced with, so a button that only changed a flag the list
-                    // no longer shows was a control over nothing.
-                    Button {
-                        text: "立即同步";
-                        clicked => {
-                            UIState.sync-now(row.id);
-                        }
-                    }
-                    Button {
-                        text: "忘记";
-                        clicked => {
-                            UIState.sync-forget(row.id);
-                        }
-                    }
-                }
-                // The address it was last reached at. Devices are found by the
-                // engine's broadcast, and a round that fails says "the address
-                // moved to another device" — a sentence the user can only act on
-                // if the number is on the screen.
-                if row.online : Text {
-                    text: row.ip;
-                    font-family: Typography.mono-font;
-                    font-size: Typography.size-caption;
-                    color: Colors.text-muted;
-                    overflow: elide;
-                }
-            }
-            if UIState.sync-status != "" : HorizontalLayout {
-                spacing: Theme.spacing-xs;
-                // A round in flight is a spinner's job, not the sentence's: the
-                // status line says what happened, and this says that something
-                // is still waiting for an answer. A Text rather than a drawn
-                // dot: Rectangle has no vertical-alignment, so a bullet in the
-                // row's own font is the only way this sits on the same line.
-                if UIState.sync-busy : Text {
-                    text: "●";
-                    font-size: Typography.size-caption;
-                    color: Colors.accent;
-                    vertical-alignment: center;
-                }
-                Text {
-                    text: UIState.sync-status;
-                    font-family: Typography.ui-font;
-                    font-size: Typography.size-caption;
-                    color: Colors.text-muted;
-                    horizontal-stretch: 1;
-                    wrap: word-wrap;
-                }
-            }
-            // The log, newest first: "what moved, and what refused" is the one
-            // thing a user can check without opening another app, and a failure
-            // that only ever lived in the status line was a failure they had to
-            // catch happening to see at all.
-            Text {
-                text: "最近记录";
-                font-size: Typography.size-caption;
-                font-weight: Typography.weight-semibold;
-                color: Colors.text-muted;
-            }
-            if UIState.sync-log.length == 0 : Text {
-                text: "还没有记录 — 每一轮同步、配对与失败都会留在这里。";
-                font-family: Typography.ui-font;
-                font-size: Typography.size-caption;
-                color: Colors.text-muted;
-                wrap: word-wrap;
-            }
-            for line in UIState.sync-log : HorizontalLayout {
-                spacing: Theme.spacing-xs;
-                Text {
-                    text: line.when;
-                    font-family: Typography.mono-font;
-                    font-size: Typography.size-caption;
-                    color: Colors.text-muted;
-                    vertical-alignment: top;
-                    width: 68px;
-                    overflow: elide;
-                }
-                Text {
-                    text: line.peer;
-                    font-family: Typography.ui-font;
-                    font-size: Typography.size-caption;
-                    color: Colors.text-secondary;
-                    vertical-alignment: top;
-                    width: 96px;
-                    overflow: elide;
-                }
-                Text {
-                    text: line.message;
-                    font-family: Typography.ui-font;
-                    font-size: Typography.size-caption;
-                    color: line.ok ? Colors.text-muted : Colors.danger;
-                    vertical-alignment: top;
-                    horizontal-stretch: 1;
-                    wrap: word-wrap;
-                }
-            }
+            // ── LAN sync moved out (ADR-0132) ──────────────────────────────────
+            //
+            // The whole 同步 section — 本机名称 / 本机地址 / the auto switch / the
+            // interval chips / the device rows / the log — used to live here,
+            // between 局域网共享 and 存储, and it was the wrong shape for what it
+            // is. A 400 px card that has to scroll cannot hold a seven-column
+            // device table, a statistics box, or fifty stored log lines; what it
+            // did hold was two lines per device and a 立即同步 button, which is
+            // what made the section read as "特别特别简陋".
+            //
+            // It is now a **destination**: `ui/components/SyncPage.slint`, with
+            // its own row in the rail. The settings row that used to be a second
+            // copy of everything on it is gone rather than left pointing at the
+            // new page — a link that opens a page you could already click in the
+            // sidebar is a row that costs a click to say what the rail says for
+            // free.
 
             Rectangle { height: 1px; background: Colors.border; }
 
@@ -573,20 +445,25 @@ export component SettingsDialog inherits PopupWindow {
                 VerticalLayout {
                     horizontal-stretch: 1;
                     spacing: 2px;
-                    Text {
+                    CopyableText {
                         text: "数据文件夹";
-                        font-family: Typography.ui-font;
                         font-size: Typography.size-ui;
-                        color: Colors.text-secondary;
+                        ink: Colors.text-secondary;
                     }
-                    Text {
+                    // Wrapped, and copyable (ADR-0135) — this is the single most
+                    // copied string in the app, and it used to be the one string
+                    // that could not be copied at all: a `Text`, which cannot hold
+                    // a selection, drawn `no-wrap` with `overflow: elide`, so the
+                    // path was both unselectable and truncated in a 400 px card.
+                    // Wrapping makes the whole path visible; the read-only input
+                    // makes it takeable.
+                    CopyableText {
                         text: UIState.storage-available ? UIState.data-dir
                             : "内存中运行 — 未挂载数据库";
-                        font-family: Typography.mono-font;
                         font-size: Typography.size-caption;
-                        color: UIState.storage-available ? Colors.text-primary : Colors.text-muted;
-                        wrap: no-wrap;
-                        overflow: elide;
+                        ink: UIState.storage-available ? Colors.text-primary : Colors.text-muted;
+                        mono: true;
+                        wrap: true;
                     }
                 }
                 // A `visible: false` item keeps its slot in a Slint layout, so
@@ -619,12 +496,11 @@ export component SettingsDialog inherits PopupWindow {
             // one line about the only button here that deletes anything: the
             // notice it reports through is a toast, so the rule has to be
             // readable before the click (SPEC §三十七, ADR-0037)
-            if UIState.storage-available : Text {
+            if UIState.storage-available : CopyableText {
                 text: "清理会删除没有被任何块、撤销步骤或复制块引用的图片和文件。";
-                font-family: Typography.ui-font;
                 font-size: Typography.size-caption;
-                color: Colors.text-muted;
-                wrap: word-wrap;
+                ink: Colors.text-muted;
+                wrap: true;
             }
 
             Rectangle { height: 1px; background: Colors.border; }
@@ -669,12 +545,10 @@ export component SettingsDialog inherits PopupWindow {
                     vertical-alignment: center;
                 }
                 Rectangle { width: 0px; }
-                Text {
+                // Copyable (ADR-0135): the version is what a bug report is headed
+                // with, and the 关于 section is where a user is sent to find it.
+                CopyableText {
                     text: "Quire " + UIState.app-version;
-                    font-family: Typography.ui-font;
-                    font-size: Typography.size-ui;
-                    color: Colors.text-primary;
-                    vertical-alignment: center;
                 }
             }
             HorizontalLayout {
@@ -686,12 +560,12 @@ export component SettingsDialog inherits PopupWindow {
                     vertical-alignment: center;
                 }
                 Rectangle { width: 0px; }
-                Text {
+                // Copyable for the same reason, and mono because it is an
+                // identifier rather than a sentence.
+                CopyableText {
                     text: UIState.renderer-name;
-                    font-family: Typography.mono-font;
                     font-size: Typography.size-caption;
-                    color: Colors.text-primary;
-                    vertical-alignment: center;
+                    mono: true;
                 }
             }
 

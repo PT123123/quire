@@ -295,6 +295,25 @@ component IcMaximize {
     }
 }
 
+component IcRestore {
+    in property <brush> color: Colors.text-secondary;
+    in property <length> size: 16px;
+    width: size; height: size;
+    Path {
+        width: parent.width; height: parent.height;
+        viewbox-x: 0; viewbox-y: 0; viewbox-width: 24; viewbox-height: 24;
+        stroke: color; stroke-width: 1.5px;
+        fill: transparent;
+        // two overlapping squares, front one smaller and tucked into the
+        // bottom-left — the shell's own shape, not the platform glyph, so it
+        // sits with IcMaximize at the same weight
+        MoveTo { x: 9; y: 6; } LineTo { x: 18; y: 6; }
+        LineTo { x: 18; y: 13; } LineTo { x: 9; y: 13; } Close {}
+        MoveTo { x: 6; y: 11; } LineTo { x: 15; y: 11; }
+        LineTo { x: 15; y: 18; } LineTo { x: 6; y: 18; } Close {}
+    }
+}
+
 component IcTodoCheck {
     in property <brush> color: Colors.text-secondary;
     in property <length> size: 16px;
@@ -608,6 +627,75 @@ component IcSend {
     }
 }
 
+// 刷新 (⟳): the 笔记 toolbar's round with every device, and the sync page's own
+// re-read of the peers table. Drawn and not typed for the same reason as `IcSend`
+// above: `⟳` is U+27F3, a Miscellaneous Symbols glyph this font chain does not
+// carry, and a `Text` of it is an invisible control whose `TouchArea` still
+// answers. The reference's own button is this glyph in a 30 px box; here it is
+// a `Path` so it renders whatever fonts the machine has.
+//
+// The head is the open end of the arc: a full circle with a gap is what tells
+// the reader this arrow comes round again, where a ring alone reads as a ring.
+component IcRefresh {
+    in property <brush> color: Colors.text-secondary;
+    in property <length> size: 16px;
+    width: size; height: size;
+    Path {
+        width: parent.width; height: parent.height;
+        viewbox-x: 0; viewbox-y: 0; viewbox-width: 24; viewbox-height: 24;
+        stroke: color; stroke-width: 1.8px;
+        stroke-line-cap: round; stroke-line-join: round;
+        fill: transparent;
+        // The ring: centre (12, 12), radius 7.4, open at the top over the 90°
+        // between 225° and 315° — a ring with a notch rather than a ring with a
+        // slice missing, which is what makes it read as "round again" and not
+        // as two unrelated strokes.
+        //
+        // `large-arc` and `sweep` are load-bearing here, not decoration: two
+        // points can be joined by two different arcs of the same radius, and
+        // with both flags left at their `false` default Slint draws the
+        // **minor** one — a 90° sliver across the top where there is no ink to
+        // spare, since the chevron below sits there. The ring the comment above
+        // promises is the 270° major arc, which is `large-arc: true` with the
+        // positive-angle (clockwise) direction, `sweep: true`.
+        MoveTo { x: 17.23; y: 6.77; }
+        ArcTo {
+            radius-x: 7.4; radius-y: 7.4; x: 6.77; y: 6.77;
+            large-arc: true; sweep: true;
+        }
+        // The head: a chevron on the arc's start, tangent to the ring — at
+        // 315° the clockwise tangent points 45° down-right, so the barbs sit
+        // back along that line and open perpendicular to it. Without the
+        // arrowhead the ring is a "C"; with it, the direction is the whole
+        // message.
+        MoveTo { x: 14.82; y: 6.64; } LineTo { x: 17.94; y: 7.48; }
+        LineTo { x: 17.10; y: 4.36; }
+    }
+}
+
+// The sync mark itself (the sidebar's 同步 row): two arrows round each other.
+// Drawn rather than typed for the same reason as `IcRefresh` above — the glyphs
+// this could have borrowed are outside the font chain this shell draws in.
+component IcSync {
+    in property <brush> color: Colors.text-secondary;
+    in property <length> size: 16px;
+    width: size; height: size;
+    Path {
+        width: parent.width; height: parent.height;
+        viewbox-x: 0; viewbox-y: 0; viewbox-width: 24; viewbox-height: 24;
+        stroke: color; stroke-width: 1.8px;
+        stroke-line-cap: round; stroke-line-join: round;
+        fill: transparent;
+        // two arrows round each other, the transfer mark
+        MoveTo { x: 3.5; y: 9.5; }
+        ArcTo { radius-x: 5.5; radius-y: 5.5; x: 15; y: 5.2; }
+        LineTo { x: 19.5; y: 9.2; } LineTo { x: 12.5; y: 9.4; }
+        MoveTo { x: 20.5; y: 14.5; }
+        ArcTo { radius-x: 5.5; radius-y: 5.5; x: 9; y: 18.8; }
+        LineTo { x: 4.5; y: 14.8; } LineTo { x: 11.5; y: 14.6; }
+    }
+}
+
 export component Icon {
     in property <string> name;
     in property <length> size: 16px;
@@ -638,6 +726,7 @@ export component Icon {
     IcClock { visible: root.name == "clock"; size: root.size; color: root.color; }
     IcMinimize { visible: root.name == "minimize"; size: root.size; color: root.color; }
     IcMaximize { visible: root.name == "maximize"; size: root.size; color: root.color; }
+    IcRestore { visible: root.name == "restore"; size: root.size; color: root.color; }
     IcTodoCheck { visible: root.name == "todo-check"; size: root.size; color: root.color; }
     IcExport { visible: root.name == "export"; size: root.size; color: root.color; }
     IcImport { visible: root.name == "import"; size: root.size; color: root.color; }
@@ -650,4 +739,6 @@ export component Icon {
     IcLock { visible: root.name == "lock"; size: root.size; color: root.color; }
     IcNote { visible: root.name == "note"; size: root.size; color: root.color; }
     IcSend { visible: root.name == "send"; size: root.size; color: root.color; }
+    IcRefresh { visible: root.name == "refresh"; size: root.size; color: root.color; }
+    IcSync { visible: root.name == "sync"; size: root.size; color: root.color; }
 }

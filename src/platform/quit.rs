@@ -1,5 +1,6 @@
-// The quit channel (ADR-0105): how a *running* instance is asked to end its
-// session from outside.
+// The instance channel (ADR-0105, ADR-0136): how a launching process finds out
+// whether a Quire is already running, which one, and — when the answer says it
+// should — asks that one to end its session from outside.
 //
 // Why it exists. Closing the window only hides to the tray (ADR-0096), so the
 // one graceful exit the app has is the tray menu's 「退出」 — and a deploy that
@@ -21,11 +22,17 @@
 //     the same rule `platform::mod` states for the clipboard. kernel32 is
 //     already linked.
 //
-// The protocol is one line each way: the client writes `quit\n`, and the server
-// answers `ok\n` after it has *scheduled* the quit, `err\n` if the schedule
-// failed. The answer is the point — it lets a caller tell "an instance
-// accepted, it is going to exit" from "nothing was listening", and a caller
-// that gets no answer must not assume the app is going away.
+// The protocol is one line each way, and the request names the ask:
+//
+//   * `version\n`  → the server answers `version <v>\n`. This is what a second
+//     launch asks first: whether it is about to be a second session at all, and
+//     which build it would be a second session of (ADR-0136).
+//   * `quit\n`     → the server answers `ok\n` after it has *scheduled* the quit,
+//     `err\n` if the schedule failed.
+//
+// The answer is the point — it lets a caller tell "an instance accepted, it is
+// going to exit" from "nothing was listening", and a caller that gets no answer
+// must not assume the app is going away.
 //
 // `quire.exe --quit` is the client half and runs before any session starts: no
 // log line, no database, no window, no event loop.
@@ -41,22 +48,142 @@ pub const PIPE_NAME: &str = r"\\.\pipe\quire-desktop-quit";
 /// deploy would hang on one instead of reporting it.
 const ANSWER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Start answering quit requests, and return whether this process got the
-/// channel.
-///
-/// This returns as soon as the name is claimed: the listening itself happens on
-/// a thread of its own, because `ConnectNamedPipe` blocks until a client
-/// arrives and the caller still has a window to build. `false` means another
-/// instance already owns the name, which is also the only single-instance
-/// signal this app has: the second launch keeps running (there is no guard —
-/// DECISIONS.md records that), it just cannot be reached by `--quit`.
-///
-/// `on_quit` returns whether the session's exit was actually scheduled, and
-/// that is what the answer carries.
-pub fn serve(on_quit: impl Fn() -> bool + Send + 'static) -> bool {
-    imp::serve_named(PIPE_NAME, on_quit)
-}
+/// How long a replacing launch waits for the session it asked to quit. What it
+/// waits for is one final flush and an event-loop unwind — normally well under
+/// a second — so the bound only answers an instance that wedged on the way out.
+const SESSION_END_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
+/// What a launching process decided to do about the instance it found
+/// (ADR-0136). The decision is made once, before any session starts, so the
+/// answer is one value rather than a set of booleans to misread in pairs.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SecondLaunch {
+    /// Nothing was listening: this process owns the channel and becomes the one
+    /// session. The normal path, and the only one that reaches a window.
+    Primary,
+    /// An instance of the **same** build is running. It keeps running; this
+    /// process says so and exits, so two sessions never share one database.
+    AlreadyRunning { version: String },
+    /// An **older** build is running. Same outcome as [`Self::AlreadyRunning`] —
+    /// the running one is not displaced by a downgrade — and the same notice,
+    /// which names the running version so the user can see *why* nothing
+    /// happened.
+    RunningIsNewer { version: String },
+    /// A **newer** build is running, so the old one was told to end its own
+    /// session and this process carries on to start. `quit_accepted` is false
+    /// when the request went out and nothing answered: the newer instance then
+    /// keeps running, and this process must not claim to have replaced it.
+    Replacing { quit_accepted: bool },
+}
+/// Work out what this launch should do, and act on it.
+///
+/// This is the whole of the single-instance rule (ADR-0136), and it runs before
+/// logging, the database or the window: a second launch that is going to be told
+/// to go away must not open a database first, because opening one is a second
+/// writer on a file the live instance already has.
+///
+/// The rule is one comparison of two versions, and the direction is the whole of
+/// it:
+///
+///   * nothing running → `None` (this process owns the channel and goes on to
+///     build a window);
+///   * same build → tell the user, exit. **Both** halves matter: a second
+///     session would be a second writer, and a silent one is how the user finds
+///     out.
+///   * launching is **newer** → ask the old one to exit through its own quit
+///     channel (so its flush and clean-exit record run, ADR-0105) and carry on
+///     starting. This is what makes a deploy land on a running install: the old
+///     exe releases its files without a kill, which is the property ADR-0105 was
+///     built for and what the deploy script has been asking for by hand.
+///   * launching is **older** → the running one wins. A downgrade must not
+///     displace a newer install; the user is told and this process exits.
+///
+/// `ours` is this build's version and must be `env!("CARGO_PKG_VERSION")` — the
+/// key `build.rs` stamps the exe's version block from, so the number a peer is
+/// told is the number the file on disk reports.
+///
+/// `on_quit` is the caller's, and not this module's: it has to post to whatever
+/// loop the caller's window runs on, and this claim is made *before* that window
+/// exists. The caller is what knows whether it is up yet — see `main`, which
+/// answers `false` for the window between the claim and `ui.run()` rather than
+/// posting to a loop that has not started. `announce` is how a non-`Primary`
+/// answer reaches the user; it is a callback rather than a print because that
+/// half of the rule is a window's job, not this module's.
+pub fn claim(
+    ours: &str,
+    on_quit: impl Fn() -> bool + Send + 'static,
+    announce: impl Fn(&SecondLaunch),
+) -> Option<SecondLaunch> {
+    match imp::request_version(PIPE_NAME) {
+        // Nothing is listening. Claim the name and become the one session. The
+        // claim is the last thing that can fail, and it is reported rather than
+        // assumed: a pipe this process could not own is a pipe a second launch
+        // will read a *version* from, which is the one state with no good
+        // answer.
+        Err(_) => {
+            if imp::serve_named(PIPE_NAME, ours, on_quit) {
+                None
+            } else {
+                let blocked = SecondLaunch::AlreadyRunning {
+                    version: "unknown".into(),
+                };
+                announce(&blocked);
+                Some(blocked)
+            }
+        }
+        Ok(running) => {
+            let decision = if ours == running {
+                SecondLaunch::AlreadyRunning { version: running }
+            } else if is_newer(ours, &running) {
+                // The old instance ends its own session first, and the answer
+                // decides what this launch claims. `quit` after `version` is a
+                // second exchange on the same pipe, which is why the server
+                // re-creates its instance after every request.
+                let accepted = imp::request_quit(PIPE_NAME).is_ok();
+                if accepted {
+                    // The `ok` says the old session *scheduled* its exit — its
+                    // final flush and clean-exit record are still in flight
+                    // while this process is already starting. Opening the
+                    // database here is what races both halves of that handover:
+                    // a load that reads before the last flush restores a stale
+                    // page, and this session's first open then writes that
+                    // stale "current-page" over the real one — so every
+                    // relaunch lands one session behind. The wait is bounded,
+                    // so an instance that wedges between scheduling its quit
+                    // and running it costs the launch the wait and no more.
+                    imp::wait_for_session_end(PIPE_NAME, SESSION_END_TIMEOUT);
+                }
+                SecondLaunch::Replacing { quit_accepted: accepted }
+            } else {
+                SecondLaunch::RunningIsNewer { version: running }
+            };
+            announce(&decision);
+            Some(decision)
+        }
+    }
+}
+/// Compare two dotted version strings by their numeric parts.
+///
+/// Not a general semver: a build stamp this app stamps is `MAJOR.MINOR.PATCH`,
+/// and that is all this has to tell apart. Anything non-numeric compares as `0`
+/// rather than being rejected, so a hand-edited `Cargo.toml` degrades to "the
+/// two look the same" (a prompt, which is safe) instead of panicking on a launch.
+fn is_newer(ours: &str, theirs: &str) -> bool {
+    let parts = |v: &str| -> Vec<u64> {
+        v.split(['.', '-'])
+            .map(|p| p.parse::<u64>().unwrap_or(0))
+            .collect()
+    };
+    let (a, b) = (parts(ours), parts(theirs));
+    // Padding to equal length so 0.1.12 vs 0.1 is decided by the 12 rather than
+    // by the missing component sorting as absent.
+    let n = a.len().max(b.len());
+    (0..n)
+        .map(|i| (a.get(i).copied().unwrap_or(0), b.get(i).copied().unwrap_or(0)))
+        .find(|(x, y)| x != y)
+        .map(|(x, y)| x > y)
+        .unwrap_or(false)
+}
 /// Ask the instance that owns [`PIPE_NAME`] to end its session.
 ///
 /// `Ok(())` means an instance answered `ok` — it has scheduled its own exit
@@ -64,7 +191,7 @@ pub fn serve(on_quit: impl Fn() -> bool + Send + 'static) -> bool {
 /// clean-exit record is written. Every other outcome is a reason the caller has
 /// to say out loud, because an unanswered request is not a stopped app.
 pub fn request_quit() -> Result<(), String> {
-    imp::request_named(PIPE_NAME)
+    imp::request_quit(PIPE_NAME)
 }
 
 #[cfg(target_os = "windows")]
@@ -144,11 +271,19 @@ mod imp {
             || std::io::Error::last_os_error().raw_os_error() == Some(ERROR_PIPE_CONNECTED)
     }
 
-    pub fn serve_named(pipe: &str, on_quit: impl Fn() -> bool + Send + 'static) -> bool {
+    pub fn serve_named(
+        pipe: &str,
+        version: &str,
+        on_quit: impl Fn() -> bool + Send + 'static,
+    ) -> bool {
         let name = wide(pipe);
         let Some(first) = create_instance(&name) else {
             return false;
         };
+        // Owned by the thread, and only there: the version is asked for once per
+        // request, so a `&str` captured by the closure would not outlive this
+        // call. Cloned once, before the spawn, rather than per request.
+        let version = version.to_string();
         // The name is claimed above, so a client arriving the instant this
         // returns already finds it. If the thread cannot be spawned the
         // instance is dropped instead and the name goes with it.
@@ -161,12 +296,25 @@ mod imp {
                         break;
                     }
                     let mut request = String::new();
-                    if BufReader::new(&file).read_line(&mut request).is_ok()
-                        && request.trim() == "quit"
-                    {
-                        let accepted = on_quit();
-                        let _ = file.write_all(if accepted { b"ok\n" } else { b"err\n" });
-                        let _ = file.flush();
+                    if BufReader::new(&file).read_line(&mut request).is_ok() {
+                        // Two asks, and only two. `version` is what a second launch
+                        // sends *first*, before it has decided anything, so the
+                        // answer has to be written by a server that is not going to
+                        // act on the request — unlike `quit`, which is a decision
+                        // and must never be answered by a process that is not the
+                        // session.
+                        match request.trim() {
+                            "quit" => {
+                                let accepted = on_quit();
+                                let _ = file.write_all(if accepted { b"ok\n" } else { b"err\n" });
+                                let _ = file.flush();
+                            }
+                            "version" => {
+                                let _ = file.write_all(format!("version {version}\n").as_bytes());
+                                let _ = file.flush();
+                            }
+                            _ => {}
+                        }
                     }
                     // The answer is out and this instance is done. Dropping it
                     // closes the handle, and a close delivers what the client
@@ -213,29 +361,101 @@ mod imp {
         })
     }
 
-    /// One exchange, no timeout of its own — `request_named` bounds it.
-    fn exchange(pipe: &str) -> Result<(), String> {
+    /// One exchange with the request named, no timeout of its own — the caller
+    /// bounds it. `expect` maps the answer onto `Ok`/`Err`, and the two asks have
+    /// two different answers, so it is the closure rather than a shared match
+    /// that has to know which ask this was.
+    fn exchange(pipe: &str, request: &[u8], expect: impl Fn(&str) -> Result<(), String>) -> Result<(), String> {
         let mut file = open_channel(pipe)?;
-        file.write_all(b"quit\n")
-            .map_err(|e| format!("the quit request could not be written ({e})"))?;
+        file.write_all(request)
+            .map_err(|e| format!("the request could not be written ({e})"))?;
         let _ = file.flush();
         let mut answer = String::new();
         BufReader::new(&file)
             .read_line(&mut answer)
             .map_err(|e| format!("the answer could not be read ({e})"))?;
-        match answer.trim() {
-            "ok" => Ok(()),
-            "err" => Err("the instance refused the request: it could not schedule its exit".into()),
-            "" => Err("the instance closed the channel without answering".into()),
-            other => Err(format!("the channel answered '{other}', which is not Quire")),
+        let answer = answer.trim();
+        if answer.is_empty() {
+            return Err("the instance closed the channel without answering".into());
         }
+        expect(answer)
     }
 
-    pub fn request_named(pipe: &str) -> Result<(), String> {
+    /// `quit` → `ok` is a session that scheduled its own exit; `err` is a live
+    /// instance that could not, and the caller must say so rather than act.
+    pub fn request_quit(pipe: &str) -> Result<(), String> {
+        bounded(pipe, "quit", |answer| match answer {
+            "ok" => Ok(()),
+            "err" => Err("the instance refused the request: it could not schedule its exit".into()),
+            other => Err(format!("the channel answered '{other}', which is not Quire")),
+        })
+    }
+
+    /// Wait for the session that accepted a quit to actually be gone.
+    ///
+    /// The signal is the channel itself: a server that answers `version` is an
+    /// instance that still runs, and a durable silence is a process whose
+    /// handles — the database's among them — are closed. One silence is not
+    /// proof on its own (`open_channel` also answers `Err` in the instant the
+    /// server spends one instance and creates the next), so the ask is repeated
+    /// and only two failures in a row count. The timeout then says the instance
+    /// is not going away, and the caller proceeds into the world it used to
+    /// start in — the return value says which of the two happened.
+    pub fn wait_for_session_end(pipe: &str, timeout: std::time::Duration) -> bool {
+        let start = std::time::Instant::now();
+        while start.elapsed() < timeout {
+            if request_version(pipe).is_err() {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                if request_version(pipe).is_err() {
+                    return true;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        false
+    }
+
+    /// `version` → `version <v>`, and the version is this build's. The returned
+    /// `Err` is the *only* signal that nothing is listening, which is why the
+    /// caller cannot read a version as "an old one answered" — a server that
+    /// answered with something else is an `Err` carrying its own text.
+    ///
+    /// The parsed version is carried back over its own one-shot channel rather
+    /// than captured by the answer closure: `expect` is an `Fn` that outlives
+    /// this call (it runs on the exchange thread), so it cannot assign to a
+    /// variable this frame owns, and borrowing one across that thread is the
+    /// bug the `Option` was standing in for.
+    pub fn request_version(pipe: &str) -> Result<String, String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        bounded(pipe, "version", move |answer| match answer.strip_prefix("version ") {
+            Some(v) if !v.is_empty() => tx
+                .send(v.to_string())
+                .map_err(|_| "the version could not be carried back".to_string()),
+            _ => Err(format!("the channel answered '{answer}', which is not Quire")),
+        })?;
+        rx.recv()
+            .map_err(|_| "the instance answered without naming a version".into())
+    }
+
+    /// The one place the answer timeout lives, for both asks.
+    ///
+    /// The exchange runs on a thread of its own because `ReadFile` on a pipe
+    /// whose server has gone away blocks for the full OS pipe timeout, and this
+    /// bounds the wait with `ANSWER_TIMEOUT` rather than that.
+    fn bounded(
+        pipe: &str,
+        request: &'static str,
+        expect: impl Fn(&str) -> Result<(), String> + Send + 'static,
+    ) -> Result<(), String> {
         let (tx, rx) = std::sync::mpsc::channel();
         let name = pipe.to_string();
+        // The trailing newline is part of the wire format, not of the ask's name:
+        // the server reads a *line*, so a request without it never completes the
+        // server's `read_line` and the answer that would follow it is never sent.
+        let mut bytes = request.as_bytes().to_vec();
+        bytes.push(b'\n');
         std::thread::spawn(move || {
-            let _ = tx.send(exchange(&name));
+            let _ = tx.send(exchange(&name, &bytes, expect));
         });
         match rx.recv_timeout(super::ANSWER_TIMEOUT) {
             Ok(result) => result,
@@ -252,12 +472,20 @@ mod imp {
     /// No channel off Windows: the deploy that needs it is a Windows one, and
     /// reporting failure is what `platform::mod` does everywhere else rather
     /// than pretending.
-    pub fn serve_named(_pipe: &str, _on_quit: impl Fn() -> bool + Send + 'static) -> bool {
+    pub fn serve_named(
+        _pipe: &str,
+        _version: &str,
+        _on_quit: impl Fn() -> bool + Send + 'static,
+    ) -> bool {
         false
     }
 
-    pub fn request_named(_pipe: &str) -> Result<(), String> {
+    pub fn request_quit(_pipe: &str) -> Result<(), String> {
         Err("the quit channel is Windows-only".into())
+    }
+
+    pub fn request_version(_pipe: &str) -> Result<String, String> {
+        Err("the instance channel is Windows-only".into())
     }
 }
 
@@ -286,18 +514,44 @@ mod tests {
         let hit = asked.clone();
         let name = format!(r"\\.\pipe\quire-desktop-quit-test-{}", std::process::id());
         assert!(
-            imp::serve_named(&name, move || {
+            imp::serve_named(&name, "0.1.12", move || {
                 hit.fetch_add(1, Ordering::SeqCst);
                 true
             }),
             "the first server for this name must get it"
         );
-        imp::request_named(&name).expect("the server must answer ok");
+        imp::request_quit(&name).expect("the server must answer ok");
         assert_eq!(asked.load(Ordering::SeqCst), 1, "the server must have run");
         // a quit that failed to schedule leaves the app running, so the channel
         // has to outlive the request that carried it
-        imp::request_named(&name).expect("the channel must serve a second request");
+        imp::request_quit(&name).expect("the channel must serve a second request");
         assert_eq!(asked.load(Ordering::SeqCst), 2);
+    }
+
+    /// A version request must be answered **without** running the quit handler,
+    /// and must say the build it is running. A server that acted on `version`
+    /// would make a second launch end the session it was only trying to
+    /// identify — the single-instance rule's first question killing the app it
+    /// was asked about.
+    #[test]
+    fn a_version_request_is_answered_without_ending_the_session() {
+        let asked = Arc::new(AtomicUsize::new(0));
+        let hit = asked.clone();
+        let name = format!(r"\\.\pipe\quire-desktop-quit-test-ver-{}", std::process::id());
+        assert!(imp::serve_named(&name, "0.1.12", move || {
+            hit.fetch_add(1, Ordering::SeqCst);
+            true
+        }));
+        assert_eq!(imp::request_version(&name).unwrap(), "0.1.12");
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
+            0,
+            "asking a version must not schedule the quit"
+        );
+        // and the channel is still there afterwards, for the `quit` that follows
+        // a newer build asking the old one to leave
+        imp::request_quit(&name).expect("the channel must survive a version ask");
+        assert_eq!(asked.load(Ordering::SeqCst), 1);
     }
 
     /// A refusal is told apart from an answer, because a caller acting on
@@ -308,8 +562,8 @@ mod tests {
             r"\\.\pipe\quire-desktop-quit-test-refuse-{}",
             std::process::id()
         );
-        assert!(imp::serve_named(&name, || false));
-        let err = imp::request_named(&name).expect_err("a refused request is an error");
+        assert!(imp::serve_named(&name, "0.1.12", || false));
+        let err = imp::request_quit(&name).expect_err("a refused request is an error");
         assert!(err.contains("refused"), "the reason must say so: {err}");
     }
 
@@ -321,7 +575,29 @@ mod tests {
             r"\\.\pipe\quire-desktop-quit-test-absent-{}",
             std::process::id()
         );
-        let err = imp::request_named(&name).expect_err("nothing is listening");
+        let err = imp::request_quit(&name).expect_err("nothing is listening");
         assert!(err.contains("no instance answered"), "{err}");
+    }
+
+    /// The three-way comparison the single-instance rule is made of. Pinned as a
+    /// table because the direction is the whole rule and each direction is a
+    /// different user-visible outcome: a prompt, a replacement, or a refusal.
+    #[test]
+    fn the_version_comparison_decides_each_direction() {
+        // same → not newer, and `claim` short-circuits on string equality first
+        assert!(!is_newer("0.1.12", "0.1.12"));
+        // launching newer → replace
+        assert!(is_newer("0.1.13", "0.1.12"));
+        assert!(is_newer("0.2.0", "0.1.99"));
+        assert!(is_newer("1.0.0", "0.9.9"));
+        // launching older → the running one wins
+        assert!(!is_newer("0.1.12", "0.1.13"));
+        assert!(!is_newer("0.1.9", "0.1.12"));
+        // a missing component compares as 0 rather than as absent, so 0.1.12 is
+        // newer than 0.1 — which is what a trailing `.0` means
+        assert!(is_newer("0.1.12", "0.1"));
+        assert!(!is_newer("0.1", "0.1.12"));
+        // a non-numeric part degrades to 0 instead of panicking on a launch
+        assert!(!is_newer("0.1.x", "0.1.0"));
     }
 }

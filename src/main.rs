@@ -7,6 +7,8 @@
 
 use quire::app::controller;
 use quire::app::state::{AppState, HandleArgs};
+use quire::platform;
+use quire::platform::monitors::Rect as WindowGeometry;
 use quire::services::logging;
 use quire::AppWindow;
 use slint::{ComponentHandle, Timer};
@@ -160,6 +162,26 @@ fn leak_timer(t: Timer) {
     std::mem::forget(t);
 }
 
+/// The "show the main window" answer, packaged for a thread that is not the
+/// UI's: the native tray's left click and menu, and the Alt+M hotkey, all hop
+/// through here. Clearing `minimized` first is what makes this a *restore* for
+/// a window the user minimized to the taskbar rather than closed to the tray —
+/// `show()` alone would bring it back still minimized.
+fn show_window_closure(ui: &AppWindow) -> Box<dyn Fn() + Send> {
+    let ui_w = ui.as_weak();
+    Box::new(move || {
+        // the outer closure is an `Fn` — callable many times — so the inner
+        // hop clones the weak rather than moving the only copy out of it
+        let ui_w = ui_w.clone();
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = ui_w.upgrade() {
+                ui.window().set_minimized(false);
+                let _ = ui.show();
+            }
+        });
+    })
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `--quit` is not a session. It asks the *running* instance to end its own
     // — through the same route the tray menu's 「退出」 uses, so that instance's
@@ -306,6 +328,78 @@ fn install_startup_measurement(
 }
 
 fn real_main(start: std::time::Instant) -> Result<(), String> {
+    // ── the single-instance claim (ADR-0136) ─────────────────────────────────
+    // The very first thing a session does, before logging, the database or the
+    // window. Order is the rule, not a preference: a launch that is going to be
+    // told to go away must not open the database first, because that is a second
+    // writer on a file a live instance already holds, and it must not draw a
+    // window, because the user asked for one app and would get two.
+    //
+    // The quit this can send goes through the *old* instance's own channel
+    // (ADR-0105), so the session being replaced runs its final flush and writes
+    // its clean-exit record instead of being killed — which is the property that
+    // lets a deploy overwrite a running install without the exe being locked.
+    //
+    // `on_quit` answers `false` while this process has no event loop yet: the
+    // claim is made before the window exists, so a peer that asked to be replaced
+    // in that window is told honestly that nothing accepted, rather than this
+    // process posting a quit to a loop that has not started.
+    let quitting = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let second = quire::platform::quit::claim(
+        env!("CARGO_PKG_VERSION"),
+        {
+            let quitting = quitting.clone();
+            move || {
+                // The window this process owns is the one that has to answer, and
+                // it is only reachable once its event loop is running.
+                if quitting.load(std::sync::atomic::Ordering::SeqCst) {
+                    slint::invoke_from_event_loop(|| {
+                        let _ = slint::quit_event_loop();
+                    })
+                    .is_ok()
+                } else {
+                    false
+                }
+            }
+        },
+        |verdict| {
+            // The user-facing half of the rule, said plainly: which build is
+            // running, and why nothing else happened. A MessageBox rather than a
+            // toast because there is no window yet to hang a toast off, and
+            // because this is the one launch that ends in a dialog.
+            let (title, body) = match verdict {
+                quire::platform::quit::SecondLaunch::Primary => return,
+                quire::platform::quit::SecondLaunch::AlreadyRunning { version } => (
+                    "Quire 已在运行",
+                    format!("Quire {version} 已经在运行，本次启动已退出。\n\n可在任务栏托盘图标上右键选择「显示主界面」。"),
+                ),
+                quire::platform::quit::SecondLaunch::RunningIsNewer { version } => (
+                    "已有更新版本在运行",
+                    format!(
+                        "Quire {version} 正在运行，它比本次启动的版本更新，本次启动已退出。"
+                    ),
+                ),
+                quire::platform::quit::SecondLaunch::Replacing { quit_accepted } => {
+                    if *quit_accepted {
+                        return; // the old one is on its way out; this process starts
+                    }
+                    (
+                        "旧版本未能退出",
+                        "已请求正在运行的旧版本退出，但它没有响应。\n\n请从托盘图标右键菜单选择「退出」后重试。".to_string(),
+                    )
+                }
+            };
+            quire::platform::notify(title, &body);
+        },
+    );
+    if let Some(verdict) = second {
+        // Every non-Primary verdict is a launch that does not become a session:
+        // it never opens the database and never draws a window, so there is
+        // nothing below to run.
+        if !matches!(verdict, quire::platform::quit::SecondLaunch::Replacing { .. }) {
+            return Ok(());
+        }
+    }
     // The argument parser reads only strings — no I/O to fail — so running it
     // before logging costs no coverage: `logging::init` installs the panic
     // hook as its first act, and needs the flags to know which directory the
@@ -402,22 +496,73 @@ fn real_main(start: std::time::Instant) -> Result<(), String> {
     if !notices.is_empty() {
         state.set_db_notice(format!("{}.", notices.join("; ")));
     }
-    // restore the remembered window size after the state is built (slint
-    // still counts it as pre-first-paint)
-    if let Some((w, h)) = state.window_size_setting() {
-        ui.window()
-            .set_size(slint::PhysicalSize::new(w as u32, h as u32));
+    // Restore the remembered window rectangle after the state is built (slint
+    // still counts it as pre-first-paint).
+    //
+    // The rectangle is only *hints* until `monitors::place` has looked at the
+    // displays: the monitor it was saved on may be gone, may be a different size
+    // than it was, and a size that no longer fits anywhere is a window whose
+    // bottom — the ＋ line, the window controls' row — is off the desk. Set the
+    // size before the position, because `set_position` is what asks winit to
+    // clamp against a window that already has its final size.
+    if let Some(g) = state.window_geometry_setting() {
+        let placed = platform::monitors::place(g, &platform::monitors::work_areas());
+        ui.window().set_size(slint::PhysicalSize::new(
+            placed.width() as u32,
+            placed.height() as u32,
+        ));
+        ui.window().set_position(slint::PhysicalPosition::new(
+            placed.left as i32,
+            placed.top as i32,
+        ));
     }
     controller::bind(&ui, &state);
     controller::wire(&ui, &state);
     mark("bind_wire");
 
     // The system tray (SPEC §二十七, ADR-0096): closing the window hides it, and
-    // the session ends only through the tray menu's 「退出」. The tray component
-    // is a *visible* Slint element, and a visible tray icon keeps the event loop
-    // alive on its own, so `ui.run()` below outlives the window it shows. `_tray`
-    // must therefore stay bound for the whole run — dropping it removes the icon
-    // and releases the last keepalive.
+    // the session ends only through the tray menu's 「退出」.
+    //
+    // Windows carries the *native* tray (`platform::tray`): the icon's left
+    // click shows the main window, and the right-click menu is drawn dark when
+    // the app's theme is — two things Slint's own tray cannot do here (it
+    // reports no click, and the shell paints its menu light). The native icon
+    // is not a Slint element and counts for no keepalive, which is why the
+    // Windows loop below is `run_event_loop_until_quit` and not `ui.run()`.
+    // The Slint tray stays for every platform the native one does not cover,
+    // and as the fallback when the native icon is refused (a headless run):
+    // there its visibility is what holds the keepalive, so `_tray` must stay
+    // bound for the whole run — dropping it removes the icon and can end the
+    // session.
+    #[cfg(windows)]
+    let native_tray = {
+        let on_show = show_window_closure(&ui);
+        let on_quit: Box<dyn Fn() + Send> = Box::new(|| {
+            let _ = slint::invoke_from_event_loop(|| {
+                let _ = slint::quit_event_loop();
+            });
+        });
+        match quire::platform::tray::install(on_show, on_quit) {
+            Ok(tray) => Some(tray),
+            Err(e) => {
+                eprintln!("quire: no native tray ({e})");
+                None
+            }
+        }
+    };
+    #[cfg(windows)]
+    let _slint_tray_fallback = if native_tray.is_none() {
+        match quire::app::tray::install(&ui) {
+            Ok(tray) => Some(tray),
+            Err(e) => {
+                eprintln!("quire: no system tray ({e}); closing the window will not be recoverable");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    #[cfg(not(windows))]
     let _tray = match quire::app::tray::install(&ui) {
         Ok(tray) => Some(tray),
         Err(e) => {
@@ -425,6 +570,48 @@ fn real_main(start: std::time::Instant) -> Result<(), String> {
             None
         }
     };
+
+    // The 全局快捷键 (settings rows, both defaulting to off): Alt+N opens the
+    // note capture — the same layer the notes page's ＋ opens, 标签建议 and all —
+    // and Alt+M shows the window. Registration happens only when a row says so,
+    // and the dialog's toggles flip the keys live through the handle below.
+    #[cfg(windows)]
+    {
+        let on_alt_n: Box<dyn Fn() + Send> = {
+            let ui_w = ui.as_weak();
+            Box::new(move || {
+                let ui_w = ui_w.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_w.upgrade() {
+                        // a hotkey owes the user a window: Alt+N from the tray
+                        // must show the app before the capture opens in it
+                        ui.window().set_minimized(false);
+                        let _ = ui.show();
+                        // the tick, not a direct call: a counter always changes,
+                        // so every press fires the changed hook exactly once
+                        let g = ui.global::<quire::UIState>();
+                        g.set_org_quick_note_tick(g.get_org_quick_note_tick() + 1);
+                    }
+                });
+            })
+        };
+        let on_alt_m: Box<dyn Fn() + Send> = show_window_closure(&ui);
+        match quire::platform::hotkeys::install(on_alt_n, on_alt_m) {
+            Ok(hotkeys) => {
+                let alt_n_on = state.setting_flag_or("hotkeys.alt-n", false);
+                let alt_m_on = state.setting_flag_or("hotkeys.alt-m", false);
+                if let Err(e) = hotkeys.set_enabled(quire::platform::hotkeys::ALT_N, alt_n_on) {
+                    eprintln!("quire: Alt+N unavailable: {e}");
+                }
+                if let Err(e) = hotkeys.set_enabled(quire::platform::hotkeys::ALT_M, alt_m_on) {
+                    eprintln!("quire: Alt+M unavailable: {e}");
+                }
+                state.install_hotkeys(hotkeys);
+            }
+            Err(e) => eprintln!("quire: global hotkeys unavailable ({e})"),
+        }
+    }
+
     // A close request is a hide, never a quit. This is what the title bar's X
     // reaches through `root.close()`, and it is also the answer the platform's
     // own close would get — spelled out so the two cannot drift apart.
@@ -610,29 +797,43 @@ fn real_main(start: std::time::Instant) -> Result<(), String> {
     }
 
     mark("pre_event_loop");
-    // The quit channel (ADR-0105) goes up last, immediately before the loop it
-    // has to reach: `invoke_from_event_loop` needs a loop to post to, so a
-    // request that arrives while this window is still being built is answered
-    // `err` rather than queued. Opening it earlier to "catch" that window would
-    // only make the channel claim a quit it could not deliver, and a deploy
-    // acts on that claim by overwriting an exe that is still running.
-    //
-    // Not fatal when it is missing: a second instance cannot own the name, and
-    // refusing to start over that would be a worse answer than running without
-    // a channel (the second-instance limitation is pre-existing — DECISIONS.md).
-    let _quit_channel = quire::platform::quit::serve(|| {
-        slint::invoke_from_event_loop(|| {
-            let _ = slint::quit_event_loop();
-        })
-        .is_ok()
-    });
-    if !_quit_channel {
-        eprintln!("quire: no quit channel (another instance owns the name); --quit will not reach this one");
-    }
+    // From here the event loop exists, so the channel's quit is deliverable: until
+    // this flag is set, `on_quit` above answers `false` rather than posting a
+    // quit to a loop that has not started — which is what makes a peer that asks
+    // to be replaced during startup hear `err` rather than a silent success.
+    quitting.store(true, std::sync::atomic::Ordering::SeqCst);
+    // Windows runs the loop **to the explicit quit**: the native tray icon is
+    // not a Slint element and counts for no keepalive, so `ui.run()` — which
+    // ends the session when the last visible thing goes — would end it the
+    // moment the user closed to the tray. `run_event_loop_until_quit` outlives
+    // every window; the exits are the tray menu's 「退出」 and `--quit` (ADR-0096).
+    // Everywhere else `ui.run()` keeps the shape it had, keepalive tray and all.
+    #[cfg(windows)]
+    slint::run_event_loop_until_quit().map_err(|e| e.to_string())?;
+    #[cfg(not(windows))]
     ui.run().map_err(|e| e.to_string())?;
-    // remember the window size, then flush dirty state on close (SPEC §十九)
+    // the icon goes with the session: NIM_DELETE before the process ends, so
+    // the notification area never carries this run's ghost
+    #[cfg(windows)]
+    if let Some(tray) = native_tray {
+        tray.remove();
+    }
+    // Remember the window rectangle, then flush dirty state on close (SPEC §十九).
+    // A maximized window reports the *monitor's* size, so the rectangle to record
+    // is the one snapshotted when it went maximized — otherwise a session that
+    // ended maximized saved the monitor's dimensions as the next launch's window,
+    // which is how a maximized window on a secondary display came back sized for
+    // a display that might not be plugged in any more.
     let size = ui.window().size();
-    state.record_window_size(size.width as f64, size.height as f64);
+    let position = ui.window().position();
+    let (x, y) = (position.x as f64, position.y as f64);
+    let live = WindowGeometry {
+        left: x,
+        top: y,
+        right: x + size.width as f64,
+        bottom: y + size.height as f64,
+    };
+    state.record_window_geometry(state.restore_geometry().unwrap_or(live));
     state.persistence_force_flush();
     // The clean-exit record (M8_FEEDBACK #10, ADR-0018): the next start reads
     // its absence — with no panic report — as "killed, crashed natively, or

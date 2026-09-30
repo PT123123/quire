@@ -371,15 +371,47 @@ export struct CommandRow {
     icon: string,
 }
 
-// One line of the settings dialog's LAN-sync section (crate::services::sync). Rust
-// builds these from the peers table; the delegate only draws them.
+// One line of the 同步 page's device table (crate::services::sync). Rust builds
+// these from the peers table; the delegate only draws them.
+//
+// The fields are the reference table's columns (`aw-qtui/syncpage.ui`'s
+// `devTable`) rather than the two lines the settings dialog used to draw: a
+// device is a *row you can act on* — dial it, read where it was last reached,
+// see when it last answered — and squeezing that into a name plus a sentence is
+// what made the section unreadable. `kind` and `port` are separate from `label`
+// for the same reason they are separate columns there: the name is the user's
+// word for it, the platform is the device's own.
 export struct SyncRow {
     id: string,
-    label: string,   // "Laptop (windows)"
-    status: string,  // "已配对 · 3 分钟前同步过" / "发现 · 未配对"
+    label: string,   // "Laptop" — the name the peer announced
+    kind: string,    // "Windows" / "Android" / "未知设备"
+    status: string,  // "3 分钟前同步过" / "还没同步过"
     ip: string,
+    port: int,
+    // The age of the last announcement ("5 秒前"), which is what separates a
+    // device that is on the network from one whose row is simply still stored.
+    // `online` is the same fact as a bool and is kept: it is the one thing the
+    // row's dot and its 立即同步 button branch on, and a delegate comparing two
+    // age strings to answer that is Rust's rule living in a `.slint` file.
+    last-seen: string,
     paired: bool,
     online: bool,
+}
+
+// One line of the 同步 page's 同步统计 box: what this device carries, and what a
+// round with one peer actually moved. Rust's numbers, not the page's arithmetic
+// — a stat that is computed in a delegate is a stat that can disagree with the
+// snapshot it describes.
+//
+// `local` splits the box in two: this device's own counts, then one pair of lines
+// per peer. The split is a **field** rather than a second model because it is a
+// property of the line, not a different kind of line — and because Slint's
+// `model` has no slice, so "the first N rows" is not something a delegate can
+// ask for.
+export struct SyncStat {
+    label: string,
+    value: string,
+    local: bool,
 }
 
 // One line of the sync log (settings row "sync.log"), oldest first, the tail of
@@ -470,6 +502,12 @@ export struct NoteRow {
     excerpt: string,      // the body's first line, for the list row
     pinned: bool,
     tags: string,         // already joined: a delegate never does string work
+    // One entry per tag, **the raw path** (`项目/工作`) — the card's pill shows
+    // it as `#项目/工作` and clicking it filters by that path, so the display
+    // string and the filter argument are the same value and neither side
+    // reconstructs the other. (`tags` above stays the joined label for the
+    // detail panel.)
+    tag-list: [string],
     when: string,         // relative age ("3 分钟前")
     selected: bool,
     // picked by 多选 — a second flag beside `selected` on purpose: one row can be
@@ -644,7 +682,24 @@ export global UIState {
     // LAN sync (crate::services::sync): the devices on this network, the last line
     // the engine said, and the switch that lets the periodic round run by itself.
     // The rows are Rust-built from the peers table (settings row "sync.peers").
+    //
+    // The 同步 page is a destination, not a panel (`active-area == "sync"`): the
+    // device table, the per-round statistics and the log are three things a user
+    // comes back to look at, and a 400 px popup that scrolls is none of them.
     in-out property <[SyncRow]> sync-rows;
+    // 设备 / 统计 / 日志: the three boxes of the reference's tab widget, as one
+    // segmented control. `sync-tab` rather than three booleans so exactly one is
+    // ever true, which is the same rule the notes' own 笔记/任务 tabs follow.
+    in-out property <int> sync-tab: 0;   // 0 设备, 1 统计, 2 日志
+    // 同步统计: what this device carries and what the last round with each peer
+    // moved, as label/value rows. Filled by `refresh_sync_ui` in the same pass
+    // that builds `sync-rows`, so a stat cannot describe a device the table no
+    // longer lists.
+    in-out property <[SyncStat]> sync-stats;
+    // A log of 50 stored lines shown 12 at a time was the dialog's compromise
+    // (a popup has no room for more); the page has a scroller, so the whole
+    // stored log reaches the screen and the count is Rust's.
+    in-out property <int> sync-log-total: 0;
     // Whether there is anything to sync with at all — the 笔记/任务 刷新 button
     // asks this rather than the row count, because a row this device cannot
     // reach (a laptop that left the building) is not a round anybody can start.
@@ -659,6 +714,13 @@ export global UIState {
     // thing the periodic timer does that a single `sync-now` cannot.
     callback sync-now-all();
     callback sync-forget(string);    // peer id: drop it from the table
+    // 淘汰离线设备: the grey rows, swept in one press. The count is Rust's (the
+    // same online window the row's dot answers), and it is what both decides the
+    // button exists and says how many it will sweep. Rows only — the shadow
+    // (what the two devices last agreed on) survives, so a swept device that
+    // comes back resumes where it left off instead of re-deciding every row.
+    in-out property <int> sync-offline-count: 0;
+    callback sync-forget-offline();
     callback sync-auto-toggled(bool);
     // This device's own half of the section, so the other one can be recognised
     // on the wire: the name the peer sees, this device's address (what a failed
@@ -667,11 +729,21 @@ export global UIState {
     // the engine left. Rust fills all five in `refresh_sync_ui`.
     in-out property <string> sync-self-name: "";
     in-out property <string> sync-self-address: "";
-    in-out property <int> sync-interval: 60;
+    // The aggressive end of the cadence (ADR-0140). `start_sync` overwrites this
+    // from the settings row before the first paint, so this only has to agree with
+    // `sync_config`'s default rather than be right on its own — but a stale 60 here
+    // read as "60 秒" on any frame drawn first.
+    in-out property <int> sync-interval: 10;
     in-out property <bool> sync-busy: false;
     in-out property <[SyncLogRow]> sync-log;
     callback sync-name-set(string);
     callback sync-interval-set(int);
+    // The page's own two doors beyond a round: emptying the stored log, and
+    // being opened (which re-reads the peers table, so a device found while the
+    // user was elsewhere is on screen when they arrive). The second one is a
+    // callback rather than a bare property write because the read is Rust's.
+    callback sync-log-cleared();
+    callback sync-open-requested();
     // true when the workspace has no pages: the empty state grows a CTA
     in-out property <bool> workspace-empty: false;
 
@@ -882,6 +954,15 @@ export global UIState {
     // monitor or display-scaling change throws the zoom away) and puts the zoom
     // back. See controller::wire.
     callback window-resized();
+    // 最大化 / 窗口化. The flag is mirrored for the title bar's 还原 button, and
+    // the callback is for Rust, which has one job: the moment the window goes
+    // maximized is the last moment its own rectangle is knowable, because from
+    // then on `Window::size()` answers with the monitor's size. Without the
+    // snapshot a session closed while maximized saves that monitor's dimensions
+    // as the next launch's window size — which is how a maximized window on a
+    // secondary display came back sized for a display that may not be there.
+    in-out property <bool> window-maximized: false;
+    callback window-maximized-changed(bool);
     callback move-block(int);
     // drag-reorder (grip handle): Rust packs/unpacks the payload, hovers
     // validate the landing, drops commit one MoveBlockTo command
@@ -1238,7 +1319,6 @@ export global UIState {
     // than being looked up by id — the 收藏 / 最近 sections re-list pages the tree
     // also holds, so an id is not a row.
     callback node-context(int, length);
-    callback page-menu-requested();
     callback page-create-requested();
     callback rename-committed(int, string);
     callback rename-cancelled();
@@ -1266,12 +1346,27 @@ export global UIState {
     // Which tab and which filter are showing is **session state** like every
     // other "how the user is looking" fact (ADR-0073): a restart opens on
     // 笔记 · 收集箱, and none of this reaches the file.
-    in-out property <string> active-area: "docs"; // "docs" | "organizer"
+    in-out property <string> active-area: "docs"; // "docs" | "organizer" | "sync"
     in-out property <int> org-tab: 0;             // 0 笔记, 1 任务
     in-out property <int> org-view: 0;            // smart view slot, see Rust's SMART_*
     in-out property <int> org-list: -1;           // stored list id, -1 = the chip decides
     in-out property <string> org-query: "";
     in-out property <int> org-sort: 0;            // 0 添加顺序, 1 优先级, 2 截止日期
+    // The 笔记 half's own sort, which the tasks' three choices cannot express: a
+    // task list is ordered by when it was added, when it is due and how urgent it
+    // is, while a note list is read by when it was written and when it was last
+    // touched — the reference's 最新创建 / 最新更新 / 按内容. Separate from
+    // `org-sort` rather than a fourth slot of it, because the two halves are
+    // never on screen together and one three-slot control that changes meaning
+    // with the tab is a control nobody can read.
+    in-out property <int> org-note-sort: 0;       // 0 最新创建, 1 最新更新, 2 按内容
+    // Whether the 笔记 toolbar's sort list is down. Session state like every
+    // other "how the user is looking" fact here (ADR-0073) — and on `UIState`
+    // rather than on the component because a headless scene has to be able to
+    // photograph the list *open*: a control that only exists while a
+    // component-local `property` is true cannot be reached by `apply_scene`, and
+    // an unreachable control is an unreviewed one.
+    in-out property <bool> org-note-sort-open: false;
     // Which of the two views the toolbar's segmented control is on: 0 列表,
     // 1 平铺. Session state like everything else here (ADR-0073).
     in-out property <int> org-mode: 0;
@@ -1331,6 +1426,13 @@ export global UIState {
     in-out property <bool> org-note-details-open: false;
     in-out property <TaskRow> org-task-detail;
     in-out property <int> org-selected-note: -1;
+    // The note the detail panel is **open** for — a different thing from the
+    // highlighted row above, and the split is what keeps a plain click from
+    // raising the page (ADR-0137): a click writes `org-selected-note`, while
+    // only the ⋯ menu's 打开 / 详细信息, the capture layer's "open what you
+    // just made" and the scene seeds write this. `org-note-detail` is
+    // projected from it, so `id >= 0` here is the page's own gate.
+    in-out property <int> org-note-open: -1;
     in-out property <int> org-selected-task: -1;
     // ── 多选 (SPEC §四十一, ADR-0111) ────────────────────────────────────────
     // Whether the page is *picking* rows rather than showing them. A flag on the
@@ -1442,6 +1544,11 @@ export global UIState {
     callback org-bin-purged(int);
     // 清空回收站: every binned row of the half on screen, purged as **one** step.
     callback org-bin-emptied();
+    // 复制全部 (the inbox header): the notes the list is showing right now,
+    // bodies with their 唯一 IDs, as one clipboard block — the reference's own
+    // `btnCopy`, and the door an AI answer walks back in through when the batch
+    // is "everything I captured today" rather than a hand-picked set.
+    callback org-notes-copy-all();
     // ── 指令 (SPEC §四十一): a batch of AI instructions ──────────────────────
     // The dialog's own state. `org-cmd-text` is the pasted JSON and is a two-way
     // draft like every other field here; `org-cmd-tab` is which half of the area
@@ -1474,6 +1581,13 @@ export global UIState {
     callback org-capture-opened();
     callback org-capture-sent();
     callback org-capture-closed();
+    // The 全局快捷键's Alt+N (settings, off by default) reaches the capture
+    // layer through here: the hotkey thread cannot hold the app's state, so it
+    // bumps `org-quick-note-tick` (a counter, so every press is a change) and
+    // AppWindow's `changed` hook fires this callback — whose handler walks the
+    // exact same door the ＋ does: the same layer, the same 标签建议.
+    callback org-quick-note-requested();
+    in-out property <int> org-quick-note-tick: 0;
     // 标签建议 (ADR-0118): the `#`-typeahead the Android shell's composer has had
     // since its own ADR-0015. `org-tag-suggestions` is Rust's projection — the
     // distinct tags of the live catalog whose last path segment starts with the
@@ -1490,6 +1604,15 @@ export global UIState {
     // same database — and absent means on.
     in-out property <bool> org-auto-input: true;
     callback org-auto-input-toggled(bool);
+    // ── 全局快捷键 (the Settings rows; both off in a library that never wrote
+    // the rows, which is the default) ─────────────────────────────────────────
+    // The properties mirror the settings rows so the switches read the persisted
+    // choice, and the toggles carry the new value to Rust — which persists it
+    // and registers / unregisters the key on the hotkey thread.
+    in-out property <bool> hotkey-alt-n: false;
+    in-out property <bool> hotkey-alt-m: false;
+    callback hotkey-alt-n-toggled(bool);
+    callback hotkey-alt-m-toggled(bool);
     // tasks: the row's own switches are immediate, the text fields commit on blur
     callback org-task-create();
     callback org-task-selected(int);
@@ -1529,6 +1652,19 @@ export global UIState {
     pure callback org-card-payload(int) -> data-transfer;
     pure callback org-card-hover(data-transfer, int) -> bool;
     callback org-card-dropped(data-transfer, int);
+    // 落位环 (the reference board's settle ring): the task a drop just moved,
+    // and how bright its accent ring is right now. Rust owns the fade — it sets
+    // the task at the drop and walks the alpha to zero over ~620 ms — because a
+    // fade that starts the moment a card *lands* needs a clock, and the ring is
+    // the only thing in the area that has one.
+    in-out property <int> org-settle-task: -1;
+    in-out property <float> org-settle-alpha: 0.0;
+    // The dragging pointer's **window** y, written by the board column's
+    // `can-drop` on every drag-move and read by the cards to place the gap slot.
+    // A global rather than a column property for the same reason the sort list
+    // hangs off the area: a scene has to be able to *set* it, and the cards that
+    // read it live in another sub-tree.
+    in-out property <length> org-drop-y: -100000px;
     // the toolbar's segmented control and the footer's completed switch
     callback org-mode-picked(int);
     callback org-show-done-toggled();
@@ -1550,6 +1686,10 @@ export global UIState {
     callback org-view-picked(int);
     callback org-list-picked(int);
     callback org-sort-picked(int);
+    // The 笔记 half's sort, the three choices above. Its own callback because it
+    // is its own property: one `picked(int)` cannot mean "which of three" on one
+    // half and "which of three different ones" on the other.
+    callback org-note-sort-picked(int);
     callback org-query-changed();
     // a draft changed: the field slot it belongs to, which row, which subtask
     callback org-field-edited(int);

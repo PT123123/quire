@@ -134,15 +134,10 @@ export component TopBar inherits Rectangle {
                 UIState.search-open-requested();
             }
         }
-        IconButton {
-            vertical-stretch: 0;
-            cross-axis-self-alignment: center;
-            icon-name: "dots-horizontal";
-            size: 30px;
-            clicked => {
-                UIState.page-menu-requested();
-            }
-        }
+        // No ⋯ here. The page's own verbs live on the row that owns them — the
+        // sidebar rows carry their own ⋯ and their own right-click menu — and a
+        // second, window-level door to the same menu is one more place for the
+        // menu's anchor to disagree with the row it is about.
 
         Rectangle {
             width: 1px;
@@ -152,6 +147,9 @@ export component TopBar inherits Rectangle {
         }
 
         // ---- window controls ----
+        // 最大化 / 还原 share one button, and it says which way it goes: a
+        // window control that looks the same in both states is a control the
+        // user has to try before they trust it.
         WindowControlButton {
             icon-name: "minimize";
             clicked => {
@@ -159,7 +157,7 @@ export component TopBar inherits Rectangle {
             }
         }
         WindowControlButton {
-            icon-name: "maximize";
+            icon-name: UIState.window-maximized ? "restore" : "maximize";
             clicked => {
                 root.maximize-requested();
             }

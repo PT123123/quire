@@ -40,7 +40,7 @@ use crate::services::search_service::SearchService;
 use crate::storage::search_index::SearchRequest;
 use crate::storage::SqliteRepository;
 use crate::storage::versions;
-use crate::{BacklinkRow, BlockRow, BoardCard, BoardColumn, ColumnBox, ColumnItem, CommandRow, DbCell, DbColumn, DbOption, DbRow, DbViewTab, DiffRow, MenuRow, NoteDetails, NoteRow, SearchRow, SidebarNode, SlashRow, SubtaskRow, TableCell, TagRow, TaskListRow, TaskRow, TextRun, TocEntry, VersionRow};
+use crate::platform::monitors::Rect as WindowGeometry;use crate::{BacklinkRow, BlockRow, BoardCard, BoardColumn, ColumnBox, ColumnItem, CommandRow, DbCell, DbColumn, DbOption, DbRow, DbViewTab, DiffRow, MenuRow, NoteDetails, NoteRow, SearchRow, SidebarNode, SlashRow, SubtaskRow, TableCell, TagRow, TaskListRow, TaskRow, TextRun, TocEntry, VersionRow};
 use slint::{Model, ModelRc, VecModel};
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -128,6 +128,11 @@ pub struct AppState {
     /// put the zoom back instead of letting a monitor change swallow it
     /// (controller::apply_zoom).
     base_scale: Cell<f32>,
+    /// The window's own rectangle as it was just before it was maximized, and
+    /// `None` the rest of the time. A maximized window reports the *monitor's*
+    /// size, so this is the only place the user's chosen size survives a session
+    /// that ends while maximized — see `record_window_geometry`.
+    restore_geometry: RefCell<Option<WindowGeometry>>,
     /// UI weak handle, installed by the controller at wire time — lets the
     /// state push display-only projections (page stats) without a callback.
     ui: RefCell<Option<slint::Weak<crate::UIState<'static>>>>,
@@ -342,6 +347,10 @@ pub struct AppState {
     /// `None` until the first announcement, which reads the stored row itself
     /// rather than assuming an empty table.
     sync_peers_written: RefCell<Option<String>>,
+    /// The global hotkeys' registration handle, installed after wiring (main)
+    /// and driven by the settings toggles (`wire`). `None` on a session where
+    /// the thread refused — the toggles then only persist the choice.
+    pub(crate) hotkeys: RefCell<Option<crate::platform::hotkeys::Hotkeys>>,
 }
 
 /// The picked rows and which kind they are (ADR-0111). Empty is not a state: the
@@ -962,9 +971,20 @@ impl AppState {
             PAGE_ATLAS
         } else {
             // reopen the page the last session had open (the "current-page"
-            // meta every open_page writes), unless it no longer exists
+            // meta every open_page writes). A page that no longer exists, or a
+            // record that never landed (a session killed inside its flush
+            // window), walks the recents that were persisted beside it before
+            // giving up on the file's memory entirely: the newest survivor is
+            // the closest answer to "where was I" the library still holds, and
+            // the demo page is the last resort, not the default.
             restored_current
                 .filter(|id| workspace.contains(*id))
+                .or_else(|| {
+                    restored_recents
+                        .iter()
+                        .find(|id| workspace.contains(**id))
+                        .copied()
+                })
                 .unwrap_or(PAGE_GETTING_STARTED)
         };
         let nav_start = start_stop(args.blocks > 0, restored_home, open);
@@ -1040,6 +1060,7 @@ impl AppState {
             clipboard: RefCell::new(None),
             settings: RefCell::new(restored_settings),
             base_scale: Cell::new(1.0),
+            restore_geometry: RefCell::new(None),
             recents_restored: Cell::new(restored_recents),
             ui: RefCell::new(None),
             db_notice: RefCell::new(
@@ -1110,6 +1131,7 @@ impl AppState {
             org_delete_token: Cell::new(0),
             org_selection: RefCell::new(OrgSelection::default()),
             sync_peers_written: RefCell::new(None),
+            hotkeys: RefCell::new(None),
         };
         // restore persisted recents before the first open marks its page
         let state = Rc::new(state);
@@ -1550,8 +1572,14 @@ impl AppState {
     }
 
     /// Controller installs the UI weak handle at wire time.
-    pub fn set_ui(&self, ui: slint::Weak<crate::UIState<'static>>) {
-        *self.ui.borrow_mut() = Some(ui);
+    /// Hand the installed hotkey handle to the state, so the settings' toggles
+    /// (which run in `wire`) can drive the registrations without `main`
+    /// reaching into the struct across the crate line.
+    pub fn install_hotkeys(&self, hotkeys: crate::platform::hotkeys::Hotkeys) {
+        *self.hotkeys.borrow_mut() = Some(hotkeys);
+    }
+
+    pub fn set_ui(&self, ui: slint::Weak<crate::UIState<'static>>) {        *self.ui.borrow_mut() = Some(ui);
     }
 
     /// Word/char counts for the editor footer (display-only push).
@@ -1907,30 +1935,69 @@ impl AppState {
         }]);
     }
 
-    /// Persisted window size (physical px), if a previous session saved one.
-    pub fn window_size_setting(&self) -> Option<(f64, f64)> {
+    /// The window rectangle of the last session (physical px, virtual-desktop
+    /// coordinates), if one was saved. Position and size are both required: a
+    /// position with no size, or the other way round, is not a rectangle and
+    /// guessing half of one is how a window ends up somewhere nobody remembers
+    /// putting it.
+    ///
+    /// The keys are `window.w` / `window.h` for the size and `window.x` /
+    /// `window.y` for the position, in the same units as before — physical
+    /// pixels, which is what keeps a restart at a different zoom landing in the
+    /// same window (ADR-0095). An install from before the position existed has
+    /// the size and no position, which reads as "no rectangle saved" and simply
+    /// opens at the platform's default position; the size row is not half-used,
+    /// because a size with a made-up position is exactly the state this record
+    /// exists to stop.
+    pub fn window_geometry_setting(&self) -> Option<WindowGeometry> {
         let map = self.settings.borrow();
-        let (Some(w), Some(h)) = (map.get("window.w"), map.get("window.h")) else {
+        let num = |k: &str| map.get(k).and_then(|v| v.parse::<f64>().ok());
+        let (Some(x), Some(y), Some(w), Some(h)) =
+            (num("window.x"), num("window.y"), num("window.w"), num("window.h"))
+        else {
             return None;
         };
-        match (w.parse::<f64>(), h.parse::<f64>()) {
-            (Ok(w), Ok(h)) if w >= 400.0 && h >= 300.0 => Some((w, h)),
-            _ => None,
-        }
+        // The floor is the layout's own minimum (AppWindow's `min-width` /
+        // `min-height`), not an arbitrary number: anything smaller was never a
+        // window this app had.
+        (w >= 400.0 && h >= 300.0)
+            .then_some(WindowGeometry { left: x, top: y, right: x + w, bottom: y + h })
     }
 
-    /// Record the window size as settings changes (flushed with the batch).
-    pub fn record_window_size(&self, w: f64, h: f64) {
-        self.settings
-            .borrow_mut()
-            .insert("window.w".into(), format!("{w}"));
-        self.settings
-            .borrow_mut()
-            .insert("window.h".into(), format!("{h}"));
-        self.record(vec![
-            Change::SettingSet { key: "window.w".into(), value: format!("{w}") },
-            Change::SettingSet { key: "window.h".into(), value: format!("{h}") },
-        ]);
+    /// Record the window rectangle as settings changes (flushed with the batch).
+    /// One batch of four settings rows, which `PERFORMANCE.md`'s all-`SettingSet`
+    /// exemption covers exactly as the two-row version did.
+    pub fn record_window_geometry(&self, g: WindowGeometry) {
+        let rows = [
+            ("window.x", g.left),
+            ("window.y", g.top),
+            ("window.w", g.width()),
+            ("window.h", g.height()),
+        ];
+        {
+            let mut map = self.settings.borrow_mut();
+            for (key, value) in rows {
+                map.insert(key.into(), format!("{value}"));
+            }
+        }
+        self.record(
+            rows.into_iter()
+                .map(|(key, value)| Change::SettingSet { key: key.into(), value: format!("{value}") })
+                .collect(),
+        );
+    }
+
+    /// The rectangle a maximized window will return to, snapshotted when the
+    /// window went maximized (`controller::bind`'s
+    /// `on_window_maximized_changed`). Session state, not a setting: it is
+    /// meaningless after a restart, and `main.rs` reads it at exit only to
+    /// decide what to write.
+    pub fn set_restore_geometry(&self, g: Option<WindowGeometry>) {
+        self.restore_geometry.replace(g);
+    }
+
+    pub fn restore_geometry(&self) -> Option<WindowGeometry> {
+        self.restore_geometry.borrow().clone()
     }
 
     /// Read a persisted settings flag (value "1"/"0").
@@ -7380,6 +7447,14 @@ impl AppState {
             Some(g) => (g.get_org_selected_note(), g.get_org_selected_task()),
             None => (-1, -1),
         };
+        // The note the detail panel is open for (ADR-0137's split): the rows
+        // above highlight by the *selected* note, while the panel and its six
+        // 详细信息 facts belong to the *open* one — a click moves the first and
+        // must never move the second.
+        let open_note_id = match &ui {
+            Some(g) => g.get_org_note_open(),
+            None => -1,
+        };
         let dates = OrgDates::now();
         // The 反向筛选 set, read once so every projection below filters and styles
         // by one snapshot of it (and so the borrow is not held across a rebuild).
@@ -7509,8 +7584,8 @@ impl AppState {
             // The bar's own number, and it is a projection like every other count
             // on this screen: the set lives in Rust, the pixels read what Rust said.
             g.set_org_selection_count(self.org_selection_count(tab == 1));
-            g.set_org_note_detail(self.org_note_detail(note_id as i64));
-            g.set_org_note_details(self.org_note_details(note_id as i64));
+            g.set_org_note_detail(self.org_note_detail(open_note_id as i64));
+            g.set_org_note_details(self.org_note_details(open_note_id as i64));
             g.set_org_task_detail(self.org_task_detail(task_id as i64, &dates));
         }
     }
@@ -7789,6 +7864,9 @@ impl AppState {
             excerpt: excerpt.into(),
             pinned: note.pinned,
             tags: tags_label(&note.tags).into(),
+            // The raw paths, one per pill: the card shows `#项目/工作` and the
+            // pill's click filters by the same string — see `NoteRow.tag-list`.
+            tag_list: note_tag_model(&note.tags),
             when: org_when(note.edited).into(),
             selected,
             // `rebuild_organizer` lights the picks after the rows exist
@@ -7931,18 +8009,17 @@ impl AppState {
     }
 
     fn org_note_detail(&self, selected: i64) -> NoteRow {
-        // **The open note's identity is the one thing the overlay gate does not
-        // read** (ADR-0137). The gate is `org-note-detail.id >= 0`, so a
-        // projection that filled `id` for the *highlighted* row would make a
-        // plain click raise the note page — which is exactly what a click is no
-        // longer allowed to do. The highlighted row is its own thing: it is what
-        // `org_notes` marks `selected` on, and it is the only place a click
-        // shows up now.
+        // **The open note is its own property** (ADR-0137). The gate is
+        // `org-note-detail.id >= 0`, and this projection is filled from
+        // `org-note-open` — so a plain click, which writes only the highlight,
+        // can never raise the note page. The highlighted row is the other half
+        // of the split: it is what `org_notes` marks `selected` on, and it is
+        // the only place a click shows up.
         //
-        // `selected` therefore names the note the page is *open* for, and nothing
-        // else writes it. It is set by the context menu's 打开 / 详细信息 and by
-        // the capture layer, and cleared by ✕ — a set with four writers rather
-        // than one per click.
+        // The argument therefore names the note the page is *open* for, and
+        // nothing feeds it but `org-note-open`. That property is written by the
+        // context menu's 打开 / 详细信息 and by the capture layer, and cleared
+        // by ✕ — a short, deliberate list of writers, never one per click.
         let catalog = self.organizer.borrow();
         match catalog.note(NoteId(selected.max(0) as u64)) {
             // `false`, not `true`: this is the *open* note, and the page's own
@@ -9092,6 +9169,35 @@ impl AppState {
             .filter(|text| !text.trim().is_empty())
             .collect::<Vec<_>>()
             .join("\n\n")
+    }
+
+    /// 复制全部: the notes the list is *showing* — same filters, same order, no
+    /// selection — as one clipboard block. The inbox header's verb, and the
+    /// reference's own `btnCopy`: a reader who wants "everything I captured
+    /// today" back out of the app should not have to pick the rows one by one.
+    ///
+    /// The filters are read the way `rebuild_organizer` reads them (off the UI
+    /// handle, so the copy is of what the user can see, not of what a stale
+    /// property said); the bin has no copy, because a binned list's text is not
+    /// a thing anyone sends anywhere.
+    pub fn org_note_copy_all_text(&self) -> String {
+        let ui = self.ui.borrow().clone().and_then(|u| u.upgrade());
+        let Some(g) = &ui else {
+            return String::new();
+        };
+        if g.get_org_bin_open() {
+            return String::new();
+        }
+        let excluded = self.org_excluded();
+        let rows = self.org_notes(
+            &g.get_org_query().to_string(),
+            &g.get_org_tag().to_string(),
+            &excluded,
+            -1,
+            g.get_org_note_sort(),
+        );
+        let ids: Vec<i64> = rows.iter().map(|row| row.id as i64).collect();
+        self.org_note_copy_text(&ids)
     }
 
     /// The picked tasks as clipboard text — the tasks' half of the 复制 verb, and
@@ -14913,6 +15019,14 @@ fn peer_carries_the_whole_library(kind: &str) -> bool {
     matches!(kind, "windows" | "linux" | "macos")
 }
 
+/// How long a peer may stay unheard before the table gives the row up. The
+/// announcer speaks every four seconds, so a device that has been silent for a
+/// month is not on this network — and short of reinstalling, it will not come
+/// back under the same id either. Rows that cannot age (a `last_seen` of 0, the
+/// durable form peers written by older builds still carry) are never auto-pruned;
+/// 「淘汰离线设备」 is how those leave.
+const PEER_STALE_SECS: u64 = 30 * 86_400;
+
 /// Store an attachment whose bytes arrived but that [`AttachmentStore::import_bytes`]
 /// could not take (a non-image, or a picture that will not decode): the file
 /// under a name *this device* owns, and the row that points at it.
@@ -15027,21 +15141,26 @@ impl AppState {
 
     pub fn sync_set_peers(&self, peers: &[crate::services::sync::engine::PeerRecord]) {
         let json = serde_json::to_string(peers).unwrap_or_else(|_| "[]".into());
-        // `last_seen` is the one field the four-second announcement moves, and it
-        // is the field nobody needs on disk: both readers of it are about *now*
-        // (the auto-cycle's sixty-second recency gate and the dialog's fifteen-
-        // second online dot), the in-memory table answers both, and the next beat
-        // refills it. Recording it anyway meant one SQLite transaction every four
-        // seconds per listening device — and, because a durable write is what arms the
-        // periodic snapshot, a whole-file copy every ten minutes of a laptop that
-        // has not been touched. So: the table is written into memory always, and
-        // only a change something would still want after a restart reaches the
-        // file — a peer added or dropped, an address or name or kind moved, a
-        // pairing decided, a round that succeeded (`last_sync`).
+        // `last_seen` is the one field the four-second announcement moves, and a
+        // precise copy of it is the field nobody needs on disk: the readers about
+        // *now* (the auto-cycle's sixty-second recency gate and the dialog's
+        // fifteen-second online dot) both read the in-memory table, and the next
+        // beat refills it. But one reader is *not* about now — the stale-peer
+        // prune (`sync_prune_stale_peers`) has to know how long a row has been
+        // silent across a restart, which is why the durable form keeps the stamp
+        // quantized to the day instead of zeroing it: a sighting written at most
+        // once a day per peer is a transaction a day, not one every four seconds,
+        // and — because a durable write is what arms the periodic snapshot — a
+        // copy a day rather than a whole-file copy every ten minutes of a laptop
+        // that has not been touched. So: the table is written into memory always,
+        // and only a change something would still want after a restart reaches
+        // the file — a peer added or dropped, an address or name or kind moved, a
+        // pairing decided, a round that succeeded (`last_sync`), a sighting that
+        // crossed into a new day.
         let durable: Vec<crate::services::sync::engine::PeerRecord> = peers
             .iter()
             .map(|p| crate::services::sync::engine::PeerRecord {
-                last_seen: 0,
+                last_seen: p.last_seen - p.last_seen % 86_400,
                 ..p.clone()
             })
             .collect();
@@ -15056,7 +15175,7 @@ impl AppState {
                 .sync_peers()
                 .into_iter()
                 .map(|p| crate::services::sync::engine::PeerRecord {
-                    last_seen: 0,
+                    last_seen: p.last_seen - p.last_seen % 86_400,
                     ..p
                 })
                 .collect();
@@ -15163,6 +15282,76 @@ impl AppState {
             &format!("sync.shadow.{peer_id}"),
             "",
         );
+    }
+
+    /// Drop rows from the peers table **without** touching their shadows. This
+    /// is 淘汰, and it is deliberately not 忘记: the shadow is the record of what
+    /// the two peers last agreed on, and it is what makes a deletion travel — a
+    /// row missing from a returning peer's snapshot reads as "they deleted it"
+    /// only while the shadow still holds that row. Dropping the shadow beside the
+    /// row would turn the peer's next round into a first meeting, and everything
+    /// this device deleted while the peer was away would come back with it. A
+    /// retired row costs one settings entry nobody sees; a resurrected note is a
+    /// wrong fact on the screen. 忘记 stays the total verb — the row *and* the
+    /// memory, for a device the user is saying goodbye to on purpose.
+    ///
+    /// Returns the rows it dropped, so the caller can say what left and drop any
+    /// round still waiting on one of them.
+    fn sync_drop_peer_rows(&self, ids: &[String]) -> Vec<crate::services::sync::engine::PeerRecord> {
+        let mut dropped = Vec::new();
+        let kept: Vec<crate::services::sync::engine::PeerRecord> = self
+            .sync_peers()
+            .into_iter()
+            .filter(|p| {
+                if ids.contains(&p.id) {
+                    dropped.push(p.clone());
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect();
+        if !dropped.is_empty() {
+            self.sync_set_peers(&kept);
+        }
+        dropped
+    }
+
+    /// 淘汰: give every peer that has been silent for [`PEER_STALE_SECS`] its row
+    /// back. The shadow survives (see [`Self::sync_drop_peer_rows`]), so if the
+    /// device does return under the same id, the next round picks up where the
+    /// last one left off instead of re-deciding every row.
+    pub fn sync_prune_stale_peers(&self) -> Vec<crate::services::sync::engine::PeerRecord> {
+        let now = crate::services::sync::engine::now_unix();
+        let stale: Vec<String> = self
+            .sync_peers()
+            .iter()
+            // 0 is the durable form's "no stamp" (and every row older builds
+            // wrote): a row that cannot say when it was last heard cannot say it
+            // is stale, so it stays until the 淘汰离线设备 button names it.
+            .filter(|p| p.last_seen != 0 && now.saturating_sub(p.last_seen) >= PEER_STALE_SECS)
+            .map(|p| p.id.clone())
+            .collect();
+        self.sync_drop_peer_rows(&stale)
+    }
+
+    /// The 淘汰离线设备 button: every peer whose announcement is older than the
+    /// online window — the same question the row's dot answers, so the button
+    /// sweeps exactly the rows the user can see are grey. A `last_seen` of 0 is
+    /// offline by this measure too (it is how the rows older builds left behind
+    /// read), which is what makes this the way the un-ageable backlog leaves.
+    pub fn sync_retire_offline_peers(
+        &self,
+        online_window_secs: u64,
+    ) -> Vec<crate::services::sync::engine::PeerRecord> {
+        let now = crate::services::sync::engine::now_unix();
+        let offline: Vec<String> = self
+            .sync_peers()
+            .iter()
+            .filter(|p| now.saturating_sub(p.last_seen) >= online_window_secs)
+            .map(|p| p.id.clone())
+            .collect();
+        self.sync_drop_peer_rows(&offline)
     }
 
     pub fn sync_log(&self) -> Vec<crate::services::sync::engine::LogLine> {
@@ -16443,6 +16632,19 @@ fn tag_list_model(tags: &[String]) -> ModelRc<slint::SharedString> {
     ModelRc::from(Rc::new(VecModel::from(
         tags.iter()
             .map(|t| slint::SharedString::from(format!("#{}", tag_breadcrumb(t))))
+            .collect::<Vec<_>>(),
+    )))
+}
+
+/// A note's tags as the card's pills read them: one entry per **raw path**, no
+/// `#` and no breadcrumb — the pill paints the `#` and the path itself
+/// (`#项目/工作`), and its click hands the same string back as the filter.
+/// `tag_list_model` above is the *display* twin (breadcrumbs with ` / `), which
+/// is what a task's pills want and a filter pill cannot use.
+fn note_tag_model(tags: &[String]) -> ModelRc<slint::SharedString> {
+    ModelRc::from(Rc::new(VecModel::from(
+        tags.iter()
+            .map(|t| slint::SharedString::from(t.clone()))
             .collect::<Vec<_>>(),
     )))
 }
@@ -22923,6 +23125,111 @@ mod tests {
         );
     }
 
+    /// **A peer thirty days silent loses its row but keeps its shadow.**
+    ///
+    /// 淘汰 is the janitor, not the executioner: the row is what the table shows
+    /// and the shadow is what the merge remembers, and the merge is what makes a
+    /// deletion travel — a returning peer whose snapshot lacks a row this device
+    /// deleted while they were apart reads as "they deleted it" only while the
+    /// shadow still holds that row. Dropping the shadow beside the row would
+    /// make the next round a first meeting, and everything deleted in the
+    /// meantime would come back with the peer. 忘记 is the verb that takes both.
+    #[test]
+    fn a_peer_thirty_days_silent_loses_its_row_but_keeps_its_shadow() {
+        use crate::services::sync::engine::now_unix;
+
+        let s = super::AppState::new(&plain_args(), None);
+        let now = now_unix();
+        // Seeded straight into the table rather than through `sync_note_device`:
+        // that stamps the wall clock, and staleness has to be a fact of the row,
+        // not of the moment the test ran. The sightings are plain integers.
+        let rows = vec![
+            {
+                let mut p = peer("dev-old", "Old desk");
+                p.last_seen = now - 40 * 86_400;
+                p
+            },
+            {
+                let mut p = peer("dev-new", "New desk");
+                p.last_seen = now - 60;
+                p
+            },
+        ];
+        s.settings.borrow_mut().insert(
+            "sync.peers".into(),
+            serde_json::to_string(&rows).unwrap_or_default(),
+        );
+        s.record_setting("sync.shadow.dev-old", r#"{"pages":[]}"#);
+
+        let retired = s.sync_prune_stale_peers();
+        assert_eq!(
+            peer_ids(&retired),
+            ["dev-old"],
+            "the peer forty days silent is the one the prune retires"
+        );
+        assert_eq!(
+            peer_ids(&s.sync_peers()),
+            ["dev-new"],
+            "the peer still announcing keeps its row"
+        );
+        assert_eq!(
+            s.sync_setting("sync.shadow.dev-old").as_deref(),
+            Some(r#"{"pages":[]}"#),
+            "the shadow outlives the row — the next round still knows what the two agreed on"
+        );
+
+        // The control: 忘记 is the total verb, and it takes the shadow with it.
+        s.sync_forget_peer("dev-new");
+        assert_eq!(
+            s.sync_setting("sync.shadow.dev-new").as_deref(),
+            Some(""),
+            "忘记 drops the memory as well as the row"
+        );
+    }
+
+    /// **「淘汰离线设备」 sweeps exactly the rows the dot draws grey.**
+    ///
+    /// A row whose announcement is older than the online window — including the
+    /// `last_seen` of 0 an older build left behind, which is the un-ageable
+    /// backlog this button exists to clear — leaves; a device heard inside the
+    /// window stays.
+    #[test]
+    fn retiring_the_offline_takes_the_grey_rows_and_leaves_the_loud_ones() {
+        use crate::services::sync::engine::now_unix;
+
+        let s = super::AppState::new(&plain_args(), None);
+        let now = now_unix();
+        let rows = vec![
+            {
+                let mut p = peer("dev-live", "Live desk");
+                p.last_seen = now - 4; // announcing this second
+                p
+            },
+            {
+                let mut p = peer("dev-left", "Left desk");
+                p.last_seen = now - 3_600; // gone an hour
+                p
+            },
+            peer("dev-legacy", "Legacy desk"), // never stamped: the older build's row
+        ];
+        s.settings.borrow_mut().insert(
+            "sync.peers".into(),
+            serde_json::to_string(&rows).unwrap_or_default(),
+        );
+
+        let retired = s.sync_retire_offline_peers(crate::app::controller::ONLINE_WINDOW_SECS);
+        assert_eq!(
+            peer_ids(&retired),
+            ["dev-left", "dev-legacy"],
+            "the hour-silent and the never-stamped rows are offline; the live one is not"
+        );
+        assert_eq!(
+            peer_ids(&s.sync_peers()),
+            ["dev-live"],
+            "…and the loud row stays"
+        );
+    }
+
     /// **The dialog shows the rows a user can act on first.**
     ///
     /// The stored table is in discovery order — whoever announced first is row
@@ -23074,11 +23381,25 @@ mod tests {
         assert_eq!(peers.len(), 1, "the pairing is still there");
         assert_eq!(peers[0].last_sync, "2026-09-27T22:00:00Z", "…with when it last worked");
 
-        // And the beat after a restart is still not a write (the two halves meet
-        // here: the table was restored, so its projection is the baseline).
+        // And the beat after a restart spends exactly one write: the durable form
+        // carries the sighting's *day* (the stale-prune's memory across a
+        // restart), and the restored row's stamp is from 2023, so the first beat
+        // re-stamps it with today's bucket — and the beat after that, the one the
+        // four-second contract is about, spends nothing again.
         let pending = || s.persistence.as_ref().expect("a session with a repo").pending_len();
         s.sync_note_device("dev-a", "Phone", "android", "192.168.1.5", 0, Some(true));
-        assert_eq!(pending(), 0, "a restored pairing is not re-recorded by a beat");
+        s.persistence_force_flush();
+        assert_eq!(
+            pending(),
+            0,
+            "the first beat re-stamps the restored row with the day it was heard"
+        );
+        s.sync_note_device("dev-a", "Phone", "android", "192.168.1.5", 0, Some(true));
+        assert_eq!(
+            pending(),
+            0,
+            "a beat within the same day re-records nothing"
+        );
     }
 
     /// **An export that cannot read its own rows says so instead of answering.**

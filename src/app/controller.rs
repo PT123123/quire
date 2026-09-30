@@ -11,6 +11,7 @@ use crate::app::state::{
 };
 use crate::core::database::PropertyKind;
 use crate::core::{BlockId, Change, Command, Lang};
+use crate::platform::monitors::Rect;
 use crate::{AppWindow, UIState};
 use slint::{ComponentHandle, Global, LogicalSize, Model, Timer};
 use std::rc::Rc;
@@ -116,6 +117,13 @@ const ROUND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 /// whose server has stopped too, which is the round that would only time out.
 const RECENT_ENOUGH_SECS: u64 = 60;
 
+/// A row draws its dot filled while its announcement is this recent — the same
+/// window the auto-cycle's target rule spells as "a missed beat or two", and the
+/// window 「淘汰离线设备」 sweeps by. One number for both, so the button and the
+/// dot can never disagree about which rows are grey. (`pub(crate)` because the
+/// peers-table tests sweep by the same number the button does.)
+pub(crate) const ONLINE_WINDOW_SECS: u64 = 15;
+
 /// Start the engine and the pump. Called once from `wire`.
 ///
 /// The port is tried here before the engine starts: a listener that cannot bind
@@ -196,6 +204,35 @@ fn start_sync(ui: &AppWindow, state: &Rc<AppState>, awaited: Awaited) {
     {
         let gw = ui_state_weak(ui);
         let s = state.clone();
+        let a = awaited.clone();
+        // 淘汰离线设备: the grey rows, swept in one press. The per-row 忘记 is
+        // the total verb (row *and* shadow); this one only gives rows up — a
+        // device that walks back in the door reappears by announcing, and the
+        // round that greets it still knows what the two of them agreed on last.
+        ui.global::<UIState>().on_sync_forget_offline(move || {
+            let g = gw.upgrade().unwrap();
+            let retired = s.sync_retire_offline_peers(ONLINE_WINDOW_SECS);
+            for peer in &retired {
+                // a round with a swept device can only end in the timeout sweep
+                a.borrow_mut().remove(peer.id.as_str());
+            }
+            let names: Vec<&str> = retired.iter().map(sync_peer_display_name).collect();
+            match names.is_empty() {
+                // the count on the button was computed at the last refresh; a
+                // device that came back in between is read as the no-op it was
+                true => g.set_sync_status("没有离线的设备 — 什么都不用淘汰。".into()),
+                false => {
+                    let message = format!("已淘汰 {} 台离线设备：{}。", names.len(), names.join("、"));
+                    s.sync_log_push("本机", true, &message);
+                    g.set_sync_status(message.into());
+                }
+            }
+            refresh_sync_ui(&g, &s, &a);
+        });
+    }
+    {
+        let gw = ui_state_weak(ui);
+        let s = state.clone();
         ui.global::<UIState>().on_sync_name_set(move |name| {
             let g = gw.upgrade().unwrap();
             s.sync_set_device_name(name.as_str());
@@ -251,14 +288,21 @@ fn start_sync(ui: &AppWindow, state: &Rc<AppState>, awaited: Awaited) {
         // 打开 the page: rebuild from the peers table on the way in, so a device
         // that announced while the user was in a document is on screen when they
         // arrive. This is the same read the settings dialog did on its own open,
-        // and it moved here with the section (ADR-0132).
+        // and it moved here with the section (ADR-0132). The read is preceded by
+        // the 淘汰 the page's own table wants: a row thirty days silent is a
+        // device that is not coming back, and a page that rebuilds on arrival is
+        // the one place that can retire it before the user has to look at it.
         ui.global::<UIState>().on_sync_open_requested(move || {
             let g = gw.upgrade().unwrap();
+            sync_prune_stale(&s);
             g.set_sync_self_name(s.sync_self_info().name.into());
             let (auto, interval) = s.sync_config();
             g.set_sync_auto(auto);
             g.set_sync_interval(interval as i32);
             refresh_sync_ui(&g, &s, &a);
+            // 同步 is the other page the composer does not follow the user to:
+            // the area it was opened over is gone the moment this lands.
+            org_capture_discard(&g);
             g.set_active_area("sync".into());
         });
     }
@@ -354,6 +398,41 @@ fn start_sync(ui: &AppWindow, state: &Rc<AppState>, awaited: Awaited) {
                 }
             }
         },
+    );
+}
+
+/// A peer's name as the log and the status line say it — the fallback a row with
+/// no announcement-given name shares with the table's own label.
+fn sync_peer_display_name(peer: &crate::services::sync::engine::PeerRecord) -> &str {
+    if peer.name.is_empty() {
+        "设备"
+    } else {
+        &peer.name
+    }
+}
+
+/// The automatic half of 淘汰: a peer thirty days silent has its row given up,
+/// and the log says who left. Called where the table is already being tended —
+/// the page opening, a discovery beat landing — so a dead row never outlives the
+/// second look at the page it sits on. Nothing goes in the status line on
+/// purpose: the user did not press anything, and a sentence that arrives
+/// unbidden is how a background feature becomes the thing the user is trying to
+/// get rid of (the same rule that keeps an automatic round's failure off the
+/// notice bar).
+fn sync_prune_stale(state: &Rc<AppState>) {
+    let retired = state.sync_prune_stale_peers();
+    if retired.is_empty() {
+        return;
+    }
+    let names: Vec<&str> = retired.iter().map(sync_peer_display_name).collect();
+    state.sync_log_push(
+        "本机",
+        true,
+        &format!(
+            "已淘汰 {} 台 30 天没有上线的设备：{}。",
+            names.len(),
+            names.join("、")
+        ),
     );
 }
 
@@ -535,10 +614,22 @@ fn handle_sync_job(
             match &result {
                 Ok(_) => {
                     // the workspace moved under the open page: redraw what the
-                    // window shows before anything else looks at it
+                    // window shows before anything else looks at it — in place.
+                    // `open` is a *navigation* (a history entry, a scroll reset
+                    // to the top, a current-page rewrite): a sync round must not
+                    // steal the reader's place, least of all the automatic one,
+                    // so a page that survived the merge is only repainted here.
                     let shown = state.open_page.get();
                     if state.workspace.borrow().contains(shown) {
-                        open(g, state, shown);
+                        let (title, crumb) = state.open_page_info(shown);
+                        g.set_page_title(title.into());
+                        g.set_page_breadcrumb(crumb.into());
+                        g.set_sidebar_selected_id(shown);
+                        state.apply_page_style();
+                        // the merge may have added or removed pages around the
+                        // one on screen, and `open_page` is what normally
+                        // rebuilds the tree — this is the round's stand-in
+                        state.rebuild_sidebar();
                     } else {
                         // …unless the merge deleted the page on screen, which is
                         // `open_page` sitting at 0 and a window still painting a
@@ -621,7 +712,11 @@ fn handle_sync_job(
             // two shells answer the same question the same way — the alternative
             // is one shell filtering on `paired` and the other on "have we heard
             // it", which is the kind of asymmetry that only shows up as a device
-            // that syncs with one and not the other.
+            // that syncs with one and not the other. The beat also tends the
+            // table: a network this one is on is a network that can be heard
+            // from, so the rows thirty days silent are retired here rather than
+            // waiting for the page to be opened.
+            sync_prune_stale(state);
             state.sync_note_device(
                 &device.id,
                 &device.name,
@@ -791,9 +886,9 @@ fn refresh_sync_ui(g: &UIState<'_>, state: &AppState, awaited: &Awaited) {
         .sync_peers_ordered()
         .into_iter()
         .map(|p| {
-            // the announcement cadence is 4 s; a peer heard inside ~15 s is
-            // on the network right now
-            let online = now.saturating_sub(p.last_seen) < 15;
+            // the announcement cadence is 4 s; a peer heard inside the online
+            // window is on the network right now
+            let online = now.saturating_sub(p.last_seen) < ONLINE_WINDOW_SECS;
             // The row says when this device last had a round with it, which is the
             // only fact here the user can act on. "Paired" is gone from the
             // wording because it no longer names a state anything can be in
@@ -828,6 +923,16 @@ fn refresh_sync_ui(g: &UIState<'_>, state: &AppState, awaited: &Awaited) {
     // announcing is a device that has left, and offering a round with it would
     // only produce the timeout the status line already knows how to explain.
     g.set_sync_has_peers(!peers_due_for_a_round(state).0.is_empty());
+    // The grey rows, counted for the 淘汰离线设备 button: the button exists while
+    // the count is above zero and says how many it will sweep, both read off this
+    // one number so the label can never promise a row the dot draws as online.
+    g.set_sync_offline_count(
+        state
+            .sync_peers()
+            .iter()
+            .filter(|p| now.saturating_sub(p.last_seen) >= ONLINE_WINDOW_SECS)
+            .count() as i32,
+    );
     g.set_sync_stats(sync_stats_model(state, now));
     // The address is asked for here rather than once at wire time because the
     // answer moves: a laptop that switches networks gets a new address, and the
@@ -1423,6 +1528,13 @@ pub fn bind(ui: &AppWindow, state: &Rc<AppState>) {
     g.set_page_title(title.into());
     g.set_page_breadcrumb(crumb.into());
     g.set_renderer_name(renderer_name().into());
+    // The number the shell *prints* — the sidebar's footer line and the settings
+    // dialog's title — is this build's own package version, the same key
+    // `build.rs` stamps into the exe's version block and `quire.iss` reads back
+    // out. It has to be written here because the `.slint` side can only hold a
+    // constant: `Types.slint`'s default was `"0.1.0"`, so every release since
+    // drew itself as 0.1.0 no matter what Cargo.toml said.
+    g.set_app_version(env!("CARGO_PKG_VERSION").into());
     g.set_theme(state.theme_setting().into());
     g.set_lan_sharing(state.setting_flag("lan.share"));
     g.set_sidebar_open(!state.setting_flag("sidebar.closed"));
@@ -1431,6 +1543,15 @@ pub fn bind(ui: &AppWindow, state: &Rc<AppState>) {
     // `auto_input_on_start` must be *written* to fire. The Android shell reads the
     // same `notes.auto_input` row out of the same database.
     g.set_org_auto_input(state.setting_flag_or("notes.auto_input", true));
+    // The 全局快捷键 switches (settings, both defaulting to off): the toggles in
+    // the dialog read the persisted choice, and main has already registered the
+    // keys from the same rows, so the two can never disagree.
+    g.set_hotkey_alt_n(state.setting_flag_or("hotkeys.alt-n", false));
+    g.set_hotkey_alt_m(state.setting_flag_or("hotkeys.alt-m", false));
+    // The tray menu follows the app's theme, re-read every time it opens.
+    crate::platform::tray::set_theme_mode(crate::platform::tray::theme_mode_of(
+        &state.theme_setting(),
+    ));
     // settings storage row (M8): the database folder, hidden for a
     // memory-only session
     g.set_data_dir(state.data_dir().unwrap_or_default().into());
@@ -1570,6 +1691,9 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
             let g = gw.upgrade().unwrap();
             g.set_theme(id.clone());
             s.set_theme(id.as_str());
+            // the tray's right-click menu re-themes itself off this hint each
+            // time it opens, so a theme switch needs no restart to reach it
+            crate::platform::tray::set_theme_mode(crate::platform::tray::theme_mode_of(id.as_str()));
         });
     }
 
@@ -1634,6 +1758,34 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                     apply_zoom(&ui, &s);
                 }
             });
+        });
+    }
+
+    {
+        // 最大化 / 窗口化: remember the window's own rectangle, because from the
+        // moment it is maximized `Window::size()` answers with the *monitor's*
+        // size and the rectangle the user chose is not recoverable. `main.rs`
+        // reads this at exit instead of the maximized rectangle — without it a
+        // session that ended maximized saved a screen's dimensions as the next
+        // launch's window, which is the whole of the multi-monitor bug.
+        let ui_w = ui.as_weak();
+        let s = state.clone();
+        ui.global::<UIState>().on_window_maximized_changed(move |maximized| {
+            let Some(ui) = ui_w.upgrade() else { return };
+            if maximized {
+                let window = ui.window();
+                let position = window.position();
+                let size = window.size();
+                let (x, y) = (position.x as f64, position.y as f64);
+                s.set_restore_geometry(Some(Rect {
+                    left: x,
+                    top: y,
+                    right: x + size.width as f64,
+                    bottom: y + size.height as f64,
+                }));
+            } else {
+                s.set_restore_geometry(None);
+            }
         });
     }
 
@@ -1863,6 +2015,12 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
                     crate::app::state::MENU_ORG_NOTE_OPEN
                     | crate::app::state::MENU_ORG_NOTE_DETAILS => {
                         g.set_org_selected_note(id);
+                        // The page is raised here and **only** here (plus the
+                        // capture layer's own open): `org-note-open` is what the
+                        // panel's gate projects from, and a click deliberately
+                        // never writes it — the two asks are two menu words
+                        // rather than one gesture that guessed.
+                        g.set_org_note_open(id);
                         g.set_org_note_details_open(
                             action == crate::app::state::MENU_ORG_NOTE_DETAILS,
                         );
@@ -2432,24 +2590,6 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
             g.set_versions_selected(-1);
             g.set_versions_showing_diff(false);
             g.set_version_name("".into());
-        });
-    }
-
-    {
-        let gw = gw.clone();
-        let s = state.clone();
-        ui.global::<UIState>().on_page_menu_requested(move || {
-            let g = gw.upgrade().unwrap();
-            let id = g.get_sidebar_selected_id();
-            if !s.workspace.borrow().contains(id) {
-                return;
-            }
-            s.fill_menu(id);
-            g.set_menu_node_id(id);
-            // under the ⋯ button, top-right of the window
-            g.set_menu_x(g.get_window_w() - 224.0);
-            g.set_menu_y(44.0);
-            g.set_menu_open(true);
         });
     }
 
@@ -5280,6 +5420,52 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         });
     }
 
+    // ---- 全局快捷键的设置开关 (SPEC §二十七; both rows default off) ----------
+    {
+        let s = state.clone();
+        ui.global::<UIState>().on_hotkey_alt_n_toggled(move |on| {
+            s.record_setting("hotkeys.alt-n", if on { "1" } else { "0" });
+            // registration is live: the key starts (or stops) the moment the
+            // switch flips, and a shortcut another application owns reads as
+            // the log's own line rather than a silent dead switch
+            if let Some(hotkeys) = s.hotkeys.borrow().as_ref() {
+                if let Err(e) = hotkeys.set_enabled(crate::platform::hotkeys::ALT_N, on) {
+                    crate::services::logging::warn(&format!("Alt+N: {e}"));
+                }
+            }
+        });
+    }
+    {
+        let s = state.clone();
+        ui.global::<UIState>().on_hotkey_alt_m_toggled(move |on| {
+            s.record_setting("hotkeys.alt-m", if on { "1" } else { "0" });
+            if let Some(hotkeys) = s.hotkeys.borrow().as_ref() {
+                if let Err(e) = hotkeys.set_enabled(crate::platform::hotkeys::ALT_M, on) {
+                    crate::services::logging::warn(&format!("Alt+M: {e}"));
+                }
+            }
+        });
+    }
+
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        // Alt+N's landing: the same capture layer the ＋ opens, with the same
+        // 标签建议 — because it *is* the ＋, one callback later. A session
+        // already composing keeps its draft: the hotkey is not a reset.
+        ui.global::<UIState>().on_org_quick_note_requested(move || {
+            let g = gw.upgrade().unwrap();
+            if g.get_org_capture_open() {
+                return;
+            }
+            org_commit_field(&g, &s);
+            if g.get_active_area() != "organizer" || g.get_org_tab() != 0 {
+                org_open(&g, &s, 0);
+            }
+            org_capture_open(&g, &s);
+        });
+    }
+
     // ---- page title in-place editing ----
     {
         let gw = gw.clone();
@@ -5490,9 +5676,14 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         // the page is now the context menu's 打开, and 详细信息 is its own row, so
         // the two asks are two words rather than one gesture that guessed.
         //
-        // The drafts are deliberately **not** loaded. They are the page's own
-        // fields; loading them on a click would commit whatever the page last had
-        // half-typed into a note the user only pointed at.
+        // The split that makes "and nothing more" true: this write lands on
+        // `org-selected-note`, the highlight the rows style themselves by, while
+        // the page's gate is `org-note-open` — a property this handler never
+        // touches. Writing the open gate here was the bug: the panel rose on a
+        // click, and since the drafts are deliberately **not** loaded — they are
+        // the page's own fields; loading them on a click would commit whatever
+        // the page last had half-typed into a note the user only pointed at —
+        // the page it rose with showed an empty body.
         ui.global::<UIState>().on_org_note_selected(move |id| {
             let g = gw.upgrade().unwrap();
             // While 多选 is on, a tap picks rather than selects — the same route on
@@ -5623,6 +5814,10 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
             let text = g.get_org_capture_draft().to_string();
             if let Some(id) = s.org_create_note_from_capture(text) {
                 g.set_org_selected_note(id as i32);
+                // "Open what you just made" is one of the few legitimate writers
+                // of the page's own gate (ADR-0137): the refresh below fills the
+                // panel from it, and the draft load puts the new note's words in.
+                g.set_org_note_open(id as i32);
             }
             g.set_org_capture_draft("".into());
             g.set_org_capture_caret(0);
@@ -5688,6 +5883,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
             let g = gw.upgrade().unwrap();
             org_commit_field(&g, &s);
             g.set_org_selected_note(-1);
+            g.set_org_note_open(-1);
             org_refresh(&g, &s);
             org_load_drafts(&g, &s);
         });
@@ -6265,6 +6461,28 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         });
     }
     {
+        // 复制全部: the inbox header's verb. The text is the visible list with
+        // its 唯一 IDs — the same shape a hand-picked 复制 sends, so an answer
+        // can name any row in it — and the notice band says how many went,
+        // because a clipboard write with nothing on screen to count is a write
+        // nobody can trust.
+        let gw = gw.clone();
+        let s = state.clone();
+        ui.global::<UIState>().on_org_notes_copy_all(move || {
+            let text = s.org_note_copy_all_text();
+            let Some(g) = gw.upgrade() else {
+                return;
+            };
+            if text.is_empty() {
+                g.set_db_notice("没有可复制的笔记。".into());
+            } else {
+                let count = text.matches("\nID: ").count();
+                crate::platform::copy_to_clipboard(&text);
+                g.set_db_notice(format!("已复制 {count} 条笔记（含唯一 ID）。").into());
+            }
+        });
+    }
+    {
         ui.global::<UIState>().on_org_card_payload(|id| {
             let mut data = slint::DataTransfer::default();
             data.set_plain_text(format!("{}{id}", crate::app::state::ORG_CARD_MIME).into());
@@ -6273,10 +6491,26 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
     }
     {
         let gw = gw.clone();
+        let s = state.clone();
         ui.global::<UIState>().on_org_card_hover(move |data, list| {
-            let Some(_) = org_card_id(&data) else {
+            let Some(id) = org_card_id(&data) else {
                 return false;
             };
+            // 拖回原列不是一步（the reference board ignores it outright): the
+            // column's order is the sort's, so a same-list drop has nothing to
+            // say — refusing here keeps its highlight dark and its gap frame
+            // quiet, instead of a lit column that means "nothing will happen".
+            // The inbox column's id is -1 while a stored task's inbox list is 0,
+            // so both sides normalize before the comparison.
+            let target = if list < 0 { 0 } else { list as i64 };
+            let current = s
+                .organizer()
+                .task(crate::core::organizer::TaskId(id.max(0) as u64))
+                .map(|t| t.list.0 as i64)
+                .unwrap_or(0);
+            if current == target {
+                return false;
+            }
             // Lighting the column the card is over is this callback's other job:
             // `can-drop` runs as the pointer crosses each column, so the last one
             // it said yes to is the one being hovered.
@@ -6300,6 +6534,35 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
             // every other no-op edit in this area follows.
             s.org_task_list(id as i64, list as i64);
             org_refresh(&g, &s);
+            // 落位环: the card that just landed carries an accent ring that pops
+            // to full and fades to nothing over 620 ms — "this is the one that
+            // moved", still saying so after the rebuild replaced every row. The
+            // fade is stepped here and not animated in Slint because the two
+            // halves of an alpha transition (instant on, slow off) are one
+            // property the renderer can only animate one way; forty-millisecond
+            // steps of a one-shot are feedback, not an idle loop.
+            g.set_org_settle_task(id);
+            g.set_org_settle_alpha(0.9);
+            let timer: &'static slint::Timer = Box::leak(Box::new(slint::Timer::default()));
+            let started = std::time::Instant::now();
+            let gw = gw.clone();
+            timer.start(
+                slint::TimerMode::Repeated,
+                std::time::Duration::from_millis(40),
+                move || {
+                    let Some(g) = gw.upgrade() else {
+                        return;
+                    };
+                    let elapsed = started.elapsed().as_millis() as f32;
+                    if elapsed >= 620.0 {
+                        timer.stop();
+                        g.set_org_settle_alpha(0.0);
+                        g.set_org_settle_task(-1);
+                    } else {
+                        g.set_org_settle_alpha(0.9 * (1.0 - elapsed / 620.0));
+                    }
+                },
+            );
         });
     }
 
@@ -6324,9 +6587,11 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
     // …and if this session *starts* in the area (ADR-0110: a library last read
     // in 收件箱 opens there), this is the one moment the landing can be applied
     // — after the projection that fills the rows, before the first frame. It is
-    // an arrival like any other, so 自动弹出输入框 applies here too.
+    // also the one arrival 自动弹出输入框 still applies to: a session that
+    // starts in the area opens ready to type, and no navigation after that
+    // re-opens what the user walked away from.
     if let NavStop::Org(tab) = state.nav_start() {
-        org_land(&ui.global::<UIState>(), state, tab);
+        org_land(&ui.global::<UIState>(), state, tab, true);
     }
 }
 
@@ -6350,22 +6615,42 @@ const ORG_FIELD_TASK_DUE: i32 = 8;
 /// it goes on the history like any other (ADR-0110).
 fn org_open(g: &UIState<'_>, state: &Rc<AppState>, tab: i32) {
     state.nav_record(NavStop::Org(tab));
-    org_land(g, state, tab);
+    // `false`: a move to the page never opens the capture layer — the ＋ and
+    // Alt+N are how a composer is asked for, and `org_show` inside has already
+    // thrown any previous one away.
+    org_land(g, state, tab, false);
 }
 
 /// `org_show` for an **arrival** — the sidebar, the palette, the startup landing —
 /// rather than a step through history.
 ///
-/// Arriving at 笔记 is the one moment the reference app opens its input box by
-/// itself (`auto_input_on_start`), so that happens here and not inside `org_show`:
-/// a back/forward step must not pop a composer nobody asked for, and it is the
-/// same `org_capture_open` the ＋ uses, so the left-over filter pre-fill applies.
-fn org_land(g: &UIState<'_>, state: &Rc<AppState>, tab: i32) {
-    let arriving = g.get_org_tab() != tab || g.get_active_area() != "organizer";
+/// The startup landing is the one arrival that opens the input box by itself
+/// (`auto_input_on_start` — the reference opens it when the session *starts* in
+/// the area, which is what the name says): `auto_input` says whether this is
+/// that landing. Every other arrival is a page the user asked for, and a
+/// composer popping itself open over it — resuming a draft they already walked
+/// away from, no less — is the one thing worse than a composer nobody asked
+/// for: one they asked to go away.
+fn org_land(g: &UIState<'_>, state: &Rc<AppState>, tab: i32, auto_input: bool) {
     org_show(g, state, tab);
-    if tab == 0 && arriving && state.setting_flag_or("notes.auto_input", true) {
+    if tab == 0 && auto_input && state.setting_flag_or("notes.auto_input", true) {
         org_capture_open(g, state);
     }
+}
+
+/// Throw the capture layer away: closed, draft gone, caret reset — the same
+/// three writes ✕, the scrim and Escape make (`on_org_capture_closed`), minus
+/// the 标签建议 refresh that only matters while the layer is on screen. Called
+/// by every move that leaves the layer's page behind it; a layer that outlived
+/// its page would still hold a half-written sentence the next visit never
+/// asked for.
+fn org_capture_discard(g: &UIState<'_>) {
+    if !g.get_org_capture_open() {
+        return;
+    }
+    g.set_org_capture_draft("".into());
+    g.set_org_capture_caret(0);
+    g.set_org_capture_open(false);
 }
 
 /// Open the capture layer, seeded with the tag filter when there is one.
@@ -6433,6 +6718,13 @@ fn org_show(g: &UIState<'_>, state: &Rc<AppState>, tab: i32) {
         g.set_org_selecting(false);
         state.org_selection_clear();
     }
+    // …and ends the capture layer: it belongs to the notes page it was opened
+    // over, and a layer that survived the move would hang over 任务 or reappear
+    // with its old draft when the user walked back. ADR-0115's rule is what
+    // makes throwing the draft away free — nothing is written until ➤, so there
+    // is nothing to save. `org_land`'s startup auto-open runs *after* this, so
+    // the landing still gets its input.
+    org_capture_discard(g);
     g.set_active_area("organizer".into());
     // A tag filter belongs to the half of the area it was asked of: the notes'
     // tags are not the tasks' tags, so carrying `项目` across a tab switch would
@@ -6584,6 +6876,13 @@ fn org_selection_verb(
             if !text.is_empty() {
                 crate::platform::copy_to_clipboard(&text);
             }
+            // The verb already tore the mode down (`org_stop_selecting`), but
+            // the *picked fill lives in the row models*, and only a refresh
+            // repaints it — without this, 复制 was the one verb whose cards
+            // stayed lit under a bar that had already gone: 完成 and 删除
+            // refresh on their own paths below, so this arm was the only one
+            // that could leave the screen half in the mode it just left.
+            org_refresh(g, state);
         }
         // 完成 is one command for the whole batch, so one Ctrl+Z takes the batch
         // back — which is more than the reference shells give here, and is the
@@ -6650,7 +6949,11 @@ fn org_commit_field(g: &UIState<'_>, state: &Rc<AppState>) {
         return;
     }
     g.set_org_field(0);
-    let note_id = g.get_org_selected_note() as i64;
+    // The drafts are the **open** note page's fields (ADR-0137), so the commit
+    // lands on the note the page is open for and never on the row a click
+    // merely highlighted — the two are different notes the moment the user
+    // clicks around while the page is up.
+    let note_id = g.get_org_note_open() as i64;
     let task_id = g.get_org_selected_task() as i64;
     let sub_id = g.get_org_field_sub() as i64;
     match slot {
@@ -6726,6 +7029,9 @@ fn org_deferred_delete(
         g.set_org_selected_task(-1);
     } else {
         g.set_org_selected_note(-1);
+        // The pane was showing the row this delete just hid: the page closes
+        // with it, and the refresh + draft reload below settle the empty state.
+        g.set_org_note_open(-1);
     }
     g.set_org_undo_text(message.into());
     org_refresh(g, s);
@@ -8556,6 +8862,10 @@ fn show_open_page(g: &UIState<'_>, state: &Rc<AppState>) {
     // arrive here, and one line here is what keeps every one of them from
     // painting a page under a title that says 笔记.
     g.set_active_area("docs".into());
+    // Opening a page is also leaving the capture layer behind: it belongs to
+    // the notes page it was opened over, and a half-written note following the
+    // user into a document is the layer outliving its page.
+    org_capture_discard(g);
     g.set_page_title(title.into());
     g.set_page_breadcrumb(crumb.into());
     g.set_sidebar_selected_id(id);
@@ -8806,6 +9116,7 @@ fn apply_scene_body(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
                 // (`org_create_reply`) and a second one drafted in the field, so the
                 // scene shows the list and the input in one picture.
                 g.set_org_selected_note(ids.notes[1]);
+                g.set_org_note_open(ids.notes[1]);
                 state.org_create_reply(ids.notes[1] as i64, "读完了，下周一把结论贴到这里。".into());
                 g.set_org_reply_draft("再补一句…".into());
                 org_refresh(&g, state);
@@ -8813,6 +9124,7 @@ fn apply_scene_body(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             }
             if scene == "notes-detail" {
                 g.set_org_selected_note(ids.notes[1]);
+                g.set_org_note_open(ids.notes[1]);
                 org_refresh(&g, state);
                 org_load_drafts(&g, state);
             }
@@ -8823,6 +9135,7 @@ fn apply_scene_body(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
                 // 创建 and 修改 both read 刚刚 — what a scene cannot fake, it says
                 // honestly rather than stamps a fake date into the store.
                 g.set_org_selected_note(ids.notes[0]);
+                g.set_org_note_open(ids.notes[0]);
                 g.set_org_note_details_open(true);
                 org_refresh(&g, state);
                 org_load_drafts(&g, state);
@@ -8880,7 +9193,8 @@ fn apply_scene_body(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             // page looks like anyway.
             refresh_sync_ui(&g, state, &Default::default());
         }
-        "tasks" | "tasks-detail" | "tasks-list" | "tasks-overdue" | "tasks-board" => {
+        "tasks" | "tasks-detail" | "tasks-list" | "tasks-overdue" | "tasks-board"
+        | "tasks-done" | "tasks-drag" | "tasks-drop" => {
             let ids = org_scene_seed(state);
             org_scene_open(&g, state, 1);
             if scene == "tasks-list" {
@@ -8904,6 +9218,37 @@ fn apply_scene_body(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
                 g.set_org_mode(1);
                 g.set_org_view(3);
                 g.set_org_list(-1);
+            }
+            if scene == "tasks-done" {
+                // 显示已完成 **on**: the footer's switch is what reveals the done
+                // row, and the done row is where the strike lives — a picture of
+                // the toggle's own effect, with the finished task appended under
+                // the live ones the way the store orders them.
+                g.set_org_view(3);
+                g.set_org_list(-1);
+                g.set_org_show_done(true);
+            }
+            if scene == "tasks-drag" || scene == "tasks-drop" {
+                // The two drag moments, staged: **drag** holds the pointer over
+                // the 生活 column's first card with the column lit, so the gap
+                // slot and the accent wash photograph together; **drop** commits
+                // a real move — the work list's first task into 生活, through the
+                // dropped callback's own path — so the settle ring is caught at
+                // full strength before the fade's first tick.
+                g.set_org_mode(1);
+                g.set_org_view(3);
+                g.set_org_list(-1);
+                org_refresh(&g, state);
+                if scene == "tasks-drag" {
+                    g.set_org_drop_list(ids.lists[1]);
+                    // A y in the first 生活 card's lower half, in window
+                    // coordinates — the shot's own geometry, read off the board
+                    // sweep, not computed.
+                    g.set_org_drop_y(300.0);
+                } else {
+                    let data = g.invoke_org_card_payload(ids.tasks[0]);
+                    g.invoke_org_card_dropped(data, ids.lists[1]);
+                }
             }
             org_refresh(&g, state);
             if scene == "tasks-detail" {
@@ -8976,6 +9321,7 @@ fn apply_scene_body(ui: &AppWindow, state: &Rc<AppState>, scene: &str) {
             let ids = org_scene_seed(state);
             org_scene_open(&g, state, 0);
             g.set_org_selected_note(ids.notes[0]);
+            g.set_org_note_open(ids.notes[0]);
             g.set_menu_node_id(ids.notes[0]);
             org_refresh(&g, state);
             org_load_drafts(&g, state);

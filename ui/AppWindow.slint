@@ -536,6 +536,19 @@ export component AppWindow inherits Window {
     resize-border-width: 6px;
     forward-focus: shortcuts;
 
+    // 最大化 / 窗口化, told twice and for two different readers. The title bar
+    // needs the flag to draw 「还原」 instead of 「最大化」 — a window control
+    // that cannot say which way it goes is a control the user has to try. Rust
+    // needs it because the size a maximized window reports is the *monitor's*
+    // size, and recording that is how a maximized session used to come back
+    // as a full-screen window on the next launch: the flag is the only moment
+    // at which the pre-maximize rectangle is still knowable (see
+    // `window_maximized_changed` in `controller::wire`).
+    changed maximized => {
+        UIState.window-maximized = self.maximized;
+        UIState.window-maximized-changed(self.maximized);
+    }
+
     // `changed` handlers can only observe locally declared properties, so the
     // things Rust must react to are mirrored here first.
     in-out property <bool> palette-open <=> UIState.palette-open;
@@ -557,6 +570,14 @@ export component AppWindow inherits Window {
     in-out property <bool> settings-open <=> UIState.settings-open;
     in-out property <bool> icon-picker-open <=> UIState.icon-picker-open;
     in-out property <bool> versions-open <=> UIState.versions-open;
+    in-out property <int> org-quick-note-tick <=> UIState.org-quick-note-tick;
+
+    // The 全局快捷键's Alt+N lands here (main.rs bumps the counter from the
+    // event loop): the counter is the only thing a foreign thread can write,
+    // and this hook is where the write becomes the same call the ＋ makes.
+    changed org-quick-note-tick => {
+        UIState.org-quick-note-requested();
+    }
 
     changed palette-open => {
         if (palette-open) {

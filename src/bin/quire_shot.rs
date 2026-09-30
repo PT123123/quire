@@ -196,6 +196,13 @@ fn run() -> Result<(), String> {
     if let Some(scene) = &scene {
         controller::apply_scene(&ui, &state, scene);
     }
+    // --theme <id>, **after** the scene: `apply_scene` owns the theme (dark-*
+    // scenes are dark, the rest light), so an explicit ask has to land after it
+    // to win — the one way to photograph a scene the catalog already seeds in a
+    // palette the scene's own name does not spell.
+    if let Some(id) = parse(&argv, "--theme") {
+        ui.global::<UIState>().set_theme(id.into());
+    }
     // --scroll-y drives the same viewport mirror scene F uses. It exists
     // because a scroll that moves nothing still burns CPU, and the bench
     // harness shipped with that bug: a run at 0 and a run at ±2000 have to

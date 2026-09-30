@@ -189,10 +189,6 @@ component OrgNavRow inherits Rectangle {
 
     height: 32px;
     border-radius: Theme.radius-sm;
-    background: selected
-        ? Colors.surface-selected
-        : (ta.has-hover ? Colors.hover-fill : transparent);
-    animate background { duration: Theme.duration-instant; }
 
     // What the text must leave room for: the count, then the exclude control, then
     // the ⋯. One property rather than three subtractions, because a `Text`'s width
@@ -202,14 +198,27 @@ component OrgNavRow inherits Rectangle {
         + (excludable ? 24px : 0px)
         + (menuable ? 22px : 0px);
 
+    // A selected row is a **state, not an emphasis** (the same rule `OrgFilterChip`
+    // states, and the same reason: `Colors.surface-selected` is accent-tinted, and
+    // a row that is selected *by default* — 全部笔记, lit whenever no tag filter is
+    // on — then shouts about the one thing the user already knows). A nav draws
+    // the lit row as a raised surface with a 2 px accent bar down its left edge
+    // and the label in the primary colour: three cues, none of them a saturated
+    // plate. The bar is also what tells a long label where it starts.
+    background: selected
+        ? Colors.surface-overlay
+        : (ta.has-hover ? Colors.hover-fill : transparent);
+    animate background { duration: Theme.duration-instant; }
+
     if selected : Rectangle {
         x: 0;
-        y: 7px;
-        width: 3px;
-        height: parent.height - 14px;
-        border-radius: 2px;
+        y: 5px;
+        width: 2px;
+        height: parent.height - 10px;
+        border-radius: 1px;
         background: Colors.accent;
     }
+
     if color-slot >= 0 : Rectangle {
         x: 13px;
         y: (parent.height - 8px) / 2;
@@ -504,7 +513,14 @@ component OrgSeg inherits Rectangle {
 
     HorizontalLayout {
         for label[i] in root.labels : Rectangle {
-            background: root.selected == i ? Colors.surface-selected : transparent;
+            // The lit half is a wash of the accent with the label in the accent's
+            // ink — the reference nav's own selected treatment (a 12–16% tint of
+            // the accent, `kColorNavSel`), and the same "a state, not an
+            // emphasis" rule the nav rows and the filter chips keep. `with-alpha`
+            // and not a `mix`, because the blend's factor reads against the card
+            // the box sits on and an alpha says the same thing without picking a
+            // side in the palette.
+            background: root.selected == i ? Colors.accent.with-alpha(0.15) : transparent;
             animate background { duration: Theme.duration-instant; }
             Text {
                 text: label;
@@ -512,7 +528,7 @@ component OrgSeg inherits Rectangle {
                 font-size: Typography.size-caption;
                 horizontal-alignment: center;
                 vertical-alignment: center;
-                color: root.selected == i ? Colors.text-primary : Colors.text-muted;
+                color: root.selected == i ? Colors.accent-text : Colors.text-muted;
             }
             TouchArea {
                 mouse-cursor: MouseCursor.pointer;
@@ -571,17 +587,35 @@ component OrgMeta inherits Text {
 // One tag as a pill. `List ` + `tag` in the toolbar of activitywatch's page; here
 // it is also how a row says which list it is in, which is why the tint is a
 // property rather than a constant.
+//
+// The fill is the tint's own, at the reference pill's own two stops — a 12% wash
+// of the colour inside a 30% border of it, text in the colour itself — because a
+// wash of *the tag's colour* is what makes a row of pills read as a row of tags
+// rather than as a row of gray chips that happen to have words in them.
 component OrgPill inherits Rectangle {
     in property <string> text;
     in property <color> tint: Colors.text-secondary;
+    // A pill that filters when clicked carries its own TouchArea; the task
+    // row's informational pills do not and must not swallow the row's click.
+    // `value` is what a click reports — the note pill paints `#` + path and
+    // reports the bare path, because the filter speaks in paths — and falls
+    // back to the label, which is what an informational pill would be picked by.
+    in property <bool> clickable: false;
+    in property <string> value: "";
+    callback picked(string);
 
     height: 17px;
-    width: pill-text.preferred-width + 14px;
+    // `min()` rather than `max-width`: this build rejects a `width` and a
+    // `max-width` on the same element, and a cap is what keeps a four-level
+    // path from becoming the widest thing in its row.
+    width: min(pill-text.preferred-width + (root.clickable ? 18px : 14px), 180px);
     border-radius: 9px;
-    background: Colors.hover-fill;
+    border-width: root.clickable ? 1px : 0px;
+    border-color: root.tint.with-alpha(0.30);
+    background: root.tint.with-alpha(0.12);
     pill-text := Text {
-        x: 7px;
-        width: parent.width - 14px;
+        x: root.clickable ? 9px : 7px;
+        width: parent.width - self.x - (root.clickable ? 9px : 7px);
         height: parent.height;
         text: root.text;
         font-family: Typography.ui-font;
@@ -589,6 +623,10 @@ component OrgPill inherits Rectangle {
         color: root.tint;
         vertical-alignment: center;
         overflow: elide;
+    }
+    if root.clickable : pill-ta := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { root.picked(root.value == "" ? root.text : root.value); }
     }
 }
 
@@ -640,6 +678,13 @@ component OrgDue inherits Rectangle {
 // One task as the list paints it: 52 px, because a row carries a title *and* a
 // line of pills and 42 could not hold both. The whole row is the click target
 // for selection; only the box toggles, and only the ⋯ opens the menu.
+//
+// The row's states are the reference's own four, and they are all *one* colour
+// with the alpha doing the work: a wash of the accent inside a border of the
+// same accent, with a 2 px bar down the left edge as the anchor. Hover is the
+// faintest of the three, the detail-open row a step up, and 多选's pick the
+// strongest — three intensities of one statement, "you are pointed at this",
+// instead of three different colours.
 component OrgTaskRow inherits Rectangle {
     in property <TaskRow> task;
     callback toggled();
@@ -648,10 +693,32 @@ component OrgTaskRow inherits Rectangle {
 
     height: 52px;
     border-radius: Theme.radius-md;
-    background: task.selected || task.picked
-        ? Colors.surface-selected
-        : (ta.has-hover ? Colors.hover-fill : transparent);
+    border-width: 1px;
+    border-color: task.picked
+        ? Colors.accent.with-alpha(task-hover-ta.has-hover ? 0.70 : 0.55)
+        : task.selected
+        ? Colors.accent.with-alpha(task-hover-ta.has-hover ? 0.50 : 0.35)
+        : task-hover-ta.has-hover ? Colors.accent.with-alpha(0.28) : transparent;
+    background: task.picked
+        ? Colors.accent.with-alpha(task-hover-ta.has-hover ? 0.24 : 0.16)
+        : task.selected
+        ? Colors.accent.with-alpha(task-hover-ta.has-hover ? 0.16 : 0.10)
+        : task-hover-ta.has-hover ? Colors.accent.with-alpha(0.11) : transparent;
     animate background { duration: Theme.duration-instant; }
+    animate border-color { duration: Theme.duration-instant; }
+
+    // The left bar, the states' anchor — drawn, because Slint borders are
+    // uniform and the reference's `border-left: 3px` has no one-property twin.
+    if task.picked || task.selected || task-hover-ta.has-hover : Rectangle {
+        x: 0px;
+        y: 5px;
+        width: 2.5px;
+        height: parent.height - 10px;
+        border-radius: 1.25px;
+        background: task-hover-ta.has-hover && !task.picked && !task.selected
+            ? Colors.accent.with-alpha(0.85)
+            : Colors.accent;
+    }
 
     HorizontalLayout {
         padding-left: 12px;
@@ -675,18 +742,53 @@ component OrgTaskRow inherits Rectangle {
             // `max-width` earns its place here for the reason the area's own
             // comment gives — a container of elidable text has a small preferred
             // width and no ceiling above it without this line.
+            //
+            // **No `alignment`**: this build's layout alignment reaches across
+            // the axes, and a centered column took the title Rectangle at its
+            // preferred width and parked it mid-row. The outer box's
+            // `cross-axis-alignment` is the only centering the row needs.
             vertical-stretch: 1;
             horizontal-stretch: 1;
             max-width: 100000px;
-            alignment: center;
             spacing: 3px;
-            Text {
-                text: task.title != "" ? task.title : "无标题";
-                font-family: Typography.ui-font;
-                font-size: Typography.size-ui;
-                color: task.done ? Colors.text-muted : Colors.text-primary;
-                vertical-alignment: center;
-                overflow: elide;
+            Rectangle {
+                // Stretch hints, not `width: parent.width` — that binding loops
+                // (the layout asks the child, the child asks the layout). This
+                // layout's `alignment: center` takes a bare Rectangle at its
+                // *preferred* width and centres it in both axes, which is how the
+                // title once marched to the middle of the row; the stretch pin is
+                // what holds it to the checkbox's right edge, and the strike line
+                // under it to the text's own left.
+                horizontal-stretch: 1;
+                max-width: 100000px;
+                height: 20px;
+                // `x: 0` and a stated alignment: a Text floating in a plain
+                // Rectangle centres itself in this build, and a title that
+                // starts wherever the middle of the row is, is a title that
+                // cannot be scanned down a list.
+                task-title := Text {
+                    x: 0;
+                    horizontal-alignment: left;
+                    text: task.title != "" ? task.title : "无标题";
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-ui;
+                    font-weight: Typography.weight-semibold;
+                    color: task.done ? Colors.text-muted : Colors.text-primary;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                // The strike, drawn: the reference animates its own across the
+                // glyphs over 260 ms, which this renderer cannot trace — but the
+                // line it ends at is one pixel through the x-height, the width of
+                // the text that is actually there, and it is the only part of the
+                // animation a static frame keeps.
+                if task.done : Rectangle {
+                    x: 0;
+                    y: (parent.height - 1px) / 2 + 2px;
+                    width: min(task-title.preferred-width, parent.width);
+                    height: 1px;
+                    background: Colors.text-muted;
+                }
             }
             HorizontalLayout {
                 // The pills line is dropped whole when it is empty, so a row
@@ -699,7 +801,7 @@ component OrgTaskRow inherits Rectangle {
                     text: task.list-name;
                     tint: Colors.block-text(task.list-color);
                 }
-                for tag[i] in task.tag-list : OrgPill { text: tag; }
+                for tag[i] in task.tag-list : OrgPill { text: tag; tint: Colors.accent-text; }
                 if task.subtasks-total > 0 : Text {
                     text: "☑ " + task.subtasks-done + "/" + task.subtasks-total;
                     font-family: Typography.ui-font;
@@ -731,7 +833,7 @@ component OrgTaskRow inherits Rectangle {
             // drawn instead — a menu that holds only 恢复 and 彻底删除 is a menu
             // that costs a click to say what a button already says.
             visible: !UIState.org-selecting && !UIState.org-bin-open;
-            opacity: ta.has-hover || task.selected ? 1 : 0;
+            opacity: task-hover-ta.has-hover || task.selected ? 1 : 0;
             clicked => {
                 root.menu-requested(self.absolute-position.x, self.absolute-position.y);
             }
@@ -749,7 +851,7 @@ component OrgTaskRow inherits Rectangle {
             clicked => { UIState.org-bin-purged(task.id); }
         }
     }
-    ta := TouchArea {
+    task-hover-ta := TouchArea {
         mouse-cursor: MouseCursor.pointer;
         clicked => { root.opened(); }
     }
@@ -770,7 +872,12 @@ component OrgQuickAdd inherits Rectangle {
     height: 36px;
     border-radius: Theme.radius-md;
     border-width: 1px;
-    border-color: ta.has-hover || input.has-focus ? Colors.border-strong : Colors.border;
+    // The reference's own two steps on its quick-add line: the pointer teases
+    // the border **toward** the accent (a 60% wash of it), the focus arrives at
+    // it — an input that is being typed into is the one thing on the bar that
+    // gets to glow.
+    border-color: input.has-focus ? Colors.accent
+        : (ta.has-hover ? Colors.accent.with-alpha(0.60) : Colors.border);
     background: Colors.surface-hover;
 
     if root.value == "" : Text {
@@ -820,19 +927,34 @@ component OrgQuickAdd inherits Rectangle {
 // One card of the board. Drag it to another column to move it there — the same
 // drag the page tree and the document's rows use, so a card lifts the way every
 // other draggable thing in this app lifts.
+//
+// The paint is the reference board's own arithmetic: a wash of the **ink** over
+// the column (4.5%, 9% under the pointer) rather than an opaque surface step,
+// because a column is already a panel and a card that is another opaque plate
+// on it reads as a form field; and the border goes the accent's way under the
+// pointer, which is what says "draggable, and this is the one you hold".
 component OrgBoardCard inherits Rectangle {
     in property <BoardCard> card;
     callback toggled();
     callback opened();
 
-    height: card-text.preferred-height + (card.tag-list.length > 0 ? 24px : 0px) + 38px;
+    height: card-lay.preferred-height;
+    // 拖拽中整卡变暗 (the reference's `setDimmed`): while this card *is* the
+    // drag, the original dims to a ghost — what the pointer carries is the
+    // idea of the card, and the thing left behind should not pretend to still
+    // be it.
+    opacity: drag.dragging ? 0.32 : 1.0;
+    animate opacity { duration: Theme.duration-fast; }
     border-radius: Theme.radius-md;
     border-width: 1px;
-    border-color: ta.has-hover ? Colors.border-strong : Colors.border;
-    background: Colors.surface;
+    border-color: card-ta.has-hover
+        ? Colors.accent.with-alpha(0.50)
+        : Colors.border.with-alpha(0.75);
+    background: Colors.text-primary.with-alpha(card-ta.has-hover ? 0.09 : 0.045);
+    animate background { duration: Theme.duration-instant; }
     animate border-color { duration: Theme.duration-instant; }
 
-    VerticalLayout {
+    card-lay := VerticalLayout {
         padding: 10px;
         spacing: 6px;
         HorizontalLayout {
@@ -840,30 +962,43 @@ component OrgBoardCard inherits Rectangle {
             OrgCheck {
                 checked: card.done;
                 box-size: 16px;
+                round: true;
                 toggled => { root.toggled(); }
             }
             card-text := Text {
                 text: card.title != "" ? card.title : "无标题";
                 font-family: Typography.ui-font;
                 font-size: Typography.size-ui;
+                font-weight: Typography.weight-semibold;
                 color: Colors.text-primary;
                 wrap: word-wrap;
                 horizontal-stretch: 1;
             }
             OrgPrio { slot: card.priority; }
         }
-        if card.tag-list.length > 0 : HorizontalLayout {
-            height: 17px;
-            spacing: 6px;
-            for tag[i] in card.tag-list : OrgPill { text: tag; }
-        }
+        // The meta line, the reference's own: priority glyph, deadline, then at
+        // most **two** tag pills and a ＋N for the rest — a card is scanned, and
+        // a row of six pills is a row of noise.
         HorizontalLayout {
-            height: 18px;
-            spacing: 6px;
+            visible: card.due != "" || card.tag-list.length > 0;
+            height: card.due != "" || card.tag-list.length > 0 ? 18px : 0px;
+            spacing: 5px;
             OrgDue {
                 label: card.due-label;
                 overdue: card.overdue;
                 today: card.due == UIState.org-today;
+            }
+            for tag[i] in card.tag-list : OrgPill {
+                text: tag;
+                tint: Colors.accent-text;
+                visible: i < 2;
+            }
+            if card.tag-list.length > 2 : Text {
+                text: "+" + (card.tag-list.length - 2);
+                font-family: Typography.ui-font;
+                font-size: Typography.size-caption;
+                color: Colors.text-muted;
+                vertical-alignment: center;
             }
             Rectangle { horizontal-stretch: 1; }
         }
@@ -874,14 +1009,55 @@ component OrgBoardCard inherits Rectangle {
         data: UIState.org-card-payload(card.id);
         drag-finished => { UIState.org-drop-list = -2; }
     }
-    ta := TouchArea {
+    card-ta := TouchArea {
         mouse-cursor: MouseCursor.pointer;
         clicked => { root.opened(); }
     }
+    // 落位环: a two-pixel accent ring around the card that just landed, popped
+    // to full the moment the drop commits and walked back to nothing by the
+    // six-hundred-millisecond fade Rust steps through (`org-settle-alpha`). The
+    // "still blue after the rebuild" is the point — the board re-lays itself the
+    // instant a card changes columns, and this is what tells the eye *which*
+    // card it just watched move. Drawn a hair and a half outside the card's own
+    // border, so the two read as a ring and not as a repaint.
+    if UIState.org-settle-task == card.id : Rectangle {
+        x: -1.5px;
+        y: -1.5px;
+        width: parent.width + 3px;
+        height: parent.height + 3px;
+        border-radius: Theme.radius-md + 1.5px;
+        border-width: 2px;
+        border-color: Colors.accent.with-alpha(UIState.org-settle-alpha);
+        background: transparent;
+    }
+}
+
+// The drop-gap placeholder, straddling the seam a card would drop across while a
+// drag is over the column — the reference board's `TodoBoardGap`: an accent frame
+// with a pale wash inside. Its stroke is **solid** where the reference draws a
+// dash {4,3}, because this renderer's `Path` carries no dash array (checked
+// against slint 1.18.1); the frame's job — a slot a card will fall into —
+// survives the difference.
+//
+// Its height is grown from zero by the card that owns the seam rather than
+// created on demand, because an element that appears cannot be animated into
+// appearing and this slot is meant to *open*.
+component OrgBoardGap inherits Rectangle {
+    border-radius: Theme.radius-md;
+    border-width: 1.5px;
+    border-color: Colors.accent.with-alpha(0.80);
+    background: Colors.accent.with-alpha(0.10);
 }
 
 // One column of the board: the list, its count, its open tasks, and the ＋ line
 // that adds straight into it.
+//
+// The paint is the reference board's: a 2.8% wash of the ink over the page —
+// barely there, which is the point; a column is a *place*, and a place that
+// shouts is a place nobody scans — that deepens to 5.5% under the pointer and
+// becomes a wash of the accent while a card is held over it. The width is a
+// range, not a fixed 232: few columns share the spare width out (340 at the
+// top), and many of them scroll instead of squeezing below 206.
 component OrgBoardColumn inherits Rectangle {
     in property <BoardColumn> column;
     callback card-toggled(int);
@@ -890,17 +1066,42 @@ component OrgBoardColumn inherits Rectangle {
     // One draft per column would need one draft per column *id*; a single one is
     // shared because only one column's ＋ line can have focus at a time.
     property <string> add-draft: "";
+    // The reference's ＋ is a **ghost line** that becomes an input when pressed —
+    // a column of cards ends in a quiet verb, not in a boxed field asking for
+    // text nobody is typing yet. This is whether that input is up.
+    property <bool> adding: false;
+    // The drop gap. The pointer's window y lives on the global (`org-drop-y`),
+    // written by the drop area's `can-drop` on every drag-move; the gap slot
+    // itself is drawn by whichever card's own range the pointer falls in (its
+    // upper half → the slot above it, its lower half → the one below), which is
+    // the same answer the reference's `dropIndexAt` computes from centers.
+    // `gap-h` is its height — the reference's `max(si(34), card)`, at the floor
+    // because this column's cards already know their own height and the slot is
+    // a promise, not a preview.
+    property <length> gap-h: 34px;
+    private property <bool> drop-active: UIState.org-drop-list == column.id;
+    // The list's own box, which is where the pointer has to be for a card to be
+    // asking for a slot. The list's position comes from the column's layout
+    // (padding, the header, the ＋ line) and not from how tall its delegates
+    // turned out, so asking *it* is safe; asking a delegate used to not be — see
+    // the note on the slot below.
+    private property <length> list-top: list.absolute-position.y;
+    private property <bool> over-list: root.drop-active
+        && UIState.org-drop-y >= root.list-top
+        && UIState.org-drop-y <= root.list-top + list.height;
 
-    // 232 rather than 268 so three columns fit the list column's 442 px beside
-    // them: a board that always scrolls sideways is a board nobody scans.
-    min-width: 232px;
-    max-width: 232px;
+    min-width: 206px;
+    max-width: 340px;
+    horizontal-stretch: 1;
     border-radius: Theme.radius-md;
     border-width: 1px;
-    border-color: UIState.org-drop-list == column.id
-        ? Colors.accent
-        : (ta.has-hover ? Colors.border-strong : Colors.border);
-    background: Colors.background;
+    border-color: drop-active
+        ? Colors.accent.with-alpha(0.45)
+        : ta.has-hover ? Colors.border.with-alpha(0.90) : Colors.border.with-alpha(0.55);
+    background: drop-active
+        ? Colors.accent.with-alpha(0.09)
+        : Colors.text-primary.with-alpha(ta.has-hover ? 0.055 : 0.028);
+    animate background { duration: Theme.duration-fast; }
     animate border-color { duration: Theme.duration-fast; }
 
     // Declared first, so it is *under* the column's own content: it exists for
@@ -915,9 +1116,9 @@ component OrgBoardColumn inherits Rectangle {
             height: 22px;
             spacing: 8px;
             if column.color >= 0 : Rectangle {
-                width: 9px;
-                height: 9px;
-                border-radius: 3px;
+                width: 8px;
+                height: 8px;
+                border-radius: 2.5px;
                 background: Colors.block-text(column.color);
             }
             Text {
@@ -938,31 +1139,170 @@ component OrgBoardColumn inherits Rectangle {
             }
             Rectangle { horizontal-stretch: 1; }
         }
-        ListView {
+        list := ListView {
             vertical-stretch: 1;
-            for entry[i] in column.cards : OrgBoardCard {
-                card: entry;
-                toggled => { root.card-toggled(entry.id); }
-                opened => { root.card-opened(entry.id); }
+            // One item = one card *plus its 8 px gutter*, the gap the reference
+            // sets between its cards (`spacing si(8)`), drawn the note list's way
+            // because a `ListView` has no spacing of its own.
+            //
+            // The item height is **fixed**, and the slot is drawn over the cards
+            // rather than opened between them. The reference slides the two cards
+            // beside a real gap apart; here the item's height would have to feed
+            // the list's layout, the layout feeds every item's
+            // `absolute-position`, and `absolute-position` is the only thing that
+            // knows which half of a card the pointer is in — a loop Slint answers
+            // with "Recursion detected" instead of solving. So the card keeps its
+            // seat and the slot is drawn on the *boundary* the reference's
+            // `dropIndexAt` would have picked: the pointer in a card's upper half
+            // opens the slot above it, in its lower half the one below, and the
+            // frame straddles that edge — seventeen pixels either side — so it
+            // reads as a seam being pulled open rather than a panel laid on top.
+            // Reading `absolute-position` here is safe precisely because the
+            // height above no longer depends on it.
+            // The item's own extent, in window coordinates: its top, the line the
+            // pointer has to cross to mean "above" it, and its foot. The 8 px in
+            // the lower bound of `slot-above` is the gutter — a pointer resting in
+            // the gutter is still on this card's leading seam, not on nobody's.
+            for entry[i] in column.cards : Rectangle {
+                property <length> my-top: self.absolute-position.y;
+                property <length> my-mid: my-top + board-card.preferred-height / 2;
+                property <length> my-foot: my-top + board-card.preferred-height;
+                property <bool> slot-above: root.over-list
+                    && (i == 0
+                        ? UIState.org-drop-y < my-mid
+                        : UIState.org-drop-y >= my-top - 8px && UIState.org-drop-y < my-mid);
+                property <bool> slot-below: root.over-list && UIState.org-drop-y >= my-mid
+                    && (i == column.cards.length - 1 || UIState.org-drop-y <= my-foot);
+                height: board-card.preferred-height + 8px;
+                board-card := OrgBoardCard {
+                    y: 0;
+                    card: entry;
+                    toggled => { root.card-toggled(entry.id); }
+                    opened => { root.card-opened(entry.id); }
+                }
+                // The two seams this card can open — the one above it and the one
+                // below — are both always here and animate their own height, so
+                // the slot *opens* over 150 ms the way the reference's does
+                // instead of appearing between two frames. Growing a leaf's
+                // height is safe where growing the item's was not: nothing lays
+                // anything out from this box.
+                OrgBoardGap {
+                    y: -root.gap-h / 2;
+                    width: parent.width;
+                    height: slot-above ? root.gap-h : 0px;
+                    opacity: slot-above ? 1.0 : 0.0;
+                    animate height, opacity { duration: 150ms; easing: ease-out; }
+                }
+                OrgBoardGap {
+                    y: self.height - 8px - root.gap-h / 2;
+                    width: parent.width;
+                    height: slot-below ? root.gap-h : 0px;
+                    opacity: slot-below ? 1.0 : 0.0;
+                    animate height, opacity { duration: 150ms; easing: ease-out; }
+                }
             }
         }
-        OrgQuickAdd {
-            placeholder: "＋ 添加任务";
-            hint: "";
-            value <=> root.add-draft;
-            submitted => {
-                if (root.add-draft != "") { root.added(root.add-draft); }
-                root.add-draft = "";
+        // The ＋ line, the reference's two shapes: a ghost verb at rest — muted,
+        // left-aligned, invisible until the column holds it — and the one-line
+        // input it turns into, committed by Enter or by the focus leaving, and
+        // dismissed by Escape. The placeholder names the list, because a line
+        // at the foot of 工作 that says 新任务 has not said where the task goes.
+        if !root.adding : Rectangle {
+            height: 28px;
+            border-radius: Theme.radius-sm;
+            background: add-ta.has-hover ? Colors.text-primary.with-alpha(0.07) : transparent;
+            animate background { duration: Theme.duration-instant; }
+            Text {
+                x: 8px;
+                width: parent.width - 16px;
+                height: parent.height;
+                text: "＋ 添加任务";
+                font-family: Typography.ui-font;
+                font-size: Typography.size-ui;
+                color: add-ta.has-hover ? Colors.text-primary : Colors.text-muted;
+                vertical-alignment: center;
+            }
+            add-ta := TouchArea {
+                mouse-cursor: MouseCursor.pointer;
+                clicked => {
+                    root.adding = true;
+                    root.add-draft = "";
+                }
+            }
+        }
+        if root.adding : Rectangle {
+            height: 28px;
+            border-radius: Theme.radius-sm;
+            border-width: 1px;
+            border-color: add-input.has-focus ? Colors.accent : Colors.border;
+            background: Colors.surface-hover;
+            if root.add-draft == "" : Text {
+                x: 8px;
+                width: parent.width - 16px;
+                height: parent.height;
+                text: "新任务（" + column.name + "）";
+                font-family: Typography.ui-font;
+                font-size: Typography.size-caption;
+                color: Colors.text-muted;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            add-input := TextInput {
+                x: 7px;
+                y: 5px;
+                width: parent.width - 14px;
+                height: parent.height - 10px;
+                text <=> root.add-draft;
+                single-line: true;
+                font-family: Typography.ui-font;
+                font-size: Typography.size-caption;
+                color: Colors.text-primary;
+                vertical-alignment: center;
+                selection-foreground-color: Colors.text-on-accent;
+                selection-background-color: Colors.selection;
+                accepted => {
+                    if (root.add-draft != "") { root.added(root.add-draft); }
+                    root.adding = false;
+                    root.add-draft = "";
+                }
+                key-pressed(event) => {
+                    if (event.text == Key.Escape) {
+                        root.adding = false;
+                        root.add-draft = "";
+                        accept
+                    } else {
+                        reject
+                    }
+                }
+                changed has-focus => {
+                    // The focus leaving is the third of the reference's commits:
+                    // a click anywhere else in the board sends the task rather
+                    // than throwing it away — unless the text is empty, which no
+                    // verb turns into a row.
+                    if (!self.has-focus && root.add-draft != "") {
+                        root.added(root.add-draft);
+                    }
+                    if (!self.has-focus) { root.adding = false; }
+                }
+                init => { add-input.focus(); }
             }
         }
     }
     // The drop target is last, so it is *above* the content: a `DropArea` only
     // reacts to a drag (normal clicks pass straight through).
-    DropArea {
+    dropa := DropArea {
         can-drop(event) => {
             if (UIState.org-card-hover(event.data, column.id)) {
+                // The pointer's window y, for the gap slot's arithmetic — the
+                // event's own position is this area's, and the delegates read
+                // `absolute-position` in the same coordinates.
+                UIState.org-drop-y = event.position.y + self.absolute-position.y;
                 DragAction.move
             } else {
+                // A column that says no (its own card coming home) goes dark
+                // *now* — the last accepted column's light would otherwise hang
+                // around claiming a drop that is not going to happen.
+                UIState.org-drop-list = -2;
                 DragAction.none
             }
         }
@@ -992,6 +1332,11 @@ component OrgInput inherits Rectangle {
     // which is why min and max are both set there.)
     in property <bool> grow: true;
     in property <length> field-width: 170px;
+    // Whether this is a **field** rather than a quiet row of the page. The search
+    // box is one (`filled: true`, and the reference draws its `QLineEdit` with a
+    // background too); the detail pane's inline title and the 标签 fields are
+    // not, because a page of eight filled boxes is a form and this is a page.
+    in property <bool> filled: false;
     callback edited();
     callback accepted();
 
@@ -1002,9 +1347,23 @@ component OrgInput inherits Rectangle {
         ? max(root.hint-height, inner.preferred-height + 12px)
         : max(root.hint-height, 32px);
     border-radius: Theme.radius-sm;
-    background: inner.has-focus
-        ? Colors.background
-        : (hover.has-hover ? Colors.hover-fill : transparent);
+    // A **field** is a field at rest, not on hover. The sort pill and the filter
+    // chips are buttons and get a fill when the pointer is on them; a box you
+    // are meant to click *into* and type in has to say so before the pointer
+    // arrives, or the 笔记 toolbar's first control is an invisible rectangle with
+    // the word 搜索笔记 floating in it. `surface-hover` is the reference's own
+    // answer (`QLineEdit { background: %1; … }` with `glassBg(kColorBgElev)`),
+    // and it is one step above the page rather than a border, so the field reads
+    // as a field and the sort pill beside it still reads as a button.
+    background: root.filled
+        ? (inner.has-focus ? Colors.background : Colors.surface-hover)
+        : (inner.has-focus ? Colors.background
+            : (hover.has-hover ? Colors.hover-fill : transparent));
+    // The focus ring, drawn on the field itself rather than as an outline the
+    // layout would have to reserve room for.
+    border-width: root.filled && inner.has-focus ? 1px : 0px;
+    border-color: Colors.accent;
+    animate background { duration: Theme.duration-instant; }
 
     // Declared first, so it is *under* the text: it exists for the hover fill
     // only, and a TouchArea above an input is an input nobody can click into.
@@ -1041,6 +1400,261 @@ component OrgInput inherits Rectangle {
     }
 }
 
+// The 笔记 half's sort box, the reference's `sortBox` (a 108 px combo with the
+// three orders 最新创建 / 最新更新 / 按内容) drawn as a pill that opens its own
+// list, because Slint has no combo box and a popup list is a second card on top
+// of this one for three words.
+//
+// The pill is 108 px — the reference's own `setFixedWidth(si(108))` — and the
+// chosen word is what it shows, not a label like 「排序」: a box that says
+// 「排序」 and a list that says 「按内容」 is two clicks to learn the current
+// order, and the current order is the thing the reader wants.
+//
+// The list hangs **under** the pill and is anchored to its own left edge, so it
+// opens under the box the press was on; the reference's own combo does the same
+// (QComboBox's view drops below the frame). It closes on the press that opened
+// it, on Escape, and on a click outside — the last one is a `TouchArea` under the
+// whole list rather than a "done" button, for the reason the settings dialog
+// needed one (a popup only closable by its own button is a popup that outlives
+// the user's attention).
+component OrgSortBox inherits Rectangle {
+    in property <[string]> labels: [];
+    in property <int> selected: 0;
+    in property <bool> open: false;
+    // Where the list belongs, in **area** coordinates, so the area can draw it
+    // outside the toolbar row.
+    //
+    // The list cannot be a child of the box: the box sits in a 30 px
+    // `HorizontalLayout` row, and a layout gives a child only its own box to
+    // paint in — so a list hanging 100 px below was clipped to a 30 px strip
+    // (visible in the first `notes-sort` sweep: three blue slivers and no words).
+    // Neither `clip` nor a bigger `height` on the box fixes it, because the clip
+    // belongs to the *row*, not to the box. So the box reports where it is and
+    // the area draws the list as one of **its own** last children — the same
+    // reason the 指令 card and the capture layer are the area's last children.
+    //
+    // Reported in the area's coordinates rather than the window's, because the
+    // area is what draws it and the area is what a `for` row's `parent` chain
+    // ends in. `root.absolute-position` minus the area's own is the arithmetic;
+    // doing it in the component would need the area's own position, which a
+    // child cannot ask for.
+    out property <length> list-x: 0px;
+    out property <length> list-y: 0px;
+    // The box cannot write the area's properties, so it *reports* where the
+    // list belongs and the area stores it. The `+ 4px` is the gap between the
+    // pill and the list — the reference's own combo view has it, and a list
+    // flush against its box reads as part of the bar rather than as a popup over
+    // the rows.
+    callback report-position(length, length);
+    // The open state belongs to the area above (it is that row's session state,
+    // and a `bool` the box writes for itself would be a second copy of the same
+    // fact). So the box *asks* rather than sets — the same rule the whole area
+    // follows with `org-query`, `org-tab` and every other "how the user is
+    // looking" value.
+    callback opened();
+    callback closed();
+    callback picked(int);
+
+    height: 30px;
+    width: 108px;
+    border-radius: Theme.radius-sm;
+    border-width: 1px;
+    // The reference draws its search box and sort box the same way: no border
+    // until there is a reason for one — a fill on hover, the accent on focus.
+    // A 1px border on both at rest made a toolbar of two boxes that read as two
+    // form fields sitting in a row of buttons.
+    border-color: root.open ? Colors.accent
+        : (ta.has-hover ? Colors.border : transparent);
+    background: root.open || ta.has-hover ? Colors.surface-hover : transparent;
+    animate background { duration: Theme.duration-instant; }
+
+    Text {
+        x: 12px;
+        width: parent.width - 12px - 18px;
+        height: parent.height;
+        text: root.labels[root.selected];
+        font-family: Typography.ui-font;
+        font-size: Typography.size-caption;
+        color: Colors.text-secondary;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    // The ▾, drawn rather than typed: `▾` is a Geometric Shapes glyph and this
+    // app has no font chain that carries it (the `✕` trap, twice now).
+    Rectangle {
+        x: parent.width - 16px;
+        y: (parent.height - 5px) / 2;
+        width: 7px;
+        height: 7px;
+        clip: true;
+        Path {
+            x: 0;
+            y: 0;
+            width: 7px;
+            height: 4px;
+            viewbox-x: 0; viewbox-y: 0; viewbox-width: 7; viewbox-height: 4;
+            stroke: Colors.text-muted; stroke-width: 1.2px;
+            stroke-line-cap: round; stroke-line-join: round;
+            fill: transparent;
+            MoveTo { x: 0.6; y: 0.6; } LineTo { x: 3.5; y: 3.4; } LineTo { x: 6.4; y: 0.6; }
+        }
+    }
+    // Declared before the list below, so the list's own hit area is above it.
+    ta := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => {
+            if (root.open) { root.closed(); } else { root.opened(); }
+        }
+    }
+
+    // The list itself is `OrgSortList`, drawn by the area — see this component's
+    // `report-position` for why it cannot live here.
+    //
+    // Reported from a **`changed` on the box's own geometry** rather than from
+    // `init`, because a window resize moves the box without re-running `init` and
+    // a one-shot report would leave the list anchored to the old width. The
+    // position is in *window* coordinates and the area converts it, because a
+    // child can read its own `absolute-position` but cannot read its parent's.
+    changed absolute-position => {
+        root.report-position(self.absolute-position.x, self.absolute-position.y);
+    }
+}
+
+// The three orders, as a list that hangs under the pill — drawn by the **area**,
+// not by the box, for the clipping reason `OrgSortBox`'s own comment gives. It
+// is the same card as every other popup in this file (指令, the capture layer, a
+// note's page): an offset shadow plate, a `border-strong` edge, and a clip.
+component OrgSortList inherits Rectangle {
+    in property <[string]> labels: [];
+    in property <int> selected: 0;
+    callback picked(int);
+    callback closed();
+
+    // 108 px, the pill's own width, so the two read as one control rather than as
+    // a list that happens to be under a box.
+    width: 108px;
+    // Three rows of 28 px plus the 4 px of padding the reference's own combo view
+    // carries (`QComboBox QAbstractItemView { … padding: 4px; }`).
+    height: 3 * 28px + 8px;
+
+    // The dismissal, and it is **first** so it is under the three rows: a press
+    // on the box below the list closes it, and a press on a row picks it. A `z` of
+    // -1 rather than a sibling above, because a sibling above would swallow the
+    // rows it is meant to sit behind.
+    miss := TouchArea {
+        x: -600px;
+        y: -600px;
+        width: 1200px;
+        height: 1200px;
+        z: -1;
+        mouse-cursor: MouseCursor.default;
+        clicked => { root.closed(); }
+    }
+    // The shadow plate, drawn the way `ContextMenu` and the 悬浮 ＋ draw theirs:
+    // this renderer has no drop-shadow, so it is an offset plate behind the card.
+    Rectangle {
+        x: 1px;
+        y: 2px;
+        width: parent.width - 2px;
+        height: parent.height - 2px;
+        border-radius: Theme.radius-md;
+        background: Colors.shadow;
+    }
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        border-radius: Theme.radius-md;
+        border-width: 1px;
+        border-color: Colors.border-strong;
+        background: Colors.surface-overlay;
+        clip: true;
+        VerticalLayout {
+            padding: 4px;
+            spacing: 0px;
+            for entry[i] in root.labels : Rectangle {
+                height: 28px;
+                border-radius: Theme.radius-xs;
+                // A selected order is a **state**, not an emphasis, and this
+                // component's own comment about it was being contradicted by the
+                // colour: `surface-selected` is `bg-elev2.mix(accent, 0.22)`, a
+                // saturated blue plate, which is the one thing ADR-0118 removed
+                // from the filter chips for exactly this reason. The lit row is a
+                // raised surface with the text in the primary colour, and the
+                // accent keeps its job.
+                background: item-ta.has-hover
+                    ? Colors.hover-fill
+                    : (root.selected == i ? Colors.surface-hover : transparent);
+                animate background { duration: Theme.duration-instant; }
+                Text {
+                    x: 8px;
+                    width: parent.width - 16px;
+                    height: parent.height;
+                    text: entry;
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-caption;
+                    // The lit row is a *state*, not an emphasis, for the reason
+                    // `OrgFilterChip` states: the order is on by default and a
+                    // saturated plate for it is a shout about the one thing the
+                    // user already knows.
+                    color: root.selected == i
+                        ? Colors.text-primary : Colors.text-secondary;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                item-ta := TouchArea {
+                    mouse-cursor: MouseCursor.pointer;
+                    clicked => {
+                        root.picked(i);
+                        root.closed();
+                    }
+                }
+            }
+        }
+    }
+}
+
+// The area's empty state, the reference's own three lines (📝 / 还没有笔记 /
+// 点击右下角 ＋ 新建一条) centred in the list's own space.
+//
+// A list with no rows and no explanation reads as a page that failed to load,
+// and the ＋ that would fix it is in the corner and small. This is drawn only
+// for an **empty filter**, not for an empty library: a 全部笔记 list with a
+// hundred notes and a tag chip that matched none is a different thing, and it
+// says so in the words below.
+component OrgEmptyState inherits VerticalLayout {
+    in property <bool> filtered: false;
+    in property <string> count: "0";
+
+    alignment: center;
+    spacing: 10px;
+
+    // The emoji, asked for by name rather than left to fall back: this is the
+    // one place a colour emoji is the whole message, and Segoe UI carries
+    // monochrome glyphs for the same code points.
+    Text {
+        text: "📝";
+        font-family: Typography.emoji-font;
+        font-size: 42px;
+        horizontal-alignment: center;
+    }
+    Text {
+        text: root.filtered ? "没有符合条件的笔记" : "还没有笔记";
+        font-family: Typography.ui-font;
+        font-size: Typography.size-ui-lg;
+        color: Colors.text-secondary;
+        horizontal-alignment: center;
+    }
+    Text {
+        text: root.filtered
+            ? "换个标签或清掉搜索词试试。"
+            : "点击右下角 ＋ 新建一条";
+        font-family: Typography.ui-font;
+        font-size: Typography.size-caption;
+        color: Colors.text-muted;
+        horizontal-alignment: center;
+    }
+}
+
 export component OrganizerArea inherits Rectangle {
     // Transparent for the same reason as the editor: the window's `Colors.page`
     // ramp is the backdrop, so the gradient runs behind the organizer too.
@@ -1070,6 +1684,16 @@ export component OrganizerArea inherits Rectangle {
     property <[string]> priority-names: ["无", "低", "中", "高"];
     property <[string]> repeat-names: ["不重复", "每天", "工作日", "每周", "每月"];
     property <[string]> sort-names: ["添加顺序", "优先级", "截止日期"];
+    // The 笔记 half's three orders, the reference's `sortBox` items in its own
+    // order (`setItemData(0..2)` = created / updated / content). Its own list
+    // beside the tasks' because the two halves' orders have nothing in common.
+    property <[string]> note-sort-names: ["最新创建", "最新更新", "按内容"];
+    // Where the sort list hangs, in this area's own coordinates. Written by the
+    // `OrgSortBox` in the bar and read by the `OrgSortList` at the bottom of this
+    // component; a property rather than a binding because the two are in
+    // different sub-trees and neither is the other's parent.
+    out property <length> note-sort-x: 0px;
+    out property <length> note-sort-y: 0px;
 
     HorizontalLayout {
         padding: 14px;
@@ -1094,10 +1718,26 @@ export component OrganizerArea inherits Rectangle {
                     clip: true;
 
                     VerticalLayout {
-                        padding-left: 14px;
-                        padding-right: 14px;
-                        padding-top: 12px;
-                        padding-bottom: 10px;
+                        // 20 / 20 / 16 / 16 — the reference's own list metrics, and
+                        // the number that made these cards read as the reference's:
+                        // `listLay->setContentsMargins(si(20), 0, si(20), si(16))`
+                        // for the list and `toolbar->setContentsMargins(si(20),
+                        // si(16), si(16), si(12))` for the header above it. The two
+                        // are merged into one padding because the header and the
+                        // cards must share a left edge: at 14 px the cards were
+                        // inset further than the title and the count, so the
+                        // header read as a row of chrome sitting *beside* the list
+                        // rather than as its own top.
+                        //
+                        // With the card's own 14 px inside, a note's first glyph
+                        // lands 34 px from the column's edge — which is exactly
+                        // where the reference's lands (20 + 14), and the reason
+                        // its cards look like cards in a column rather than like
+                        // rows with a border drawn round them.
+                        padding-left: 20px;
+                        padding-right: 20px;
+                        padding-top: 16px;
+                        padding-bottom: 16px;
                         spacing: 10px;
 
                         // the header: what is showing, how many, and the two
@@ -1156,6 +1796,18 @@ export component OrganizerArea inherits Rectangle {
                                 font-size: Typography.size-caption;
                                 clicked => { UIState.org-select-entered(UIState.org-tab); }
                             }
+                            // 复制全部: the reference's own `btnCopy`, and the
+                            // inbox's way back out — every note the list is
+                            // showing, bodies with their 唯一 IDs, as one block
+                            // for the clipboard. Beside 刷新 because both are
+                            // "the list, as it is right now" verbs, and hidden
+                            // in the bin, whose contents are not what anyone
+                            // sends anywhere.
+                            if UIState.org-tab == 0 && !UIState.org-bin-open : OrgButton {
+                                label: "复制全部";
+                                font-size: Typography.size-caption;
+                                clicked => { UIState.org-notes-copy-all(); }
+                            }
                             // 刷新: a round with every paired device, right now.
                             // It is the only button in this row that leaves the
                             // app — everything else edits what is on screen —
@@ -1163,12 +1815,23 @@ export component OrganizerArea inherits Rectangle {
                             // dialog because that is where a note is read *and*
                             // written, so a row that arrived from another device
                             // while you were in the list is the moment the button
-                            // is worth pressing. Drawn only with a device to dial:
-                            // a 刷新 that can only say "还没有别的设备" is a
-                            // button in the way.
-                            if UIState.sync-has-peers : OrgButton {
-                                label: "刷新";
-                                font-size: Typography.size-caption;
+                            // is worth pressing. It is drawn whether or not a
+                            // peer exists right now (ADR-0140): the desktop is
+                            // the always-on half of a pair, and a round with
+                            // nobody to dial is a harmless empty round — a 刷新
+                            // that hid itself when the network was quiet read as
+                            // no 刷新 at all.
+                            //
+                            // The icon rather than the word, in a 30 px box —
+                            // the reference's `btnRefresh` (`setFixedSize(si(30),
+                            // si(30))`, text `⟳`, tooltip 刷新 (F5)). It is a
+                            // 30 px button because the row it sits in already
+                            // carries three words and a chip row; a fourth word
+                            // made the header wider than the list it heads.
+                            IconButton {
+                                icon-name: "refresh";
+                                icon-color: Colors.text-secondary;
+                                size: 30px;
                                 clicked => { UIState.sync-now-all(); }
                             }
                             // 列表/平铺 says nothing about a bin, so the segmented
@@ -1232,65 +1895,80 @@ export component OrganizerArea inherits Rectangle {
                             }
                         }
 
-                        // ── the 笔记 half's filter bar (ADR-0118) ────────────
-                        // What the removed nav column carried, in the one place a
-                        // list that owns its card can put it: the needle, the tag
-                        // chips (the level under the current path, 反向筛选 and
-                        // all), and the 回收站 door. A row of its own rather than a
-                        // third header line, so the title row stays the same shape
-                        // on both halves.
+                        // ── the 笔记 half's filter bar (ADR-0138) ────────────
+                        // The needle, 排序 and the 回收站 door, and nothing else.
+                        //
+                        // The tag chips that used to be here moved to the card's
+                        // **right** column (ADR-0138), which is where the reference
+                        // puts a tag filter and the side a right-handed pointer
+                        // reaches without crossing the rows it is filtering. They
+                        // were here because ADR-0118 removed that column, and the
+                        // cost of that was a filter expressed as a horizontal
+                        // scroll of chips over a list: a tag tree with a `↑ 上级`
+                        // row has no honest representation as a chip row, and a
+                        // chip row that has to scroll hides half the tags.
+                        //
+                        // The bar is therefore the two things that are *not* tags:
+                        // what to search for, and what order to read in. A row of
+                        // its own rather than a third header line, so the title row
+                        // stays the same shape on both halves.
                         if UIState.org-tab == 0 && !UIState.org-selecting : HorizontalLayout {
                             height: 30px;
                             spacing: 8px;
                             OrgInput {
                                 grow: false;
-                                field-width: 170px;
+                                filled: true;
+                                // 240, the reference's own `m_search->setFixedWidth(
+                                // si(240))`. A needle is searched in, so it is
+                                // wide enough to hold a phrase; at 170 px the
+                                // field showed a dozen characters and the rest
+                                // scrolled off behind the caret.
+                                field-width: 240px;
                                 hint-height: 30px;
                                 placeholder: "搜索笔记";
                                 value <=> UIState.org-query;
                                 edited => { UIState.org-query-changed(); }
                             }
-                            // The bin is not a filter over the live notes, so the
-                            // chips go with it (the Android copy's own rule): its
-                            // counts are drawn from the other half of the catalog.
-                            if !UIState.org-bin-open : ScrollView {
-                                height: 30px;
-                                horizontal-stretch: 1;
-                                HorizontalLayout {
-                                    spacing: 6px;
-                                    padding-top: 3px;
-                                    padding-bottom: 3px;
-                                    // one level down the ↑ chip says where the
-                                    // filter is *and* is the way out of it
-                                    if UIState.org-tag != "" : OrgFilterChip {
-                                        label: "↑ " + UIState.org-tag-label;
-                                        selected: true;
-                                        clicked => { UIState.org-tag-picked(UIState.org-tag-parent); }
-                                    }
-                                    if UIState.org-tag == "" : OrgFilterChip {
-                                        label: "全部笔记";
-                                        selected: true;
-                                        clicked => { UIState.org-tag-picked(""); }
-                                    }
-                                    for tag[i] in UIState.org-tag-rows : OrgFilterChip {
-                                        label: "#" + tag.name + "  " + tag.count;
-                                        excludable: true;
-                                        excluded: tag.excluded;
-                                        clicked => { UIState.org-tag-picked(tag.path); }
-                                        exclude-toggled => { UIState.org-tag-excluded(tag.path); }
-                                    }
-                                    if UIState.org-excluded-label != "" : OrgFilterChip {
-                                        label: UIState.org-excluded-label;
-                                        excluded: true;
-                                    }
-                                    if UIState.org-tag != "" || UIState.org-excluded-label != "" : OrgFilterChip {
-                                        label: "清除筛选";
-                                        accent: true;
-                                        clicked => { UIState.org-filters-cleared(); }
-                                    }
+                            // The gap that held the chips. The bar is now left
+                            // block + right block, and without this the 排序 box
+                            // and 回收站 would sit against the needle.
+                            Rectangle { horizontal-stretch: 1; }
+                            // 排序: the reference's `sortBox`, and the only
+                            // control on this half's bar that is not a filter —
+                            // it does not narrow the list, it reorders it, which
+                            // is why it sits at the bar's *end* beside the 回收站
+                            // door rather than among the chips. A reader scanning
+                            // the chips is asking "which notes?", and a box that
+                            // answers "in what order?" in the middle of them reads
+                            // as a fourth filter.
+                            //
+                            // Hidden in the bin for the reason the bar's other
+                            // controls are: a binned list's order is not a
+                            // question anyone asks, and the bin's counts are drawn
+                            // from the other half of the catalog.
+                            if !UIState.org-bin-open : OrgSortBox {
+                                labels: root.note-sort-names;
+                                selected: UIState.org-note-sort;
+                                open: UIState.org-note-sort-open;
+                                // The box reports its position in **window**
+                                // coordinates; the list is drawn here, so it needs
+                                // them in the area's. The subtraction is the whole
+                                // reason the callback exists — a child can read its
+                                // own `absolute-position` and a parent can read
+                                // its own, but neither can read the other's, so the
+                                // two numbers have to meet in the middle.
+                                report-position(x, y) => {
+                                    root.note-sort-x = x - root.absolute-position.x;
+                                    root.note-sort-y = y - root.absolute-position.y
+                                        + 30px + 4px;
                                 }
+                                opened => { UIState.org-note-sort-open = true; }
+                                picked(slot) => {
+                                    UIState.org-note-sort-open = false;
+                                    UIState.org-note-sort-picked(slot);
+                                }
+                                closed => { UIState.org-note-sort-open = false; }
                             }
-                            if UIState.org-bin-open : Rectangle { horizontal-stretch: 1; }
                             OrgFilterChip {
                                 // The count only when there is one: the nav row this
                                 // replaces hid a zero too, and "回收站 0" reads like a
@@ -1398,7 +2076,22 @@ export component OrganizerArea inherits Rectangle {
                         // The old shape led with the title and buried the age on
                         // the tags line, so a list of notes was scanned by the
                         // field a captured note does not even have.
-                        if UIState.org-tab == 0 : ListView {
+                        //
+                        // The empty state is drawn **instead of** the list rather
+                        // than over it: an empty `ListView` is zero pixels tall
+                        // and would leave the ＋ floating in a void with nothing
+                        // to say why (ADR-0133). `filtered` distinguishes "you
+                        // have no notes" from "this filter matched none of the
+                        // notes you have" — the reference's empty state is the
+                        // first, and showing it for the second is a page telling
+                        // a reader with ninety notes that they have none.
+                        if UIState.org-tab == 0 && UIState.note-rows.length == 0 : OrgEmptyState {
+                            horizontal-stretch: 1;
+                            vertical-stretch: 1;
+                            filtered: UIState.org-query != "" || UIState.org-tag != ""
+                                || UIState.org-excluded-label != "";
+                        }
+                        if UIState.org-tab == 0 && UIState.note-rows.length > 0 : ListView {
                             vertical-stretch: 1;
                             // One item = one card *plus its gutter*. The `ListView`
                             // takes no `spacing` and Slint's `margin` is not
@@ -1408,62 +2101,85 @@ export component OrganizerArea inherits Rectangle {
                             // box, which is what leaves the 6 px below it and
                             // nothing above (the first card would otherwise sit a
                             // gutter lower than every other).
+                            //
+                            // The height is the card's **own** preferred height —
+                            // the board card's idiom — and not a hand-written sum:
+                            // the card inside carries a body that wraps to as many
+                            // as three lines, and a sum written for one line of body
+                            // would clip the second. The wrapper only adds the
+                            // gutter; every other number is the layout's own.
                             for row[i] in UIState.note-rows : Rectangle {
-                                // As tall as what it draws — the board card's own
-                                // idiom — because a note with no title is a card with
-                                // one line fewer, and the fixed 62 px these rows
-                                // used to be left that line as a gap under every
-                                // captured note. A card with neither title nor body
-                                // is still one line: 无标题. The 2px is the border
-                                // itself, which the box has to be tall enough to
-                                // draw or the line is clipped.
-                                height: 12px + 16px
-                                    + (row.title != "" ? 18px : 0px)
-                                    + (row.excerpt != "" ? 16px : 0px)
-                                    + (row.title == "" && row.excerpt == "" ? 16px : 0px)
-                                    + (row.tags != "" ? 16px : 0px)
-                                    + 8px + 2px + 6px;
+                                height: note-card.preferred-height + 6px;
                                 background: transparent;
 
-                                Rectangle {
+                                note-card := Rectangle {
                                     x: 0px;
+                                    // 5 px, the reference's own top margin — the
+                                    // gutter is 5 above and 6 below, and anchoring
+                                    // the card to the top of its item box is what
+                                    // puts the whole 11 px *between* two cards.
                                     y: 0px;
                                     width: parent.width;
                                     height: parent.height - 6px;
                                 border-radius: Theme.radius-lg;
-                                // **A card, not a divider-separated row.** The
-                                // Compose shell has drawn every note this way since
-                                // its inbox arrived, and the two shells are meant to
-                                // look the same; the desktop had a transparent row
-                                // with a hover fill, which is a list, not a set of
-                                // notes. The recipe is the board card's own
-                                // (`OrgBoardCard`): an opaque `surface` and a plain
-                                // `border` — theme-neutral, so a card reads as paper
-                                // rather than as a coloured row.
+                                // **A card, not a divider-separated row.** The Compose
+                                // shell has drawn every note this way since its inbox
+                                // arrived, and the two shells are meant to look the
+                                // same. The recipe is the board card's own: an opaque
+                                // fill one ramp step **above** the panel behind it and
+                                // a plain `border` — theme-neutral, so a card reads as
+                                // paper rather than as a coloured row.
+                                //
+                                // The pointer's edge is the reference's own: hover
+                                // turns the border the accent's colour, which is what
+                                // makes a hovered card say "this is the one the
+                                // ⋯ belongs to" without lifting its fill.
                                 border-width: 1px;
                                 border-color: row.selected || row.picked
                                     ? Colors.accent
-                                    : (note-ta.has-hover ? Colors.border-strong : Colors.border);
+                                    : note-ta.has-hover
+                                    ? Colors.accent.with-alpha(0.60)
+                                    : Colors.border;
                                 background: row.selected || row.picked
                                     ? Colors.surface-selected
-                                    : Colors.surface;
+                                    : Colors.surface-hover;
                                 animate border-color { duration: Theme.duration-instant; }
 
                                 VerticalLayout {
-                                    padding-top: 6px;
-                                    padding-bottom: 6px;
-                                    padding-left: 8px;
+                                    // 10/10/14/10, the reference's own
+                                    // `lay->setContentsMargins(si(14), si(10),
+                                    // si(10), si(12))` — 14 left, 10 top, 10 right,
+                                    // 12 bottom, plus the 2 px border this card
+                                    // draws where the reference's QFrame counts its
+                                    // border outside the margin. The left is the
+                                    // widest because the header line starts with
+                                    // the age and the body follows it: 14 px of
+                                    // air before the leftmost glyph is what makes
+                                    // the card read as a card and not as a
+                                    // full-bleed row with a border.
+                                    padding-top: 10px;
+                                    padding-bottom: 10px;
+                                    padding-left: 14px;
                                     // While the bin is open the row's own two verbs
                                     // sit at its right edge, so the text stops short
                                     // of them: a title elided *under* a button is a
-                                    // title nobody can read.
-                                    padding-right: UIState.org-bin-open ? 132px : 8px;
-                                    spacing: 2px;
+                                    // title nobody can read. 10 px rather than the
+                                    // 8 px the card used, matching the top and the
+                                    // reference's own right margin.
+                                    padding-right: UIState.org-bin-open ? 134px : 10px;
+                                    // 6 px, the reference's own `m_col->setSpacing(
+                                    // si(6))` between the header line and the body.
+                                    spacing: 6px;
                                     // the age line: what the reference puts first,
                                     // and where the row's ⋯ lives — the corner every
                                     // other per-row menu in this window is in
                                     HorizontalLayout {
-                                        height: 16px;
+                                        // 17, an 11 px caption with room to sit
+                                        // centred: a 16 px box clips the descender
+                                        // of a 「号」 on the taller CJK fallback face
+                                        // Windows substitutes, and this line is
+                                        // almost always a relative age in Chinese.
+                                        height: 17px;
                                         spacing: 6px;
                                         // The pick and the ⋯ are both overlays on this
                                         // line's right end (ADR-0111), so the age
@@ -1490,7 +2206,16 @@ export component OrganizerArea inherits Rectangle {
                                         }
                                         Rectangle { horizontal-stretch: 1; }
                                     }
+                                    // Each body line is a fixed 20 px so the card's
+                                    // outer height (written out in the `for` below)
+                                    // and its inner content are the same number
+                                    // twice. A `Text` in a `VerticalLayout` takes
+                                    // its own preferred height, and a 13 px row's
+                                    // preferred height is not 20 px — so without
+                                    // this the card grew a sliver of empty
+                                    // background under the last line of every note.
                                     if row.title != "" : Text {
+                                        height: 20px;
                                         text: row.title;
                                         font-family: Typography.ui-font;
                                         font-size: Typography.size-ui;
@@ -1499,35 +2224,61 @@ export component OrganizerArea inherits Rectangle {
                                         vertical-alignment: center;
                                         overflow: elide;
                                     }
-                                    if row.excerpt != "" : Text {
-                                        text: row.excerpt;
+                                    // The note's words, in the **ink** colour and
+                                    // wrapped — the reference paints its body at 14 px
+                                    // in the foreground colour and folds it, and a
+                                    // card whose text is the same gray as its age
+                                    // reads as metadata. Three lines and out: the
+                                    // reference truncates at 600 characters, which in
+                                    // this column is three lines of card; the `min`
+                                    // keeps a one-line note a one-line card, and the
+                                    // elide marks what a longer note folded off.
+                                    if row.body != "" : Text {
+                                        height: min(self.preferred-height, 60px);
+                                        text: row.body;
                                         font-family: Typography.ui-font;
-                                        font-size: Typography.size-caption;
-                                        color: Colors.text-muted;
+                                        font-size: Typography.size-ui;
+                                        color: Colors.text-primary;
+                                        wrap: word-wrap;
                                         overflow: elide;
                                     }
                                     // A row a ＋ was pressed on and left alone: one
                                     // muted line rather than nothing at all, which
                                     // is what the reference draws as （空笔记）.
-                                    if row.title == "" && row.excerpt == "" : Text {
+                                    if row.title == "" && row.body == "" : Text {
+                                        height: 20px;
                                         text: "无标题";
                                         font-family: Typography.ui-font;
-                                        font-size: Typography.size-caption;
+                                        font-size: Typography.size-ui;
                                         color: Colors.text-muted;
                                         vertical-alignment: center;
                                         overflow: elide;
                                     }
-                                    if row.tags != "" : Text {
-                                        text: row.tags;
-                                        font-family: Typography.ui-font;
-                                        font-size: Typography.size-caption;
-                                        color: Colors.text-muted;
-                                        vertical-alignment: center;
-                                        overflow: elide;
+                                    // The tags, as the reference's hashtags: pills in
+                                    // the accent's own wash, and **doors** — a click
+                                    // filters the list by that path, which is how a
+                                    // tag on a card differs from a tag on a label.
+                                    if row.tag-list.length > 0 : HorizontalLayout {
+                                        height: 17px;
+                                        spacing: 6px;
+                                        for tag[i] in row.tag-list : OrgPill {
+                                            text: "#" + tag;
+                                            value: tag;
+                                            tint: Colors.accent-text;
+                                            clickable: true;
+                                            picked(t) => { UIState.org-tag-picked(t); }
+                                        }
                                     }
                                 }
                                 note-ta := TouchArea {
                                     mouse-cursor: MouseCursor.pointer;
+                                    // **Selects, and stops there** (ADR-0137). A
+                                    // click used to raise the note page over the
+                                    // list, which meant a list of notes could not
+                                    // be scanned: every card you looked at replaced
+                                    // the ones you were looking at. The page is the
+                                    // context menu's 打开 now, and 详细信息 is its
+                                    // own row beside it.
                                     clicked => { UIState.org-note-selected(row.id); }
                                     // The reference opens this menu with a long
                                     // press; the gesture a pointer has for the same
@@ -2004,12 +2755,15 @@ export component OrganizerArea inherits Rectangle {
                     }
                 }
 
-                // ── the nav column (任务 only, ADR-0118) ────────────────────
-                // The notes half has no column here any more: its two tabs were a
-                // second copy of the left sidebar's pinned rows, and its filter is
-                // the list header's own chip row now. 任务 keeps it, because
-                // 收集箱 / 今天 / 最近 7 天 / the lists *are* that half's navigation
-                // and there is nowhere else for them to be.
+                // ── the nav column (任务 only, ADR-0118/0138) ────────────────
+                // The 笔记 half's tag column is the block above this one; this is
+                // the 任务 half's, and it is the only half that still has
+                // navigation of its own — 收集箱 / 今天 / 最近 7 天 / the lists
+                // *are* that half's navigation and there is nowhere else for them
+                // to be. The 笔记 tab's own 全部笔记 row and tag tree are in their
+                // own right-hand column rather than here, because the two halves'
+                // columns are never on screen together and the tabs themselves are
+                // the left sidebar's rows (ADR-0138).
                 if UIState.org-tab == 1 : Rectangle {
                     // min *and* max, not `width`: in a layout an explicit width
                     // is only the *preferred* one, and Slint raises it to
@@ -2066,6 +2820,14 @@ export component OrganizerArea inherits Rectangle {
                         // (ADR-0118), and the two halves are never on screen
                         // together, so neither box is a second thing to clear.
                         OrgInput {
+                            // `filled` for the same reason the notes half's
+                            // needle has it: it is the one control on this column
+                            // you click *into*, so it has to look like a field
+                            // before the pointer arrives. The reference's task page
+                            // draws its `m_search` with the same fill
+                            // (`QLineEdit { background: %1; border: 1px solid
+                            // transparent; border-radius: 9px; }`).
+                            filled: true;
                             hint-height: 30px;
                             placeholder: "搜索任务";
                             value <=> UIState.org-query;
@@ -2160,22 +2922,80 @@ export component OrganizerArea inherits Rectangle {
                     }
                 }
 
+                // ── the 笔记 half's tag column (ADR-0138) ─────────────────────
+                // The tags, and only the tags, in the card's **last** column.
+                //
+                // ADR-0118 removed this column and moved the tag filter into the
+                // list header's chip row, on the reasoning that its two tabs were
+                // a second copy of the left sidebar's pinned rows. That was half
+                // right: the *tabs* really were a duplicate, and they are gone for
+                // good. But the column's other half — 标签 as a tree, with a
+                // `↑ 上级` row, a count per tag, and 反向筛选 on each — is not a
+                // duplicate of anything, and a chip row cannot hold it: a path is
+                // a hierarchy, and a hierarchy drawn as a horizontal strip of
+                // pills both scrolls (hiding half the tags) and loses the one
+                // level of context that says which path you are inside.
+                //
+                // It is on the **right** for the reason ADR-0112 gave: that is the
+                // side the reference puts it on, and the side a right-handed
+                // pointer reaches without crossing the rows it is filtering.
+                if UIState.org-tab == 0 : Rectangle {
+                    // min *and* max, for the nav column's own reason below: an
+                    // explicit `width` in a layout is only a preferred one, and
+                    // Slint raises it to whatever the content asks for.
+                    min-width: 208px;
+                    max-width: 208px;
+                    background: Colors.sidebar;
+                    // The card's right edge, because this is the card's last
+                    // column.
+                    border-top-right-radius: Theme.radius-lg;
+                    border-bottom-right-radius: Theme.radius-lg;
+
+                    VerticalLayout {
+                        padding: 10px;
+                        spacing: 1px;
+
+                        // 全部笔记: the way out of every tag, and the answer to
+                        // "show me everything" — the same row the 任务 half's
+                        // smart views carry, which is why it is drawn on both
+                        // halves rather than left implicit on one.
+                        OrgNavRow {
+                            label: "全部笔记";
+                            count: UIState.org-note-count;
+                            selected: UIState.org-tag == "" && !UIState.org-bin-open;
+                            clicked => { UIState.org-tag-picked(""); }
+                        }
+                        Rectangle { height: 10px; }
+                        // The shared tag tree, the same component the 任务 column
+                        // mounts: include (a path), exclude (the 减 on each row),
+                        // and 清除筛选 for both halves. One implementation, so
+                        // there is one set of rules about what a tag filter does.
+                        OrgTagColumn { }
+                        Rectangle { vertical-stretch: 1; min-height: 8px; }
+                    }
+                }
+
                 // the columns' own edge, drawn rather than bordered: a border
                 // would put a line on all four sides. It goes with the nav
-                // column it belongs to.
-                if UIState.org-tab == 1 : Rectangle { width: 1px; background: Colors.divider; }
+                // column it belongs to, on either half.
+                Rectangle { width: 1px; background: Colors.divider; }
             }
 
             // ── the 笔记 half's note page, as a 浮层 (ADR-0118) ──────────────
-            // The note the list picked, drawn *over* the rows rather than beside
-            // them: the notes half's card is the rows' now. A docked column cost
-            // them a third of the card whether a note was open or not, and the
-            // row that opened the note is *context* — which note among which
+            // The note the user asked to open, drawn *over* the rows rather than
+            // beside them: the notes half's card is the rows' now. A docked column
+            // cost them a third of the card whether a note was open or not, and
+            // the row that opened the note is *context* — which note among which
             // others — which is what the list behind this card still says.
+            //
+            // **Reached by right-click → 打开 / 详细信息, not by a click**
+            // (ADR-0137). A single click selects a row and stops there; the
+            // `id >= 0` gate below reads the *open* note, not the highlighted one,
+            // so pointing at a card cannot raise this card over it.
             //
             // Last among the card's children, so it sits above the list; the
             // `TouchArea` inside it is what keeps a click on its own padding off
-            // the rows. ✕ and Escape close it, and picking another row moves it.
+            // the rows. ✕ and Escape close it.
             if UIState.org-tab == 0 && UIState.org-note-detail.id >= 0 : Rectangle {
                 x: parent.width - self.width - 16px;
                 y: 16px;
@@ -2398,6 +3218,31 @@ export component OrganizerArea inherits Rectangle {
         }
     }
 
+    // ── 排序: the three orders, hanging under the pill ────────────────────────
+    //
+    // Drawn by the **area**, not by the `OrgSortBox`, because the box sits in the
+    // 30 px filter-bar row and a layout gives a child only its own box to paint
+    // in — the first `notes-sort` sweep showed three blue slivers and no words
+    // where three orders should have been. It is the last of the area's children
+    // before 指令 for the same reason 指令 and the capture layer are: a popup has
+    // to be **above** the rows it covers, and only a later sibling in the same
+    // component is.
+    //
+    // Only on the 笔记 half and not in the bin, because that is where the pill is:
+    // a list for a control that is not on screen is a list with no way to close
+    // it but picking an order.
+    if UIState.org-tab == 0 && UIState.org-note-sort-open && !UIState.org-bin-open : OrgSortList {
+        x: root.note-sort-x;
+        y: root.note-sort-y;
+        labels: root.note-sort-names;
+        selected: UIState.org-note-sort;
+        picked(slot) => {
+            UIState.org-note-sort-open = false;
+            UIState.org-note-sort-picked(slot);
+        }
+        closed => { UIState.org-note-sort-open = false; }
+    }
+
     // ── 指令 (SPEC §四十一): the batch dialog ────────────────────────────────
     //
     // A card over the area rather than a window-level popup, because what it acts
@@ -2508,21 +3353,25 @@ export component OrganizerArea inherits Rectangle {
     }
 
     // ── the capture layer (ADR-0115) ──────────────────────────────────────────
-    // What the 悬浮 ＋ opens: a field, a count of what its `#`-tokens will file
-    // under, and the ➤ that is the only thing in the area that commits it.
+    // What the 悬浮 ＋ opens — drawn now as the reference's own NoteEditorDialog:
+    // one centred card, the shortcut hint **above** the field where a hint is
+    // read before typing (not under it, where it is read after), the editor, the
+    // `#`-suggestions as a **vertical list** under the field with the keyboard
+    // walking it (↑↓ move, Enter or Tab apply, Esc puts it away), and 保存/取消
+    // where a dialog keeps its verdict.
     //
-    // **Nothing is written until ➤.** The draft is a property and the layer is a
-    // mode, so closing it — by ✕, by Escape, by a click on the scrim — throws away
-    // a half-written note and leaves the file, the catalog and the undo stack
-    // exactly where they were. That is the reference's own rule and the Android
-    // copy's (ADR-0015 there), and it is why this is not a new blank row: a row
-    // that exists because a ＋ was pressed is a row every count and every rebuild
-    // has to carry until someone decides to delete it.
+    // **Nothing is written until 保存.** The draft is a property and the layer is
+    // a mode, so closing it — by ✕, 取消, Escape, or a click on the scrim —
+    // throws away a half-written note and leaves the file, the catalog and the
+    // undo stack exactly where they were. That is the reference's own rule and
+    // the Android copy's (ADR-0015 there), and it is why this is not a new blank
+    // row: a row that exists because a ＋ was pressed is a row every count and
+    // every rebuild has to carry until someone decides to delete it.
     //
     // An overlay inside the area rather than a window popup, for the reason 指令's
     // card is one: what it acts on is *these* rows. Its `TouchArea` is what makes
     // the three columns behind it unclickable while a note is being written.
-    if UIState.org-capture-open : Rectangle {
+    if UIState.org-capture-open : capture-root := Rectangle {
         width: parent.width;
         height: parent.height;
         background: Colors.scrim;
@@ -2536,23 +3385,35 @@ export component OrganizerArea inherits Rectangle {
             clicked => { UIState.org-capture-closed(); }
         }
 
+        // The suggestion tray's own session state. The list is Rust's (the pool,
+        // the prefix rule, the five-item cap); *where the keyboard is in it* is
+        // the field's, and `suggest-hidden` is the Esc-to-put-it-away the
+        // reference's own eventFilter does — the tray comes back the moment the
+        // draft changes, because a hidden tray over a `#` still being typed is
+        // a tray that lied.
+        property <int> suggest-index: 0;
+        property <bool> suggest-hidden: false;
+        property <bool> suggest-visible: UIState.org-tag-suggestions.length > 0
+            && !suggest-hidden;
+
         Rectangle {
-            // Bottom-centre, the shape the reference shell's sheet has: the field
-            // grows upward from a floor that does not move, so the card is the same
-            // size whether one word or nine lines are being typed into it.
+            // Centred, the reference dialog's own placement (560 × 320 on its
+            // screen's available area) — a composer at the window's middle is a
+            // composer the eye is already at, and the scrim carries the "this is
+            // the only thing happening" that its dialog's modality did.
             x: (parent.width - self.width) / 2;
-            y: parent.height - self.height - 24px;
-            width: min(parent.width - 80px, 620px);
-            height: 236px;
+            y: (parent.height - self.height) / 2;
+            width: min(parent.width - 80px, 560px);
+            height: min(parent.height - 60px, 340px);
             background: Colors.surface-overlay;
             border-radius: Theme.radius-lg;
             border-width: 1px;
             border-color: Colors.border-strong;
 
-            // Swallows the card's own clicks — its padding, its title, the hint
-            // line under the field — so that only the scrim *around* the card
-            // closes the layer. Declared first, so every control below sits above
-            // it; without it a click on the card's own margin would land on the
+            // Swallows the card's own clicks — its padding, its title, the space
+            // under the buttons — so that only the scrim *around* the card closes
+            // the layer. Declared first, so every control below sits above it;
+            // without it a click on the card's own margin would land on the
             // scrim behind and dismiss the note being written.
             TouchArea { }
 
@@ -2578,56 +3439,38 @@ export component OrganizerArea inherits Rectangle {
                         clicked => { UIState.org-capture-closed(); }
                     }
                 }
-
-                // ── 标签建议 (ADR-0118) ─────────────────────────────────────
-                // The tray the Android composer raises for the `#token` being
-                // typed; tapping a chip rewrites that token into the whole tag
-                // (its `tagSuggestions` / `applyTagSuggestion`). Rust decides
-                // what is in it — the field only reports its edits — so the pool,
-                // the prefix rule and the "a space ends a token" rule are one
-                // definition and not a second copy of the parser.
-                //
-                // Above the field rather than under it: the card grows upward
-                // from a floor that does not move, and a tray between the field
-                // and the ➤ would shove the button the eye is already on.
-                if UIState.org-tag-suggestions.length > 0 : ScrollView {
-                    height: 30px;
-                    HorizontalLayout {
-                        spacing: 6px;
-                        padding-top: 3px;
-                        padding-bottom: 3px;
-                        for tag[i] in UIState.org-tag-suggestions : OrgFilterChip {
-                            label: "#" + tag;
-                            // Rust rewrites the token and hands the caret's new
-                            // byte offset back; the field takes it, so the next
-                            // keystroke lands after the tag and not inside it.
-                            clicked => {
-                                UIState.org-tag-suggest-picked(tag);
-                                capture-input.set-selection-offsets(
-                                    UIState.org-capture-caret,
-                                    UIState.org-capture-caret,
-                                );
-                            }
-                        }
-                    }
+                // The hint, where the reference puts it: **above** the field. Its
+                // own dialog's line — 提示：# 输入标签，Ctrl+Enter 或 Alt+S 提交，
+                // Esc 取消 — names the one convention (`#`) and the three keys,
+                // and a convention read before the first keystroke is the only
+                // kind that saves one.
+                Text {
+                    height: 16px;
+                    text: "提示：# 输入标签，Ctrl+Enter 或 Alt+S 提交，Esc 取消";
+                    font-family: Typography.ui-font;
+                    font-size: Typography.size-caption;
+                    color: Colors.text-muted;
+                    vertical-alignment: center;
+                    overflow: elide;
                 }
 
                 Rectangle {
                     vertical-stretch: 1;
+                    min-height: 56px;
                     border-radius: Theme.radius-sm;
                     border-width: 1px;
-                    border-color: capture-input.has-focus ? Colors.border-strong : Colors.border;
-                    background: Colors.background;
+                    border-color: capture-input.has-focus ? Colors.accent : Colors.border;
+                    background: Colors.surface;
 
                     // The placeholder, under the field: Slint's `TextInput` has none,
-                    // and an empty box with no hint is a box nobody knows what to type
-                    // into. It names the one convention this layer has — `#` marks a
-                    // tag — which is the only thing a user has to be told.
+                    // and an empty box with no hint is a box nobody knows what to
+                    // type into. The reference's own words, which name the one
+                    // convention this layer has.
                     if UIState.org-capture-draft == "" : Text {
                         x: 12px;
                         y: 10px;
                         width: parent.width - 24px;
-                        text: "记录点什么… 使用 #标签 标记";
+                        text: "写点什么… 用 #标签 归类";
                         font-family: Typography.ui-font;
                         font-size: Typography.size-ui;
                         color: Colors.text-muted;
@@ -2644,18 +3487,54 @@ export component OrganizerArea inherits Rectangle {
                         color: Colors.text-primary;
                         selection-foreground-color: Colors.text-on-accent;
                         selection-background-color: Colors.selection;
-                        // Every keystroke re-asks Rust for the 标签建议 tray: the
-                        // field owns the text, and the pool is the catalog's.
-                        edited => { UIState.org-capture-draft-changed(); }
-                        // Escape closes the layer and Ctrl+Enter *is* the ➤ — the
-                        // reference app's own pair of keys, and what lets a
-                        // multi-line note be sent without the pointer leaving the
-                        // field it was written in.
+                        // Every keystroke re-asks Rust for the suggestion list: the
+                        // field owns the text, and the pool is the catalog's. A
+                        // change also brings a hidden tray back and puts the
+                        // keyboard's row back at the top — the tray that hid for
+                        // Esc has no business staying hidden under new text.
+                        edited => {
+                            UIState.org-capture-draft-changed();
+                            capture-root.suggest-hidden = false;
+                            capture-root.suggest-index = 0;
+                        }
+                        // Escape puts the tray away first and the layer second —
+                        // the reference's own two-step — and Ctrl+Enter *is* 保存,
+                        // as are Alt+S and, with the tray up, plain Enter and Tab
+                        // (a suggestion the keyboard walked to is a word the
+                        // keyboard is asking to finish, not a line to break).
                         key-pressed(event) => {
-                            if (event.text == Key.Escape) {
-                                UIState.org-capture-closed();
+                            if (capture-root.suggest-visible && event.text == Key.UpArrow) {
+                                capture-root.suggest-index = Math.mod(
+                                    capture-root.suggest-index
+                                    + UIState.org-tag-suggestions.length - 1,
+                                    UIState.org-tag-suggestions.length);
+                                accept
+                            } else if (capture-root.suggest-visible && event.text == Key.DownArrow) {
+                                capture-root.suggest-index = Math.mod(
+                                    capture-root.suggest-index + 1,
+                                    UIState.org-tag-suggestions.length);
+                                accept
+                            } else if (capture-root.suggest-visible
+                                && (event.text == Key.Return || event.text == Key.Tab)) {
+                                UIState.org-tag-suggest-picked(
+                                    UIState.org-tag-suggestions[capture-root.suggest-index]);
+                                capture-input.set-selection-offsets(
+                                    UIState.org-capture-caret,
+                                    UIState.org-capture-caret,
+                                );
+                                capture-root.suggest-index = 0;
+                                accept
+                            } else if (event.text == Key.Escape) {
+                                if (capture-root.suggest-visible) {
+                                    capture-root.suggest-hidden = true;
+                                } else {
+                                    UIState.org-capture-closed();
+                                }
                                 accept
                             } else if (event.modifiers.control && event.text == Key.Return) {
+                                UIState.org-capture-sent();
+                                accept
+                            } else if (event.modifiers.alt && event.text == "s") {
                                 UIState.org-capture-sent();
                                 accept
                             } else {
@@ -2676,46 +3555,97 @@ export component OrganizerArea inherits Rectangle {
                     }
                 }
 
-                HorizontalLayout {
-                    height: 40px;
-                    spacing: 8px;
-                    Text {
-                        // The keyboard hint is the desktop's, like the quick-add
-                        // line's 回车创建: a touch copy of this layer drops it
-                        // (ADR-0115's SPEC section).
-                        text: "#标签 会被提取 · Ctrl+Enter 发送 · Esc 关闭";
-                        font-family: Typography.ui-font;
-                        font-size: Typography.size-caption;
-                        color: Colors.text-muted;
-                        vertical-alignment: center;
-                        overflow: elide;
+                // ── 标签建议 (ADR-0118), as the reference's list ───────────
+                // The tray the editor raises for the `#token` being typed — but
+                // drawn as its dialog draws one: a **vertical list** under the
+                // field, at most five rows (Rust's cap), the keyboard's row lit in
+                // the accent, a tap applying the same way the keys do. Rust
+                // rewrites the token and hands the caret's new byte offset back;
+                // the field takes it, so the next keystroke lands after the tag
+                // and not inside it.
+                if capture-root.suggest-visible : Rectangle {
+                    height: min(UIState.org-tag-suggestions.length * 26px + 8px, 138px);
+                    border-radius: Theme.radius-sm;
+                    border-width: 1px;
+                    border-color: Colors.border;
+                    background: Colors.surface-hover;
+                    clip: true;
+
+                    ScrollView {
+                        VerticalLayout {
+                            padding: 4px;
+                            spacing: 0px;
+                            for tag[i] in UIState.org-tag-suggestions : Rectangle {
+                                height: 26px;
+                                border-radius: Theme.radius-xs;
+                                background: capture-root.suggest-index == i
+                                    ? Colors.accent
+                                    : (sug-ta.has-hover ? Colors.hover-fill : transparent);
+                                animate background { duration: Theme.duration-instant; }
+                                Text {
+                                    x: 6px;
+                                    width: parent.width - 12px;
+                                    height: parent.height;
+                                    text: "#" + tag;
+                                    font-family: Typography.ui-font;
+                                    font-size: Typography.size-ui;
+                                    color: capture-root.suggest-index == i
+                                        ? Colors.text-on-accent : Colors.text-primary;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+                                sug-ta := TouchArea {
+                                    mouse-cursor: MouseCursor.pointer;
+                                    clicked => {
+                                        UIState.org-tag-suggest-picked(tag);
+                                        capture-input.set-selection-offsets(
+                                            UIState.org-capture-caret,
+                                            UIState.org-capture-caret,
+                                        );
+                                        capture-root.suggest-index = 0;
+                                    }
+                                }
+                            }
+                        }
                     }
+                }
+
+                HorizontalLayout {
+                    height: 30px;
+                    spacing: 8px;
                     Rectangle { horizontal-stretch: 1; }
-                    // The ➤: the reference app's send, drawn rather than typed, and
-                    // this layer's only verb. Dimmed over an empty draft instead of
-                    // hidden — the button is where the eye already is, and a control
-                    // that vanishes is a control the user has to find twice — and
-                    // Rust refuses the write as well, so a click on a dimmed ➤
-                    // commits nothing.
+                    // 取消: the dialog's other verdict, and it means the same
+                    // thing its window had it mean — the draft is thrown away,
+                    // not parked.
+                    OrgButton {
+                        label: "取消";
+                        clicked => { UIState.org-capture-closed(); }
+                    }
+                    // 保存: the PrimaryBtn, drawn filled — the one control in the
+                    // layer that carries the accent as a plate, because a verdict
+                    // is exactly what the accent plates in this window say. Dimmed
+                    // over an empty draft instead of hidden — the button is where
+                    // the eye already is, and Rust refuses the write as well, so
+                    // a click on a dimmed 保存 commits nothing.
                     Rectangle {
-                        width: 40px;
-                        height: 40px;
-                        border-radius: 20px;
-                        background: send-ta.has-hover && UIState.org-capture-draft != ""
-                            ? Colors.accent-text : Colors.accent;
+                        width: save-text.preferred-width + 32px;
+                        height: 30px;
+                        border-radius: Theme.radius-sm;
+                        background: Colors.accent;
                         opacity: UIState.org-capture-draft == "" ? 0.4 : 1;
                         animate opacity { duration: Theme.duration-instant; }
-
-                        Icon {
-                            x: (parent.width - self.width) / 2;
-                            y: (parent.height - self.height) / 2;
-                            width: 18px;
-                            height: 18px;
-                            name: "send";
-                            size: 18px;
+                        save-text := Text {
+                            width: self.preferred-width;
+                            height: parent.height;
+                            text: "保存";
+                            font-family: Typography.ui-font;
+                            font-size: Typography.size-ui;
+                            font-weight: Typography.weight-semibold;
                             color: Colors.text-on-accent;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
                         }
-                        send-ta := TouchArea {
+                        save-ta := TouchArea {
                             mouse-cursor: MouseCursor.pointer;
                             clicked => { UIState.org-capture-sent(); }
                         }

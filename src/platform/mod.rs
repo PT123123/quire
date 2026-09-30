@@ -2,7 +2,10 @@
 // Policy (ADR-0002): never implement TSF/IME ourselves.
 
 pub mod dib;
+pub mod hotkeys;
+pub mod monitors;
 pub mod quit;
+pub mod tray;
 
 use std::path::Path;
 
@@ -77,6 +80,52 @@ pub fn copy_to_clipboard(text: &str) -> bool {
     {
         let _ = text;
         false
+    }
+}
+
+/// Say something to the user when there is no window to say it in.
+///
+/// The single-instance claim (ADR-0136) is the caller: it runs before
+/// `AppWindow::new`, so a second launch that is going to be told to go away has
+/// no tray icon, no toast band and no Slint popup to carry the message — a
+/// message printed to a console the release build does not even have would be a
+/// rule the user never learns about.
+///
+/// `MessageBoxW` rather than a Slint popup for the same reason the clipboard
+/// above is hand-declared FFI: this runs before the Slint backend exists, and
+/// `MessageBoxW` is one call with no event loop of its own. `MB_OK` only, so the
+/// box is a statement and not a question the app has no handler for.
+pub fn notify(title: &str, body: &str) {
+    #[cfg(target_os = "windows")]
+    {
+        const MB_OK: u32 = 0x0000_0000;
+        const MB_ICONINFORMATION: u32 = 0x0000_0040;
+
+        #[link(name = "user32")]
+        extern "system" {
+            fn MessageBoxW(hwnd: isize, text: *const u16, caption: *const u16, kind: u32) -> i32;
+        }
+
+        fn wide(s: &str) -> Vec<u16> {
+            use std::os::windows::ffi::OsStrExt;
+            std::ffi::OsStr::new(s)
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect()
+        }
+
+        let (text, caption) = (wide(body), wide(title));
+        // A message box that cannot be shown (a session 0 service, a headless
+        // verify run) returns 0 rather than blocking; there is no second channel
+        // here to fall back to, and a failed notice is not worth failing a
+        // launch over.
+        unsafe {
+            let _ = MessageBoxW(0, text.as_ptr(), caption.as_ptr(), MB_OK | MB_ICONINFORMATION);
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        eprintln!("quire: {title}: {body}");
     }
 }
 
