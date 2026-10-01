@@ -13,6 +13,7 @@ import { Colors } from "../Colors.slint";
 import { Typography } from "../Typography.slint";
 import { Icon } from "../Icons.slint";
 import { Button } from "./Button.slint";
+import { IconButton } from "./IconButton.slint";
 import { SyncPage } from "./SyncPage.slint";
 import { UIState } from "../Types.slint";
 
@@ -138,6 +139,72 @@ component ShortcutRow inherits Rectangle {
             font-size: Typography.size-ui;
             ink: Colors.text-secondary;
         }
+    }
+}
+
+// The 外观 tab's one row that is not a theme card: the whole-window zoom as a
+// stepper — −, the current percentage, +, and the way home. The percentage is
+// a *read* of `zoom-level` (Rust writes it after every zoom move, keyboard
+// included), so this row and the keys can never disagree about where the
+// ladder stands; the buttons only name the intents the keyboard names, and the
+// two ends gray out because the ladder itself is where the walking stops.
+component ZoomRow inherits VerticalLayout {
+    spacing: Theme.spacing-xs;
+
+    HorizontalLayout {
+        spacing: Theme.spacing-sm;
+        CopyableText {
+            text: "界面缩放";
+            font-size: Typography.size-ui;
+            ink: Colors.text-secondary;
+            wrap: true;
+            horizontal-stretch: 1;
+        }
+        IconButton {
+            vertical-stretch: 0;
+            cross-axis-self-alignment: center;
+            icon-name: "minus";
+            size: 26px;
+            enabled: UIState.zoom-level > 0.501;
+            clicked => {
+                UIState.zoom-out();
+            }
+        }
+        Text {
+            vertical-stretch: 0;
+            cross-axis-self-alignment: center;
+            width: 52px;
+            text: Math.round(UIState.zoom-level * 100) + "%";
+            font-family: Typography.ui-font;
+            font-size: Typography.size-ui;
+            color: Colors.text-primary;
+            horizontal-alignment: center;
+        }
+        IconButton {
+            vertical-stretch: 0;
+            cross-axis-self-alignment: center;
+            icon-name: "plus";
+            size: 26px;
+            enabled: UIState.zoom-level < 2.999;
+            clicked => {
+                UIState.zoom-in();
+            }
+        }
+        Button {
+            vertical-stretch: 0;
+            cross-axis-self-alignment: center;
+            text: "复位";
+            enabled: Math.abs(UIState.zoom-level - 1.0) > 0.001;
+            clicked => {
+                UIState.zoom-reset();
+            }
+        }
+    }
+    Text {
+        text: "整个界面一起放大或缩小 — 内容、侧栏与按钮。Ctrl+= / Ctrl+- 步进，Ctrl+0 复位。";
+        font-size: Typography.size-caption;
+        color: Colors.text-muted;
+        wrap: TextWrap.word-wrap;
     }
 }
 
@@ -405,7 +472,7 @@ export component SettingsDialog inherits PopupWindow {
                 // ── 外观 ─────────────────────────────────────────────────
                 if (UIState.settings-filter == ""
                     ? UIState.settings-tab == 0
-                    : UIState.settings-match("外观 主题 跟随系统 深色 浅色 配色 theme"))
+                    : UIState.settings-match("外观 主题 跟随系统 深色 浅色 配色 界面 缩放 放大 缩小 复位 百分比 zoom theme"))
                 : SettingsSection {
                     label: "外观";
                     open: true;
@@ -437,6 +504,11 @@ export component SettingsDialog inherits PopupWindow {
                             }
                         }
                     }
+
+                    // the zoom stepper, under the cards: the one 外观 control the
+                    // keyboard had and the mouse did not (until now the ladder was
+                    // reachable only through Ctrl+= / Ctrl+- / Ctrl+0)
+                    ZoomRow {}
                 }
 
                 // ── 通用 ─────────────────────────────────────────────────
@@ -580,7 +652,7 @@ export component SettingsDialog inherits PopupWindow {
                 // ── 快捷键 ───────────────────────────────────────────────
                 if (UIState.settings-filter == ""
                     ? UIState.settings-tab == 3
-                    : UIState.settings-match("快捷键 命令面板 搜索页面 页内查找 新建页面 侧边栏 粗体 斜体 代码 公式 缩进 复制块 保存 放大 缩小 复位 后退 前进"))
+                    : UIState.settings-match("快捷键 命令面板 搜索页面 页内查找 新建页面 侧边栏 主题 深色 浅色 撤销 重做 粗体 斜体 代码 公式 缩进 复制块 保存 放大 缩小 复位 后退 前进"))
                 : SettingsSection {
                     label: "快捷键";
                     open: true;
@@ -600,6 +672,12 @@ export component SettingsDialog inherits PopupWindow {
                         : ShortcutRow { keys: "Ctrl+N"; label: "新建页面"; }
                         if (UIState.settings-filter == "" || UIState.settings-match("快捷键 切换侧边栏 ctrl"))
                         : ShortcutRow { keys: "Ctrl+\\"; label: "切换侧边栏"; }
+                        if (UIState.settings-filter == "" || UIState.settings-match("快捷键 主题 深色 浅色 切换 ctrl+shift+l ctrl l shift"))
+                        : ShortcutRow { keys: "Ctrl+Shift+L"; label: "切换深浅色主题"; }
+                        if (UIState.settings-filter == "" || UIState.settings-match("快捷键 撤销 undo ctrl+z ctrl z"))
+                        : ShortcutRow { keys: "Ctrl+Z"; label: "撤销"; }
+                        if (UIState.settings-filter == "" || UIState.settings-match("快捷键 重做 redo ctrl+shift+z ctrl+y shift z"))
+                        : ShortcutRow { keys: "Ctrl+Shift+Z / Y"; label: "重做"; }
                         if (UIState.settings-filter == "" || UIState.settings-match("快捷键 粗体 斜体 代码 公式 ctrl+b ctrl+i ctrl+e ctrl+m"))
                         : ShortcutRow { keys: "Ctrl+B / I / E / M"; label: "粗体 / 斜体 / 代码 / 公式"; }
                         if (UIState.settings-filter == "" || UIState.settings-match("快捷键 缩进 取消缩进 tab"))

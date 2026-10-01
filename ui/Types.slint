@@ -979,6 +979,10 @@ export global UIState {
     callback zoom-in();
     callback zoom-out();
     callback zoom-reset();
+    // The factor as the shell shows it (the settings row's percentage): Rust
+    // writes it at wire time and after every zoom move, so the row reads state
+    // instead of owning it. 1.0 = 100%.
+    in property <float> zoom-level: 1.0;
     // Every window resize, mirrored from the root's width/height. Rust reads it
     // as "the platform may have just re-announced its own scale factor" (a
     // monitor or display-scaling change throws the zoom away) and puts the zoom

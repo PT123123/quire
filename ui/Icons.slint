@@ -72,6 +72,19 @@ component IcPlus {
     }
 }
 
+component IcMinus {
+    in property <brush> color: Colors.text-secondary;
+    in property <length> size: 16px;
+    width: size; height: size;
+    Path {
+        width: parent.width; height: parent.height;
+        viewbox-x: 0; viewbox-y: 0; viewbox-width: 24; viewbox-height: 24;
+        stroke: color; stroke-width: 1.8px; stroke-line-cap: round;
+        fill: transparent;
+        MoveTo { x: 5; y: 12; } LineTo { x: 19; y: 12; }
+    }
+}
+
 component IcX {
     in property <brush> color: Colors.text-secondary;
     in property <length> size: 16px;
@@ -714,6 +727,7 @@ export component Icon {
     IcCopy { visible: root.name == "copy"; size: root.size; color: root.color; }
     IcTrash { visible: root.name == "trash"; size: root.size; color: root.color; }
     IcPlus { visible: root.name == "plus"; size: root.size; color: root.color; }
+    IcMinus { visible: root.name == "minus"; size: root.size; color: root.color; }
     IcX { visible: root.name == "x"; size: root.size; color: root.color; }
     IcGrip { visible: root.name == "grip"; size: root.size; color: root.color; }
     IcDotsHorizontal { visible: root.name == "dots-horizontal"; size: root.size; color: root.color; }

@@ -102,7 +102,7 @@ fn apply_zoom(ui: &AppWindow, state: &Rc<AppState>, initial: bool) {
         Some((physical.width as f64, physical.height as f64))
             .filter(|(w, h)| *w > 0.0 && *h > 0.0)
     } else {
-        window_work_area(window).map(|a| (a.width(), a.height()))
+        zoom_avail_area(window).map(|a| (a.width(), a.height()))
     };
 
     // Cap the factor so the min window still fits — but only from *above*:
@@ -154,6 +154,28 @@ fn apply_zoom(ui: &AppWindow, state: &Rc<AppState>, initial: bool) {
         (vw * target).round() as u32,
         (vh * target).round() as u32,
     ));
+    // The factor change can grow the window past the desk it sits on — the
+    // failure that opened as "only the top-left corner is on screen, and the
+    // window controls (TopBar's right end) are the first thing off it". The
+    // size above is already capped so the min window fits the area; this
+    // keeps the *placement* honest about the same area, which `monitors::place`
+    // does for the saved rectangle at startup but no one did for a live zoom.
+    if let Some(a) = zoom_avail_area(window) {
+        let pos = window.position();
+        let (mut x, mut y) = (pos.x, pos.y);
+        if x + window.size().width as i32 > a.right as i32 {
+            x = a.right as i32 - window.size().width as i32;
+        }
+        if y + window.size().height as i32 > a.bottom as i32 {
+            y = a.bottom as i32 - window.size().height as i32;
+        }
+        if x != pos.x || y != pos.y {
+            window.set_position(slint::PhysicalPosition::new(
+                x.max(a.left as i32),
+                y.max(a.top as i32),
+            ));
+        }
+    }
 }
 
 /// The work area of the monitor the window's top-left corner sits on, in
@@ -166,6 +188,17 @@ fn window_work_area(window: &slint::Window) -> Option<Rect> {
     crate::platform::monitors::work_areas()
         .into_iter()
         .find(|a| x >= a.left && x < a.right && y >= a.top && y < a.bottom)
+}
+
+/// The area a zoom change must fit into: the corner's own work area when it
+/// names one, the primary's when it does not. "Cannot tell where I am" (the
+/// window not yet placed, a virtual-display ghost coordinate) has to mean the
+/// conservative bound — some real monitor — and never "no limit": an uncapped
+/// factor is how a persisted zoom on a mismatched-DPI launch arrived bigger
+/// than the desk, with the window controls the first thing off-screen.
+fn zoom_avail_area(window: &slint::Window) -> Option<Rect> {
+    window_work_area(window)
+        .or_else(|| crate::platform::monitors::work_areas().into_iter().next())
 }
 
 // ─── LAN sync (crate::sync) ─────────────────────────────────────────────────
@@ -1657,6 +1690,8 @@ pub fn bind(ui: &AppWindow, state: &Rc<AppState>) {
     // the zoom back instead of losing it (see the `window-resized` handler).
     state.set_base_scale(ui.window().scale_factor());
     apply_zoom(ui, state, true);
+    // the settings row's percentage reads this, not its own arithmetic
+    g.set_zoom_level(state.zoom());
 }
 
 /// Select a find hit: route through the hit block's editing input, which
@@ -1798,6 +1833,9 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
     }
 
     // ---- zoom (Ctrl + = / Ctrl + +, Ctrl + -, Ctrl + 0) ----
+    // Each verb re-pushes the factor it landed on: the settings row's
+    // percentage is a *read* of state (`zoom-level`), so the keyboard and the
+    // row can never disagree about where the ladder stands.
     {
         let ui_w = ui.as_weak();
         let s = state.clone();
@@ -1805,6 +1843,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
             if let Some(ui) = ui_w.upgrade() {
                 s.set_zoom(zoom_step(s.zoom(), 1));
                 apply_zoom(&ui, &s, false);
+                ui.global::<UIState>().set_zoom_level(s.zoom());
             }
         });
     }
@@ -1816,6 +1855,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
             if let Some(ui) = ui_w.upgrade() {
                 s.set_zoom(zoom_step(s.zoom(), -1));
                 apply_zoom(&ui, &s, false);
+                ui.global::<UIState>().set_zoom_level(s.zoom());
             }
         });
     }
@@ -1827,6 +1867,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
             if let Some(ui) = ui_w.upgrade() {
                 s.set_zoom(1.0);
                 apply_zoom(&ui, &s, false);
+                ui.global::<UIState>().set_zoom_level(s.zoom());
             }
         });
     }
@@ -2048,10 +2089,14 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
             g.set_menu_node_id(id);
             // anchor at the row's right edge, its top arriving from the delegate
             // itself, so a page the 收藏 / 最近 sections re-list opens its menu
-            // where it was clicked rather than where its tree row sits.
+            // where it was clicked rather than where its tree row sits. The edge
+            // is the rail's *live* width — the drag handle moves it between 200
+            // and 480, and a 240 fixed here from the old default put the menu
+            // over the row at 480 and stranded it inside the editor at 200.
             let menu_h = g.get_menu_rows().row_count() as f32 * 30.0 + 8.0;
             g.set_menu_y((y - 4.0).clamp(48.0, (g.get_window_h() - menu_h - 8.0).max(48.0)));
-            g.set_menu_x(240.0);
+            let edge = if g.get_sidebar_open() { g.get_sidebar_width() } else { 0.0 };
+            g.set_menu_x(edge.min((g.get_window_w() - 8.0).max(8.0)));
             g.set_menu_open(true);
         });
     }
