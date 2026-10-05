@@ -436,14 +436,28 @@ fn real_main(start: std::time::Instant) -> Result<(), String> {
                         "Quire {version} 正在运行，它比本次启动的版本更新，本次启动已退出。"
                     ),
                 ),
-                quire::platform::quit::SecondLaunch::Replacing { quit_accepted } => {
+                quire::platform::quit::SecondLaunch::Replacing {
+                    quit_accepted,
+                    replaced,
+                } => {
                     if *quit_accepted {
-                        return; // the old one is on its way out; this process starts
+                        // The old session is on its way out and this one takes its
+                        // place — a window that vanishes and another that appears,
+                        // with no dialog in between. Naming the version that left
+                        // is what makes the swap legible instead of looking like
+                        // the app restarted itself behind the user's back.
+                        (
+                            "已更新到新版本",
+                            format!(
+                                "Quire {replaced} 已在运行，本次启动已让旧版本退出并由新版本接替。"
+                            ),
+                        )
+                    } else {
+                        (
+                            "旧版本未能退出",
+                            "已请求正在运行的旧版本退出，但它没有响应。\n\n请从托盘图标右键菜单选择「退出」后重试。".to_string(),
+                        )
                     }
-                    (
-                        "旧版本未能退出",
-                        "已请求正在运行的旧版本退出，但它没有响应。\n\n请从托盘图标右键菜单选择「退出」后重试。".to_string(),
-                    )
                 }
             };
             quire::platform::notify(title, &body);

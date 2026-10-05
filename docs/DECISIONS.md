@@ -598,7 +598,7 @@ exits.
 |---|---|---|
 | nothing | any | this process becomes the session |
 | `v` | `v` | 已在运行 dialog, this launch exits |
-| `older` | `newer` | the old one is asked to quit, this process starts |
+| `older` | `newer` | 已更新 dialog naming the version replaced, this process starts |
 | `newer` | `older` | 已有更新版本 dialog, this launch exits |
 
 **It reuses ADR-0105's channel rather than adding a second mechanism.** That pipe
@@ -626,6 +626,21 @@ icon and no toast band at claim time, and the release build has no console: a
 `println!` would be a rule the user never learns about. One hand-declared
 user32 call, the same no-crate rule `platform::mod` already states for the
 clipboard.
+
+**The replacement says so too — it is not the silent branch.** This one was
+originally written as `if quit_accepted { return }`, on the reasoning that the
+notice belongs to the launches that *do not* become a session. That is wrong, and
+wrong in the one direction the user is least able to reconstruct: a replacement
+is the only outcome where a window the user was looking at **disappears** and a
+different one takes its place, unprompted and unattributed. The other three
+verdicts all leave the running window alone and add a dialog; this one takes the
+window away, so it is the one that needs saying. `Replacing` therefore carries the
+displaced version (`replaced`) so the notice can name it — without that number the
+dialog reads as an unexplained restart. **Rejected: naming only the direction**
+("旧版本已退出"). Which build left is the only fact the user cannot see; that a
+swap happened at all is visible from the window that moved. **Rejected: a silent
+replacement plus a log line** — the release build's log is not something a user
+reads unprompted, which is the same reason the other three are `MessageBoxW`.
 
 **Rejected: a named mutex as a separate instance guard.** It is the textbook
 answer and it would be a second source of truth next to the pipe, which is already

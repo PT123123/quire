@@ -73,7 +73,14 @@ pub enum SecondLaunch {
     /// session and this process carries on to start. `quit_accepted` is false
     /// when the request went out and nothing answered: the newer instance then
     /// keeps running, and this process must not claim to have replaced it.
-    Replacing { quit_accepted: bool },
+    ///
+    /// `replaced` is the version that was asked to leave, carried so the notice
+    /// can name it — a replacement the user was never told about is the one
+    /// outcome of this rule that looks like the app lost its window by itself.
+    Replacing {
+        quit_accepted: bool,
+        replaced: String,
+    },
 }
 /// Work out what this launch should do, and act on it.
 ///
@@ -139,6 +146,7 @@ pub fn claim(
                 // decides what this launch claims. `quit` after `version` is a
                 // second exchange on the same pipe, which is why the server
                 // re-creates its instance after every request.
+                let replaced = running.clone();
                 let accepted = imp::request_quit(PIPE_NAME).is_ok();
                 if accepted {
                     // The `ok` says the old session *scheduled* its exit — its
@@ -153,7 +161,10 @@ pub fn claim(
                     // and running it costs the launch the wait and no more.
                     imp::wait_for_session_end(PIPE_NAME, SESSION_END_TIMEOUT);
                 }
-                SecondLaunch::Replacing { quit_accepted: accepted }
+                SecondLaunch::Replacing {
+                    quit_accepted: accepted,
+                    replaced,
+                }
             } else {
                 SecondLaunch::RunningIsNewer { version: running }
             };
