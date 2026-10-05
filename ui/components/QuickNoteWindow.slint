@@ -9,11 +9,19 @@
 // and it goes away on the same 保存 / 取消 / Esc the overlay answers to.
 //
 // What it is *not* is a second composer. `NoteCaptureCard` draws the card the ＋
-// draws, and the draft, the 标签建议 and the submit path are the shared
-// `UIState.org-capture-*` state behind it — one note, one catalog write, reached
-// from two places. The host flag (`UIState.quick-note-host`) is what tells the two
+// draws, and the draft, the 标签建议 and the submit path are the same Rust
+// handlers the overlay's are — one note, one catalog write, reached from two
+// places. The host flag (`UIState.quick-note-host`) is what tells the two
 // surfaces apart, so the overlay stands down while this window is the one holding
 // the words.
+//
+// The draft crosses as data rather than through this window's own `UIState`,
+// which is the whole reason the card takes it as a property: a Slint global
+// lives in the item tree's `SharedGlobals`, and a second root component builds
+// a second set. Reading `UIState` here got this window a private copy that Rust
+// never wrote to — so 标签建议 stayed empty and ✕ / 取消 / 保存 / Esc reached no
+// handler at all. `Rust` (below) owns the authoritative draft and pushes it in
+// both directions; this window's copies are the display, nothing more.
 //
 // Frameless and always-on-top, like the app's own dialogs: it is a thing to type
 // into and then leave, and a title bar to chrome it with is a bar that says
@@ -54,8 +62,24 @@ export component QuickNoteWindow inherits Window {
     // and a drag bar added: a title bar to chrome this with is a bar that says
     // "minimise me, maximise me, move me to the corner and forget where".
     public function raise-input() {
-        card.raise-input();
+    card.raise-input();
     }
+
+    // The authoritative draft, as Rust holds it. `draft` is `in-out` on purpose:
+    // the field writes it while the user types *and* Rust writes it when the
+    // tray rewrites a `#token`, so a one-way binding would drop one of the two.
+    // Everything else travels Rust → this window only.
+    in-out property <string> draft: "";
+    in property <int> caret: 0;
+    in property <[string]> suggestions: [];
+
+    // The four verdicts, straight to Rust. This is what this window's own copy
+    // of the callbacks used to get wrong: the card fired a tracker that had no
+    // handler on it, so 保存 and 取消 and Esc did nothing at all.
+    callback submitted();
+    callback dismissed();
+    callback draft-edited();
+    callback suggestion-picked(string);
 
     card := NoteCaptureCard {
         // Square corners: the card *is* this window's client area, and Windows
@@ -72,5 +96,17 @@ export component QuickNoteWindow inherits Window {
         // here, with no rows behind it competing for the same pixels.
         gutter: 20px;
         body-size: Typography.size-ui-lg;
+        // No edge: the card fills this window edge to edge, so its 1px border
+        // would be the outermost pixel row of a frameless window — a pale ring
+        // around the whole thing, which is a border nobody asked for.
+        outlined: false;
+
+        draft <=> root.draft;
+        caret: root.caret;
+        suggestions: root.suggestions;
+        submitted => { root.submitted(); }
+        dismissed => { root.dismissed(); }
+        draft-edited => { root.draft-edited(); }
+        suggestion-picked(tag) => { root.suggestion-picked(tag); }
     }
 }

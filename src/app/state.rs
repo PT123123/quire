@@ -1642,6 +1642,53 @@ impl AppState {
         }
     }
 
+    /// Push the authoritative capture draft into the 速记 window (ADR-0145).
+    ///
+    /// Why this exists at all: a Slint `global` lives in the item tree's
+    /// `SharedGlobals`, and **every root component builds its own**. 速记 is a
+    /// second `Window`, so its `NoteCaptureCard` had a private copy of
+    /// `UIState` that Rust never wrote to — the tray stayed empty and ✕ / 取消 /
+    /// 保存 / Esc fired a callback tracker with no handler on it. The card now
+    /// takes its draft as a plain property (see `NoteCaptureCard`), which makes
+    /// this function the only thing that has to know the window exists.
+    ///
+    /// `UIState.org-capture-*` on the *main* window stays the one truth: every
+    /// path that ends the composer already writes there, and the overlay reads
+    /// it. This copies that truth onto the small window's display properties, so
+    /// the two hosts can never drift into showing different words.
+    pub fn quick_note_push_draft(&self, draft: &str, caret: i32) {
+        if let Some(window) = self.quick_note.borrow().as_ref() {
+            window.set_draft(draft.into());
+            window.set_caret(caret);
+        }
+    }
+
+    /// The 标签建议 tray for whatever `#token` the 速记 window is holding.
+    ///
+    /// The same projection the overlay reads off `UIState`, pushed onto the
+    /// window's own `suggestions` — see `quick_note_push_draft` for why the two
+    /// hosts need separate properties at all.
+    pub fn quick_note_push_suggestions(&self, rows: &[String]) {
+        if let Some(window) = self.quick_note.borrow().as_ref() {
+            let model: Vec<slint::SharedString> =
+                rows.iter().map(|r| r.as_str().into()).collect();
+            window.set_suggestions(slint::ModelRc::new(slint::VecModel::from(model)));
+        }
+    }
+
+    /// What the 速记 window currently holds, as `(draft, caret)`.
+    ///
+    /// Read on every keystroke: the window's own `draft` property is the field's,
+    /// so it is where the words actually are while that window is up. Rust takes
+    /// them from here and writes them onto `UIState`, which is what every submit
+    /// and dismissal path reads — so 保存 saves what was typed in the small
+    /// window, not whatever the overlay last had.
+    pub fn quick_note_draft(&self) -> Option<(String, i32)> {
+        let window = self.quick_note.borrow();
+        let window = window.as_ref()?;
+        Some((window.get_draft().to_string(), window.get_caret()))
+    }
+
     pub fn set_ui(&self, ui: slint::Weak<crate::UIState<'static>>) {        *self.ui.borrow_mut() = Some(ui);
     }
 

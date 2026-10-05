@@ -5969,22 +5969,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         // rule the nav column's ＋ already keeps.
         ui.global::<UIState>().on_org_capture_sent(move || {
             let g = gw.upgrade().unwrap();
-            let text = g.get_org_capture_draft().to_string();
-            if let Some(id) = s.org_create_note_from_capture(text) {
-                g.set_org_selected_note(id as i32);
-                // "Open what you just made" is one of the few legitimate writers
-                // of the page's own gate (ADR-0137): the refresh below fills the
-                // panel from it, and the draft load puts the new note's words in.
-                g.set_org_note_open(id as i32);
-            }
-            g.set_org_capture_draft("".into());
-            g.set_org_capture_caret(0);
-            g.set_org_capture_open(false);
-            quick_note_put_down(&g, &s);
-            // the draft and its tray are one thing: an empty draft has no token
-            org_tag_suggest(&g, &s);
-            org_refresh(&g, &s);
-            org_load_drafts(&g, &s);
+            org_capture_sent(&g, &s);
         });
     }
     {
@@ -5995,11 +5980,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         // followed it — goes with the layer.
         ui.global::<UIState>().on_org_capture_closed(move || {
             let g = gw.upgrade().unwrap();
-            g.set_org_capture_draft("".into());
-            g.set_org_capture_caret(0);
-            g.set_org_capture_open(false);
-            quick_note_put_down(&g, &s);
-            org_tag_suggest(&g, &s);
+            org_capture_closed(&g, &s);
         });
     }
     {
@@ -6021,16 +6002,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         // open-seed's does, so the next keystroke lands *after* the tag.
         ui.global::<UIState>().on_org_tag_suggest_picked(move |tag| {
             let g = gw.upgrade().unwrap();
-            let draft = g.get_org_capture_draft().to_string();
-            if let Some(hash) = draft.rfind('#') {
-                let mut next = draft[..hash].to_string();
-                next.push('#');
-                next.push_str(&tag);
-                next.push(' ');
-                g.set_org_capture_caret(next.len() as i32);
-                g.set_org_capture_draft(next.into());
-                org_tag_suggest(&g, &s);
-            }
+            org_tag_suggest_picked(&g, &s, &tag);
         });
     }
     {
@@ -6811,7 +6783,72 @@ fn org_capture_discard(g: &UIState<'_>, state: &Rc<AppState>) {
     g.set_org_capture_draft("".into());
     g.set_org_capture_caret(0);
     g.set_org_capture_open(false);
+    org_capture_publish(g, state);
     quick_note_put_down(g, state);
+}
+
+/// The one write 保存 makes (ADR-0115), shared by both hosts.
+///
+/// It lands as an ordinary note — the `#`-tokens in the draft become its tags,
+/// exactly as the Android shell's ➤ does — and the row is then selected, the
+/// "open what you just made" rule the nav column's ＋ already keeps.
+///
+/// A function rather than an inline closure because `wire_quick_note` has to run
+/// this identical body: 速记's 保存 is a different callback on a different item
+/// tree, and two copies of "write the note, clear the draft, put the window away"
+/// is two copies to keep in step. The draft is read from `UIState`, which is why
+/// every caller adopts the small window's draft onto it first.
+fn org_capture_sent(g: &UIState<'_>, s: &Rc<AppState>) {
+    let text = g.get_org_capture_draft().to_string();
+    if let Some(id) = s.org_create_note_from_capture(text) {
+        g.set_org_selected_note(id as i32);
+        // "Open what you just made" is one of the few legitimate writers
+        // of the page's own gate (ADR-0137): the refresh below fills the
+        // panel from it, and the draft load puts the new note's words in.
+        g.set_org_note_open(id as i32);
+    }
+    g.set_org_capture_draft("".into());
+    g.set_org_capture_caret(0);
+    g.set_org_capture_open(false);
+    org_capture_publish(g, s);
+    quick_note_put_down(g, s);
+    // the draft and its tray are one thing: an empty draft has no token
+    org_tag_suggest(g, s);
+    org_refresh(g, s);
+    org_load_drafts(g, s);
+}
+
+/// ✕, 取消, Escape, the scrim and the platform's own close: nothing was written,
+/// so there is nothing to undo and nothing to say about it. The draft — and the
+/// 标签建议 tray that followed it — goes with the layer, and the 速记 window goes
+/// with it too (`quick_note_put_down`).
+///
+/// Shared by both hosts for the reason `org_capture_sent` is.
+fn org_capture_closed(g: &UIState<'_>, s: &Rc<AppState>) {
+    g.set_org_capture_draft("".into());
+    g.set_org_capture_caret(0);
+    g.set_org_capture_open(false);
+    org_capture_publish(g, s);
+    quick_note_put_down(g, s);
+    org_tag_suggest(g, s);
+}
+
+/// A tapped 标签建议 row: the `#token` under the caret becomes the whole tag. The
+/// caret's new byte offset travels with the text, the way the open-seed's does,
+/// so the next keystroke lands *after* the tag.
+///
+/// Shared by both hosts for the reason `org_capture_sent` is.
+fn org_tag_suggest_picked(g: &UIState<'_>, s: &Rc<AppState>, tag: &str) {
+    let draft = g.get_org_capture_draft().to_string();
+    let Some(hash) = draft.rfind('#') else { return };
+    let mut next = draft[..hash].to_string();
+    next.push('#');
+    next.push_str(tag);
+    next.push(' ');
+    g.set_org_capture_caret(next.len() as i32);
+    g.set_org_capture_draft(next.into());
+    org_capture_publish(g, s);
+    org_tag_suggest(g, s);
 }
 
 /// Put the 速记 window down with the composer it was holding (ADR-0145).
@@ -6832,6 +6869,116 @@ fn quick_note_put_down(g: &UIState<'_>, state: &Rc<AppState>) {
     state.hide_quick_note();
 }
 
+/// Wire the 速记 window's own four verdicts to the same Rust paths the overlay's
+/// are on (ADR-0145).
+///
+/// This function is the whole fix for a window that typed but could not be
+/// closed. A Slint `global` belongs to one item tree's `SharedGlobals`, and every
+/// root component builds its own — so 速记's card, had it kept reading
+/// `UIState`, was reading a *private copy* of it: `org-tag-suggestions` was
+/// never written, and `org-capture-closed` / `-sent` / `-draft-changed` /
+/// `tag-suggest-picked` fired trackers with no Rust handler bound, so ✕, 取消,
+/// 保存 and Esc all did nothing. Typing worked, which is why it read as a
+/// missing tray rather than as a dead window.
+///
+/// So the card takes its draft as a property and asks for its verdicts through
+/// callbacks, and this is where those callbacks land. Each one first copies what
+/// the window is holding onto `UIState` — the authoritative draft, and the one
+/// every submit and dismissal path already reads — and then runs the identical
+/// handler the overlay runs. `gw` is the main window's `UIState`, which is the
+/// only globals that carry the models and the callbacks `wire` installed.
+pub fn wire_quick_note(
+    quick: &crate::QuickNoteWindow,
+    ui: &AppWindow,
+    state: &Rc<AppState>,
+) {
+    use slint::ComponentHandle;
+    let gw = ui_state_weak(ui);
+
+    // The one helper every handler below needs: take the small window's draft as
+    // the truth and write it onto `UIState` before anything else looks at it.
+    // Without this, 保存 would write whatever the overlay last held — which, for
+    // a window that has been up the whole time, is nothing at all.
+    //
+    // It holds its own `Rc` rather than borrowing the argument's: the handlers it
+    // is cloned into are `'static`, and a borrow of a parameter is not.
+    let adopt = {
+        let s = state.clone();
+        move |g: &UIState<'_>| {
+            if let Some((draft, caret)) = s.quick_note_draft() {
+                g.set_org_capture_draft(draft.into());
+                g.set_org_capture_caret(caret);
+            }
+        }
+    };
+
+    // 保存 — the same write `on_org_capture_sent` makes, byte for byte.
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        let adopt = adopt.clone();
+        quick.on_submitted(move || {
+            let Some(g) = gw.upgrade() else { return };
+            adopt(&g);
+            org_capture_sent(&g, &s);
+        });
+    }
+    // ✕ / 取消 / Esc — the same dismissal, which is also what puts this window
+    // down (`quick_note_put_down` inside).
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        let adopt = adopt.clone();
+        quick.on_dismissed(move || {
+            let Some(g) = gw.upgrade() else { return };
+            adopt(&g);
+            org_capture_closed(&g, &s);
+        });
+    }
+    // Every keystroke: the window's draft is the truth, so adopt it and let Rust
+    // recompute the 标签建议 tray from the catalog — the same projection the
+    // overlay gets, which is what makes the tray appear here at all.
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        let adopt = adopt.clone();
+        quick.on_draft_edited(move || {
+            let Some(g) = gw.upgrade() else { return };
+            adopt(&g);
+            org_tag_suggest(&g, &s);
+        });
+    }
+    // A tapped 标签建议 row.
+    {
+        let gw = gw.clone();
+        let s = state.clone();
+        let adopt = adopt.clone();
+        quick.on_suggestion_picked(move |tag| {
+            let Some(g) = gw.upgrade() else { return };
+            adopt(&g);
+            org_tag_suggest_picked(&g, &s, &tag);
+        });
+    }
+    // The window's own close door (Alt+F4, 关闭窗口): the platform reaches this
+    // rather than the card's ✕, so it is wired separately and answers the same
+    // dismissal — with the draft going, because a composer nobody can see is a
+    // composer that lied about holding the words.
+    {
+        let ui_w = ui.as_weak();
+        // A clone rather than the borrow: the handler outlives this call, and
+        // `&Rc<AppState>` is not `'static`. The `Rc` is what every other handler
+        // here holds for the same reason.
+        let s = state.clone();
+        quick.window().on_close_requested(move || {
+            if let Some(ui) = ui_w.upgrade() {
+                let g = ui.global::<UIState>();
+                org_capture_closed(&g, &s);
+            }
+            slint::CloseRequestResponse::HideWindow
+        });
+    }
+}
+
 /// Open the capture layer, seeded with the tag filter when there is one.
 ///
 /// The preset is written as a `#token` rather than stapled onto the row, so ➤
@@ -6850,6 +6997,9 @@ fn org_capture_open(g: &UIState<'_>, state: &Rc<AppState>) {
     g.set_org_capture_caret(preset.len() as i32);
     g.set_org_capture_draft(preset.into());
     g.set_org_capture_open(true);
+    // The 速记 window shows the seed too, or Alt+N would arrive with an empty
+    // field over a tag filter the notes page is already filtering by.
+    org_capture_publish(g, state);
     // The pre-filled `#token` is a token like any other, so the 标签建议 tray is
     // asked for on the frame the layer appears and not only on the next keystroke.
     org_tag_suggest(g, state);
@@ -6858,14 +7008,29 @@ fn org_capture_open(g: &UIState<'_>, state: &Rc<AppState>) {
 /// Push the capture layer's 标签建议 tray (ADR-0118) for whatever `#token` the
 /// draft is on. `AppState::org_tag_suggestions` owns the rule; this only carries
 /// its answer across the boundary.
+///
+/// Both hosts get it, and neither reads it from the other: the overlay off
+/// `UIState`, the 速记 window off its own `suggestions` property. That is the one
+/// function every tray update already funnels through — open, edit, pick, send,
+/// discard — so this is the single place the two hosts have to be told, rather
+/// than five places each of which could be forgotten.
 fn org_tag_suggest(g: &UIState<'_>, state: &Rc<AppState>) {
     let draft = g.get_org_capture_draft().to_string();
-    let rows: Vec<slint::SharedString> = state
-        .org_tag_suggestions(&draft)
-        .into_iter()
-        .map(|tag| tag.into())
-        .collect();
+    let rows: Vec<String> = state.org_tag_suggestions(&draft);
+    state.quick_note_push_suggestions(&rows);
+    let rows: Vec<slint::SharedString> = rows.into_iter().map(|tag| tag.into()).collect();
     g.set_org_tag_suggestions(slint::ModelRc::new(slint::VecModel::from(rows)));
+}
+
+/// Copy the authoritative draft onto the 速记 window (ADR-0145).
+///
+/// The small window's `draft` is its *own* property, not `UIState`'s — a Slint
+/// global belongs to one item tree's `SharedGlobals` and each root component
+/// builds its own, so the two hosts never shared one. Every write that seeds or
+/// clears the draft calls this, which is what makes 「the words in the small
+/// window」 and 「the words 保存 will write」 the same words.
+fn org_capture_publish(g: &UIState<'_>, state: &Rc<AppState>) {
+    state.quick_note_push_draft(&g.get_org_capture_draft(), g.get_org_capture_caret());
 }
 
 /// The tag filter as the tags a **new** row made under it should carry: at most

@@ -3327,7 +3327,20 @@ export component OrganizerArea inherits Rectangle {
             y: (parent.height - self.height) / 2;
             width: min(parent.width - 80px, 560px);
             height: min(parent.height - 60px, 340px);
-            NoteCaptureCard { }
+            // This host *does* read and write the shared `UIState`, so the
+            // injection is a straight pass-through: same draft, same tray, same
+            // four verdicts as before. The card takes them as properties rather
+            // than reading the global itself because 速记 cannot — its window
+            // carries a second, independent set of globals (see `NoteCaptureCard`).
+            NoteCaptureCard {
+                draft <=> UIState.org-capture-draft;
+                caret: UIState.org-capture-caret;
+                suggestions: UIState.org-tag-suggestions;
+                submitted => { UIState.org-capture-sent(); }
+                dismissed => { UIState.org-capture-closed(); }
+                draft-edited => { UIState.org-capture-draft-changed(); }
+                suggestion-picked(tag) => { UIState.org-tag-suggest-picked(tag); }
+            }
         }
     }
 }

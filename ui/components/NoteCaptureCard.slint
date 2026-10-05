@@ -6,11 +6,16 @@
 //
 // It is a component rather than two copies of the markup because both hosts are
 // the *same request* — "write a note" — one step apart: every key, every write
-// and every 标签建议 goes through the shared `UIState.org-capture-*` properties and
-// the callbacks Rust hangs the one submit path on. What differs is only where the
-// card is drawn, so that is what the two hosts own: the notes page centres it
-// under a scrim, and 速记 fills an always-on-top window with it and makes its
-// header the drag strip.
+// and every 标签建议 goes through one submit path that Rust hangs the handlers
+// on. What differs is only where the card is drawn, so that is what the two
+// hosts own: the notes page centres it under a scrim, and 速记 fills an
+// always-on-top window with it and makes its header the drag strip.
+//
+// Which is also why the draft arrives as a *property* and leaves as a *callback*
+// instead of being read from the `UIState` global: the two hosts do not share
+// one. A Slint global belongs to the item tree's `SharedGlobals`, and every root
+// component builds its own — so 速记's card was wired to a copy of `UIState`
+// that Rust has never written to. See the note on `draft` below.
 //
 // And what differs about *how* it is drawn is parameterised for the same reason:
 // `surface`, `gutter` and `body-size` are how 速记 gets the deep page ramp, the
@@ -29,9 +34,34 @@ import { Colors } from "../Colors.slint";
 import { Typography } from "../Typography.slint";
 import { IconButton } from "./IconButton.slint";
 import { OrgButton } from "./OrgButton.slint";
-import { UIState } from "../Types.slint";
 
 export component NoteCaptureCard inherits Rectangle {
+    // ── the draft, and the tray that follows it ───────────────────────────
+    // Injected by the host rather than read from `UIState`, and that is not a
+    // style choice. A Slint `global` lives in the *item tree's* `SharedGlobals`,
+    // and every root component builds its own: 速记 is a second `Window`, so its
+    // card was reading a `UIState` that Rust never writes to. The visible
+    // symptoms were a tray that stayed empty and a ✕ / 取消 / 保存 / Esc that
+    // reached no handler at all — the callback tracker on that copy had nothing
+    // bound to it. Typing still worked, which is exactly why it read as "only
+    // the tray is missing" rather than as a dead window.
+    //
+    // So the draft is data the host passes in and the four verdicts are
+    // callbacks the host answers. The notes page's overlay passes the shared
+    // `UIState.org-capture-*` and gets its behaviour back unchanged; 速记 passes
+    // its own window's copies and wires them to the same Rust handlers. One
+    // card, one submit path, and no read that depends on *which* globals the
+    // host happens to have been built with.
+    in-out property <string> draft: "";
+    in property <int> caret: 0;
+    in property <[string]> suggestions: [];
+    // A host whose draft is edited reports it here; the tray is recomputed by
+    // Rust (the pool is the catalog's) and comes back through `suggestions`.
+    callback draft-edited();
+    callback submitted();
+    callback dismissed();
+    callback suggestion-picked(string);
+
     // The card's own corners. The overlay draws on top of the page and keeps the
     // dialog's radius; the 速记 window *is* the card, and a frameless window that
     // rounds its corners would paint them with whatever Windows leaves behind.
@@ -47,6 +77,12 @@ export component NoteCaptureCard inherits Rectangle {
     in property <brush> surface: Colors.surface-overlay;
     in property <length> gutter: 16px;
     in property <length> body-size: Typography.size-ui;
+    // Whether the card draws its own 1px edge. The overlay draws on top of the
+    // page, where the edge is what separates the card from the rows behind it;
+    // 速记 has no such problem, because the card *is* the whole window and the
+    // edge would be the last pixel row of a frameless window — a pale ring
+    // around the desk, which reads as a stray border rather than as an edge.
+    in property <bool> outlined: true;
 
     // The suggestion tray's own session state. The list is Rust's (the pool,
     // the prefix rule, the five-item cap); *where the keyboard is in it* is the
@@ -55,13 +91,13 @@ export component NoteCaptureCard inherits Rectangle {
     // a hidden tray over a `#` still being typed is a tray that lied.
     property <int> suggest-index: 0;
     property <bool> suggest-hidden: false;
-    property <bool> suggest-visible: UIState.org-tag-suggestions.length > 0
+    property <bool> suggest-visible: root.suggestions.length > 0
         && !suggest-hidden;
     // The one place the draft's length is asked: an empty box says so in words,
     // because the button that would answer is dimmed and a dimmed button cannot
     // explain itself. Characters rather than bytes, because a Chinese draft is
     // three bytes a word and the number on screen is a word count.
-    property <int> chars: UIState.org-capture-draft.character-count;
+    property <int> chars: root.draft.character-count;
 
     // Put the caret where the typing goes and the tray back where the draft is.
     // The field's own `init` calls it when the card is *built*, and 速记 calls it
@@ -72,14 +108,14 @@ export component NoteCaptureCard inherits Rectangle {
         root.suggest-index = 0;
         capture-input.focus();
         capture-input.set-selection-offsets(
-            UIState.org-capture-caret,
-            UIState.org-capture-caret,
+            root.caret,
+            root.caret,
         );
     }
 
     background: root.surface;
     border-radius: root.radius;
-    border-width: 1px;
+    border-width: root.outlined ? 1px : 0px;
     border-color: Colors.border-strong;
 
     // Swallows the card's own clicks — its padding, its title, the space under
@@ -147,7 +183,7 @@ export component NoteCaptureCard inherits Rectangle {
                 IconButton {
                     icon-name: "x";
                     size: 22px;
-                    clicked => { UIState.org-capture-closed(); }
+                    clicked => { root.dismissed(); }
                 }
             }
         }
@@ -207,7 +243,7 @@ export component NoteCaptureCard inherits Rectangle {
             // an empty box with no hint is a box nobody knows what to type into.
             // The reference's own words, which name the one convention this layer
             // has.
-            if UIState.org-capture-draft == "" : Text {
+            if root.draft == "" : Text {
                 x: 12px;
                 y: 10px;
                 width: parent.width - 24px;
@@ -221,7 +257,7 @@ export component NoteCaptureCard inherits Rectangle {
                 y: 9px;
                 width: parent.width - 22px;
                 height: parent.height - 18px;
-                text <=> UIState.org-capture-draft;
+                text <=> root.draft;
                 wrap: word-wrap;
                 font-family: Typography.ui-font;
                 font-size: root.body-size;
@@ -234,7 +270,7 @@ export component NoteCaptureCard inherits Rectangle {
                 // the top — the tray that hid for Esc has no business staying
                 // hidden under new text.
                 edited => {
-                    UIState.org-capture-draft-changed();
+                    root.draft-edited();
                     root.suggest-hidden = false;
                     root.suggest-index = 0;
                 }
@@ -247,21 +283,21 @@ export component NoteCaptureCard inherits Rectangle {
                     if (root.suggest-visible && event.text == Key.UpArrow) {
                         root.suggest-index = Math.mod(
                             root.suggest-index
-                            + UIState.org-tag-suggestions.length - 1,
-                            UIState.org-tag-suggestions.length);
+                            + root.suggestions.length - 1,
+                            root.suggestions.length);
                         accept
                     } else if (root.suggest-visible && event.text == Key.DownArrow) {
                         root.suggest-index = Math.mod(
                             root.suggest-index + 1,
-                            UIState.org-tag-suggestions.length);
+                            root.suggestions.length);
                         accept
                     } else if (root.suggest-visible
                         && (event.text == Key.Return || event.text == Key.Tab)) {
-                        UIState.org-tag-suggest-picked(
-                            UIState.org-tag-suggestions[root.suggest-index]);
+                        root.suggestion-picked(
+                            root.suggestions[root.suggest-index]);
                         capture-input.set-selection-offsets(
-                            UIState.org-capture-caret,
-                            UIState.org-capture-caret,
+                            root.caret,
+                            root.caret,
                         );
                         root.suggest-index = 0;
                         accept
@@ -269,14 +305,14 @@ export component NoteCaptureCard inherits Rectangle {
                         if (root.suggest-visible) {
                             root.suggest-hidden = true;
                         } else {
-                            UIState.org-capture-closed();
+                            root.dismissed();
                         }
                         accept
                     } else if (event.modifiers.control && event.text == Key.Return) {
-                        UIState.org-capture-sent();
+                        root.submitted();
                         accept
                     } else if (event.modifiers.alt && event.text == "s") {
-                        UIState.org-capture-sent();
+                        root.submitted();
                         accept
                     } else {
                         reject
@@ -300,7 +336,7 @@ export component NoteCaptureCard inherits Rectangle {
         // new byte offset back; the field takes it, so the next keystroke lands
         // *after* the tag and not inside it.
         if root.suggest-visible : Rectangle {
-            height: min(UIState.org-tag-suggestions.length * 28px + 8px, 148px);
+            height: min(root.suggestions.length * 28px + 8px, 148px);
             border-radius: Theme.radius-md;
             border-width: 1px;
             border-color: Colors.border;
@@ -311,7 +347,7 @@ export component NoteCaptureCard inherits Rectangle {
                 VerticalLayout {
                     padding: 4px;
                     spacing: 0px;
-                    for tag[i] in UIState.org-tag-suggestions : Rectangle {
+                    for tag[i] in root.suggestions : Rectangle {
                         height: 28px;
                         border-radius: Theme.radius-sm;
                         background: root.suggest-index == i
@@ -350,10 +386,10 @@ export component NoteCaptureCard inherits Rectangle {
                         sug-ta := TouchArea {
                             mouse-cursor: MouseCursor.pointer;
                             clicked => {
-                                UIState.org-tag-suggest-picked(tag);
+                                root.suggestion-picked(tag);
                                 capture-input.set-selection-offsets(
-                                    UIState.org-capture-caret,
-                                    UIState.org-capture-caret,
+                                    root.caret,
+                                    root.caret,
                                 );
                                 root.suggest-index = 0;
                             }
@@ -380,7 +416,7 @@ export component NoteCaptureCard inherits Rectangle {
             // window had it mean — the draft is thrown away, not parked.
             OrgButton {
                 label: "取消";
-                clicked => { UIState.org-capture-closed(); }
+                clicked => { root.dismissed(); }
             }
             // 保存: a neutral raised surface with a plain border and the label in
             // primary colour — **not** an accent plate.
@@ -412,7 +448,7 @@ export component NoteCaptureCard inherits Rectangle {
                     ? Colors.surface-hover : Colors.surface;
                 animate background { duration: Theme.duration-instant; }
                 animate border-color { duration: Theme.duration-instant; }
-                opacity: UIState.org-capture-draft == "" ? 0.55
+                opacity: root.draft == "" ? 0.55
                     : (save-ta.pressed ? 0.7 : 1);
                 animate opacity { duration: Theme.duration-instant; }
                 save-text := Text {
@@ -429,7 +465,7 @@ export component NoteCaptureCard inherits Rectangle {
                 }
                 save-ta := TouchArea {
                     mouse-cursor: MouseCursor.pointer;
-                    clicked => { UIState.org_capture-sent(); }
+                    clicked => { root.submitted(); }
                 }
             }
         }

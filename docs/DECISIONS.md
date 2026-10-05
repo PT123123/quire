@@ -267,13 +267,19 @@ asked to see.
 **One card, two hosts.** `NoteCaptureCard.slint` is the composer the 悬浮 ＋ and
 Alt+N share — the hint row, the field, the `#`-suggestion tray (ADR-0118) and
 保存/取消, drawn once. What differs is where it is painted: the ＋ draws it as an
-overlay inside 笔记 under a scrim, Alt+N fills a window with it. The draft, the
-suggestions and the submit path are the shared `UIState.org-capture-*` properties
-behind it, so there is one write and one catalog, reached from two places.
+overlay inside 笔记 under a scrim, Alt+N fills a window with it. The submit path is
+one, so there is one write and one catalog, reached from two places.
 `quick-note-host` is the flag that says *which* surface is drawing them, and the
 two are never allowed to hold one composer at once: the overlay is
 `org-capture-open && !quick-note-host`, the ＋ puts a 速记 that has the draft down
 before it takes the draft itself, and Alt+N re-takes it from the overlay.
+
+> **Corrected by ADR-0152.** This section originally went on to say the draft and
+> the suggestions are "the shared `UIState.org-capture-*` properties behind it".
+> They are not shared. A Slint `global` belongs to one item tree's
+> `SharedGlobals` and each root component builds its own, so the 速记 window's card
+> was reading a private copy of `UIState` that Rust never wrote to. The card takes
+> its draft as a property and its verdicts as callbacks instead.
 
 **The card is parameterised rather than themed twice, because the two hosts differ
 in what is behind them.** `surface` / `gutter` / `body-size` let 速记 paint the
@@ -7744,3 +7750,82 @@ Consequences:
 * Unverified: the real cost of `db_refresh_page` on a page holding several large databases —
   the peer pass is bounded by the page's blocks, but three 10 000-row databases on one page is
   a page nobody has drawn yet. Named in `docs/REPORT_TRACK3.md`.
+
+## ADR-0152 · A second root component gets its own globals, so the card takes its draft as an argument
+
+**A Slint `global` is not a process-wide singleton; it belongs to one item tree's
+`SharedGlobals`, and every root component builds its own.** `AppWindow::new()` and
+`QuickNoteWindow::new()` each run `SharedGlobals::new(...)` (visible in the
+generated `target/debug/build/quire-*/out/AppWindow.rs`, in each `impl Inner…::new`),
+so `slint-build` compiles `export global UIState` into a field of *that* struct. The
+two `global::<UIState>()` calls therefore hand back two unrelated instances.
+
+ADR-0145 assumed otherwise. Its `NoteCaptureCard` read `UIState.org-capture-draft`
+and fired `UIState.org-capture-closed` directly, and `controller::wire` bound every
+handler to the **main** window's copy. So the 速记 window's card was talking to a
+copy of the state that Rust never wrote to:
+
+* `org-tag-suggestions` stayed empty there — 标签建议 never appeared.
+* `org-capture-closed` / `-sent` / `-draft-changed` / `tag-suggest-picked` fired a
+  callback tracker with **no handler bound** — 保存, 取消, ✕ and Esc did nothing.
+* Typing worked, because `text <=> org-capture-draft` closes inside that copy. That
+  is why this read for months as "the tray is missing" rather than as a dead window.
+
+**Sharing the globals was not available.** Slint 1.18 does not support `Window` as a
+child element — `i-slint-compiler`'s `warn_about_child_windows` says so outright
+("Window elements as children do not create separate windows"), and only
+`PopupWindow` reaches for `clone_with_window_adapter`. A `PopupWindow` is positioned
+relative to its parent and carries auto-close semantics, which is not what an
+independent always-on-top window wants.
+
+**So the card stopped reading a global.** `draft` / `caret` / `suggestions` are now
+properties and the four verdicts are callbacks, injected by the host:
+`OrganizerArea` passes the shared `UIState` and behaves exactly as before, and
+`QuickNoteWindow` passes its own window's copies, wired by a new
+`controller::wire_quick_note` to the *same* Rust functions
+(`org_capture_sent` / `org_capture_closed` / `org_tag_suggest_picked` — extracted for
+this, so neither host has a second copy of "write the note, clear the draft, put the
+window away"). `UIState.org-capture-*` stays authoritative: `org_capture_publish`
+copies it onto the small window, and the window's own draft is adopted back onto
+`UIState` before any submit or dismissal, so 保存 writes the words that were typed in
+the small window rather than whatever the overlay last held.
+
+**The card also lost its 1px edge on this host.** `border-strong` is what separates a
+card from the rows behind it, but 速记's card *is* the client area, so the border was
+the outermost pixel row of a frameless window — a pale ring around the whole thing.
+`outlined` is the new switch; 速记 passes `false`.
+
+**`--quick-note` had been reporting `pass` on a window with four dead buttons.** Its
+dismiss stage called `ui.global::<UIState>().invoke_org_capture_closed()` — the main
+window's tree — so the broken path was never walked, and nothing asserted that the
+small window's draft matched the authoritative one. It now fires
+`quick.invoke_dismissed()`, gained a typing stage that goes through the window's own
+`draft-edited`, and asserts 「小窗里的字就是 UIState 里的字」. A stage that reaches the
+wrong item tree is worse than no stage: it is a green light over a dead window.
+
+**The strengthened gate was then made to fail on purpose**, which is the only way to
+know a green light means anything: `adopt`'s write was temporarily short-circuited to
+reproduce the original break, and the gate reported
+
+```
+quick-note typed: note-draft="#" ui-draft=""
+quick-note verdict: typed: 小窗里的字就是 UIState 里的字, typed: 小窗按下的键到了 UIState
+Error: "quick-note: 2 rule(s) unmet"
+```
+
+— the keystroke in the window, the empty string in the authoritative state, and a
+non-zero exit. With the break removed the same run prints `note-draft="#" ui-draft="#"`
+and passes. The probe was deleted and `controller.rs` diffed clean afterwards.
+
+A note on how the gate nearly lied a second time, since it is the same failure mode:
+the new typing stage was first written as `2 => {…}` *above* the report arm
+`s @ (1 | 2 | 4 | 6 | 8) => {…}`. Rust takes the first matching arm, so the keystroke
+happened and **the report never ran** — while every other stage stayed green and the
+verdict read `pass`. No warning is emitted, because the report arm is still reachable
+by its other numbers. The only thing that caught it was counting the report lines
+(4 before the stage, 4 after it, 5 once it was actually placed after the reports).
+**A stage machine that grows a stage has to be checked by counting what it printed.**
+
+Unverified: the tray's own keyboard walk inside 速记 (↑↓ / Enter / Tab) is now reached
+through the injected callbacks, but only the round trip Rust → `suggestions` is
+covered by `--quick-note`; the key handling itself is still only checked by hand.

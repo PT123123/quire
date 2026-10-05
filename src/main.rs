@@ -662,22 +662,13 @@ fn real_main(start: std::time::Instant) -> Result<(), String> {
         // it alive) and the hotkey thread reaches it as a `Weak` it can send.
         let quick_note =
             quire::QuickNoteWindow::new().map_err(|e| e.to_string())?;
-        // Its ✕ and its Esc are the card's own 「放弃」; this is the door the
-        // platform closes instead (Alt+F4, a taskbar's 关闭窗口). The draft goes
-        // with it — a composer nobody can see is a composer that lied about
-        // holding the user's words — and the window hides rather than dies, so
-        // the next Alt+N brings back the same card with its position kept.
-        {
-            let ui_w = ui.as_weak();
-            quick_note
-                .window()
-                .on_close_requested(move || {
-                    if let Some(ui) = ui_w.upgrade() {
-                        ui.global::<quire::UIState>().invoke_org_capture_closed();
-                    }
-                    slint::CloseRequestResponse::HideWindow
-                });
-        }
+        // Its four verdicts — 保存, 取消/✕, every keystroke, a tapped 标签建议 —
+        // and the platform's own close door (Alt+F4, a taskbar's 关闭窗口) are
+        // wired in `controller::wire_quick_note`, which is also where the reason
+        // they have to be wired *here* rather than off `UIState` is written down:
+        // this window is a second root component and therefore carries a second,
+        // independent set of globals.
+        controller::wire_quick_note(&quick_note, &ui, &state);
         // The window outlives this block because the state holds it — the handle
         // *is* its strong reference, and `real_main` drops its own binding the
         // moment the hotkeys are wired. A 速记 window that no longer exists is a
@@ -744,6 +735,11 @@ fn real_main(start: std::time::Instant) -> Result<(), String> {
             Box::new(move || press())
         };
         let qn_w = quick_note.as_weak();
+        // Handed to the state *after* `wire_quick_note`, which only captured
+        // closures over it: the callbacks read the window through the state
+        // (`quick_note_draft`), so an install that came later would still be
+        // correct at press time — but only because nothing here fires a callback
+        // synchronously. The order is stated so that stays true.
         state.install_quick_note(quick_note);
 
         // `--quick-note`: the verification door, and the only reason a run
@@ -779,10 +775,23 @@ fn real_main(start: std::time::Instant) -> Result<(), String> {
                     let stage = stages.get();
                     stages.set(stage + 1);
                     match stage {
+                        // The run: press (0) → report (1) → dismiss (2) → report (3)
+                        // → ＋ (4) → report (5) → press again (6) → report (7) →
+                        // type (8) → report-typed (9, the assertion that the
+                        // keystroke landed) → verdict (10). A tick between each,
+                        // so every report reads the frame its action settled into.
                         0 | 6 => press(),
-                        2 => g.invoke_org_capture_closed(),
+                        // The dismissal stage fires the 速记 window's **own**
+                        // `dismissed` callback, not the main window's
+                        // `org-capture-closed`. That is the whole point: the two
+                        // used to be different callbacks on different item trees,
+                        // and invoking the main window's one is exactly what let a
+                        // 速记 whose ✕ / 取消 / 保存 did nothing at all report
+                        // `pass`. A stage that reaches the wrong tree is worse than
+                        // no stage, so this one goes the way the button does.
+                        2 => quick.invoke_dismissed(),
                         4 => g.invoke_org_capture_opened(),
-                        s @ (1 | 3 | 5 | 7) => {
+                        s @ (1 | 3 | 5 | 7 | 9) => {
                             // What each door leaves behind, in the platform's own
                             // words: the 速记 window holds the draft for Alt+N and
                             // the ＋ hands it back to the notes page's overlay.
@@ -790,7 +799,10 @@ fn real_main(start: std::time::Instant) -> Result<(), String> {
                                 1 => ("press", true, true),
                                 3 => ("dismiss", false, false),
                                 5 => ("plus", false, true),
-                                _ => ("press-again", true, true),
+                                7 => ("press-again", true, true),
+                                // Reported one tick *after* the keystroke, so the
+                                // draft below is the one that keystroke produced.
+                                _ => ("typed", true, true),
                             };
                             let ex = platform::window_ex_style(quick.window());
                             let note_visible = quick.window().is_visible();
@@ -800,7 +812,7 @@ fn real_main(start: std::time::Instant) -> Result<(), String> {
                             let host = g.get_quick_note_host();
                             let capture = g.get_org_capture_open();
                             eprintln!(
-                                "quick-note {door}: main-visible={} note-visible={} capture-open={} host={} area={} tick={} note-ex={} toolwindow={}",
+                                "quick-note {door}: main-visible={} note-visible={} capture-open={} host={} area={} tick={} note-ex={} toolwindow={} note-draft={:?} ui-draft={:?}",
                                 ui.window().is_visible(),
                                 note_visible,
                                 capture,
@@ -810,6 +822,8 @@ fn real_main(start: std::time::Instant) -> Result<(), String> {
                                 ex.map(|bits| format!("0x{bits:08X}"))
                                     .unwrap_or_else(|| "-".into()),
                                 toolwindow,
+                                quick.get_draft(),
+                                g.get_org_capture_draft(),
                             );
                             // One draft, one surface: `host` is the flag that
                             // says which, and the rule the controller keeps is
@@ -817,19 +831,60 @@ fn real_main(start: std::time::Instant) -> Result<(), String> {
                             // while it is on screen — the two are written
                             // together on every path, so a mismatch is one of
                             // them having been set without the other.
+                            //
+                            // `draft` is the rule that had no check at all, and
+                            // it is the one whose absence let a dead window
+                            // report `pass`: the small window's own draft
+                            // property is what 保存 would write, and nothing
+                            // asserted that it was being kept in step with
+                            // `UIState`. It is a separate property precisely
+                            // because a second root component has a second set
+                            // of globals, so "in step" is a fact to be tested
+                            // rather than a fact to be assumed.
+                            let draft_matches =
+                                quick.get_draft() == g.get_org_capture_draft();
                             for (name, ok) in [
                                 ("主界面没有跟着出来", !ui.window().is_visible()),
                                 ("小窗的显与隐对得上", note_visible == wants_note),
                                 ("草稿的有无对得上", capture == wants_capture),
                                 ("草稿只有一个宿主", host == note_visible),
                                 ("小窗可见时不在任务栏", !note_visible || toolwindow),
+                                ("小窗里的字就是 UIState 里的字", draft_matches),
+                                // The one assertion that would have caught the
+                                // original bug on its own: the keystroke was
+                                // typed into the *window's* property and the
+                                // authoritative draft has to have followed it.
+                                // Everything else above can be green while a
+                                // window's `draft-edited` leads nowhere.
+                                (
+                                    "小窗按下的键到了 UIState",
+                                    s != 9 || g.get_org_capture_draft() == "#",
+                                ),
                             ] {
                                 if !ok {
                                     failures.borrow_mut().push(format!("{door}: {name}"));
                                 }
                             }
                         }
+                        // Type into the small window the way the field does — set
+                        // its own `draft`, then fire *its* `draft-edited`. This is
+                        // the 标签建议 path end to end: the callback is what asks
+                        // Rust to recompute the tray, so a window whose callback
+                        // had no handler showed an empty tray forever while every
+                        // other check stayed green.
+                        //
+                        // **After** the last report, and reporting on the next
+                        // tick, because the action and the reading cannot share a
+                        // `match` arm: a stage listed in both the action arms and
+                        // the report arms is taken by whichever comes first, and
+                        // the report silently stops happening — which is a green
+                        // run that checked one stage fewer than it claims.
                         8 => {
+                            quick.set_draft("#".into());
+                            quick.set_caret(1);
+                            quick.invoke_draft_edited();
+                        }
+                        10 => {
                             // The verdict, and then the session ends on its own:
                             // a harness that has to kill the process would leave
                             // the app's own log saying it crashed.
