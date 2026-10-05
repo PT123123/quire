@@ -3887,7 +3887,7 @@ dependencies = [
 
 [[package]]
 name = "quire"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "embed-resource",
  "image",
