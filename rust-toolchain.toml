@@ -1,0 +1,23 @@
+# The toolchain this shell's numbers were measured on.
+#
+# Why this file exists: a build-cost claim is only comparable to a build-cost
+# claim measured with the same compiler. `docs/PERFORMANCE.md` and
+# `docs/BUILD_PERFORMANCE.md` both quote wall-clock figures, and every one of
+# them assumes `rustc 1.98.0`. An unpinned toolchain means a `rustup update`
+# silently changes what those numbers mean — and because `rustc`'s version is in
+# the fingerprint of *every* unit in the graph, it does not degrade one crate, it
+# invalidates the whole build the same way switching a profile does (measured:
+# the `codegen-units` switch rebuilds ≈240 dependency crates, 7m59s — see
+# `docs/BUILD_PERFORMANCE.md` §2). Pinning it turns that from "you may find out
+# when a build is inexplicably slow" into "you find out when you meant to
+# upgrade".
+#
+# `channel` is what is load-bearing; the rest is recorded so the pin is legible.
+# Measured on: rustc 1.98.0 (88d9e12ae 2026-08-18), LLVM 22.1.8, host
+# x86_64-pc-windows-msvc. The other toolchains installed here (nightly ×3, 1.97.1)
+# are for experiments; this shell does not build on them.
+[toolchain]
+channel = "1.98.0"
+targets = ["x86_64-pc-windows-msvc"]
+profile = "minimal"
+components = ["rustfmt", "clippy"]

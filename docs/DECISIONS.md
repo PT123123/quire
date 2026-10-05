@@ -79,6 +79,14 @@ Format: decision → context → consequences. Newest first.
 而 PERFORMANCE.md 已记：codegen 与 link 的耗时比例没有测过，贸然换链接器的收益未知，
 而它影响的每一个构建。
 
+> **2026-10-05 已测，这条可以结案了：换链接器不值得。** 在 `72a69f9` 上实测，
+> 改一个 `.rs` 的 release 构建共 **209 s**，其中**纯 link（删掉 exe 后重链，零 codegen）
+> 只有 11.2 s**，其余 ≈198 s 是一个 crate 的 codegen（`libquire-*.rlib` 113.4 MB，
+> slint 生成的 `AppWindow.rs` 24.2 MB / 225 648 行，`codegen-units = 1`）。
+> 所以换 `lld-link` 的收益上限就是那 11 秒，而启用它要改 `linker-flavor`，
+> 那会作废全图指纹（≈240 crate / 7m59s）。**收益为零、代价为真。**
+> 数据与另外两条被实测否决的项在 `docs/BUILD_PERFORMANCE.md` §2 / §5。
+
 **被否掉的选项（写在这里而不是只留在对话里）：**
 
 - **把版本号改成 `[package.metadata.app]` + 运行时读取** —— 否。exe 的版本资源块

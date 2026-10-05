@@ -35,6 +35,7 @@ cargo run --no-default-features --features skia --release   # Skia build
 - Status & roadmap: `PLAN.md`
 - Why it looks like this: `docs/ARCHITECTURE.md`, `docs/DECISIONS.md`
 - Measured numbers: `docs/PERFORMANCE.md` (`benchmarks/scripts/bench.ps1`)
+- Build cost and what would actually make it faster: `docs/BUILD_PERFORMANCE.md`
 - UI iteration loop (Slint live preview): `docs/LIVE_PREVIEW.md`
 
 ## 核心目标（浓缩版）

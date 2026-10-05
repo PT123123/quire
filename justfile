@@ -21,6 +21,18 @@ run *args:
 # (`cargo test --all-targets` there). So a green `just check` here means the shell
 # compiles against the pinned rev and its own suite passes — never quote it as
 # "the whole app is green".
+#
+# The third line keeps `--release` and is *not* to be weakened: measured
+# 2026-10-05 at `72a69f9`, replacing it with a release-opt-in dev-profile build
+# (`--profile dev` + `lto`/`codegen-units`/`strip` via `--config`) rebuilt **325
+# crates** — switching a profile invalidates every unit in the graph, the same
+# 7m59s trap PERFORMANCE.md records for `codegen-units`, and it would have made
+# every `just check` slower rather than faster. `--profile` is also mutually
+# exclusive with `--release`, so there is no flag that asks for "release checks,
+# cheap". The line stays exactly as it was. `docs/BUILD_PERFORMANCE.md` §2 has
+# the numbers (a `.rs` touch is 209 s: 11 s link, ~198 s one crate's codegen at
+# `codegen-units = 1`) and §4-R1 why that is a structural cost rather than a
+# misconfiguration.
 check:
     cargo check --workspace --all-targets
     cargo test --workspace
