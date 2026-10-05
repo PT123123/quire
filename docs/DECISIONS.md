@@ -2,6 +2,151 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0149 · 频繁 bump version 是安全的；付钱的是产物里嵌了版本号，不是「切换」
+
+一份外部的构建加速分析被贴进来（「bump version ≠ 切换，可以放心频繁 bump」）。
+结论**方向正确但因果说反了**，本仓库的实现恰好是那个反例，所以照抄会得到错的结论。
+这里记下实测、记下本仓库真正该守的规则，以及被否掉的选项。
+
+**决定。** 两件事分开记账，它们经常被混为一谈：
+
+1. **bump version 本身不重编依赖，也不改依赖解析结果。** 这是可以放心高频做的事，
+   不需要跟别的构建「错开」。
+2. **本仓库的 bump 会重编整个 `quire` crate**，因为 `package.version` **确实在**
+   cargo 指纹里，而且 `build.rs` 还把它写进了 exe 的版本资源块、三个 Rust 文件用
+   `env!("CARGO_PKG_VERSION")` 把它编进产物。这笔 2 分半是**这个 shell 的设计**，
+   不是「切换」的代价。
+
+**实测（2026-10-05，本机，dev 口径，`.scratch/bench_bump.ps1`）。** 预热后 bump
+`0.1.24 → 0.1.25`，带 `CARGO_LOG=cargo::core::compiler::fingerprint=info` 跑
+`cargo check --all-targets`：
+
+| 观测 | 结果 |
+|------|------|
+| 变 dirty 的 crate | **只有 `quire` 一个**（日志里 `Compiling quire v0.1.25` 一行） |
+| bump 后 `cargo check --all-targets` | 142.7 s |
+| `cargo metadata` 的包集合 | 612 → 612，逐包比对 `changed_count=2`：`ADDED quire 0.1.25` / `REMOVED quire 0.1.24` |
+| 依赖图 | 612 节点、1875 条边，去版本后 `GRAPH_SHAPE_IDENTICAL=True` |
+| `Cargo.lock` diff | 一行：`quire` 的 `version = "0.1.24" → "0.1.25"` |
+| member 的 `source` / `features` / `dependencies` / `rust_version` | 全部未变（`rust_version` 本来就没有） |
+
+**所以「package.version 不在指纹里」这句话在本仓库是错的**，而 PERFORMANCE.md
+「Build cost」一节原本记的「`[package] version` 是 cargo 指纹的一部分」是**对的**。
+实测只看到 `quire` 自己重编，正好印证后者。ADR-0148 从另一头确认了同一件事：
+它否决的 `println!("cargo:rerun-if-env-changed=CARGO_PKG_VERSION")` 建议，前提
+就是「`[package].version` 本来就在 cargo 的 fingerprint 里」。
+
+**为什么「不在指纹里」这个说法有诱惑力**：`package.version` 确实**不参与依赖的
+指纹计算**，所以它不会让依赖失效——但它参与**自己这个 package 单元**的指纹。
+把它简化成「不在指纹里」，就会推出「bump 零成本」，而真实成本是「重编一个 crate」。
+这两个结论在「敢不敢频繁 bump」上恰好同向（都能放心 bump），但在**要不要改实现**上
+完全相反，所以这个简化会让人漏掉本仓库真正的那个坑。
+
+**代价来自 build.rs，来源有三处，都要记下来：**
+`build.rs` 读 `CARGO_PKG_VERSION` 生成 `quire.rc` 的 `FILEVERSION`/
+`PRODUCTVERSION`/`FileVersion`/`ProductVersion`；`src/app/controller.rs`、
+`src/main.rs`、`src/platform/quit.rs` 三处 `env!` 把它编进 Rust 产物。
+部署脚本要求 bump 排在 build 之前，正是为了这个资源块（deploy-workshop.ps1
+步骤 1–2 的注释说的就是这个）。
+
+**本仓库已经做到的三条隔离**（核对过，无需改动）：
+
+- bump 只改三个数字：两个脚本都用正则匹配 `^version = "x.y.z"` 且**只拼接 group1
+  到 group3 之间**，其他字节不动（deploy-workshop.ps1 的 bump 段）。实测的
+  `git diff -- Cargo.toml` 只有版本一行。
+- 提交只带 `Cargo.toml` + `Cargo.lock`：`git add Cargo.toml Cargo.lock`
+  （两个脚本的提交段），所以 bump 提交是单用途的。
+- 依赖解析方式在 bump 时不变：`quire-core` 是 `git = …, rev = "db0e95f"`
+  （Cargo.toml 的 `[dependencies]`），bump 不动它。
+
+**真的坑，本仓库中两个**（不是三个，前提已经具备）：
+
+- **坑 1 的实际形态是「两个脚本都没有 `--locked`」**。deploy-workshop.ps1 与
+  release-publish.ps1 都是裸的 `cargo build --release`。因为依赖里有 git 源
+  （`quire-core`），一次 bump 后的构建会顺手刷新 lock 里 git 源的条目；今天这次实测
+  lock 只变了一行版本号，但那是运气好——`--locked`（lock 需要变更就报错而不是
+  悄悄改）才是把这条运气变成保证的东西。
+- **坑 2 就是上面那份 build.rs**，它把版本写进了 exe 的资源块，而且是**有意**的：
+  `quire.iss` 从 exe 的版本资源读版本号，deploy 脚本还要靠这个断言产物真的带上了
+  bump。所以这里**不能简单照抄「版本号不进编译」**：那份建议把版本挪到
+  `[package.metadata.app]` 或 `--cfg` 注入，但 exe's 版本资源块恰恰需要 exe 里真的有
+  这个数——无论资源块在链接前由谁生成，链接产物必须变。这条在本仓库是**收益为零、
+  风险为真**的改动。
+
+**为什么仍然不追求「bump 不重编」**：真正的剩余杠杆是「不改产物就换掉一个产物里
+必须有的数字」，那是做不到的——资源块和 `env!` 都要求 exe 内容真的变。剩下的只有
+更快的链接器（`lld-link.exe` 随工具链在 `<sysroot>\lib\rustlib\x86_64-pc-windows-msvc\bin\gcc-ld\`），
+而 PERFORMANCE.md 已记：codegen 与 link 的耗时比例没有测过，贸然换链接器的收益未知，
+而它影响的每一个构建。
+
+**被否掉的选项（写在这里而不是只留在对话里）：**
+
+- **把版本号改成 `[package.metadata.app]` + 运行时读取** —— 否。exe 的版本资源块
+  仍需 `FILEVERSION`，链接产物照样变，零收益；且 `quire.iss` 依赖它。
+- **`--config build.rustflags=["--cfg","app_version=…"]` 从 git describe 注入** ——
+  否。`rustflags` 变化会让**每个** crate 的指纹变（指纹含 rustflags），一次 bump
+  就变成 240+ 依赖全量重编——这正是要避免的，比现在贵一个数量级。
+- **bump 时顺手 `cargo update`** —— 否。`cargo update -w` 会把依赖解析结果整个换一遍，
+  那是坑 1，不是隔离。
+- **给 bump 提交加「只改三行」的 CI 断言** —— 未做，属于下次可做的一个小件。现在靠
+  两个脚本的正则保证，但 `git add` 是硬编码的两个文件，人工手改 Cargo.toml 时没有
+  第二道闸。
+
+**后果与未验证项。** 结论建立在**本仓库本机 dev 口径**上：bump 的 142.7 s 是
+`cargo check`，不是 `cargo build --release`；release 下同一个 crate 的成本是
+PERFORMANCE.md 记的 2m30s（2026-09-25 那批），本轮**没有重新测 release 的 bump 成本**。
+热构建基线本轮实测为 298.6 s / 25.5 s / 11 s 三连（同 tree，其中第一次 298.6 s 是
+dev→release 口径切换的一次性重建，不是 bump 的代价），与 PERFORMANCE.md 记的 4.4 s
+**不同批次、不可直接比较**；能确定的只有「增量机制没坏，热构建不是全量」。
+`--locked` 是**建议**，本轮**没有实施**。
+
+## ADR-0148 · `build.rs` 的 Slint include graph 不自己声明，交给 `slint-build`
+
+一份外部的构建加速评估把「收窄 `build.rs` 的 `rerun-if-changed`」列为最高性价比、
+最低风险的第一项改动，理由是 `build.rs` 只声明了 `QUIRE_PROBE` 与
+`install/quire.ico`，所以 Rust 改动会顺带重跑 Slint 前端。**结论不成立，不采纳。**
+
+**观察对了一半，结论错在没往下读一层。** `build.rs` 确实只声明两条，但它调用的
+`slint_build::compile()` 会把整张 include graph 声明出来：`slint-build 1.18.0`
+（`Cargo.lock` 锁定的版本）`lib.rs:540-545` 遍历 `compile_with_output_path` 返回的
+依赖逐条打印，而那个返回值就是 `diag.all_loaded_files` + 入口文件 + embedded file
+resource（`lib.rs:610-634`）。落盘的 `target/debug/build/quire-*/output` 里，
+`QUIRE_PROBE` 之后是 **41 条 `.slint` 的 `rerun-if-changed`**，覆盖 `ui/` 下全部
+6 个文件与 `components/` 下全部 34 个组件，外加 `install/quire.png`。
+
+**决定性实测**（2026-10-05，commit `72a69f9`）：`touch src\main.rs` 后跑
+`cargo check --workspace --all-targets`，68.6 s 成功，而 build script 产出的
+`out\AppWindow.rs` 的 mtime **没有变** —— Slint 前端没有重跑。方案描述的那个
+症状在本仓库不存在，那 68 秒是 rustc 的。
+
+**被考虑并否决的方案**，三条独立理由，任何一条都足够：
+
+1. **要解决的问题不存在**（上面的实测）。加 `walkdir::WalkDir` 扫描 `ui/` 只会把
+   一张精确的图换成一个粗粒度的目录遍历。
+2. **它编译不过。** `walkdir` 不在 `[build-dependencies]`（`Cargo.toml` 只有
+   `embed-resource` 与 `slint-build`）。方案给出的代码片段引用了一个不存在的 crate。
+3. **它会往回退一步。** cargo 的规则是 build script 一旦发出**任何**一条
+   `rerun-if-changed`，就从「默认重跑」切到「只跟这些文件」。本 shell 已经在后者，
+   而且清单是精确的；再补一批 `Cargo.toml` / `Cargo.lock` / `walkdir(ui/)` 只会
+   **放宽**它 —— 而放宽正是 ADR-0134 那 63 GB 的成因。
+
+**同一条推理否掉了另一条建议**：加
+`println!("cargo:rerun-if-env-changed=CARGO_PKG_VERSION")`。`[package].version`
+本来就在 cargo 的 fingerprint 里，而 `build.rs` 读 `CARGO_PKG_VERSION` 只在 build
+script **已经重跑**时才有意义 —— 而重跑与否由上面那张表决定。声明它不会让版本
+bump 变快，只会让版本之外的改动多一次重跑。
+
+还有一条建议同样落空：「给 `OUT_DIR/quire.rc` 的写入加内容稳定保护」。版本 bump
+时 `.rc` 的内容是真的变了，不重写反而是错的。它只在「build.rs 因别的原因重跑、
+版本没变」时省下一次 `rc.exe`，收益接近零。
+
+**后果。** `build.rs` 维持现状（只声明 `QUIRE_PROBE` 与 `install/quire.ico`），
+**并且「不要自己遍历 `ui/`」成为一条约定**，以免下一次又有人来优化它。
+`slint-build` 升级时若改变这条行为，本 ADR 失效，需重新评估。
+方案全文、复核数据与分级执行顺序在 `docs/BUILD_PERFORMANCE.md`；其中 §9
+「尚未验证」列出了这份判断的边界，其中一项（`Cargo.toml` / `Cargo.lock` 改动
+是否重跑 build script）正是本决策留下的真实缺口。
+
 ## ADR-0147 · 托盘菜单真的暗下来；新建笔记的提示与保存按钮去掉装饰
 
 三处「看着不对」的界面，按根因分别处理。

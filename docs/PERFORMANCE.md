@@ -403,6 +403,18 @@ Reading:
   same version into the exe's resource block, so bumping it is an edit to
   `quire` — and `quire` is where cgu = 1 + thin LTO spends its time. Dependencies
   are not involved: they are cached and stay cached.
+  **Measured directly on 2026-10-05 (ADR-0149):** bumping `0.1.24 → 0.1.25`
+  with the fingerprint log on makes **exactly one** crate dirty — `quire` — and
+  leaves all 240+ dependencies fresh. `cargo metadata` before and after is
+  612 packages / 1875 edges both times, differing only in `quire`'s own version
+  (`changed_count=2`: the member added and removed); the `Cargo.lock` diff is one
+  line. So "the bump re-resolves dependencies" is **not** what happens here.
+  The cost is real but it is *one crate*, for the reason above: the version is
+  both in the fingerprint **and** embedded in the artifact (`build.rs` writes it
+  into `quire.rc`; `controller.rs` / `main.rs` / `quit.rs` use
+  `env!("CARGO_PKG_VERSION")`). ADR-0149 also records why the suggested
+  workarounds — moving the version to `[package.metadata.app]` or injecting it via
+  `--cfg`/`rustflags` — are rejected here rather than adopted.
 - **`codegen-units = 16` loses here, and that does not contradict the A3 audit.**
   A3 measured 1m45s for `cgu16` against 3m10s for the current profile — but that
   was a **full** build, where the win is parallel codegen spread across many
