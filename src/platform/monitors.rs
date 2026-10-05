@@ -215,6 +215,70 @@ pub fn place(saved: Rect, areas: &[Rect]) -> Rect {
     Rect { left: x, top: y, right: x + w, bottom: y + h }
 }
 
+impl Rect {
+    /// Whether the point sits on this panel. `right`/`bottom` are exclusive the
+    /// way Windows draws them: a cursor on the last pixel column of the primary
+    /// is on the primary, and one on the second monitor's first column is not.
+    fn carries(&self, x: f64, y: f64) -> bool {
+        x >= self.left && x < self.right && y >= self.top && y < self.bottom
+    }
+}
+
+/// The `w`×`h` rectangle centred in `area`. Pure, so the placement is a number
+/// anyone can test without a desktop. A rectangle bigger than its area is pinned
+/// to the area's top-left rather than centred on a negative offset: the alternative
+/// is to put the composer's *bottom* — the 保存 row — off the panel.
+fn center_in(area: Rect, w: f64, h: f64) -> Rect {
+    let x = area.left + ((area.width() - w) / 2.0).max(0.0).round();
+    let y = area.top + ((area.height() - h) / 2.0).max(0.0).round();
+    Rect { left: x, top: y, right: x + w, bottom: y + h }
+}
+
+/// Where a pop-up that answers to the *mouse* — Alt+N's 速记, first press of the
+/// session — should open: centred in the work area the cursor is on.
+///
+/// `None` when there is nothing to place it on (no monitors, no cursor). The
+/// caller then leaves the window where the platform put it rather than guessing
+/// an origin, which is `place`'s rule for the same question.
+pub fn centered_on_cursor(size: (f64, f64)) -> Option<Rect> {
+    let areas = work_areas();
+    let (w, h) = size;
+    let home = match cursor() {
+        Some((x, y)) => areas.iter().find(|a| a.carries(x, y)).copied(),
+        // A cursor the desktop will not report (a session with no pointing
+        // device) still has a primary to open on.
+        None => None,
+    }
+    .or_else(|| areas.first().copied())?;
+    Some(center_in(home, w, h))
+}
+
+/// The pointer's position, in the same physical pixels as the work areas.
+#[cfg(target_os = "windows")]
+fn cursor() -> Option<(f64, f64)> {
+    #[repr(C)]
+    struct Point {
+        x: i32,
+        y: i32,
+    }
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetCursorPos(point: *mut Point) -> i32;
+    }
+    let mut p = Point { x: 0, y: 0 };
+    let ok = unsafe { GetCursorPos(&mut p) };
+    if ok != 0 {
+        Some((p.x as f64, p.y as f64))
+    } else {
+        None
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn cursor() -> Option<(f64, f64)> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -308,5 +372,51 @@ mod tests {
             areas.iter().all(|a| a.width() > 0.0 && a.height() > 0.0),
             "a monitor that will not describe itself is skipped, not returned empty: {areas:?}"
         );
+    }
+
+    // ─── where a pop-up that answers to the mouse goes ───────────────────────
+
+    #[test]
+    fn a_panel_carries_its_top_left_and_not_its_bottom_right() {
+        let primary = r(0.0, 0.0, 1920.0, 1040.0);
+        assert!(primary.carries(0.0, 0.0));
+        assert!(primary.carries(1919.0, 1039.0), "the last real pixel is on the panel");
+        assert!(!primary.carries(1920.0, 500.0), "the next panel's first column is not this one");
+        assert!(!primary.carries(500.0, 1040.0), "nor the row below the taskbar");
+        // The virtual desktop's origin is the primary's, so a left-hand panel
+        // carries negative x — and the primary does not answer for it.
+        let left = r(-2560.0, 0.0, 0.0, 1400.0);
+        assert!(left.carries(-2560.0, 10.0));
+        assert!(left.carries(-1.0, 10.0), "x = -1 is the left panel's last column");
+        assert!(!primary.carries(-1.0, 10.0), "and nothing of it is on the primary");
+    }
+
+    #[test]
+    fn a_pop_up_is_centred_in_the_area_it_lands_on() {
+        let area = r(0.0, 0.0, 1920.0, 1040.0);
+        let placed = center_in(area, 560.0, 340.0);
+        assert_eq!(placed, r(680.0, 350.0, 1240.0, 690.0));
+        assert!(area.contains(&placed));
+        // A secondary's own coordinates, taskbar offset and all: centring is
+        // arithmetic on *that* panel, never on the virtual desktop.
+        let second = r(1920.0, 0.0, 4480.0, 1400.0);
+        let placed = center_in(second, 560.0, 340.0);
+        assert_eq!((placed.left, placed.top), (2920.0, 530.0));
+        assert!(second.contains(&placed));
+    }
+
+    #[test]
+    fn a_pop_up_bigger_than_its_panel_keeps_its_buttons_on_screen() {
+        // 900 tall on a 700-tall work area: centring would put the top at -100
+        // and the 保存 row off the bottom of the panel. Pinning to the origin
+        // loses the off-screen overflow instead, which is the half the user
+        // cannot reach anyway.
+        let small = r(0.0, 0.0, 800.0, 700.0);
+        let placed = center_in(small, 1000.0, 900.0);
+        assert_eq!((placed.left, placed.top), (0.0, 0.0));
+        // Same on a panel that does not start at the origin.
+        let left = r(-2560.0, -200.0, 0.0, 1200.0);
+        let placed = center_in(left, 4000.0, 2000.0);
+        assert_eq!((placed.left, placed.top), (-2560.0, -200.0));
     }
 }

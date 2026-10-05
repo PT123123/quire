@@ -2,6 +2,108 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0145 · Alt+N answers with a 速记 window, not with the whole interface
+
+**Alt+N no longer brings the app out.** The key used to restore the main window,
+switch the area to 笔记 and open the composer over it — so a note about the
+document the user was in arrived by putting the whole workspace on top of it. Alt+N
+now shows `QuickNoteWindow`: 560×340, frameless, always-on-top, never raised by
+Alt+M or the tray, and it leaves `active-area` and the main window's visibility
+alone. The note is written *over* the work rather than under an interface nobody
+asked to see.
+
+**One card, two hosts.** `NoteCaptureCard.slint` is the composer the 悬浮 ＋ and
+Alt+N share — the hint row, the field, the `#`-suggestion tray (ADR-0118) and
+保存/取消, drawn once. What differs is where it is painted: the ＋ draws it as an
+overlay inside 笔记 under a scrim, Alt+N fills a window with it. The draft, the
+suggestions and the submit path are the shared `UIState.org-capture-*` properties
+behind it, so there is one write and one catalog, reached from two places.
+`quick-note-host` is the flag that says *which* surface is drawing them, and the
+two are never allowed to hold one composer at once: the overlay is
+`org-capture-open && !quick-note-host`, the ＋ puts a 速记 that has the draft down
+before it takes the draft itself, and Alt+N re-takes it from the overlay.
+
+**The card is parameterised rather than themed twice, because the two hosts differ
+in what is behind them.** `surface` / `gutter` / `body-size` let 速记 paint the
+page's own `Colors.page` ramp with roomier margins and `size-ui-lg` type — a window
+whose card has nothing behind it *is* the page, while a flat grey box parked on the
+desk is exactly what the notes page's overlay is allowed to be. The corners go with
+it: the overlay keeps the dialog's radius, the window cuts them square, since a
+frameless window that rounds its corners shows whatever Windows leaves behind
+there. `OrgButton` came out of the area for the same reason — 取消 is the same
+control seen from two hosts, and a button that exists twice is a button whose
+hover colour drifts. The hint row became keycaps (`#` / `Ctrl+Enter` / `Alt+S` /
+`Esc`) and the draft's character count sits in the button row's margin, per the
+app's own footer rule.
+
+**Every path that ends the composer ends the window, and it is a hide.** 保存,
+取消, ✕, Esc, the platform's own close (`on_close_requested` → `HideWindow`, which
+is Alt+F4 and a taskbar's 关闭窗口) and the page's discard already all ran through
+the controller's capture handlers; `quick_note_put_down` sits in each of them next
+to the draft being cleared, so no sixth place can forget it. Hiding rather than
+destroying is the point: the next Alt+N brings the same card back at the same size,
+in the place the user dragged it to. A window left visible with the host flag
+cleared is a composer sitting on words nobody can see, and the flag set with the
+window gone is the overlay standing down for nothing — the two are written
+together for that reason.
+
+**Alt+N is registered by default now; Alt+M is not.** Both rows were off in a
+library that never wrote them, which was defensible while Alt+N meant "drag the
+whole app in front of me". It is not defensible for 速记, because hiding the window
+to the tray (ADR-0096) is the half of the same idea: a shell that goes away without
+giving back the key that summons a note is a half feature. Alt+M keeps its default
+off — it duplicates the tray icon's own left click, so nothing is missing when it
+is unregistered. The row is renamed 全局 Alt+N 速记（不打开主界面）so the switch
+says what it now buys.
+
+**The window is centred on the cursor's panel, once per session.**
+`monitors::centered_on_cursor` asks the desktop where the pointer is, picks the work
+area that carries it (`carries`, with `right`/`bottom` exclusive the way Windows
+draws them), and centres the pop-up there — falling back to the primary when there
+is no pointing device to ask. Later presses do not move it, and a pop-up that
+followed the mouse every time would jump out from under a user pressing Alt+N for
+a second line. A card larger than its panel pins to that panel's top-left rather
+than centreing on a negative offset: the alternative is to put the 保存 row off
+screen, which is the half the user cannot reach anyway.
+
+**`WS_EX_TOOLWINDOW` has to be re-written on every press, not once.** Slint's
+window flags stop at `always-on-top` and `no-frame`, so the answer is the shell's
+own extended style plus a `SetWindowPos(… FRAMECHANGED)` for the taskbar to
+re-read. What makes this a per-press rule is winit: it owns `GWL_EXSTYLE` and
+rebuilds the whole of it from its own flags whenever any one changes — and
+`VISIBLE` is one of those flags, so the hide that ends the note takes the bit with
+it and hands the window back to the shell as an application window. A write on the
+first show would work exactly once. Showing this window happens in one Rust closure
+and nowhere else, so "re-apply where it is shown" is the whole rule; the write
+skips a window that already carries the bit, and a run whose HWND did not exist yet
+retries one hop later. Cosmetic when both fail — the note is still written.
+
+Context: the hotkey existed before the tray did, and the cheapest honest landing
+for it was the layer the ＋ already opened, which meant borrowing the window that
+held that layer. ADR-0136's single instance and ADR-0096's hide-to-tray made the
+borrow visible: summoning a note from another application became an
+Alt+Tab-worthy event. The alternative shapes considered were a `PopupWindow` (no —
+popups cannot hold keyboard focus across applications the way this must), the
+main window shrunk to the card (a second geometry to persist and restore), and a
+separate process (a second database connection for a text field).
+
+Consequences: `--quick-note` is the verification door for all of this, and the
+only reason a run reaches it — nine stages 900 ms apart that call the *real* doors
+(the hotkey's own closure, the ✕'s callback, the ＋'s callback) and print what the
+platform then reports about both windows, ending in one verdict line that is also
+the exit code. It skips the single-instance quit-claim on purpose: a harness that
+claimed the channel could ask the developer's own session to quit, which is why the
+pairing with `--db` on a throwaway file matters. The 速记 rules checked there are
+five per stage — the main window stayed down, the small window's visibility, which
+surface holds the draft, whether a draft exists at all, and the taskbar bit while
+the window is on screen. `org-quick-note-requested` no longer switches areas, so
+the tick's handler lost its `org_open` call and a note taken while 任务 was showing
+leaves 任务 showing. And 速记 is Windows-only as things stand: the window, the hotkey
+and the verification door all live in the same `#[cfg(windows)]` block, so off
+Windows the component compiles and nothing instantiates it — the taskbar it exists
+to leave out is the same reason.
+
+
 ## ADR-0144 · The settings dialog is a searchable card of five tabs, and 同步 came home
 
 **The settings popup is now a 560 px card with five tabs — 外观 / 通用 / 同步 /

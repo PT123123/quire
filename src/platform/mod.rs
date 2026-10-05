@@ -336,6 +336,131 @@ pub fn read_clipboard_image() -> Option<Vec<u8>> {
     }
 }
 
+/// `WS_EX_TOOLWINDOW` — the bit that keeps a window off the taskbar and out of
+/// Alt+Tab. Spelled out because a caller has to read it back to prove it landed.
+pub const WS_EX_TOOLWINDOW: u32 = 0x0000_0080;
+
+/// The two extended-style questions a Slint window cannot answer about itself.
+/// They live here together because both need the same HWND, and the HWND is the
+/// only place the shell keeps them.
+#[cfg(target_os = "windows")]
+mod win_style {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    const GWL_EXSTYLE: i32 = -20;
+    const WS_EX_TOOLWINDOW: isize = super::WS_EX_TOOLWINDOW as isize;
+    const SWP_NOSIZE: u32 = 0x0001;
+    const SWP_NOMOVE: u32 = 0x0002;
+    const SWP_NOZORDER: u32 = 0x0004;
+    const SWP_NOACTIVATE: u32 = 0x0010;
+    const SWP_FRAMECHANGED: u32 = 0x0020;
+
+    // `GetWindowLongPtrW` is the 64-bit spelling, which is what this shell ships.
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetWindowLongPtrW(hwnd: isize, index: i32) -> isize;
+        fn SetWindowLongPtrW(hwnd: isize, index: i32, value: isize) -> isize;
+        fn SetWindowPos(
+            hwnd: isize,
+            insert_after: isize,
+            x: i32,
+            y: i32,
+            cx: i32,
+            cy: i32,
+            flags: u32,
+        ) -> i32;
+    }
+
+    /// The HWND behind a Slint window. It is only real once the window has been
+    /// shown *and* the event loop has run a frame, so an answer asked on the same
+    /// frame as `show()` is the expected failure rather than a bug.
+    fn hwnd_of(window: &slint::Window) -> Result<isize, String> {
+        // `handle` outlives `raw`: the borrowed window handle points into it
+        let handle = window.window_handle();
+        let raw = handle
+            .window_handle()
+            .map_err(|e| format!("no window handle: {e}"))?;
+        let RawWindowHandle::Win32(win32) = raw.as_ref() else {
+            return Err("the window is not a Win32 HWND".to_string());
+        };
+        Ok(win32.hwnd.get())
+    }
+
+    pub fn ex_style(window: &slint::Window) -> Option<u32> {
+        let hwnd = hwnd_of(window).ok()?;
+        let style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) };
+        // zero is `GetWindowLongPtrW`'s "not a window" answer as well as a legal
+        // style, and no live top-level is ever that
+        (style != 0).then(|| style as u32)
+    }
+
+    pub fn set_tool_window(window: &slint::Window) -> Result<(), String> {
+        let hwnd = hwnd_of(window)?;
+        unsafe {
+            let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+            if style == 0 {
+                return Err("GetWindowLongPtrW failed".to_string());
+            }
+            if style & WS_EX_TOOLWINDOW != 0 {
+                return Ok(());
+            }
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | WS_EX_TOOLWINDOW);
+            // The shell latches the style when it builds the button, so writing
+            // the bit alone would leave it there: the frame change is what makes
+            // it re-read.
+            let ok = SetWindowPos(
+                hwnd,
+                0,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            );
+            if ok == 0 {
+                return Err("SetWindowPos failed".to_string());
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Take a pop-up out of the taskbar and out of Alt+Tab — the thing a 速记 window
+/// owes the user, since a composer that vanishes on Escape has no business
+/// keeping a button on the bar (ADR-0145).
+///
+/// Slint has no property for it: its window flags stop at `always-on-top` and
+/// `no-frame`, so the answer is the shell's own extended style. Best-effort by
+/// contract — the caller logs, and the note still gets written.
+pub fn hide_from_taskbar(window: &slint::Window) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        win_style::set_tool_window(window)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = window;
+        Err("this platform has no taskbar to leave out".to_string())
+    }
+}
+
+/// The window's `GWL_EXSTYLE` bits as the shell actually holds them.
+///
+/// A caller cannot prove a style landed from the write alone, and `--quick-note`
+/// (ADR-0145) is the only one that asks: it reads the bit back off the live
+/// window instead of trusting that `hide_from_taskbar` returned `Ok`.
+pub fn window_ex_style(window: &slint::Window) -> Option<u32> {
+    #[cfg(target_os = "windows")]
+    {
+        win_style::ex_style(window)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = window;
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

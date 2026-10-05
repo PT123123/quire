@@ -1,0 +1,76 @@
+// 速记 — the window Alt+N opens (ADR-0145).
+//
+// Why a window at all: the hotkey is what reaches the app *from inside every
+// other application*, and the answer it owed the user used to be the whole
+// interface — the main window restored, the notes page switched to, and the
+// composer opened over it, on top of the document the user was actually working
+// in. A window of its own answers the note and leaves the rest of the desk alone:
+// it is never shown by Alt+M or the tray, it does not move the main window's page,
+// and it goes away on the same 保存 / 取消 / Esc the overlay answers to.
+//
+// What it is *not* is a second composer. `NoteCaptureCard` draws the card the ＋
+// draws, and the draft, the 标签建议 and the submit path are the shared
+// `UIState.org-capture-*` state behind it — one note, one catalog write, reached
+// from two places. The host flag (`UIState.quick-note-host`) is what tells the two
+// surfaces apart, so the overlay stands down while this window is the one holding
+// the words.
+//
+// Frameless and always-on-top, like the app's own dialogs: it is a thing to type
+// into and then leave, and a title bar to chrome it with is a bar that says
+// "minimise me, maximise me, move me to the corner and forget where". Its header
+// drags it instead; ✕ puts it down.
+
+import { Colors } from "../Colors.slint";
+import { Typography } from "../Typography.slint";
+import { NoteCaptureCard } from "./NoteCaptureCard.slint";
+
+export component QuickNoteWindow inherits Window {
+    title: "Quire 速记";
+    preferred-width: 560px;
+    preferred-height: 340px;
+    min-width: 360px;
+    min-height: 220px;
+    // The point of the hotkey: the note is written over the work, not under it.
+    always-on-top: true;
+    no-frame: true;
+    // The card paints the ramp, so this is the ramp's *top* stop: a flat colour,
+    // because a *brush* on a `Window` is silently flattened to its first stop (the
+    // note AppWindow's background carries). It shows nowhere while the card fills
+    // the client area, and in the theme's own colour where it ever did.
+    background: Colors.p.bg;
+
+    // Whether this window is on screen is Rust's decision, not the file's: every
+    // path that ends the composer — 保存, 取消, ✕, Esc, the platform's own close,
+    // and the page's discard — already runs through the one Rust handler that
+    // clears `UIState.org-capture-open`, and that handler is what puts this window
+    // down (ADR-0145). A window Rust forgets to hide is a note the user cannot see
+    // being typed, so the rule lives where the write happens rather than in a
+    // mirror property that watches it from here.
+    //
+    // `hosted` (`UIState.quick-note-host`) says which surface is drawing the shared
+    // draft, and the notes page's overlay stands down while this window holds it.
+    //
+    // The card is the same component the ＋ opens, with the frameless corners cut
+    // and a drag bar added: a title bar to chrome this with is a bar that says
+    // "minimise me, maximise me, move me to the corner and forget where".
+    public function raise-input() {
+        card.raise-input();
+    }
+
+    card := NoteCaptureCard {
+        // Square corners: the card *is* this window's client area, and Windows
+        // paints what a rounded corner would have shown through as whatever was
+        // behind it — for a frameless window that is the window's own surface.
+        radius: 0px;
+        draggable: true;
+        heading: "速记";
+        // The page's own ramp rather than the overlay's flat panel: nothing is
+        // behind this window, so it has to be the desk rather than a grey box
+        // parked on one.
+        surface: Colors.page;
+        // Roomier margins and one step larger type — the card is the only thing
+        // here, with no rows behind it competing for the same pixels.
+        gutter: 20px;
+        body-size: Typography.size-ui-lg;
+    }
+}

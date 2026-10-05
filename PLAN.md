@@ -4187,5 +4187,58 @@ core 遗留里最后两条（`adopt_uuids` 按整型 id 归并 uuid、影子 := 
 - Android 壳（`quire-compose`）这一轮**没动**：单实例是桌面窗口的性质，而标签列 / 单击 / 设置三项
   按 ADR-0138 之前的约定本就要两端一致——**这一刀只落在桌面上，compose 那一半是欠着的**。
 
+## 速记：Alt+N 开一张卡片而不是开整个应用（2026-10-03，ADR-0145）
+
+**卡片**
+- `ui/components/NoteCaptureCard.slint` 是 ＋ 与 Alt+N 共用的那张卡：提示行（键帽 `#` / `Ctrl+Enter` /
+  `Alt+S` / `Esc`）、输入框、`#` 标签建议竖排 tray、字数、取消/保存。`OrganizerArea` 里三百多行撰写层
+  （+14 / −338）删掉，换成 `if org-capture-open && !quick-note-host : Rectangle { … NoteCaptureCard { } }`。
+- 宿主差的东西参数化而不是复制一份：`surface` / `gutter` / `body-size`。浮层用默认的平面板 + 16px +
+  `size-ui`；小窗把 `Colors.page` 那道渐变铺满、20px、`size-ui-lg`——它背后没有页，它**就是**页。
+- `OrgButton` 从 `OrganizerArea` 里搬出来成独立文件（取消按钮两个宿主都要画）。
+- 计数用 `.character-count` 而不是字节数（Slint 的字符串成员函数不带括号）。
+
+**小窗**
+- `ui/components/QuickNoteWindow.slint`：560×340、`no-frame`、`always-on-top`，`WindowMoveArea` 只在
+  header 上（`draggable: true`），✕ 走 `org-capture-closed`。`AppWindow.slint` 里 `export` 它，否则
+  没有 markup 实例化的组件编译器不会生成。
+- Rust 侧：`state.install_quick_note(window)` 持强引用（热键线程只能拿 `Weak`），`press` 闭包
+  `Arc<dyn Fn>`——热键和 `--quick-note` 共用同一个闭包，脚手架不该另跑一份代码。
+- 放下的路径只有 `quick_note_put_down`，挂在已有的每一条关层路径上（保存 / 取消 / ✕ / Esc /
+  平台关闭 / 切标签 / 开文档），另加 ＋ 接回草稿那一处；`hide_quick_note()` 是 hide 不是 destroy，
+  位置因此留得住。
+
+**不进任务栏**
+- `platform::hide_from_taskbar` → `SetWindowLongPtrW(GWL_EXSTYLE, … | WS_EX_TOOLWINDOW)` +
+  `SetWindowPos(… SWP_FRAMECHANGED)`；`window_ex_style` 把位读回来给 harness 断言。
+- 每次按下都要重写：winit 拥有扩展样式，任一标志变化就按自己的记录整个重建（`window_state.rs:274`
+  加 `WS_EX_APPWINDOW`、`:407` 写 `GWL_EXSTYLE`），而 `VISIBLE` 也是它的标志之一——隐藏把
+  `WS_EX_TOOLWINDOW` 一起带走了。日志里 dismiss 那行 `toolwindow=false` 就是这个，不是 bug。
+- 首次按下在光标所在工作区居中（`monitors::centered_on_cursor`），`placed: AtomicBool` 一个会话只一次。
+
+**默认值**
+- Alt+N 从"库没写过这行就关"改成开（`Types.slint` 的 `hotkey-alt-n: true`、`setting_flag_or` 的默认、
+  以及 `main.rs` 注册处三处同步）；Alt+M 保持关，它和托盘左键重复。设置项文案改名。
+
+**验证**
+- `cargo test --workspace` 全绿：202 lib + 6 + 14 集成。新增三条 `platform::monitors`：`carries` 的
+  右/下开区间（含负 x 的左屏）、`center_in` 在两块屏各自的坐标、比屏大的弹窗钉左上而不是把 保存 排出屏。
+- `./target/debug/quire.exe --db .scratch/qn-run.db --quick-note` 九步跑完，`quick-note verdict: pass`、
+  退出码 0：两次 press 都是 `main-visible=false note-visible=true host=true note-ex=0x00040198
+  toolwindow=true`，dismiss 后 `note-visible=false host=false capture-open=false`，＋ 接回草稿时
+  `host=false` 而小窗没有偷偷显示。
+
+**没验证的（诚实）**
+- **没有按过一次真的 Alt+N**：本机这次运行里 `Alt+N unavailable: the hotkey id 1 could not be
+  registered`（另一个实例占着），harness 调的是热键那个闭包本身——注册成功、以及"注册失败时设置里
+  那一行说得对不对"没测。
+- 小窗的观感（渐变、20px、`size-ui-lg`）只有代码，没有像素证据；`just shot` 的 headless 场景画不到一个
+  `Window`，这一版按用户要求不截屏。
+- 多屏只测了纯函数：这台机器一块屏，`centered_on_cursor` 里"光标在副屏 → 卡片开在副屏"是推断。
+- 窗口位置不持久化：隐藏/显示留着，但重启回到"下一次首按在光标处居中"，是否是想要的规则没问过。
+- 小窗没有主窗口那套 `place` 钳位：360×220 的下限之外，把它拖到工作区外面就留在那儿了，
+  下次 Alt+N 还在那个位置（这条没有处理）。
+
+
 
 

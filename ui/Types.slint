@@ -1612,14 +1612,20 @@ export global UIState {
     // put the next keystroke in front of it — so Rust hands over the byte offset
     // it wrote, the same shape the find flow's `pending-sel-*` pair has.
     in-out property <int> org-capture-caret: 0;
+    // Which of the two surfaces is drawing the draft (ADR-0145). Alt+N hosts the
+    // capture in its own always-on-top window — 速记 without dragging the main
+    // interface out of the tray — and the ＋ hosts it as the notes page's overlay.
+    // One draft, one tray, one submit path; only the placement differs, so the
+    // overlay asks for this flag and the small window answers it.
+    in-out property <bool> quick-note-host: false;
     callback org-capture-opened();
     callback org-capture-sent();
     callback org-capture-closed();
-    // The 全局快捷键's Alt+N (settings, off by default) reaches the capture
-    // layer through here: the hotkey thread cannot hold the app's state, so it
-    // bumps `org-quick-note-tick` (a counter, so every press is a change) and
-    // AppWindow's `changed` hook fires this callback — whose handler walks the
-    // exact same door the ＋ does: the same layer, the same 标签建议.
+    // The 全局快捷键's Alt+N (a settings row, on by default) reaches the capture
+    // through here: the hotkey thread cannot hold the app's state, so it bumps
+    // `org-quick-note-tick` (a counter, so every press is a change) and AppWindow's
+    // `changed` hook fires this callback — whose handler walks the same door the ＋
+    // does: the same draft, the same 标签建议, only hosted in the small window.
     callback org-quick-note-requested();
     in-out property <int> org-quick-note-tick: 0;
     // 标签建议 (ADR-0118): the `#`-typeahead the Android shell's composer has had
@@ -1638,12 +1644,17 @@ export global UIState {
     // same database — and absent means on.
     in-out property <bool> org-auto-input: true;
     callback org-auto-input-toggled(bool);
-    // ── 全局快捷键 (the Settings rows; both off in a library that never wrote
-    // the rows, which is the default) ─────────────────────────────────────────
+    // ── 全局快捷键 (the Settings rows) ────────────────────────────────────────
     // The properties mirror the settings rows so the switches read the persisted
     // choice, and the toggles carry the new value to Rust — which persists it
     // and registers / unregisters the key on the hotkey thread.
-    in-out property <bool> hotkey-alt-n: false;
+    //
+    // Alt+N is **on** in a library that never wrote the row (ADR-0145): 速记 is the
+    // reason the window hides to the tray, and a shell that hides the app without
+    // giving back the key that summons it is a half feature. Alt+M stays off — it
+    // duplicates the tray icon's own left click, so nothing is missing when it is
+    // unregistered.
+    in-out property <bool> hotkey-alt-n: true;
     in-out property <bool> hotkey-alt-m: false;
     callback hotkey-alt-n-toggled(bool);
     callback hotkey-alt-m-toggled(bool);

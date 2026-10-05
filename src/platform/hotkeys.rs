@@ -1,8 +1,12 @@
-// Global hotkeys (Windows): Alt+N opens the note capture, Alt+M shows the main
-// window. Both are **settings, off by default** — a keystroke that reaches the
-// app from inside every other application is not something to turn on for a
-// user who never asked, so the registration only happens when the settings row
-// says so, and `set_enabled` is how the settings' toggles flip it live.
+// Global hotkeys (Windows): Alt+N opens the 速记 window — the note composer on a
+// small always-on-top window of its own, which is the whole point and why it does
+// not raise the main interface (ADR-0145) — and Alt+M shows the main window.
+//
+// Both are settings, and `set_enabled` is how the settings' toggles flip them
+// live. Alt+N is **on** in a library that never wrote the row: hiding the window
+// to the tray without giving back the key that summons the note is a half
+// feature. Alt+M is **off**: it duplicates the tray icon's own left click, so a
+// session without it loses nothing.
 //
 // `RegisterHotKey` is thread-affine: the keys are registered on this module's
 // own thread (one hidden window, one message loop — the same shape

@@ -529,8 +529,8 @@ export component SettingsDialog inherits PopupWindow {
                         }
                     }
                     ToggleRow {
-                        label: "全局 Alt+N 新建笔记";
-                        keywords: "通用 快捷键 全局 新建笔记 alt+n alt";
+                        label: "全局 Alt+N 速记（不打开主界面）";
+                        keywords: "通用 快捷键 全局 新建笔记 速记 alt+n alt";
                         on: UIState.hotkey-alt-n;
                         toggled(v) => {
                             UIState.hotkey-alt-n = v;

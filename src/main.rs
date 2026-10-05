@@ -51,6 +51,10 @@ pub struct LaunchArgs {
     pub pull: Option<String>,
     /// Debug: print loaded page/block counts to stderr (--dump-state).
     pub dump_state: bool,
+    /// Verification: close the main window to the tray, then run the Alt+N press
+    /// and report what the platform shows (--quick-note). Nothing but a test
+    /// harness asks for it; see ADR-0145.
+    pub quick_note: bool,
     /// A2: measure the first painted frame and print one JSON line to stderr
     /// (--measure-startup). Normal runs never set this: no timer, no thread,
     /// no extra frame.
@@ -72,6 +76,7 @@ fn parse_launch_args() -> LaunchArgs {
         db: None,
         portable: false,
         dump_state: false,
+        quick_note: false,
         open: None,
         share: None,
         pull: None,
@@ -124,6 +129,9 @@ fn parse_launch_args() -> LaunchArgs {
             }
             ("--dump-state", _) => {
                 a.dump_state = true;
+            }
+            ("--quick-note", _) => {
+                a.quick_note = true;
             }
             ("--open", Some(v)) => {
                 a.open = Some(std::path::PathBuf::from(v));
@@ -180,6 +188,44 @@ fn show_window_closure(ui: &AppWindow) -> Box<dyn Fn() + Send> {
             }
         });
     })
+}
+
+/// Keep the 速记 pop-up out of the taskbar, on the press that shows it (ADR-0145).
+///
+/// On *every* press rather than once, because the bit does not survive the window
+/// being put down: winit owns the extended style and rewrites the whole of it from
+/// its own flags whenever any of them changes — and `VISIBLE` is one of them, so
+/// the hide that ends the composer takes `WS_EX_TOOLWINDOW` with it and hands the
+/// window back to the shell as an application window. A write on the first show
+/// only would therefore work exactly once. Showing is the only path that makes
+/// this window visible, so re-writing it there is the whole rule; `--quick-note`
+/// reads the bit back off the live window and `hide_from_taskbar` skips a window
+/// that already carries it.
+///
+/// Twice per press because of one sentence in Slint's own documentation: the
+/// window handle only becomes reachable after the event loop has run a frame past
+/// `show()`. The first try is the frame the press is in, and the retry is the hop
+/// later, for the press that built the HWND right now.
+///
+/// Cosmetic when both fail, so the answer is a log line and not a dropped note.
+fn quick_note_keep_off_taskbar(window: &quire::QuickNoteWindow) {
+    if platform::hide_from_taskbar(window.window()).is_ok() {
+        return;
+    }
+    let weak = window.as_weak();
+    let t = Timer::default();
+    t.start(
+        slint::TimerMode::SingleShot,
+        std::time::Duration::from_millis(60),
+        move || {
+            if let Some(window) = weak.upgrade() {
+                if let Err(e) = platform::hide_from_taskbar(window.window()) {
+                    logging::warn(&format!("速记 taskbar: {e}"));
+                }
+            }
+        },
+    );
+    leak_timer(t);
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -345,7 +391,18 @@ fn real_main(start: std::time::Instant) -> Result<(), String> {
     // in that window is told honestly that nothing accepted, rather than this
     // process posting a quit to a loop that has not started.
     let quitting = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let second = quire::platform::quit::claim(
+    // `--quick-note` (ADR-0145) is a harness run rather than a session, and the
+    // rule above is what a harness cannot pass: it would read the live instance's
+    // pipe, and if that instance turned out to be an *older* build the claim would
+    // ask it to quit — the developer's session, ended by a test. So the harness
+    // leaves the channel alone entirely. It opens no shared library either (the
+    // door is paired with `--db` on a throwaway file), which is the other half of
+    // why skipping the claim is safe here and nowhere else.
+    let harness = std::env::args().skip(1).any(|a| a == "--quick-note");
+    let second = if harness {
+        None
+    } else {
+        quire::platform::quit::claim(
         env!("CARGO_PKG_VERSION"),
         {
             let quitting = quitting.clone();
@@ -391,7 +448,8 @@ fn real_main(start: std::time::Instant) -> Result<(), String> {
             };
             quire::platform::notify(title, &body);
         },
-    );
+    )
+    };
     if let Some(verdict) = second {
         // Every non-Primary verdict is a launch that does not become a session:
         // it never opens the database and never draws a window, so there is
@@ -571,34 +629,217 @@ fn real_main(start: std::time::Instant) -> Result<(), String> {
         }
     };
 
-    // The 全局快捷键 (settings rows, both defaulting to off): Alt+N opens the
-    // note capture — the same layer the notes page's ＋ opens, 标签建议 and all —
-    // and Alt+M shows the window. Registration happens only when a row says so,
-    // and the dialog's toggles flip the keys live through the handle below.
+    // A `--quick-note` run's unmet rules, collected by its own stages and read
+    // once the loop ends — so the verdict is also the exit code a harness checks
+    // rather than a word it has to grep for. Empty for every other run.
+    let quick_note_failures: std::rc::Rc<std::cell::RefCell<Vec<String>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+
+    // The 全局快捷键 (settings rows): Alt+N opens the 速记 window — the same card
+    // the notes page's ＋ opens, 标签建议 and all, in a small always-on-top window
+    // that does *not* bring the main interface out (ADR-0145) — and Alt+M shows
+    // the window. Alt+N registers unless its row says otherwise, Alt+M only when
+    // its row says so, and the dialog's toggles flip the keys live through the
+    // handle below.
     #[cfg(windows)]
     {
-        let on_alt_n: Box<dyn Fn() + Send> = {
+        // 速记 is the one thing this window cannot do for itself: a top-level
+        // `Window` is shown from Rust, so the handle lives here (the state keeps
+        // it alive) and the hotkey thread reaches it as a `Weak` it can send.
+        let quick_note =
+            quire::QuickNoteWindow::new().map_err(|e| e.to_string())?;
+        // Its ✕ and its Esc are the card's own 「放弃」; this is the door the
+        // platform closes instead (Alt+F4, a taskbar's 关闭窗口). The draft goes
+        // with it — a composer nobody can see is a composer that lied about
+        // holding the user's words — and the window hides rather than dies, so
+        // the next Alt+N brings back the same card with its position kept.
+        {
             let ui_w = ui.as_weak();
-            Box::new(move || {
-                let ui_w = ui_w.clone();
-                let _ = slint::invoke_from_event_loop(move || {
+            quick_note
+                .window()
+                .on_close_requested(move || {
                     if let Some(ui) = ui_w.upgrade() {
-                        // a hotkey owes the user a window: Alt+N from the tray
-                        // must show the app before the capture opens in it
-                        ui.window().set_minimized(false);
-                        let _ = ui.show();
-                        // the tick, not a direct call: a counter always changes,
-                        // so every press fires the changed hook exactly once
-                        let g = ui.global::<quire::UIState>();
-                        g.set_org_quick_note_tick(g.get_org_quick_note_tick() + 1);
+                        ui.global::<quire::UIState>().invoke_org_capture_closed();
                     }
+                    slint::CloseRequestResponse::HideWindow
+                });
+        }
+        // The window outlives this block because the state holds it — the handle
+        // *is* its strong reference, and `real_main` drops its own binding the
+        // moment the hotkeys are wired. A 速记 window that no longer exists is a
+        // hotkey with nowhere to put the note, so it goes in last, once the
+        // closure below has taken the `Weak` it can send to the hotkey thread.
+        //
+        // The press is an `Arc` rather than the boxed closure the hotkey alone
+        // would need, because a second door calls the *same* press: `--quick-note`
+        // (ADR-0145). A harness that ran its own copy of these lines would be
+        // testing a path no user is ever on.
+        let press: std::sync::Arc<dyn Fn() + Send + Sync> = {
+            let ui_w = ui.as_weak();
+            let qn_w = quick_note.as_weak();
+            // Centred on the cursor once per session: the first press has no
+            // place of its own yet, and every later one has exactly the place the
+            // user dragged the card to. `Weak` and atomics because the hotkey
+            // thread owns this closure — `Rc` would not cross to it.
+            let placed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            std::sync::Arc::new(move || {
+                let ui_w = ui_w.clone();
+                let qn_w = qn_w.clone();
+                let placed = placed.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    // A hotkey owes the user somewhere to type, and nowhere else:
+                    // the main window stays hidden in the tray, and the card
+                    // arrives over whatever the user was working in.
+                    let (Some(ui), Some(quick)) = (ui_w.upgrade(), qn_w.upgrade()) else {
+                        return;
+                    };
+                    if let Err(e) = quick.window().show() {
+                        logging::warn(&format!("速记 window: {e}"));
+                    }
+                    // Every press, not only the first: putting the window down can
+                    // leave it a new HWND on the next one, and a 速记 that came back
+                    // as an application window is a taskbar button the user never
+                    // asked for.
+                    quick_note_keep_off_taskbar(&quick);
+                    if !placed.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                        let size = quick.window().size();
+                        if let Some(rect) = platform::monitors::centered_on_cursor((
+                            size.width as f64,
+                            size.height as f64,
+                        )) {
+                            quick.window().set_position(slint::PhysicalPosition::new(
+                                rect.left as i32,
+                                rect.top as i32,
+                            ));
+                        }
+                    }
+                    // the tick, not a direct call: a counter always changes,
+                    // so every press fires the changed hook exactly once
+                    let g = ui.global::<quire::UIState>();
+                    g.set_org_quick_note_tick(g.get_org_quick_note_tick() + 1);
+                    // …and the caret goes in on the frame the window is in front of
+                    // the user. The card's own `init` ran once, when this window was
+                    // built and invisible; a press that re-shows it is a second
+                    // arrival the `init` cannot see.
+                    quick.invoke_raise_input();
                 });
             })
         };
+        let on_alt_n: Box<dyn Fn() + Send> = {
+            let press = press.clone();
+            Box::new(move || press())
+        };
+        let qn_w = quick_note.as_weak();
+        state.install_quick_note(quick_note);
+
+        // `--quick-note`: the verification door, and the only reason a run
+        // reaches it. Every stage calls the *real* door — the hotkey's own closure,
+        // the card's ✕ callback, the ＋'s callback — and prints what the platform
+        // then reports about the two windows. So the whole contract of ADR-0145 is
+        // a handful of lines a harness reads plus one verdict line, rather than a
+        // screenshot someone squints at.
+        //
+        // The rules are checked here rather than by a script reading the log, so
+        // that the window a stage reports on is the window the action settled
+        // into and not a frame the reader has to guess at.
+        if launch.quick_note {
+            // Stage 0's setup is the state a global hotkey is actually pressed
+            // from: the main window closed to the tray.
+            let _ = ui.window().hide();
+            let t = Timer::default();
+            let press = press.clone();
+            let ui_w = ui.as_weak();
+            let stages = std::rc::Rc::new(std::cell::Cell::new(0u32));
+            let failures = quick_note_failures.clone();
+            t.start(
+                slint::TimerMode::Repeated,
+                std::time::Duration::from_millis(900),
+                move || {
+                    let (Some(ui), Some(quick)) = (ui_w.upgrade(), qn_w.upgrade()) else {
+                        eprintln!("quick-note: a window is gone");
+                        return;
+                    };
+                    let g = ui.global::<quire::UIState>();
+                    // a tick per action and a tick per report, so each report
+                    // reads the frame the action settled into
+                    let stage = stages.get();
+                    stages.set(stage + 1);
+                    match stage {
+                        0 | 6 => press(),
+                        2 => g.invoke_org_capture_closed(),
+                        4 => g.invoke_org_capture_opened(),
+                        s @ (1 | 3 | 5 | 7) => {
+                            // What each door leaves behind, in the platform's own
+                            // words: the 速记 window holds the draft for Alt+N and
+                            // the ＋ hands it back to the notes page's overlay.
+                            let (door, wants_note, wants_capture) = match s {
+                                1 => ("press", true, true),
+                                3 => ("dismiss", false, false),
+                                5 => ("plus", false, true),
+                                _ => ("press-again", true, true),
+                            };
+                            let ex = platform::window_ex_style(quick.window());
+                            let note_visible = quick.window().is_visible();
+                            let toolwindow = ex
+                                .map(|bits| bits & platform::WS_EX_TOOLWINDOW != 0)
+                                .unwrap_or(false);
+                            let host = g.get_quick_note_host();
+                            let capture = g.get_org_capture_open();
+                            eprintln!(
+                                "quick-note {door}: main-visible={} note-visible={} capture-open={} host={} area={} tick={} note-ex={} toolwindow={}",
+                                ui.window().is_visible(),
+                                note_visible,
+                                capture,
+                                host,
+                                g.get_active_area(),
+                                g.get_org_quick_note_tick(),
+                                ex.map(|bits| format!("0x{bits:08X}"))
+                                    .unwrap_or_else(|| "-".into()),
+                                toolwindow,
+                            );
+                            // One draft, one surface: `host` is the flag that
+                            // says which, and the rule the controller keeps is
+                            // that the small window hosts the draft *exactly*
+                            // while it is on screen — the two are written
+                            // together on every path, so a mismatch is one of
+                            // them having been set without the other.
+                            for (name, ok) in [
+                                ("主界面没有跟着出来", !ui.window().is_visible()),
+                                ("小窗的显与隐对得上", note_visible == wants_note),
+                                ("草稿的有无对得上", capture == wants_capture),
+                                ("草稿只有一个宿主", host == note_visible),
+                                ("小窗可见时不在任务栏", !note_visible || toolwindow),
+                            ] {
+                                if !ok {
+                                    failures.borrow_mut().push(format!("{door}: {name}"));
+                                }
+                            }
+                        }
+                        8 => {
+                            // The verdict, and then the session ends on its own:
+                            // a harness that has to kill the process would leave
+                            // the app's own log saying it crashed.
+                            let bad = failures.borrow();
+                            eprintln!(
+                                "quick-note verdict: {}",
+                                if bad.is_empty() {
+                                    "pass".to_string()
+                                } else {
+                                    bad.join(", ")
+                                }
+                            );
+                            let _ = slint::quit_event_loop();
+                        }
+                        _ => {}
+                    }
+                },
+            );
+            leak_timer(t);
+        }
         let on_alt_m: Box<dyn Fn() + Send> = show_window_closure(&ui);
         match quire::platform::hotkeys::install(on_alt_n, on_alt_m) {
             Ok(hotkeys) => {
-                let alt_n_on = state.setting_flag_or("hotkeys.alt-n", false);
+                let alt_n_on = state.setting_flag_or("hotkeys.alt-n", true);
                 let alt_m_on = state.setting_flag_or("hotkeys.alt-m", false);
                 if let Err(e) = hotkeys.set_enabled(quire::platform::hotkeys::ALT_N, alt_n_on) {
                     eprintln!("quire: Alt+N unavailable: {e}");
@@ -840,6 +1081,16 @@ fn real_main(start: std::time::Instant) -> Result<(), String> {
     // lost power". Normal exit path only, after the final flush, so a session
     // that dies any other way still counts as unclean.
     logging::note(logging::END_RECORD);
+    // The harness's verdict *is* its exit code, and it comes after the clean-exit
+    // record: a run that checked the rules and then died on its own way out would
+    // leave the app's log saying it crashed, and the next session's warning would
+    // be about the wrong thing.
+    if !quick_note_failures.borrow().is_empty() {
+        return Err(format!(
+            "quick-note: {} rule(s) unmet",
+            quick_note_failures.borrow().len()
+        ));
+    }
     Ok(())
 }
 

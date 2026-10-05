@@ -357,6 +357,12 @@ pub struct AppState {
     /// and driven by the settings toggles (`wire`). `None` on a session where
     /// the thread refused — the toggles then only persist the choice.
     pub(crate) hotkeys: RefCell<Option<crate::platform::hotkeys::Hotkeys>>,
+    /// Alt+N's 速记 window (ADR-0145), installed by `main` before the hotkey is
+    /// wired, because a top-level `Window` is shown from Rust and the hotkey
+    /// thread may only hold a `Weak`. This is the strong half: it keeps the card
+    /// alive between presses, and it is what `wire` puts away on 保存 and 取消.
+    /// `None` on a headless run — the shot and bench binaries never build one.
+    pub(crate) quick_note: RefCell<Option<crate::QuickNoteWindow>>,
 }
 
 /// The picked rows and which kind they are (ADR-0111). Empty is not a state: the
@@ -1140,6 +1146,7 @@ impl AppState {
             org_selection: RefCell::new(OrgSelection::default()),
             sync_peers_written: RefCell::new(None),
             hotkeys: RefCell::new(None),
+            quick_note: RefCell::new(None),
         };
         // restore persisted recents before the first open marks its page
         let state = Rc::new(state);
@@ -1611,6 +1618,28 @@ impl AppState {
     /// reaching into the struct across the crate line.
     pub fn install_hotkeys(&self, hotkeys: crate::platform::hotkeys::Hotkeys) {
         *self.hotkeys.borrow_mut() = Some(hotkeys);
+    }
+
+    /// The 速记 window Alt+N shows, handed over by `main` (which builds it on the
+    /// UI thread and cannot keep it alive past the hotkey wiring).
+    pub fn install_quick_note(&self, window: crate::QuickNoteWindow) {
+        *self.quick_note.borrow_mut() = Some(window);
+    }
+
+    /// Put the 速记 window down (ADR-0145). Every path that ends the composer —
+    /// 保存, 取消, ✕, Esc, the platform's Alt+F4, and the page's own discard —
+    /// reaches here through the controller's capture handlers, which are the one
+    /// place all five already pass. Hiding rather than destroying is the point:
+    /// the next Alt+N brings the same card back with its position kept.
+    ///
+    /// A run that never built one (the shot and bench binaries) has nothing to
+    /// hide, and the note is written regardless — the window is a surface, not
+    /// the record.
+    pub fn hide_quick_note(&self) {
+        use slint::ComponentHandle;
+        if let Some(window) = self.quick_note.borrow().as_ref() {
+            let _ = window.window().hide();
+        }
     }
 
     pub fn set_ui(&self, ui: slint::Weak<crate::UIState<'static>>) {        *self.ui.borrow_mut() = Some(ui);

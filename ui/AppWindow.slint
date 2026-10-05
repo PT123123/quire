@@ -1,5 +1,11 @@
-// The single top-level Window. Everything below is composition; state and
-// actions are routed through the UIState global to the Rust controller.
+// The app's windows. `AppWindow` is the workspace; 速记 (ADR-0145) is the small
+// always-on-top composer Alt+N answers with, and it is re-exported here because
+// the Rust side shows it as its own top level — a component no markup
+// instantiates is a component the compiler does not generate. Everything below
+// is composition; state and actions are routed through the UIState global to the
+// Rust controller.
+
+export { QuickNoteWindow } from "components/QuickNoteWindow.slint";
 
 import { Theme } from "Theme.slint";
 import { Colors } from "Colors.slint";

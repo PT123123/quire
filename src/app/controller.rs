@@ -1664,10 +1664,11 @@ pub fn bind(ui: &AppWindow, state: &Rc<AppState>) {
     // `auto_input_on_start` must be *written* to fire. The Android shell reads the
     // same `notes.auto_input` row out of the same database.
     g.set_org_auto_input(state.setting_flag_or("notes.auto_input", true));
-    // The 全局快捷键 switches (settings, both defaulting to off): the toggles in
-    // the dialog read the persisted choice, and main has already registered the
-    // keys from the same rows, so the two can never disagree.
-    g.set_hotkey_alt_n(state.setting_flag_or("hotkeys.alt-n", false));
+    // The 全局快捷键 switches (ADR-0145): the toggles in the dialog read the
+    // persisted choice, and main has already registered the keys from the same
+    // rows, so the two can never disagree. Alt+N is on in a library that never
+    // wrote the row; Alt+M is not.
+    g.set_hotkey_alt_n(state.setting_flag_or("hotkeys.alt-n", true));
     g.set_hotkey_alt_m(state.setting_flag_or("hotkeys.alt-m", false));
     // The tray menu follows the app's theme, re-read every time it opens.
     crate::platform::tray::set_theme_mode(crate::platform::tray::theme_mode_of(
@@ -5592,18 +5593,19 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
     {
         let gw = gw.clone();
         let s = state.clone();
-        // Alt+N's landing: the same capture layer the ＋ opens, with the same
-        // 标签建议 — because it *is* the ＋, one callback later. A session
-        // already composing keeps its draft: the hotkey is not a reset.
+        // Alt+N's landing (ADR-0145): the same card the ＋ draws, hosted in the
+        // 速记 window rather than over the notes page — `main` has already shown
+        // that window by the time this runs, and nothing here touches the main
+        // window's visibility or its page. The draft is still the one draft: a
+        // session already composing keeps its words, because the hotkey is not a
+        // reset.
         ui.global::<UIState>().on_org_quick_note_requested(move || {
             let g = gw.upgrade().unwrap();
+            g.set_quick_note_host(true);
             if g.get_org_capture_open() {
                 return;
             }
             org_commit_field(&g, &s);
-            if g.get_active_area() != "organizer" || g.get_org_tab() != 0 {
-                org_open(&g, &s, 0);
-            }
             org_capture_open(&g, &s);
         });
     }
@@ -5940,6 +5942,20 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
         // own `init`), so the caret is where the typing goes.
         ui.global::<UIState>().on_org_capture_opened(move || {
             let g = gw.upgrade().unwrap();
+            // The ＋ asks for the composer *here*, over the rows it filters. If
+            // 速记 is already holding this draft (ADR-0145) the ask is the one
+            // answer already standing on the desk — re-seeding it would throw
+            // away the words the hotkey is mid-way through.
+            if g.get_quick_note_host() && g.get_org_capture_open() {
+                return;
+            }
+            if g.get_quick_note_host() {
+                // Alt+N had the draft and the ＋ takes it back to the rows it
+                // filters: the two surfaces are never allowed to hold one
+                // composer at the same time (ADR-0145).
+                g.set_quick_note_host(false);
+                s.hide_quick_note();
+            }
             org_commit_field(&g, &s);
             org_capture_open(&g, &s);
         });
@@ -5964,6 +5980,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
             g.set_org_capture_draft("".into());
             g.set_org_capture_caret(0);
             g.set_org_capture_open(false);
+            quick_note_put_down(&g, &s);
             // the draft and its tray are one thing: an empty draft has no token
             org_tag_suggest(&g, &s);
             org_refresh(&g, &s);
@@ -5981,6 +5998,7 @@ pub fn wire(ui: &AppWindow, state: &Rc<AppState>) {
             g.set_org_capture_draft("".into());
             g.set_org_capture_caret(0);
             g.set_org_capture_open(false);
+            quick_note_put_down(&g, &s);
             org_tag_suggest(&g, &s);
         });
     }
@@ -6786,13 +6804,32 @@ fn org_land(g: &UIState<'_>, state: &Rc<AppState>, tab: i32, auto_input: bool) {
 /// by every move that leaves the layer's page behind it; a layer that outlived
 /// its page would still hold a half-written sentence the next visit never
 /// asked for.
-fn org_capture_discard(g: &UIState<'_>) {
+fn org_capture_discard(g: &UIState<'_>, state: &Rc<AppState>) {
     if !g.get_org_capture_open() {
         return;
     }
     g.set_org_capture_draft("".into());
     g.set_org_capture_caret(0);
     g.set_org_capture_open(false);
+    quick_note_put_down(g, state);
+}
+
+/// Put the 速记 window down with the composer it was holding (ADR-0145).
+///
+/// `quick-note-host` is the flag that says *which* surface draws the shared draft,
+/// so the two go together: a window left visible with the flag cleared is a hidden
+/// composer still sitting on words nobody can see, and a flag left set with the
+/// window gone is the notes page's overlay standing down for nobody.
+///
+/// Only ever a hide. The window is the same card for the whole session — shown by
+/// the hotkey, put down by every close path — which is what lets the second Alt+N
+/// come back to the place the user dragged it to.
+fn quick_note_put_down(g: &UIState<'_>, state: &Rc<AppState>) {
+    if !g.get_quick_note_host() {
+        return;
+    }
+    g.set_quick_note_host(false);
+    state.hide_quick_note();
 }
 
 /// Open the capture layer, seeded with the tag filter when there is one.
@@ -6866,7 +6903,7 @@ fn org_show(g: &UIState<'_>, state: &Rc<AppState>, tab: i32) {
     // makes throwing the draft away free — nothing is written until ➤, so there
     // is nothing to save. `org_land`'s startup auto-open runs *after* this, so
     // the landing still gets its input.
-    org_capture_discard(g);
+    org_capture_discard(g, state);
     g.set_active_area("organizer".into());
     // A tag filter belongs to the half of the area it was asked of: the notes'
     // tags are not the tasks' tags, so carrying `项目` across a tab switch would
@@ -9007,7 +9044,7 @@ fn show_open_page(g: &UIState<'_>, state: &Rc<AppState>) {
     // Opening a page is also leaving the capture layer behind: it belongs to
     // the notes page it was opened over, and a half-written note following the
     // user into a document is the layer outliving its page.
-    org_capture_discard(g);
+    org_capture_discard(g, state);
     g.set_page_title(title.into());
     g.set_page_breadcrumb(crumb.into());
     g.set_sidebar_selected_id(id);

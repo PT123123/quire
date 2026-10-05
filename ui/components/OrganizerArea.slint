@@ -53,77 +53,11 @@ import { Colors } from "../Colors.slint";
 import { Typography } from "../Typography.slint";
 import { Icon } from "../Icons.slint";
 import { IconButton } from "./IconButton.slint";
+import { OrgButton } from "./OrgButton.slint";
+import { NoteCaptureCard } from "./NoteCaptureCard.slint";
 import { UIState, BoardCard, BoardColumn, TaskRow } from "../Types.slint";
 
 // ---- local vocabulary ----
-
-// One text button in a row of them (the sorts, the form's choices). `selected`
-// is the *one* lit state the whole area uses, so "what am I looking at" reads the
-// same wherever it is asked.
-component OrgButton inherits Rectangle {
-    in property <string> label;
-    in property <bool> selected: false;
-    in property <bool> accent: false;
-    // The one destructive control in the area (删除任务), drawn the way the
-    // reference draws it: outlined in the danger colour rather than filled, so it
-    // reads as an action and not as the row's current state.
-    in property <bool> danger: false;
-    in property <int> color-slot: -1;   // >= 0 draws a palette dot before the label
-    // A drawn glyph instead of the label. `✕` (U+2715) is Dingbats and Segoe UI has
-    // no glyph for it, so a Text of it is an invisible control whose TouchArea still
-    // answers — the exact bug `DatabaseFilterPopup` documents for its delete button.
-    in property <string> icon-name: "";
-    in property <length> font-size: Typography.size-ui;
-    callback clicked();
-
-    height: 26px;
-    width: icon-name != "" ? 30px
-        : label-text.preferred-width + (color-slot >= 0 ? 30px : 18px);
-    border-radius: Theme.radius-sm;
-    border-width: root.danger ? 1px : 0px;
-    border-color: Colors.danger;
-    background: selected
-        ? Colors.surface-selected
-        : (ta.has-hover ? Colors.hover-fill : transparent);
-    animate background { duration: Theme.duration-instant; }
-
-    if color-slot >= 0 : Rectangle {
-        x: 7px;
-        y: (parent.height - 8px) / 2;
-        width: 8px;
-        height: 8px;
-        border-radius: 4px;
-        background: Colors.block-text(color-slot);
-    }
-    label-text := Text {
-        x: color-slot >= 0 ? 21px : 9px;
-        width: parent.width - self.x - 9px;
-        height: parent.height;
-        text: root.label;
-        visible: root.icon-name == "";
-        font-family: Typography.ui-font;
-        font-size: root.font-size;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-        color: root.danger ? Colors.danger
-            : (root.selected ? Colors.text-primary
-            : (root.accent ? Colors.accent-text : Colors.text-secondary));
-        overflow: elide;
-    }
-    if root.icon-name != "" : Icon {
-        x: (parent.width - self.width) / 2;
-        y: (parent.height - self.height) / 2;
-        width: 13px;
-        height: 13px;
-        size: 13px;
-        name: root.icon-name;
-        color: Colors.text-secondary;
-    }
-    ta := TouchArea {
-        mouse-cursor: MouseCursor.pointer;
-        clicked => { root.clicked(); }
-    }
-}
 
 // A field's label, to the left of its control.
 component OrgField inherits Text {
@@ -3352,13 +3286,12 @@ export component OrganizerArea inherits Rectangle {
         }
     }
 
-    // ── the capture layer (ADR-0115) ──────────────────────────────────────────
-    // What the 悬浮 ＋ opens — drawn now as the reference's own NoteEditorDialog:
-    // one centred card, the shortcut hint **above** the field where a hint is
-    // read before typing (not under it, where it is read after), the editor, the
-    // `#`-suggestions as a **vertical list** under the field with the keyboard
-    // walking it (↑↓ move, Enter or Tab apply, Esc puts it away), and 保存/取消
-    // where a dialog keeps its verdict.
+    // ── the capture layer (ADR-0115), hosted here by the 悬浮 ＋ ───────────────
+    // The scrim, the centred placement, and the dismissal — `NoteCaptureCard`
+    // draws what is inside this frame, and Alt+N draws the same card in a window
+    // of its own (ADR-0145). The two hosts are told apart by `quick-note-host`,
+    // because they share one draft: a composer that appeared twice over the same
+    // words would be two notes by the time the first one was saved.
     //
     // **Nothing is written until 保存.** The draft is a property and the layer is
     // a mode, so closing it — by ✕, 取消, Escape, or a click on the scrim —
@@ -3371,7 +3304,7 @@ export component OrganizerArea inherits Rectangle {
     // An overlay inside the area rather than a window popup, for the reason 指令's
     // card is one: what it acts on is *these* rows. Its `TouchArea` is what makes
     // the three columns behind it unclickable while a note is being written.
-    if UIState.org-capture-open : capture-root := Rectangle {
+    if UIState.org-capture-open && !UIState.quick-note-host : Rectangle {
         width: parent.width;
         height: parent.height;
         background: Colors.scrim;
@@ -3385,273 +3318,16 @@ export component OrganizerArea inherits Rectangle {
             clicked => { UIState.org-capture-closed(); }
         }
 
-        // The suggestion tray's own session state. The list is Rust's (the pool,
-        // the prefix rule, the five-item cap); *where the keyboard is in it* is
-        // the field's, and `suggest-hidden` is the Esc-to-put-it-away the
-        // reference's own eventFilter does — the tray comes back the moment the
-        // draft changes, because a hidden tray over a `#` still being typed is
-        // a tray that lied.
-        property <int> suggest-index: 0;
-        property <bool> suggest-hidden: false;
-        property <bool> suggest-visible: UIState.org-tag-suggestions.length > 0
-            && !suggest-hidden;
-
+        // Centred, the reference dialog's own placement (560 × 320 on its
+        // screen's available area) — a composer at the window's middle is a
+        // composer the eye is already at, and the scrim carries the "this is
+        // the only thing happening" that its dialog's modality did.
         Rectangle {
-            // Centred, the reference dialog's own placement (560 × 320 on its
-            // screen's available area) — a composer at the window's middle is a
-            // composer the eye is already at, and the scrim carries the "this is
-            // the only thing happening" that its dialog's modality did.
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             width: min(parent.width - 80px, 560px);
             height: min(parent.height - 60px, 340px);
-            background: Colors.surface-overlay;
-            border-radius: Theme.radius-lg;
-            border-width: 1px;
-            border-color: Colors.border-strong;
-
-            // Swallows the card's own clicks — its padding, its title, the space
-            // under the buttons — so that only the scrim *around* the card closes
-            // the layer. Declared first, so every control below sits above it;
-            // without it a click on the card's own margin would land on the
-            // scrim behind and dismiss the note being written.
-            TouchArea { }
-
-            VerticalLayout {
-                padding: 16px;
-                spacing: 10px;
-
-                HorizontalLayout {
-                    height: 24px;
-                    spacing: 8px;
-                    Text {
-                        text: "新建笔记";
-                        font-family: Typography.ui-font;
-                        font-size: Typography.size-ui-lg;
-                        font-weight: Typography.weight-semibold;
-                        color: Colors.text-primary;
-                        vertical-alignment: center;
-                    }
-                    Rectangle { horizontal-stretch: 1; }
-                    IconButton {
-                        icon-name: "x";
-                        size: 22px;
-                        clicked => { UIState.org-capture-closed(); }
-                    }
-                }
-                // The hint, where the reference puts it: **above** the field. Its
-                // own dialog's line — 提示：# 输入标签，Ctrl+Enter 或 Alt+S 提交，
-                // Esc 取消 — names the one convention (`#`) and the three keys,
-                // and a convention read before the first keystroke is the only
-                // kind that saves one.
-                Text {
-                    height: 16px;
-                    text: "提示：# 输入标签，Ctrl+Enter 或 Alt+S 提交，Esc 取消";
-                    font-family: Typography.ui-font;
-                    font-size: Typography.size-caption;
-                    color: Colors.text-muted;
-                    vertical-alignment: center;
-                    overflow: elide;
-                }
-
-                Rectangle {
-                    vertical-stretch: 1;
-                    min-height: 56px;
-                    border-radius: Theme.radius-sm;
-                    border-width: 1px;
-                    border-color: capture-input.has-focus ? Colors.accent : Colors.border;
-                    background: Colors.surface;
-
-                    // The placeholder, under the field: Slint's `TextInput` has none,
-                    // and an empty box with no hint is a box nobody knows what to
-                    // type into. The reference's own words, which name the one
-                    // convention this layer has.
-                    if UIState.org-capture-draft == "" : Text {
-                        x: 12px;
-                        y: 10px;
-                        width: parent.width - 24px;
-                        text: "写点什么… 用 #标签 归类";
-                        font-family: Typography.ui-font;
-                        font-size: Typography.size-ui;
-                        color: Colors.text-muted;
-                    }
-                    capture-input := TextInput {
-                        x: 10px;
-                        y: 8px;
-                        width: parent.width - 20px;
-                        height: parent.height - 16px;
-                        text <=> UIState.org-capture-draft;
-                        wrap: word-wrap;
-                        font-family: Typography.ui-font;
-                        font-size: Typography.size-ui;
-                        color: Colors.text-primary;
-                        selection-foreground-color: Colors.text-on-accent;
-                        selection-background-color: Colors.selection;
-                        // Every keystroke re-asks Rust for the suggestion list: the
-                        // field owns the text, and the pool is the catalog's. A
-                        // change also brings a hidden tray back and puts the
-                        // keyboard's row back at the top — the tray that hid for
-                        // Esc has no business staying hidden under new text.
-                        edited => {
-                            UIState.org-capture-draft-changed();
-                            capture-root.suggest-hidden = false;
-                            capture-root.suggest-index = 0;
-                        }
-                        // Escape puts the tray away first and the layer second —
-                        // the reference's own two-step — and Ctrl+Enter *is* 保存,
-                        // as are Alt+S and, with the tray up, plain Enter and Tab
-                        // (a suggestion the keyboard walked to is a word the
-                        // keyboard is asking to finish, not a line to break).
-                        key-pressed(event) => {
-                            if (capture-root.suggest-visible && event.text == Key.UpArrow) {
-                                capture-root.suggest-index = Math.mod(
-                                    capture-root.suggest-index
-                                    + UIState.org-tag-suggestions.length - 1,
-                                    UIState.org-tag-suggestions.length);
-                                accept
-                            } else if (capture-root.suggest-visible && event.text == Key.DownArrow) {
-                                capture-root.suggest-index = Math.mod(
-                                    capture-root.suggest-index + 1,
-                                    UIState.org-tag-suggestions.length);
-                                accept
-                            } else if (capture-root.suggest-visible
-                                && (event.text == Key.Return || event.text == Key.Tab)) {
-                                UIState.org-tag-suggest-picked(
-                                    UIState.org-tag-suggestions[capture-root.suggest-index]);
-                                capture-input.set-selection-offsets(
-                                    UIState.org-capture-caret,
-                                    UIState.org-capture-caret,
-                                );
-                                capture-root.suggest-index = 0;
-                                accept
-                            } else if (event.text == Key.Escape) {
-                                if (capture-root.suggest-visible) {
-                                    capture-root.suggest-hidden = true;
-                                } else {
-                                    UIState.org-capture-closed();
-                                }
-                                accept
-                            } else if (event.modifiers.control && event.text == Key.Return) {
-                                UIState.org-capture-sent();
-                                accept
-                            } else if (event.modifiers.alt && event.text == "s") {
-                                UIState.org-capture-sent();
-                                accept
-                            } else {
-                                reject
-                            }
-                        }
-                        // The caret is asked for on the frame the field exists, so
-                        // the layer is ready to be typed into the moment it appears
-                        // — and it goes *after* whatever `org-capture-open` seeded
-                        // (the tag filter's `#token`), not in front of it.
-                        init => {
-                            capture-input.focus();
-                            capture-input.set-selection-offsets(
-                                UIState.org-capture-caret,
-                                UIState.org-capture-caret,
-                            );
-                        }
-                    }
-                }
-
-                // ── 标签建议 (ADR-0118), as the reference's list ───────────
-                // The tray the editor raises for the `#token` being typed — but
-                // drawn as its dialog draws one: a **vertical list** under the
-                // field, at most five rows (Rust's cap), the keyboard's row lit in
-                // the accent, a tap applying the same way the keys do. Rust
-                // rewrites the token and hands the caret's new byte offset back;
-                // the field takes it, so the next keystroke lands after the tag
-                // and not inside it.
-                if capture-root.suggest-visible : Rectangle {
-                    height: min(UIState.org-tag-suggestions.length * 26px + 8px, 138px);
-                    border-radius: Theme.radius-sm;
-                    border-width: 1px;
-                    border-color: Colors.border;
-                    background: Colors.surface-hover;
-                    clip: true;
-
-                    ScrollView {
-                        VerticalLayout {
-                            padding: 4px;
-                            spacing: 0px;
-                            for tag[i] in UIState.org-tag-suggestions : Rectangle {
-                                height: 26px;
-                                border-radius: Theme.radius-xs;
-                                background: capture-root.suggest-index == i
-                                    ? Colors.accent
-                                    : (sug-ta.has-hover ? Colors.hover-fill : transparent);
-                                animate background { duration: Theme.duration-instant; }
-                                Text {
-                                    x: 6px;
-                                    width: parent.width - 12px;
-                                    height: parent.height;
-                                    text: "#" + tag;
-                                    font-family: Typography.ui-font;
-                                    font-size: Typography.size-ui;
-                                    color: capture-root.suggest-index == i
-                                        ? Colors.text-on-accent : Colors.text-primary;
-                                    vertical-alignment: center;
-                                    overflow: elide;
-                                }
-                                sug-ta := TouchArea {
-                                    mouse-cursor: MouseCursor.pointer;
-                                    clicked => {
-                                        UIState.org-tag-suggest-picked(tag);
-                                        capture-input.set-selection-offsets(
-                                            UIState.org-capture-caret,
-                                            UIState.org-capture-caret,
-                                        );
-                                        capture-root.suggest-index = 0;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                HorizontalLayout {
-                    height: 30px;
-                    spacing: 8px;
-                    Rectangle { horizontal-stretch: 1; }
-                    // 取消: the dialog's other verdict, and it means the same
-                    // thing its window had it mean — the draft is thrown away,
-                    // not parked.
-                    OrgButton {
-                        label: "取消";
-                        clicked => { UIState.org-capture-closed(); }
-                    }
-                    // 保存: the PrimaryBtn, drawn filled — the one control in the
-                    // layer that carries the accent as a plate, because a verdict
-                    // is exactly what the accent plates in this window say. Dimmed
-                    // over an empty draft instead of hidden — the button is where
-                    // the eye already is, and Rust refuses the write as well, so
-                    // a click on a dimmed 保存 commits nothing.
-                    Rectangle {
-                        width: save-text.preferred-width + 32px;
-                        height: 30px;
-                        border-radius: Theme.radius-sm;
-                        background: Colors.accent;
-                        opacity: UIState.org-capture-draft == "" ? 0.4 : 1;
-                        animate opacity { duration: Theme.duration-instant; }
-                        save-text := Text {
-                            width: self.preferred-width;
-                            height: parent.height;
-                            text: "保存";
-                            font-family: Typography.ui-font;
-                            font-size: Typography.size-ui;
-                            font-weight: Typography.weight-semibold;
-                            color: Colors.text-on-accent;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                        save-ta := TouchArea {
-                            mouse-cursor: MouseCursor.pointer;
-                            clicked => { UIState.org-capture-sent(); }
-                        }
-                    }
-                }
-            }
+            NoteCaptureCard { }
         }
     }
 }

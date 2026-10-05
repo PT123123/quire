@@ -64,7 +64,13 @@ slint = { version = "1.18", default-features = false, features = [
     "system-tray",
     "image-default-formats",
     "compat-1-18",
+    # The 速记 pop-up has to be taken off the taskbar, and Slint has no property
+    # for that — only the HWND does it (ADR-0145).
+    "raw-window-handle-06",
 ] }
+# Only for that one HWND: `RawWindowHandle::Win32` behind `Window::window_handle()`.
+# The same 0.6 slint itself builds against, so no second copy lands in the binary.
+raw-window-handle = "0.6"
 
 [features]
 default = ["femtovg"]
