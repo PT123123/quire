@@ -2,6 +2,61 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0147 · 托盘菜单真的暗下来；新建笔记的提示与保存按钮去掉装饰
+
+三处「看着不对」的界面，按根因分别处理。
+
+**托盘菜单：白底的真因是少了一次 opt-in，不是主题名写错了。**
+`src/platform/tray.rs` 一直只用 `SetWindowTheme(hwnd, "DarkMode_Explorer", …)`。
+这一句**单独不够**：dark menu 子应用只对**已 opt-in 的窗口**生效，缺的是
+`AllowDarkModeForWindow`。少了它，`SetWindowTheme` 依然返回 S_OK，菜单照样白底
+—— 一个「成功」却什么都没变的返回码，所以看起来像「主题代码是对的但菜单还是
+白的」。现在补齐三步，顺序有意义：`SetPreferredAppMode` 定进程级语义 →
+`AllowDarkModeForWindow` 让 dark sub-app 生效 → `SetWindowTheme`（原来就有）。
+两个函数在 `uxtheme.dll` 里**只按序号导出**、没有名字，`link(name = "uxtheme")`
+声明不了，所以用 `GetProcAddress` + `MAKEINTRESOURCEA` 运行时解析；序号
+（135 / 133）自 Win10 1809 起未变，钉成常量，Windows 万一改号的表现是**查找落空
+→ 菜单退回系统默认**，而不是进程起不来。托盘自己的 HWND 在 install 时 opt-in 一次；
+popup 是 shell 在 `TrackPopupMenu` 时才建的**另一个**窗口，每次开菜单单独 opt-in。
+
+顺带修了一个方向性错误：`system_is_light()` 读不到注册表时原来答「亮」。quire 的
+12 套主题里只有 `light` 一套是亮的（`Colors.slint`），所以「读不到」几乎一定是那
+11 套暗主题之一；读失败就静默地给暗色应用配一个白底菜单，正是被报的那个现象。现在
+答「暗」。
+
+**新建笔记的提示行：键帽删掉，换成参考实现的一行淡字。** 参考实现
+（`activitywatch/aw-qtui/src/widgets.cpp:832`）的提示是**一行 11px muted 纯文字**
+`提示：# 输入标签，Ctrl+Enter 或 Alt+S 提交，Esc 取消`，整个项目里没有任何 keycap
+控件。我们原来画的是一排键帽，而它难看的根因写在那一行里：
+`Colors.p.fg.mix(transparent, 0.94)` 是拿 **94% 不透明的 foreground 当背景**，所以
+亮色主题下每个键帽都是一块近白的板子加灰字 —— 一个只有两个按钮的对话框里凭空
+多出三个盒子。现在按参考的形状：一行 `size-caption` 的 `text-muted`。
+
+**保存按钮：从 accent 底改成中性抬起面。** 这一条**有意偏离参考实现**（它的
+`PrimaryBtn` 是 accent 渐变），理由是这个 app 自己对 accent 的预算，不是口味：
+accent 留给**当下需要注意**的东西 —— 聚焦时输入框的环、点亮的标签建议行、卡片标题
+旁那道标记。「有一份草稿、按钮在这儿」这种常开状态不该占掉调色板里最响的颜色，而
+这正是那个蓝底读起来像广告而不像按钮的原因。所以改成抬起面：`Colors.surface` +
+`border-strong` 边 + `text-primary` 字。它仍然压过 取消（后者是透明底、
+`text-secondary` 字），主次关系还在，只是不用色相来表达。顺带删掉了原来那道
+1px `#ffffff2e` 高光条和 `send` 图标 —— 那是 web 按钮的做法，和这个 app 的平面
+表面放在一起只会像贴上去的。
+
+**速记的关闭路径复查：没有改动，因为它是通的。** 报告里「窗口关不掉」没有复现：
+`--quick-note` 的四个门（✕ / 取消 / Esc / ＋）全部通过，而 headless 下真发鼠标
+事件点 ✕ 也确实把 `capture-open` 从 `true` 打成 `false`。中途一度怀疑 header 里的
+`WindowMoveArea` 会 grab 掉 ✕ 的点击 —— Slint 的实现确实返回
+`ForwardAndInterceptGrab` —— 但实测证明它没有吞掉子控件的点击，所以**没有为了一个
+没复现的症状去改交互**。`quire_shot.rs` 的 `--click` 探针补上了 `capture-open`，
+因为在此之前这个探针看不见笔记 composer，恰恰是最需要它的一次。
+
+**后果与未验证项。** 托盘菜单**只能在真机右键托盘图标确认** —— 它是 shell 画的
+`#32768` 窗口，headless shot 拍不到，所以那部分逻辑与 FFI 已按 uxtheme 契约核对、
+但实际是否真黑底还没看过。composer 的两处改动有 before/after 截图
+（`docs/screenshots/`）与 headless 点击验证。`WindowMoveArea` 那一项**只是没复现**，
+不等于证明不存在；如果真机上仍然关不掉，第一嫌疑就是它，下一步是把它挪出 header
+或换成手写的拖拽 `TouchArea`。
+
 ## ADR-0146 · 视觉迭代走 Slint live preview，不自研热重载
 
 **决定：UI 的快速回路用 Slint 自带的 live preview，不自研。** 这个 shell 的

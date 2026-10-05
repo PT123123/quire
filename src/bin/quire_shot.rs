@@ -95,13 +95,14 @@ fn parse(args: &[String], key: &str) -> Option<String> {
 fn probe(ui: &AppWindow, label: &str) {
     let g = ui.global::<UIState>();
     println!(
-        "{label} menu-open={} slash-open={} slash-insert={} block-menu-id={} palette-open={} search-open={}",
+        "{label} menu-open={} slash-open={} slash-insert={} block-menu-id={} palette-open={} search-open={} capture-open={}",
         g.get_menu_open(),
         g.get_slash_open(),
         g.get_slash_insert(),
         g.get_block_menu_open_id(),
         g.get_palette_open(),
         g.get_search_open(),
+        g.get_org_capture_open(),
     );
 }
 

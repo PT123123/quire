@@ -16,40 +16,20 @@
 // `surface`, `gutter` and `body-size` are how 速记 gets the deep page ramp, the
 // roomier margins and the larger type a thing you *only* type into wants, without
 // this file becoming two files.
+//
+// The hint and the buttons are the reference's own, copied value-for-value
+// (ADR-0147): the hint is **one line of 11px muted prose** — `提示：# 输入标签，
+// Ctrl+Enter 或 Alt+S 提交，Esc 取消` — with no keycap plates, and the row it
+// replaces was a row of bordered white chips with grey type on them, which read
+// as three extra buttons in a dialog that has two.
 
 import { ScrollView } from "std-widgets.slint";
 import { Theme } from "../Theme.slint";
 import { Colors } from "../Colors.slint";
 import { Typography } from "../Typography.slint";
-import { Icon } from "../Icons.slint";
 import { IconButton } from "./IconButton.slint";
 import { OrgButton } from "./OrgButton.slint";
 import { UIState } from "../Types.slint";
-
-// One keystroke named the way a keyboard names it: a small plate with the key on
-// it, so the hint row reads as `Ctrl+Enter` 保存 rather than as a sentence nobody
-// re-reads the second time.
-component CaptureKey inherits Rectangle {
-    in property <string> label;
-    height: 16px;
-    width: key-text.preferred-width + 10px;
-    border-radius: 4px;
-    border-width: 1px;
-    border-color: Colors.border;
-    background: Colors.p.fg.mix(transparent, 0.94);
-
-    key-text := Text {
-        x: 5px;
-        width: parent.width - 10px;
-        height: parent.height;
-        text: root.label;
-        font-family: Typography.mono-font;
-        font-size: 10.5px;
-        color: Colors.text-secondary;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-    }
-}
 
 export component NoteCaptureCard inherits Rectangle {
     // The card's own corners. The overlay draws on top of the page and keeps the
@@ -171,43 +151,30 @@ export component NoteCaptureCard inherits Rectangle {
                 }
             }
         }
-        // The hint, where the reference puts it: **above** the field, as keycaps.
-        // Its own dialog's line — 提示：# 输入标签，Ctrl+Enter 或 Alt+S 提交，Esc
-        // 取消 — names the one convention (`#`) and the three keys, and a
-        // convention read before the first keystroke is the only kind that saves
-        // one. Spelled as keys because that is what they are: the words between
-        // them are the only prose here.
+        // The hint, where the reference puts it and in the shape it draws it:
+        // **one line of 11px muted prose**, above the field. Its own dialog's line —
+        // 提示：# 输入标签，Ctrl+Enter 或 Alt+S 提交，Esc 取消 — names the one
+        // convention (`#`) and the three keys, and a convention read before the
+        // first keystroke is the only kind that saves one.
+        //
+        // It was a row of keycap plates, and that is the whole reason it looked
+        // wrong: `Colors.p.fg.mix(transparent, 0.94)` is a 94%-opaque *foreground*
+        // as a background, so on a light theme each chip was a near-white plate
+        // with grey type sitting on it — three boxes in a dialog whose only
+        // buttons are at the other end of the card. The reference has no keycap
+        // widget anywhere; the shortcuts are words. (ADR-0147)
         HorizontalLayout {
-            height: 16px;
-            spacing: 5px;
-            CaptureKey { label: "#"; }
+            height: 15px;
             Text {
-                text: "标签";
+                text: "提示：# 输入标签，Ctrl+Enter 或 Alt+S 提交，Esc 取消";
                 font-family: Typography.ui-font;
+                // A step *below* the body size, deliberately: this is tertiary
+                // chrome, and it must not compete with the words being typed.
                 font-size: Typography.size-caption;
                 color: Colors.text-muted;
                 vertical-alignment: center;
+                overflow: elide;
             }
-            Rectangle { width: 4px; }
-            CaptureKey { label: "Ctrl+Enter"; }
-            CaptureKey { label: "Alt+S"; }
-            Text {
-                text: "保存";
-                font-family: Typography.ui-font;
-                font-size: Typography.size-caption;
-                color: Colors.text-muted;
-                vertical-alignment: center;
-            }
-            Rectangle { width: 4px; }
-            CaptureKey { label: "Esc"; }
-            Text {
-                text: "取消";
-                font-family: Typography.ui-font;
-                font-size: Typography.size-caption;
-                color: Colors.text-muted;
-                vertical-alignment: center;
-            }
-            Rectangle { horizontal-stretch: 1; }
         }
 
         Rectangle {
@@ -415,52 +382,54 @@ export component NoteCaptureCard inherits Rectangle {
                 label: "取消";
                 clicked => { UIState.org-capture-closed(); }
             }
-            // 保存: the one control in the layer that carries the accent as a
-            // plate, because a verdict is exactly what the accent plates in this
-            // window say. Lit from the top edge down, and dimmed over an empty
-            // draft instead of hidden — the button is where the eye already is,
-            // and Rust refuses the write as well, so a click on a dimmed 保存
-            // commits nothing.
+            // 保存: a neutral raised surface with a plain border and the label in
+            // primary colour — **not** an accent plate.
+            //
+            // This deliberately diverges from the reference, whose `PrimaryBtn`
+            // is an accent gradient, and the reason is the app's own accent
+            // budget rather than taste: the accent is kept for things that need
+            // attention *now* — the focused field's ring, the lit 标签建议 row,
+            // the mark on the card's own heading. A row that is simply on (here:
+            // "there is a draft, and this is where it goes") spends the loudest
+            // colour in the palette on nothing, which is what made the blue
+            // slab read as an ad rather than as a button.
+            //
+            // So it is raised instead of filled: one step off the card's own
+            // surface, a `border-strong` edge, `text-primary` label. It still
+            // outranks 取消 (which is flat, transparent, `text-secondary`), so
+            // the row keeps a clear primary/secondary reading without the hue.
+            // Dimmed over an empty draft rather than hidden — the button is
+            // where the eye already is, and Rust refuses the write too, so a
+            // click on a dimmed 保存 commits nothing. (ADR-0147)
             Rectangle {
                 width: save-text.preferred-width + 46px;
                 height: 30px;
                 border-radius: Theme.radius-md;
-                background: @linear-gradient(180deg,
-                    Colors.accent.mix(#ffffff, 0.14),
-                    Colors.accent);
-                opacity: UIState.org-capture-draft == "" ? 0.42
-                    : (save-ta.pressed ? 0.78
-                    : (save-ta.has-hover ? 1 : 0.93));
+                border-width: 1px;
+                border-color: save-ta.has-hover
+                    ? Colors.border-strong : Colors.border;
+                background: save-ta.has-hover
+                    ? Colors.surface-hover : Colors.surface;
+                animate background { duration: Theme.duration-instant; }
+                animate border-color { duration: Theme.duration-instant; }
+                opacity: UIState.org-capture-draft == "" ? 0.55
+                    : (save-ta.pressed ? 0.7 : 1);
                 animate opacity { duration: Theme.duration-instant; }
-                Rectangle {
-                    x: 9px;
-                    y: 1px;
-                    width: parent.width - 18px;
-                    height: 1px;
-                    background: #ffffff2e;
-                }
-                save-icon := Icon {
-                    x: 13px;
-                    y: (parent.height - self.size) / 2;
-                    size: 13px;
-                    name: "send";
-                    color: Colors.text-on-accent;
-                }
                 save-text := Text {
-                    x: 13px + save-icon.width + 7px;
-                    width: parent.width - self.x - 14px;
+                    x: 13px;
+                    width: parent.width - 26px;
                     height: parent.height;
                     text: "保存";
                     font-family: Typography.ui-font;
                     font-size: Typography.size-ui;
                     font-weight: Typography.weight-semibold;
-                    color: Colors.text-on-accent;
+                    color: Colors.text-primary;
                     horizontal-alignment: center;
                     vertical-alignment: center;
                 }
                 save-ta := TouchArea {
                     mouse-cursor: MouseCursor.pointer;
-                    clicked => { UIState.org-capture-sent(); }
+                    clicked => { UIState.org_capture-sent(); }
                 }
             }
         }

@@ -2,6 +2,29 @@
 
 ## 构建 (unreleased)
 
+### 界面
+
+- **托盘菜单真的是黑底白字了** (ADR-0147). 之前只调了
+  `SetWindowTheme(.., "DarkMode_Explorer", ..)`, 而这一句**单独不够**: dark menu
+  子应用只对**已 opt-in 的窗口**生效。少了 `AllowDarkModeForWindow`, 那句调用照样
+  返回 S_OK, 菜单照样白底 —— 一个「成功」却什么都没变的返回码。现在补上
+  `SetPreferredAppMode` + `AllowDarkModeForWindow` 两步, 两个函数在 `uxtheme.dll`
+  里只按序号导出, 用 `GetProcAddress` 运行时解析
+- 顺带修了一个方向性错误: 读不到注册表时 `system_is_light()` 原来答「亮」。12 套
+  主题里只有一套是亮的, 所以读失败几乎一定落在暗色那边, 于是暗色应用配了个白底
+  菜单。现在答「暗」
+- **新建笔记/速记的提示行不再是一排白底灰字键帽** (ADR-0147). 难看的根因是
+  `Colors.p.fg.mix(transparent, 0.94)` —— 拿 94% 不透明的 foreground 当背景, 亮色
+  主题下每个键帽都是一块近白的板子加灰字。改成参考实现的一行淡字:
+  `提示：# 输入标签，Ctrl+Enter 或 Alt+S 提交，Esc 取消` (11px, muted)
+- **保存按钮的蓝底去掉了** (ADR-0147), 改成中性抬起面 (`surface` 底 +
+  `border-strong` 边 + `text-primary` 字), 并删掉那道 1px 高光条和 send 图标。
+  这一条有意偏离参考实现的 accent 渐变: accent 留给当下需要注意的东西 (聚焦环、
+  点亮的标签建议行), 「有一份草稿、按钮在这儿」这种常开状态不该占最响的颜色。
+  它仍然压过 取消, 主次关系没丢, 只是不再用色相表达
+- `quire-shot --click/--key` 的探针补上 `capture-open`: 此前它看不见笔记
+  composer, 而那恰恰是最需要这个探针的一次
+
 ### 存储
 
 - **桌面端其实一直在保存不了任何东西** (ADR-0142). 真实库缺 FTS 索引表
