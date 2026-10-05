@@ -2,6 +2,50 @@
 
 Format: decision → context → consequences. Newest first.
 
+## ADR-0146 · 视觉迭代走 Slint live preview，不自研热重载
+
+**决定：UI 的快速回路用 Slint 自带的 live preview，不自研。** 这个 shell 的
+视觉工作基本由 agent 驱动，而 `.slint` 是提前编译成原生代码的，所以「改 3 行
+UI → 看效果」现在要走完 `slint-build` → `rustc` → `link` → 启动整条链。实测
+一次 `cargo build --bin quire`（只改 `main.rs`）~4m20s，改 `.slint` 触发
+`build.rs` 重跑时更长。开启 live preview 后，Slint 改为生成走解释器的接口，
+运行中的应用监视 `.slint` 并自动重载，**业务逻辑保持连接**（properties /
+callbacks / models 保留），语法错误时屏幕上保留上一个版本。
+
+**怎么开：feature + 环境变量两样，缺一不可。**
+`SLINT_LIVE_PREVIEW=1 cargo run --features slint/live-preview`。官方明确要求
+**不要**把 `live-preview` 写进 `Cargo.toml` 的 `[features]`，要用命令行传，
+这样它不进常规构建。本仓库满足全部前提：pin 的 `slint = "1.18"` 自带这个
+feature（`slint-1.18.1/Cargo.toml:130`），且是 `include_modules!()` +
+`slint_build::compile` 的标准形态。**不用改 `build.rs`** —— `slint-build`
+自己会为 `SLINT_LIVE_PREVIEW` 发 `rerun-if-env-changed`。
+
+**权衡过 slint-viewer，不作为本项目的回路。** 它不需要改代码就能开 `.slint`，
+但对我们几乎没用：`AppWindow.slint` 依赖 `UIState` 全局、`StdWidgets`、
+`@image-url` 和一整套 Rust 侧喂进来的 model，viewer 没有那些 model，渲染出来
+是个空壳 —— 恰恰是最不适合判断视觉的那种「看」。`--load-data` 只对能序列化
+成 JSON 的 public property 有效，喂不动 `ModelRc<VecModel<…>>`；它也不认识
+12 套调色板、`Theme.theme` 的回落规则和当前打开的页面，要一致就得手写
+fixture。viewer 适合「一个自包含组件长什么样」，而我们的组件几乎都不自包含。
+
+**也没选「自己写一个 .slint 文件监视器」。** 即便监视到了改动，重载本身仍然
+需要重新编译组件 —— 那是解释器的工作，不是我们能省的一步。自研只能省掉
+cargo 的一层，写出来还是第二套热重载要维护。
+
+**后果。** 接进来时应当只加一个 just recipe（`SLINT_LIVE_PREVIEW=1 cargo run
+--features slint/live-preview`），不碰 `[features]`、不碰 `build.rs`；target
+dir 要与默认构建**分开**（`target-live`），理由与 `just shot` 的
+`target-shot` 完全一样（ADR-0134：不同 feature set 共用一个 target dir 会各留
+一份，叠成几十 GB）。它只属于开发期：`just check` / `deploy-workshop` /
+`release-publish` 都不带这个 flag，release 绝不能开着它。
+
+**这一条目前只调研、未接入，且有未验证项。** 完整评估与「尚未验证」清单见
+`docs/LIVE_PREVIEW.md`：本项目还没在 live preview 下真跑过一次，
+「解释器下 `ui/` 渲染正常、`StdWidgets` 与 `@image-url` 工作」是待验证假设；
+12 套主题、always-on-top 速记窗、native 托盘在重载时的表现未知；重载是否保住
+当前页面 / 选中行 / 滚动位置未测。接进来之后应重测编译时间并把数字记进
+`docs/PERFORMANCE.md`。
+
 ## ADR-0145 · Alt+N answers with a 速记 window, not with the whole interface
 
 **Alt+N no longer brings the app out.** The key used to restore the main window,

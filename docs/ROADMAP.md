@@ -67,6 +67,20 @@ a click outside it, the composer raises a 标签建议 tray for the `#token` bei
 回收站 row's 恢复 / 彻底删除 pair goes back to the row's right edge where it was always meant to
 be. |
 
+## UI iteration loop (ADR-0146, opened 2026-10-05)
+
+`.slint` is compiled ahead of time, so today's loop for a visual change is
+`edit → cargo run → wait for slint-build + rustc + link → launch`. Measured ~4m20s
+for a `main.rs`-only rebuild; a `.slint` edit is longer because it re-runs
+`build.rs`. Slint 1.18 ships a live preview that reloads `.slint` from disk with
+the business logic still connected, and it is the chosen answer (ADR-0146).
+
+**Not wired up yet.** The intended shape is one just recipe —
+`SLINT_LIVE_PREVIEW=1 cargo run --features slint/live-preview` — with its own
+`target-live` directory for ADR-0134's reason, touching neither `Cargo.toml`'s
+`[features]` nor `build.rs`. Assessment and the list of unverified assumptions:
+`docs/LIVE_PREVIEW.md`. |
+
 ## Repository shape (since ADR-0093 + ADR-0094, 2026-09-23)
 
 Two repositories, one edge between them. `quire-core`
